@@ -6,16 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "npm dist-tag to publish under"
+        # Only this one tag moves. OIDC covers `npm publish` alone, so the workflow cannot
+        # run `npm dist-tag add` to point a second tag at the release — that needs a stored
+        # token, which is exactly what trusted publishing exists to avoid. Pick `latest` for
+        # anything a plain `npm install` should resolve to.
+        description: "npm dist-tag to publish under (the only tag that will move)"
         required: true
-        default: alpha
+        default: latest
         type: choice
-        options: [alpha, next, latest]
-      move_latest:
-        description: "Also point `latest` at this version (what a plain npm install gets)"
-        required: true
-        default: true
-        type: boolean
+        options: [latest, alpha, next]
 
 jobs:
   publish:
@@ -68,9 +67,8 @@ jobs:
 
       - name: Publish
         env:
-          # Passed as env vars rather than interpolated into the script body.
+          # Passed as an env var rather than interpolated into the script body.
           TAG: ${{ inputs.tag }}
-          MOVE_LATEST: ${{ inputs.move_latest }}
         run: |
           set -euo pipefail
           # Dependencies first. Each tarball is named exactly rather than globbed: a
@@ -85,12 +83,14 @@ jobs:
             dir="${entry##*:}"
             version=$(node -p "require('./packages/$dir/package.json').version")
             tarball="./dist-tarballs/$pkg-$version.tgz"
+            # Publishing six packages is not atomic: if one fails partway the earlier ones are
+            # already on the registry, and re-running would die on "cannot publish over an
+            # existing version". Skipping what is already there makes a re-run finish the job
+            # instead of failing at the first package.
+            if npm view "$pkg@$version" version >/dev/null 2>&1; then
+              echo "⏭  $pkg@$version is already on the registry, skipping"
+              continue
+            fi
             echo "▶ publishing $pkg@$version"
             npm publish "$tarball" --access public --tag "$TAG"
-            # npm only sets `latest` on a package's very first publish. Without this a fix
-            # released under a pre-release tag leaves `latest` — and therefore a plain
-            # `npm install` — pointing at the older, broken version.
-            if [ "$TAG" != "latest" ] && [ "$MOVE_LATEST" = "true" ]; then
-              npm dist-tag add "$pkg@$version" latest
-            fi
           done
