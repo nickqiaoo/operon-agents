@@ -1,0 +1,58 @@
+import type { ParsedCronExpression } from "./cron-expr.ts";
+import { computeNextCronRun } from "./cron-expr.ts";
+
+export interface JitterConfig {
+  readonly recurringMaxFractionOfPeriod: number;
+  readonly recurringMaxMs: number;
+  readonly oneShotMaxMs: number;
+  readonly noJitter?: boolean;
+}
+
+export const DEFAULT_CRON_JITTER_CONFIG: JitterConfig = {
+  recurringMaxFractionOfPeriod: 0.1,
+  recurringMaxMs: 15 * 60_000,
+  oneShotMaxMs: 90_000,
+};
+
+const MS_PER_DAY = 24 * 60 * 60_000;
+const MS_PER_MINUTE = 60_000;
+
+function fractionFromId(id: string): number {
+  if (/^[0-9a-f]{8}$/i.test(id)) {
+    const n = Number.parseInt(id, 16);
+    if (Number.isFinite(n)) return n / 0x1_0000_0000;
+  }
+  let hash = 5381;
+  for (let i = 0; i < id.length; i++) hash = ((hash << 5) + hash + id.charCodeAt(i)) | 0;
+  return (hash >>> 0) / 0x1_0000_0000;
+}
+
+export function jitteredNextCronRunMs(
+  task: { id: string; cron: string; recurring?: boolean },
+  parsed: ParsedCronExpression,
+  idealMs: number,
+  config: JitterConfig = DEFAULT_CRON_JITTER_CONFIG,
+): number {
+  if (config.noJitter === true) return idealMs;
+  const nextNext = computeNextCronRun(parsed, idealMs);
+  const period = nextNext !== null && nextNext > idealMs ? nextNext - idealMs : MS_PER_DAY;
+  const cap = Math.min(period * config.recurringMaxFractionOfPeriod, config.recurringMaxMs);
+  if (!(cap > 0)) return idealMs;
+  return idealMs + cap * fractionFromId(task.id);
+}
+
+export function oneShotJitteredNextCronRunMs(
+  task: { id: string; createdAt?: number | undefined },
+  idealMs: number,
+  config: JitterConfig = DEFAULT_CRON_JITTER_CONFIG,
+): number {
+  if (config.noJitter === true) return idealMs;
+  if (idealMs % MS_PER_MINUTE !== 0) return idealMs;
+  const minuteOfHour = new Date(idealMs).getMinutes();
+  if (minuteOfHour !== 0 && minuteOfHour !== 30) return idealMs;
+  if (!(config.oneShotMaxMs > 0)) return idealMs;
+  const shifted = idealMs + -config.oneShotMaxMs * fractionFromId(task.id);
+  // Insufficient budget: returning idealMs keeps the fire on schedule, never earlier.
+  if (task.createdAt !== undefined && shifted < task.createdAt) return idealMs;
+  return shifted;
+}

@@ -1,0 +1,14 @@
+{
+  "name": "operon-example-extension-template",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js && cp manifest.json dist/manifest.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "release": "pnpm build && node ../scripts/pack-extension.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "operon-agents": "workspace:*"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "peers",
+  "version": "0.1.0",
+  "engine": "0.1.0-alpha.0",
+  "entry": "index.js",
+  "name": "Peers",
+  "description": "Team forming, teammate spawning and peer messaging between sessions."
+}

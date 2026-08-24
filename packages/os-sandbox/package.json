@@ -1,0 +1,40 @@
+{
+  "name": "operon-os-sandbox",
+  "version": "0.1.0-alpha.1",
+  "description": "OS-level command sandboxing for the LocalMachine: every Machine.run is wrapped in the platform sandbox (macOS Seatbelt / Linux bubblewrap, via @anthropic-ai/sandbox-runtime) with workspace-scoped write access, domain-allowlist networking, and sandbox-denial annotation on stderr. Unsupported platforms and missing dependencies degrade to a plain LocalMachine.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/os-sandbox"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/os-sandbox#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "pnpm --filter operon-agents-core build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "for f in src/test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.73",
+    "operon-agents-core": "workspace:*"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ]
+}

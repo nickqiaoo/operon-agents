@@ -1,0 +1,17 @@
+{
+  "name": "operon-example-managed-agents",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types --no-warnings server.ts",
+    "client": "node --experimental-strip-types --no-warnings client.ts",
+    "smoke-e2b": "node --experimental-strip-types --no-warnings smoke-e2b.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "e2b": "^2.14.1",
+    "operon-agents": "workspace:*",
+    "operon-managed-agents": "workspace:*",
+    "operon-sandbox": "workspace:*"
+  }
+}

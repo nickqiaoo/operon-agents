@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The Grep and Glob tools shell out to ripgrep, so the e2e suite needs the real binary
+      # rather than a stub. Neither runner image is guaranteed to ship it.
+      - name: Ensure ripgrep
+        run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "ripgrep already present"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ripgrep
+          else
+            brew install ripgrep
+          fi
+          rg --version
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm -r --parallel typecheck
+
+      - name: Test
+        run: pnpm -r test
+
+      - name: Evals harness self-test (offline, faux model)
+        run: pnpm --filter operon-agents-core evals:selftest

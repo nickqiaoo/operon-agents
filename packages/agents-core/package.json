@@ -1,0 +1,102 @@
+{
+  "name": "operon-agents-core",
+  "version": "0.1.0-alpha.1",
+  "description": "Internal engine for operon-agents. Prefer operon-agents for application code.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/agents-core"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/agents-core#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./events": {
+      "types": "./dist/events/index.d.ts",
+      "import": "./dist/events/index.js"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js"
+    },
+    "./llm": {
+      "types": "./dist/llm/index.d.ts",
+      "import": "./dist/llm/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
+    "./tool": {
+      "types": "./dist/tool/index.d.ts",
+      "import": "./dist/tool/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tool/index.d.ts",
+      "import": "./dist/tool/index.js"
+    },
+    "./tracing": {
+      "types": "./dist/tracing/index.d.ts",
+      "import": "./dist/tracing/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "for f in src/test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "evals": "node --experimental-strip-types --no-warnings evals/run.ts",
+    "evals:selftest": "node --experimental-strip-types --no-warnings evals/selftest.ts",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opentelemetry/api": "^1.9.0",
+    "acorn": "^8.17.0",
+    "ajv": "^8.20.0",
+    "fflate": "0.4.8",
+    "jimp": "^1.6.1",
+    "js-yaml": "^4.2.0",
+    "nunjucks": "^3.2.4",
+    "pathe": "^2.0.0",
+    "picomatch": "^4.0.0",
+    "smol-toml": "^1.6.1",
+    "ssh2": "^1.17.0",
+    "undici": "^7.27.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/nunjucks": "^3.2.6",
+    "@types/ssh2": "^1.15.5",
+    "ioredis": "^5.11.1",
+    "ioredis-mock": "^8.13.1",
+    "pg": "^8.21.0",
+    "pg-mem": "^3.0.14"
+  }
+}

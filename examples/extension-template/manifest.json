@@ -1,0 +1,8 @@
+{
+  "id": "example-plugin",
+  "version": "0.1.0",
+  "engine": "0.1.0-alpha.0",
+  "entry": "index.js",
+  "name": "Example Plugin",
+  "description": "A Greet tool that counts greetings per session."
+}

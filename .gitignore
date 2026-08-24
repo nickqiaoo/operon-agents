@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+codex-chat-ui/
+dist-tarballs/
+release/
+
+# Internal design notes — kept locally, not part of the public repo.
+# Only docs/architecture.md is published.
+/*.md
+!/README.md
+!/CONTRIBUTING.md
+!/CHANGELOG.md
+/mini-*.mjs
+/docs/*
+!/docs/architecture.md

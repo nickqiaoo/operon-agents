@@ -1,0 +1,42 @@
+{
+  "name": "operon-agents-peers",
+  "version": "0.1.0-alpha.1",
+  "description": "Peer discovery and messaging between operon-agents agents, built on the engine's steerTo seam.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/agents-peers"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/agents-peers#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "pnpm --filter operon-agents build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "for f in test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "operon-agents": "workspace:*",
+    "operon-agents-core": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

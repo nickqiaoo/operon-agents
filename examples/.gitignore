@@ -1,0 +1,3 @@
+# Runtime artifacts created when an example is run.
+.agent-home/
+workspace/

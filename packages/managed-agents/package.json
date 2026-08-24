@@ -1,0 +1,57 @@
+{
+  "name": "operon-managed-agents",
+  "version": "0.1.0-alpha.1",
+  "description": "Managed server and TypeScript client for operon-agents.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/managed-agents"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/managed-agents#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "pnpm --filter operon-agents build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "for f in test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "operon-agents": "workspace:*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
+    "operon-agents-core": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

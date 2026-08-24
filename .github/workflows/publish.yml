@@ -1,0 +1,96 @@
+name: Publish
+
+# Publishes every public package at the version currently in its package.json.
+# Trigger it by hand from the Actions tab after bumping versions and merging.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "npm dist-tag to publish under"
+        required: true
+        default: alpha
+        type: choice
+        options: [alpha, next, latest]
+      move_latest:
+        description: "Also point `latest` at this version (what a plain npm install gets)"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for npm trusted publishing: the OIDC token is what npm verifies
+      # instead of a long-lived token stored in this repo.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # Trusted publishing needs npm 11.5.1+; Node 24 ships an older npm.
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Ensure ripgrep
+        run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "ripgrep already present"
+          else
+            sudo apt-get update && sudo apt-get install -y ripgrep
+          fi
+
+      # Never publish something that does not build and pass its tests.
+      - name: Build (clean)
+        run: pnpm build:clean
+
+      - name: Typecheck
+        run: pnpm -r --parallel typecheck
+
+      - name: Test
+        run: pnpm -r test
+
+      # pnpm resolves workspace:* to real versions when packing; npm then publishes the
+      # tarballs, so the two steps stay separate and each does what it is good at.
+      - name: Pack
+        run: pnpm pack:all
+
+      - name: Publish
+        env:
+          # Passed as env vars rather than interpolated into the script body.
+          TAG: ${{ inputs.tag }}
+          MOVE_LATEST: ${{ inputs.move_latest }}
+        run: |
+          set -euo pipefail
+          # Dependencies first. Each tarball is named exactly rather than globbed: a
+          # `operon-agents-*.tgz` pattern also matches operon-agents-core and -peers.
+          for entry in operon-agents-core:agents-core \
+                       operon-agents:agents \
+                       operon-agents-peers:agents-peers \
+                       operon-managed-agents:managed-agents \
+                       operon-sandbox:sandbox \
+                       operon-os-sandbox:os-sandbox; do
+            pkg="${entry%%:*}"
+            dir="${entry##*:}"
+            version=$(node -p "require('./packages/$dir/package.json').version")
+            tarball="./dist-tarballs/$pkg-$version.tgz"
+            echo "▶ publishing $pkg@$version"
+            npm publish "$tarball" --access public --tag "$TAG"
+            # npm only sets `latest` on a package's very first publish. Without this a fix
+            # released under a pre-release tag leaves `latest` — and therefore a plain
+            # `npm install` — pointing at the older, broken version.
+            if [ "$TAG" != "latest" ] && [ "$MOVE_LATEST" = "true" ]; then
+              npm dist-tag add "$pkg@$version" latest
+            fi
+          done

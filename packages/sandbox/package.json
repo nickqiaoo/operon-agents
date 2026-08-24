@@ -1,0 +1,51 @@
+{
+  "name": "operon-sandbox",
+  "version": "0.1.0-alpha.1",
+  "description": "Host-side sandbox lifecycle for operon-agents: create, snapshot, pause and destroy a vendor sandbox, and hand the framework a Machine driven by the vendor SDK directly (native per-command timeout, incremental output, real kill).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/sandbox"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/sandbox#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "pnpm --filter operon-agents-core build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "for f in src/test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "operon-agents-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@cloudflare/sandbox": ">=0.12",
+    "e2b": ">=1.4"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/sandbox": {
+      "optional": true
+    },
+    "e2b": {
+      "optional": true
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ]
+}
