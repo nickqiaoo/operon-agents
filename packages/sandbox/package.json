@@ -3,6 +3,9 @@
   "version": "0.1.0-alpha.1",
   "description": "Host-side sandbox lifecycle for operon-agents: create, snapshot, pause and destroy a vendor sandbox, and hand the framework a Machine driven by the vendor SDK directly (native per-command timeout, incremental output, real kill).",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

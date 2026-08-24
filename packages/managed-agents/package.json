@@ -3,6 +3,9 @@
   "version": "0.1.0-alpha.1",
   "description": "Managed server and TypeScript client for operon-agents.",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

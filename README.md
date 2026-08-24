@@ -1,5 +1,10 @@
 # operon-agents
 
+[![npm](https://img.shields.io/npm/v/operon-agents?logo=npm&color=cb3837)](https://www.npmjs.com/package/operon-agents)
+[![CI](https://github.com/nickqiaoo/operon-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/nickqiaoo/operon-agents/actions/workflows/ci.yml)
+[![node](https://img.shields.io/badge/node-%E2%89%A5%2022-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/operon-agents?color=blue)](./LICENSE)
+
 A host-agnostic execution kernel for building agents, wrapped in rings that can be swapped
 independently: engine-level modules, a process-level runtime, user-space extensions, and deployment
 hosts. Every choice about *where code runs, where state is stored, and which model is called* is

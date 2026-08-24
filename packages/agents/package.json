@@ -3,6 +3,9 @@
   "version": "0.1.0-alpha.1",
   "description": "Public SDK entrypoint for building agents.",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
