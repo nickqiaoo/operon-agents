@@ -23,7 +23,8 @@ jobs:
       # Required for npm trusted publishing: the OIDC token is what npm verifies
       # instead of a long-lived token stored in this repo.
       id-token: write
-      contents: read
+      # Needed to push the release tag and create the GitHub release.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -94,3 +95,25 @@ jobs:
             echo "▶ publishing $pkg@$version"
             npm publish "$tarball" --access public --tag "$TAG"
           done
+
+      # Only reached when every package published. A tag is what ties a version on npm back to
+      # the code that produced it — without one, "I'm on alpha.1" cannot be resolved to a commit.
+      - name: Tag the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./packages/agents/package.json').version")
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "⏭  $tag already exists, skipping"
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          # A hyphen in the version is what makes it a pre-release: 0.1.0-alpha.1 has one,
+          # 0.1.0 does not. GitHub keeps pre-releases out of the "Latest release" slot.
+          case "$version" in
+            *-*) gh release create "$tag" --title "$tag" --generate-notes --prerelease ;;
+            *)   gh release create "$tag" --title "$tag" --generate-notes ;;
+          esac
