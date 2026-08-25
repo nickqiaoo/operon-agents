@@ -1,6 +1,6 @@
 {
   "name": "operon-agents-peers",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Peer discovery and messaging between operon-agents agents, built on the engine's steerTo seam.",
   "type": "module",
   "engines": {

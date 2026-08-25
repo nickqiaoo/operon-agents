@@ -174,6 +174,8 @@ tab and pick a dist-tag. Publishing authenticates through npm trusted publishing
 no token stored in the repository — and refuses to run unless a clean build, the typecheck and the
 full test suite pass first.
 
+What changed in each release is recorded in [CHANGELOG.md](./CHANGELOG.md).
+
 ## License
 
 MIT — see [LICENSE](./LICENSE). Portions were adapted from kimi-code, also MIT; its copyright and
