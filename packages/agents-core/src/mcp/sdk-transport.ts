@@ -18,13 +18,19 @@ const CLIENT_INFO = { name: "agent-framework-mcp", version: "0.0.0" };
 
 const STDERR_BUFFER_CAPACITY = 4 * 1024;
 
+interface CallToolParams {
+  name: string;
+  arguments?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+}
+
 interface SdkClient {
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
   ping(options?: { signal?: AbortSignal; timeout?: number }): Promise<unknown>;
   listTools(): Promise<{ tools: MCPTool[] }>;
   callTool(
-    params: { name: string; arguments: Record<string, unknown> | null; _meta?: Record<string, unknown> | null },
+    params: CallToolParams,
     resultSchema?: unknown,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<MCPToolResult>;
@@ -112,8 +118,14 @@ class SdkMcpTransport implements MCPTransport {
     args: Record<string, unknown> | null,
     options?: MCPCallToolOptions,
   ): Promise<MCPToolResult> {
+    // `arguments` and `_meta` are `.optional()` in the MCP schemas, which rejects an explicit
+    // `null`. Sending one makes the server fail JSON-RPC validation (-32700 parse error) before
+    // the tool ever runs, so omit the keys entirely instead.
+    const params: CallToolParams = { name: toolName };
+    if (args !== null) params.arguments = args;
+    if (options?.meta != null) params._meta = options.meta;
     return this.requireClient().callTool(
-      { name: toolName, arguments: args, _meta: options?.meta ?? null },
+      params,
       undefined,
       buildRequestOptions(this.cfg.toolTimeoutMs, options?.signal),
     );
