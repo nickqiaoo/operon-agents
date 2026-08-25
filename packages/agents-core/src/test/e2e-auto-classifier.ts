@@ -55,6 +55,8 @@ function makeCtx(toolName: string, args: unknown, model: ChatModel, toolImpl: To
 
 const BASH = (cmd: string) => ({ name: "Bash", args: { command: cmd }, tool: bashTool });
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 // A tool that declares no security relevance (toAutoApprovalInput -> '').
 const inertTool: Tool = tool({
   name: "Inert",
@@ -156,6 +158,47 @@ async function main(): Promise<void> {
     await judge.classify({ ...stub(fc.model, { name: "Edit", args: { path: "a.txt", old_string: "OLD_SECRET_TOKEN", new_string: "NEW_VALUE" }, tool: editTool }), approvalRule: "Edit" });
     fc.unregister();
     checks.push(["Edit projection exposes new content, not old_string", prompt.includes("NEW_VALUE") && !prompt.includes("OLD_SECRET_TOKEN")]);
+  }
+
+  // 9. A tripped breaker half-opens: after the probe delay one call reaches the model again,
+  //    and a successful probe clears the breaker for good.
+  {
+    const fc = fauxClassifier([{ error: "boom" }, { error: "boom" }, { xml: "<block>no</block>" }, { xml: "<block>no</block>" }]);
+    const judge = new LlmAutoApprover({ maxConsecutiveErrors: 2, breakerProbeDelayMs: 60 });
+    await judge.classify({ ...stub(fc.model, BASH("echo 1")), approvalRule: "Bash" });
+    await judge.classify({ ...stub(fc.model, BASH("echo 2")), approvalRule: "Bash" }); // trips it
+    const held = await judge.classify({ ...stub(fc.model, BASH("echo 3")), approvalRule: "Bash" });
+    const callsWhileHeld = fc.calls();
+    await sleep(100); // past the 60ms probe delay
+    const probe = await judge.classify({ ...stub(fc.model, BASH("echo 4")), approvalRule: "Bash" });
+    const after = await judge.classify({ ...stub(fc.model, BASH("echo 5")), approvalRule: "Bash" });
+    fc.unregister();
+    checks.push([
+      "breaker half-opens: probe reaches the model, success clears it (no restart needed)",
+      held.decision === "escalate" && callsWhileHeld === 2 && probe.decision === "allow" && after.decision === "allow" && fc.calls() === 4,
+    ]);
+  }
+
+  // 10. A failed probe re-trips the breaker with twice the delay, so an outage costs one call
+  //     per backoff window instead of one per tool call.
+  {
+    const fc = fauxClassifier([{ error: "boom" }, { error: "boom" }, { xml: "<block>no</block>" }]);
+    const judge = new LlmAutoApprover({ maxConsecutiveErrors: 1, breakerProbeDelayMs: 60 });
+    await judge.classify({ ...stub(fc.model, BASH("echo 1")), approvalRule: "Bash" }); // trips it, delay 60ms
+    const held1 = await judge.classify({ ...stub(fc.model, BASH("echo 2")), approvalRule: "Bash" });
+    await sleep(100);
+    await judge.classify({ ...stub(fc.model, BASH("echo 3")), approvalRule: "Bash" }); // probe fails → delay 120ms
+    const callsAfterProbe = fc.calls();
+    await sleep(80); // still inside 120ms — only a non-doubled delay would let this through
+    const held2 = await judge.classify({ ...stub(fc.model, BASH("echo 4")), approvalRule: "Bash" });
+    const callsWhileHeld = fc.calls();
+    await sleep(80); // 160ms since the failed probe — past the doubled delay
+    const recovered = await judge.classify({ ...stub(fc.model, BASH("echo 5")), approvalRule: "Bash" });
+    fc.unregister();
+    checks.push([
+      "failed probe re-trips the breaker with a doubled delay",
+      held1.decision === "escalate" && callsAfterProbe === 2 && held2.decision === "escalate" && callsWhileHeld === 2 && recovered.decision === "allow" && fc.calls() === 3,
+    ]);
   }
 
   const ok = checks.every(([, pass]) => pass);

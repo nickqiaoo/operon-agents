@@ -38,6 +38,10 @@ export interface LlmAutoApproverOptions {
   readonly stage2MaxTokens?: number;
   /** Consecutive model failures before short-circuiting to escalate (skips the call). Default 3. */
   readonly maxConsecutiveErrors?: number;
+  /** How long a tripped breaker holds before letting one probe call through. Default 30s. */
+  readonly breakerProbeDelayMs?: number;
+  /** Cap on the breaker's probe backoff, which doubles per failed probe. Default 5min. */
+  readonly breakerMaxProbeDelayMs?: number;
   /** Telemetry sink. Invoked once per classify with the outcome. */
   readonly onOutcome?: (report: AutoApprovalReport) => void;
 }
@@ -51,6 +55,8 @@ const XML_S2_SUFFIX =
 const DEFAULT_STAGE1_MAX_TOKENS = 512;
 const DEFAULT_STAGE2_MAX_TOKENS = 4096;
 const DEFAULT_MAX_CONSECUTIVE_ERRORS = 3;
+const DEFAULT_BREAKER_PROBE_DELAY_MS = 30_000;
+const DEFAULT_BREAKER_MAX_PROBE_DELAY_MS = 5 * 60_000;
 
 const ALLOW: AutoApprovalVerdict = { decision: "allow" };
 
@@ -78,6 +84,7 @@ export class LlmAutoApprover implements AutoApprover {
   private readonly options: LlmAutoApproverOptions;
   private systemPrompt: string | undefined;
   private consecutiveErrors = 0;
+  private lastErrorAt = 0;
 
   constructor(options: LlmAutoApproverOptions = {}) {
     this.options = options;
@@ -106,9 +113,7 @@ export class LlmAutoApprover implements AutoApprover {
       return { decision: "allow", reason: "Tool declares no security-relevant input" };
     }
 
-    // Circuit breaker: the model has failed N times running — stop paying latency to ask it and
-    // just escalate. Reset on the next successful response.
-    if (this.consecutiveErrors >= (this.options.maxConsecutiveErrors ?? DEFAULT_MAX_CONSECUTIVE_ERRORS)) {
+    if (this.breakerHolding()) {
       return escalate("error", "Auto-approval judge repeatedly unavailable — asking for confirmation.");
     }
 
@@ -147,9 +152,36 @@ export class LlmAutoApprover implements AutoApprover {
     } catch (error) {
       if (signal.aborted) return escalate("aborted", "Auto-approval judge aborted — asking for confirmation.");
       this.consecutiveErrors += 1;
+      this.lastErrorAt = Date.now();
       const reason = error instanceof Error ? error.message : String(error);
       return escalate("error", `Auto-approval judge unavailable (${reason}) — asking for confirmation.`);
     }
+  }
+
+  /**
+   * Whether the tripped breaker is still holding this call back.
+   *
+   * Once the model has failed `maxConsecutiveErrors` times running, asking it again mostly buys
+   * latency for an answer we expect to fail — so the breaker trips and `classify` escalates
+   * without a call. Staying tripped forever would be a one-way door: the only line that clears
+   * the breaker lives inside `runStage`, which a permanently-open breaker never reaches. A
+   * transient outage would then silently demote `auto` to `manual` for the rest of the process,
+   * long after the provider recovered, with a restart the only way out.
+   *
+   * So it half-opens instead: after a backoff, one call is let through to probe. The probe
+   * succeeds and `runStage` clears the breaker; it fails and the breaker trips again with twice
+   * the delay, up to the cap — the outage costs one call per backoff window rather than one per
+   * tool call.
+   */
+  private breakerHolding(): boolean {
+    const max = this.options.maxConsecutiveErrors ?? DEFAULT_MAX_CONSECUTIVE_ERRORS;
+    if (this.consecutiveErrors < max) return false;
+    const base = this.options.breakerProbeDelayMs ?? DEFAULT_BREAKER_PROBE_DELAY_MS;
+    const cap = this.options.breakerMaxProbeDelayMs ?? DEFAULT_BREAKER_MAX_PROBE_DELAY_MS;
+    // The failure that trips the breaker waits `base`; each failed probe after it waits twice
+    // as long. Overflowing to Infinity at absurd error counts is fine — `min` pins it to `cap`.
+    const delay = Math.min(base * 2 ** (this.consecutiveErrors - max), cap);
+    return Date.now() - this.lastErrorAt < delay;
   }
 
   /** Run one classifier stage and return its text content. Throws on a stream error. */
