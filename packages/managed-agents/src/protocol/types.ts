@@ -33,14 +33,34 @@ export interface CreateManagedSessionRequest {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+/** `PATCH /sessions/{id}`: rename a session. Only the title is client-writable after creation. */
+export interface UpdateManagedSessionRequest {
+  readonly title: string;
+}
+
 export interface ListManagedSessionsResponse {
   readonly data: readonly ManagedSession[];
 }
 
 export interface CreateManagedMessageRequest {
   readonly input: string;
+  /**
+   * Whose words these are.
+   *
+   * `user` (default): the caller's own. The party holding a session's credential is its user —
+   * the same way a local session's stdin is — so the model sees the text bare, as a prompt.
+   *
+   * `external`: another party's words the caller is relaying (a peer, a webhook, another
+   * agent). The model sees them inside an `<external-message>` envelope stamped as NOT from the
+   * user. Declaring this lowers trust, so it needs no extra permission; the server's `authorize`
+   * hook receives the value and can require it for a credential that only ever relays.
+   */
+  readonly origin?: "user" | "external";
+  /** `external` only: what relayed the words (default `"managed-api"`). */
   readonly source?: string;
+  /** `external` only: who said them. */
   readonly actor?: string;
+  /** `external` only: attributes rendered onto the envelope. */
   readonly metadata?: Readonly<Record<string, string | number | boolean | null>>;
   readonly mode?: "auto" | "steer" | "follow_up";
 }

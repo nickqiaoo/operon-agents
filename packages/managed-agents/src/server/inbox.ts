@@ -12,8 +12,7 @@
  * read — set by the same write that creates an item, cleared by a holder about to read — never
  * the truth of it.
  */
-import type { AgentRecord, InterruptAnswer, SessionStore } from "operon-agents";
-import type { ExternalOriginMetadataValue } from "operon-agents";
+import type { AgentRecord, InboxOrigin, InterruptAnswer, SessionStore } from "operon-agents";
 
 /** Where processing stopped. Everything at or before it has been dealt with. */
 export const INBOX_CURSOR_KEY = "inbox:cursor";
@@ -45,13 +44,8 @@ export interface InboxInput {
   readonly kind: "input";
   readonly sequence: string;
   readonly input: string;
-  readonly origin: {
-    readonly kind: "external";
-    readonly source: string;
-    readonly deliveryId: string;
-    readonly actor?: string;
-    readonly metadata?: Readonly<Record<string, ExternalOriginMetadataValue>>;
-  };
+  /** Whose words: the session's user (`user`) or a relayed party (`external`). */
+  readonly origin: InboxOrigin;
   readonly mode: "auto" | "steer" | "follow_up";
 }
 

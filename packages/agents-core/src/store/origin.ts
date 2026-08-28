@@ -17,12 +17,21 @@ export interface UserPromptOrigin {
   readonly kind: "user";
   /** Present when the message arrived via the SteerBus: the enqueue-time correlation id. */
   readonly steerId?: string;
+  /**
+   * Present when the message came through a durable inbox (`inbox.received`): the delivery it
+   * arrived as. Still the user's OWN words — handed over by whoever holds the session's control
+   * surface (a managed API caller), exactly as app-server's stdio is the user of a local
+   * session. Contrast `external`, which relays another party's words.
+   */
+  readonly deliveryId?: string;
 }
 
 export interface UserFollowUpPromptOrigin {
   readonly kind: "user_follow_up";
   /** Present when the message arrived via the SteerBus: the enqueue-time correlation id. */
   readonly steerId?: string;
+  /** See `UserPromptOrigin.deliveryId`. */
+  readonly deliveryId?: string;
 }
 
 export interface InjectionOrigin {

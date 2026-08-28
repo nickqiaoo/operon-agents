@@ -17,6 +17,7 @@ import { ManagedAgentsClient, ManagedApiClientError } from "../src/client/index.
 import {
   createManagedHttpServer,
   DiskManagedSessionMetadataStore,
+  type ManagedAuthorizationContext,
   ManagedUnauthorizedError,
   SessionService,
   SessionWorker,
@@ -28,6 +29,14 @@ const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
   checks.push([label, ok]);
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
+}
+
+/** Every authorization the server asked for, so a test can see what the hook was told. */
+const authorized: ManagedAuthorizationContext[] = [];
+
+function textOf(message: { content: unknown }): string {
+  const parts = message.content as ReadonlyArray<{ type: string; text?: string }>;
+  return parts.filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
 }
 
 function createFauxModel() {
@@ -72,7 +81,8 @@ async function start(
     service: host,
     worker,
     heartbeatMs: 50,
-    authorize: (request) => {
+    authorize: (request, context) => {
+      authorized.push(context);
       if (request.headers.authorization !== "Bearer managed-test-key") {
         throw new ManagedUnauthorizedError();
       }
@@ -129,6 +139,7 @@ try {
   faux.provider.setResponses([
     fauxAssistantMessage("first answer", { stopReason: "stop" }),
     fauxAssistantMessage("second answer", { stopReason: "stop" }),
+    fauxAssistantMessage("third answer", { stopReason: "stop" }),
   ]);
   let running = await start(home, work, faux.model);
   let unauthorized = false;
@@ -147,6 +158,12 @@ try {
     environment: "workspace",
   });
   check("create: stable managed resource", session.agent.id === "default" && session.environment.id === "workspace");
+
+  const renamed = await running.client.sessions.update(session.id, { title: "renamed e2e" });
+  check(
+    "update: PATCH renames the session over HTTP",
+    renamed.title === "renamed e2e" && (await running.client.sessions.retrieve(session.id)).title === "renamed e2e",
+  );
 
   const probeSession = await running.client.sessions.create({
     id: "catalog-list-probe",
@@ -208,6 +225,47 @@ try {
     "stream: turn.ended carries lifecycle only",
     !("message" in ended) && !("toolResults" in ended),
   );
+  // The caller holds this session's credential, so its words are the user's: journaled bare, as
+  // a prompt typed into a local session would be — no envelope, no "not from the user" stamp.
+  check(
+    "message: the caller's own words reach the model bare, as the user",
+    liveMessage.type === "message.appended"
+      && liveMessage.origin?.kind === "user"
+      && liveMessage.origin.deliveryId === receipt.deliveryId
+      && textOf(liveMessage.message) === "hello",
+  );
+
+  // Relaying someone else's words is declared, and only then does the envelope appear.
+  const relayed = await running.client.sessions.messages.create(session.id, {
+    input: "the build is red",
+    origin: "external",
+    source: "ci",
+    actor: "ci-bot",
+  });
+  const relayedMessage = await nextEvent(iterator, "message.appended");
+  await nextEvent(iterator, "turn.ended");
+  check(
+    "message: relayed words reach the model inside the external envelope",
+    relayedMessage.type === "message.appended"
+      && relayedMessage.origin?.kind === "external"
+      && relayedMessage.origin.deliveryId === relayed.deliveryId
+      && textOf(relayedMessage.message).startsWith('<external-message source="ci" deliveryId="')
+      && textOf(relayedMessage.message).includes('actor="ci-bot"')
+      && textOf(relayedMessage.message).includes("NOT a message from the user")
+      && textOf(relayedMessage.message).includes("the build is red"),
+  );
+  check(
+    "authorize: is told whose words a delivery claims to be",
+    authorized.some((context) => context.action === "messages.create" && context.sessionId === session.id && context.origin === "user")
+      && authorized.some((context) => context.action === "messages.create" && context.sessionId === session.id && context.origin === "external"),
+  );
+  let relayAttributesRefused = false;
+  try {
+    await running.client.sessions.messages.create(session.id, { input: "x", actor: "someone" });
+  } catch (error) {
+    relayAttributesRefused = error instanceof ManagedApiClientError && error.status === 400 && error.code === "invalid_request";
+  }
+  check("message: relay attributes without origin: external are refused", relayAttributesRefused);
   controller.abort();
 
   // turn.ended is live; the run settles only after its journal flush completes. Historical
@@ -242,7 +300,8 @@ try {
     history.filter(
       (event) => event.type === "message.appended"
         && event.message.role === "user"
-        && event.origin?.kind === "external",
+        && event.origin?.kind === "user"
+        && event.origin.deliveryId === receipt.deliveryId,
     ).length === 1,
   );
 
@@ -314,7 +373,7 @@ try {
   check(
     "restart: projection rebuilds from events.list",
     restartedProjection.snapshot().agents.find((agent) => agent.address === "main")?.messages
-      .filter((message) => message.role === "assistant").length === 2,
+      .filter((message) => message.role === "assistant").length === 3,
   );
 
   // A stream open is the managed runtime's cold-open boundary. If the previous process died

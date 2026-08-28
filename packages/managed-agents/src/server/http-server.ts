@@ -8,6 +8,7 @@ import type {
   ListManagedSessionsResponse,
   ManagedApiError,
   ResumeManagedSessionRequest,
+  UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import {
   ManagedForbiddenError,
@@ -21,6 +22,7 @@ export type ManagedAuthorizationAction =
   | "sessions.create"
   | "sessions.list"
   | "sessions.read"
+  | "sessions.update"
   | "sessions.delete"
   | "messages.create"
   | "events.list"
@@ -32,6 +34,12 @@ export type ManagedAuthorizationAction =
 export interface ManagedAuthorizationContext {
   readonly action: ManagedAuthorizationAction;
   readonly sessionId?: string;
+  /**
+   * `messages.create` only: whose words the caller says these are. `user` is the default and
+   * makes the caller this session's user; a deployment that hands a credential to something
+   * that only relays (a webhook bridge, a teammate agent) can refuse it anything but `external`.
+   */
+  readonly origin?: "user" | "external";
 }
 
 export type ManagedAuthorize = (
@@ -140,6 +148,11 @@ export function createManagedHttpServer<TContext = unknown>(
       await authorize(request, "sessions.read", sessionId);
       return sendJson(response, 200, await options.service.get(sessionId));
     }
+    if (method === "PATCH" && parts.length === 2) {
+      await authorize(request, "sessions.update", sessionId);
+      const body = await readJson<UpdateManagedSessionRequest>(request, maxBodyBytes);
+      return sendJson(response, 200, await options.service.update(sessionId, body));
+    }
     if (method === "DELETE" && parts.length === 2) {
       await authorize(request, "sessions.delete", sessionId);
       await options.service.delete(sessionId);
@@ -148,8 +161,10 @@ export function createManagedHttpServer<TContext = unknown>(
       return;
     }
     if (method === "POST" && parts[2] === "messages" && parts.length === 3) {
-      await authorize(request, "messages.create", sessionId);
+      // Body before authorization: the hook is told whose words the caller claims these are.
+      // Reading first costs an unauthenticated caller at most `maxBodyBytes` of parsing.
       const body = await readJson<CreateManagedMessageRequest>(request, maxBodyBytes);
+      await authorize(request, "messages.create", sessionId, body.origin === "external" ? "external" : "user");
       if (typeof body.input !== "string" || !body.input.trim()) {
         return sendJson(response, 400, apiError("invalid_request", "input must not be empty"));
       }
@@ -283,10 +298,12 @@ export function createManagedHttpServer<TContext = unknown>(
     request: IncomingMessage,
     action: ManagedAuthorizationAction,
     sessionId?: string,
+    origin?: "user" | "external",
   ): Promise<void> {
     const allowed = await options.authorize(request, {
       action,
       ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(origin !== undefined ? { origin } : {}),
     });
     if (allowed === false) throw new ManagedForbiddenError();
   }

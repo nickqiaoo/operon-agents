@@ -174,7 +174,8 @@ export type AgentEventBody =
   | {
       readonly type: "delivery.accepted";
       readonly deliveryId: string;
-      readonly source: string;
+      /** What relayed the input, for an `external` delivery. Absent when it is the user's own words. */
+      readonly source?: string;
       readonly channel: "turn" | "steering" | "follow_up";
     }
   // ── Tool lifecycle ──

@@ -1,5 +1,10 @@
 import type { ImageContent, Message, TextContent, Usage } from "../protocol/index.ts";
-import type { ExternalPromptOrigin, PromptOrigin } from "./origin.ts";
+import type { ExternalPromptOrigin, PromptOrigin, UserPromptOrigin } from "./origin.ts";
+
+/** Who an accepted input (`inbox.received`) is from — see that record's doc. */
+export type InboxOrigin =
+  | (UserPromptOrigin & { readonly deliveryId: string })
+  | ExternalPromptOrigin;
 
 /**
  * A record in a session's append log. The log is a FLAT, linear, append-only stream
@@ -62,10 +67,15 @@ export type AgentRecordBody =
   //
   // `origin.deliveryId` is the idempotency key: a re-processed inbox record whose delivery
   // already produced history is skipped rather than replayed into the model.
+  //
+  // `origin.kind` says WHOSE words these are, not how they arrived: `user` is the user's own
+  // input, handed over by the party holding the session's control surface (a managed API
+  // caller); `external` relays another party's words (a peer, a webhook) and is rendered to the
+  // model as such. Both are anchored on `deliveryId`.
   | {
       readonly type: "inbox.received";
       readonly input: string;
-      readonly origin: ExternalPromptOrigin;
+      readonly origin: InboxOrigin;
       /** Delivery mode as accepted — `steer` targets a running turn, `follow_up` queues after it. */
       readonly mode: "auto" | "steer" | "follow_up";
     }

@@ -328,8 +328,13 @@ export class SessionWorker<TContext = unknown> {
     const unsubscribe = session.onEvent((event: AgentEvent) => {
       if (event.type !== "message.appended") return;
       const origin = event.origin;
-      if (origin?.kind !== "external") return;
-      consumed.add(origin.deliveryId);
+      // A delivery is in the conversation when a message carries its id — on whichever origin
+      // the delivery was filed under. A locally steered `user` message has no deliveryId.
+      const deliveryId = origin?.kind === "external" || origin?.kind === "user" || origin?.kind === "user_follow_up"
+        ? origin.deliveryId
+        : undefined;
+      if (deliveryId === undefined) return;
+      consumed.add(deliveryId);
       // Persist the cursor now, not when the turn ends: a holder that dies in between must not
       // leave an input that IS in the conversation looking like one that is not.
       wake.raise();
@@ -392,14 +397,16 @@ export class SessionWorker<TContext = unknown> {
           outstanding.push(item);
           const id = inboxItemId(item);
           if (item.kind === "input") {
-            const receipt = session.dispatchAccepted(item.input, {
-              kind: "external",
-              source: item.origin.source,
-              deliveryId: item.origin.deliveryId,
-              channel: item.mode === "follow_up" ? "follow_up" : "steering",
-              ...(item.origin.actor !== undefined ? { actor: item.origin.actor } : {}),
-              ...(item.origin.metadata !== undefined ? { metadata: item.origin.metadata } : {}),
-            });
+            const receipt = session.dispatchAccepted(item.input, item.origin.kind === "external"
+              ? {
+                  kind: "external",
+                  source: item.origin.source,
+                  deliveryId: item.origin.deliveryId,
+                  channel: item.mode === "follow_up" ? "follow_up" : "steering",
+                  ...(item.origin.actor !== undefined ? { actor: item.origin.actor } : {}),
+                  ...(item.origin.metadata !== undefined ? { metadata: item.origin.metadata } : {}),
+                }
+              : { kind: item.mode === "follow_up" ? "user_follow_up" : "user", deliveryId: item.origin.deliveryId });
             if (receipt.completion !== undefined) {
               // Resolved: the turn ran to some end (answered, refused by a guardrail, paused)
               // and the input is dealt with even if no message ever named it. Rejected: the

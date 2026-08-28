@@ -58,10 +58,13 @@ for await (const event of stream) {
 // stream.lastEventId is the cursor to continue from elsewhere.
 ```
 
+`sessions.update(id, { title })` renames a session (`PATCH /v1/sessions/{id}`); the title is the
+only field a client can change after creation, and it is durable before the call resolves.
+
 `run()` sends one input and resolves when the turn that took **that** delivery ends — not the
 first `turn.ended` in the replay, which on a session with history belongs to an older turn.
 
-The server accepts an `authorize(request, { action, sessionId })` hook. Configure it for any
+The server accepts an `authorize(request, { action, sessionId, origin })` hook. Configure it for any
 networked deployment; it can verify credentials and enforce per-session ownership. The
 bundled in-memory idempotency store is atomic within one process and bounded by TTL/capacity;
 distributed deployments should provide a database-backed `ManagedDeliveryIdempotencyStore`.
@@ -101,3 +104,24 @@ await client.sessions.messages.create(
   { idempotencyKey: requestId },
 );
 ```
+
+Whose words a delivery is, the caller says. The party holding a session's credential is its
+user — the way a local session's stdin is — so by default `messages.create` delivers the
+caller's own words and the model sees them bare, as a prompt. A caller relaying someone else's
+words declares it:
+
+```ts
+await client.sessions.messages.create(session.id, {
+  input: "deploy finished: 3 warnings",
+  origin: "external",
+  source: "ci",
+  actor: "deploy-bot",
+});
+```
+
+The model then sees the text inside an `<external-message>` envelope stamped as not from the
+user — not an approval, not an answer to anything it asked. `source`, `actor` and `metadata`
+describe the relay and are refused without the declaration. Declaring `external` lowers trust,
+so it needs no permission of its own; the `authorize` hook receives `origin` on
+`messages.create`, and a deployment that hands a credential to something that only relays (a
+webhook bridge, a teammate agent) can refuse it anything else.

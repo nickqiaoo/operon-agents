@@ -40,6 +40,7 @@ import type {
   DeliveryReceiptResource,
   EnvironmentRef,
   ManagedSession,
+  UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import { CONTROL_RECORD_NAME, hasUnprocessedInbox, type ControlCommand } from "./inbox.ts";
 import type { SessionWork } from "./work.ts";
@@ -230,6 +231,28 @@ export class SessionService {
     const metadata = await this.requireMetadata(id);
     const summary = await this.summary(id);
     return this.toManagedSession(summary, metadata);
+  }
+
+  /**
+   * Rename a session. The title lives in the session's own `meta` state, so the write goes
+   * through the store — the same path `create` takes — and reaches the repository catalog via
+   * the store's observer before this resolves. Like `interruptions`, it opens the store beside
+   * whoever may be running the session: `meta` is written by nobody during a turn.
+   */
+  async update(id: string, input: UpdateManagedSessionRequest): Promise<ManagedSession> {
+    assertUpdateSessionRequest(input);
+    const metadata = await this.requireMetadata(id);
+    await this.summary(id);
+    const handle = await this.repository.open(id);
+    if (handle === undefined) throw new ManagedSessionNotFoundError(id);
+    try {
+      const meta = await handle.store.getState("meta");
+      if (!isRecord(meta)) throw new Error(`session "${id}" has no meta state`);
+      await handle.store.putState("meta", { ...meta, title: input.title, updatedAt: Date.now() });
+    } finally {
+      await handle.store.close?.();
+    }
+    return this.toManagedSession(await this.summary(id), metadata);
   }
 
   async list(): Promise<readonly ManagedSession[]> {
@@ -469,15 +492,20 @@ export class SessionService {
       time: acceptedAt,
       address: "main",
       input: request.input,
-      origin: {
-        kind: "external",
-        source: request.source ?? "managed-api",
-        deliveryId,
-        ...(request.actor !== undefined ? { actor: request.actor } : {}),
-        ...(request.metadata !== undefined
-          ? { metadata: request.metadata as Readonly<Record<string, ExternalOriginMetadataValue>> }
-          : {}),
-      },
+      // Whose words, not which transport: the caller is this session's user unless it says it is
+      // relaying someone else's. `mode` is the record's own field, so the origin never carries
+      // `user_follow_up` — the worker files a `user` delivery by mode when it dispatches.
+      origin: request.origin === "external"
+        ? {
+            kind: "external",
+            source: request.source ?? "managed-api",
+            deliveryId,
+            ...(request.actor !== undefined ? { actor: request.actor } : {}),
+            ...(request.metadata !== undefined
+              ? { metadata: request.metadata as Readonly<Record<string, ExternalOriginMetadataValue>> }
+              : {}),
+          }
+        : { kind: "user", deliveryId },
       mode,
     } satisfies AgentRecord);
     return {
@@ -633,10 +661,23 @@ function assertCreateSessionRequest(input: unknown): asserts input is CreateMana
   environmentRef(input.environment as EnvironmentRef | string);
 }
 
+function assertUpdateSessionRequest(input: unknown): asserts input is UpdateManagedSessionRequest {
+  if (!isRecord(input)) throw new ManagedInvalidRequestError("request body must be an object");
+  if (typeof input.title !== "string" || !input.title.trim()) {
+    throw new ManagedInvalidRequestError("title must be a non-empty string");
+  }
+}
+
 function assertCreateMessageRequest(input: unknown): asserts input is CreateManagedMessageRequest {
   if (!isRecord(input)) throw new ManagedInvalidRequestError("request body must be an object");
   if (typeof input.input !== "string" || !input.input.trim()) {
     throw new ManagedInvalidRequestError("input must not be empty");
+  }
+  if (input.origin !== undefined && input.origin !== "user" && input.origin !== "external") {
+    throw new ManagedInvalidRequestError("origin must be user or external");
+  }
+  if (input.origin !== "external" && (input.source !== undefined || input.actor !== undefined || input.metadata !== undefined)) {
+    throw new ManagedInvalidRequestError('source, actor and metadata describe a relayed delivery; set origin: "external"');
   }
   if (input.source !== undefined && (typeof input.source !== "string" || !input.source.trim())) {
     throw new ManagedInvalidRequestError("source must be a non-empty string");

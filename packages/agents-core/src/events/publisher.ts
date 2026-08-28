@@ -258,7 +258,7 @@ function projectableEventBody(record: AgentRecord): AgentEventBody | undefined {
       return {
         type: "delivery.accepted",
         deliveryId: record.origin.deliveryId,
-        source: record.origin.source,
+        ...(record.origin.kind === "external" ? { source: record.origin.source } : {}),
         channel: record.mode === "follow_up" ? "follow_up" : record.mode === "steer" ? "steering" : "turn",
       };
     case "metadata":

@@ -7,6 +7,22 @@ released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Managed API: a delivery is the caller's own words unless it says otherwise**
+  (`operon-managed-agents`, `operon-agents`, `operon-agents-core`). `messages.create` journaled
+  every input as an `external` origin, so the model saw even a chat window's messages inside an
+  `<external-message>` envelope stamped "NOT a message from the user" — while the same caller
+  held `sessions.resume`, the real approval channel. The party holding a session's credential is
+  its user, the way app-server's stdio is; the default is now `origin: "user"`, rendered bare.
+  Relayed words (a peer, a webhook) declare `origin: "external"`, which `source`, `actor` and
+  `metadata` now require. The `authorize` hook receives `origin` on `messages.create`, so a
+  credential that only relays can be held to it. Existing callers change behaviour: their inputs
+  lose the envelope. Types: `UserPromptOrigin.deliveryId`, `InboxOrigin`, `AcceptedOrigin` added;
+  `delivery.accepted.source` is now optional (absent for a user delivery).
+
 ## [0.1.0-alpha.2] — 2026-08-25
 
 ### Fixed

@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DiskSessionRepository } from "operon-agents";
+import { ManagedInvalidRequestError } from "../src/server/errors.ts";
 import { SessionService } from "../src/server/session-service.ts";
 import { DiskManagedSessionMetadataStore } from "../src/server/metadata.ts";
 import { MemorySessionWork } from "../src/server/work-memory.ts";
@@ -68,8 +69,21 @@ async function main(): Promise<void> {
   const listed = await service.list();
   check("list: returns the created session", listed.length === 1 && listed[0]!.id === created.id);
 
+  // ── update: a rename is durable and visible on the next read ──────────────────
+  const renamed = await service.update(created.id, { title: "renamed" });
+  const reread = await service.get(created.id);
+  check("update: title changes and persists", renamed.title === "renamed" && reread.title === "renamed");
+  check("update: updatedAt moves forward", reread.updatedAt >= created.updatedAt);
+  let rejected = false;
+  try {
+    await service.update(created.id, { title: "  " });
+  } catch (error) {
+    rejected = error instanceof ManagedInvalidRequestError;
+  }
+  check("update: rejects a blank title", rejected);
+
   // ── appendEvent: durable acceptance ───────────────────────────────────────────
-  const receipt = await service.appendEvent(created.id, { input: "do the thing", actor: "peer-a" });
+  const receipt = await service.appendEvent(created.id, { input: "do the thing", origin: "external", actor: "peer-a" });
   check("append: receipt is queued", receipt.status === "queued" && receipt.deliveryId.startsWith("delivery_"));
   check("append: the session is in line for a worker after the write", (await woken()) === created.id);
 
@@ -78,10 +92,10 @@ async function main(): Promise<void> {
   const page = await independent!.store.readRecordPage({ limit: 50 });
   await independent!.store.close?.();
   const inbox = page.data
-    .map((entry) => entry.record as { type: string; input?: string; origin?: { actor?: string } })
+    .map((entry) => entry.record as { type: string; input?: string; origin?: { kind?: string; actor?: string } })
     .filter((record) => record.type === "inbox.received");
   check("append: input is durable", inbox.length === 1 && inbox[0]!.input === "do the thing");
-  check("append: provenance is durable", inbox[0]!.origin?.actor === "peer-a");
+  check("append: provenance is durable", inbox[0]!.origin?.kind === "external" && inbox[0]!.origin.actor === "peer-a");
 
   // ── listEvents: acceptance is visible to a reconnecting client ────────────────
   const events = await service.listEvents(created.id, { limit: 50 });
@@ -104,6 +118,34 @@ async function main(): Promise<void> {
   await service.appendEvent(created.id, { input: "second" });
   await watching;
   check("watch: streams accepted inputs as they land", seen.length === 2 && seen.every((t) => t === "delivery.accepted"));
+
+  // ── appendEvent: whose words ──────────────────────────────────────────────────
+  // The caller is this session's user unless it says it is relaying: the default journals the
+  // caller's own words as `user`, anchored on the delivery like any other.
+  const own = await service.appendEvent(created.id, { input: "and this is me" });
+  const ownHandle = await new DiskSessionRepository(root).open(created.id);
+  const ownPage = await ownHandle!.store.readRecordPage({ limit: 50 });
+  await ownHandle!.store.close?.();
+  const ownRecord = ownPage.data
+    .map((entry) => entry.record as { type: string; origin?: { kind?: string; deliveryId?: string } })
+    .filter((record) => record.type === "inbox.received")
+    .at(-1);
+  check(
+    "append: the caller's own words are journaled as user, anchored on the delivery",
+    ownRecord?.origin?.kind === "user" && ownRecord.origin.deliveryId === own.deliveryId,
+  );
+  // Relay attributes without the declaration would let a caller dress their own words up as
+  // someone else's, or the reverse; they are refused, not guessed at.
+  const refused = async (request: Parameters<typeof service.appendEvent>[1]): Promise<boolean> => {
+    try {
+      await service.appendEvent(created.id, request);
+      return false;
+    } catch (error) {
+      return error instanceof ManagedInvalidRequestError;
+    }
+  };
+  check("append: relay attributes require origin: external", await refused({ input: "x", actor: "peer-a" }));
+  check("append: an unknown origin is refused", await refused({ input: "x", origin: "root" as never }));
 
   // ── interruptions: reads state without a runtime ──────────────────────────────
   check("interruptions: empty on a session that never ran", (await service.interruptions(created.id)).length === 0);

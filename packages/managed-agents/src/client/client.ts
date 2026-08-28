@@ -12,6 +12,7 @@ import type {
   ManagedSession,
   ResumeManagedSessionResponse,
   StreamSessionEventsOptions,
+  UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import { ManagedApiClientError, throwApiError } from "./errors.ts";
 
@@ -158,6 +159,11 @@ export class ManagedSessionsClient {
 
   retrieve(sessionId: string): Promise<ManagedSession> {
     return this.root.request(`/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /** Rename a session; the new title is durable before this resolves. */
+  update(sessionId: string, request: UpdateManagedSessionRequest): Promise<ManagedSession> {
+    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", body: request });
   }
 
   messages = {

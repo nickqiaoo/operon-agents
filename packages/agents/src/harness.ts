@@ -128,6 +128,17 @@ export interface DeliveryOptions {
   readonly mode?: DeliveryMode;
 }
 
+/**
+ * Provenance a worker hands `dispatchAccepted` for an input whose acceptance is already
+ * journaled. `user` / `user_follow_up`: the user's own words, delivered on their behalf by the
+ * party holding the session's control surface (a managed API caller) — rendered bare, filed as
+ * steering / follow-up. `external`: another party's words, rendered inside the envelope.
+ */
+export type AcceptedOrigin =
+  | (SteerOrigin & { readonly kind: "external" })
+  | { readonly kind: "user"; readonly deliveryId: string }
+  | { readonly kind: "user_follow_up"; readonly deliveryId: string };
+
 export interface DeliveryReceipt {
   readonly deliveryId: string;
   readonly sessionId: string;
@@ -825,12 +836,14 @@ export class HarnessSession<TContext = unknown> {
    */
   dispatchAccepted(
     input: string,
-    origin: SteerOrigin & { readonly kind: "external" },
+    origin: AcceptedOrigin,
     acceptedAt: number = Date.now(),
   ): DeliveryReceipt {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
     const deliveryId = origin.deliveryId;
-    const channel: SteerChannel = origin.channel ?? "steering";
+    const channel: SteerChannel = origin.kind === "external"
+      ? origin.channel ?? "steering"
+      : origin.kind === "user_follow_up" ? "follow_up" : "steering";
 
     if (this.currentRun !== undefined) {
       const receipt = this.core.steer.steer(input, origin);
@@ -844,13 +857,17 @@ export class HarnessSession<TContext = unknown> {
       };
     }
 
-    const promptOrigin: PromptOrigin = {
-      kind: "external",
-      source: origin.source,
-      deliveryId,
-      ...(origin.actor !== undefined ? { actor: origin.actor } : {}),
-      ...(origin.metadata !== undefined ? { metadata: origin.metadata } : {}),
-    };
+    // A fresh turn is a fresh prompt: a follow-up landing on an idle session is simply the
+    // user's next prompt, so it is journaled as `user`, not `user_follow_up`.
+    const promptOrigin: PromptOrigin = origin.kind === "external"
+      ? {
+          kind: "external",
+          source: origin.source,
+          deliveryId,
+          ...(origin.actor !== undefined ? { actor: origin.actor } : {}),
+          ...(origin.metadata !== undefined ? { metadata: origin.metadata } : {}),
+        }
+      : { kind: "user", deliveryId };
     const message = {
       role: "user" as const,
       content: [{ type: "text" as const, text: renderSteerText(origin, input) }],

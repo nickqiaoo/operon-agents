@@ -137,14 +137,14 @@ export async function run(
 
         if (event.type === "turn.started") {
           currentTurn = event.turnId;
-          if (claimNextTurn || (event.origin?.kind === "external" && event.origin.deliveryId === deliveryId)) {
+          if (claimNextTurn || deliveryOf(event.origin) === deliveryId) {
             ourTurn = event.turnId;
             claimNextTurn = false;
           }
           continue;
         }
         if (event.type === "message.appended") {
-          if (ourTurn === undefined && event.origin?.kind === "external" && event.origin.deliveryId === deliveryId) {
+          if (ourTurn === undefined && deliveryOf(event.origin) === deliveryId) {
             // Inside a turn: a steer, and that turn is ours. Between turns: the prompt was
             // journaled ahead of its turn, so the next one to start is ours.
             if (currentTurn !== undefined) ourTurn = currentTurn;
@@ -210,4 +210,15 @@ function textOf(content: unknown): string | undefined {
     .filter((part): part is { type: "text"; text: string } => (part as { type?: string }).type === "text")
     .map((part) => part.text);
   return parts.length === 0 ? undefined : parts.join("");
+}
+
+/**
+ * The delivery a journaled prompt — or the turn it started — came in as, on whichever origin it
+ * was filed under: `user` for the caller's own words, `external` for a relayed party's. Undefined
+ * for everything else in the user role (reminders, compaction summaries): those answer no delivery.
+ */
+function deliveryOf(origin: { readonly kind: string; readonly deliveryId?: string } | undefined): string | undefined {
+  return origin?.kind === "user" || origin?.kind === "user_follow_up" || origin?.kind === "external"
+    ? origin.deliveryId
+    : undefined;
 }

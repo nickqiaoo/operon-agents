@@ -67,9 +67,12 @@ async function main(): Promise<void> {
   );
   check("the worker's turn produced an assistant message", assistant.length === 1);
   // Count only what WE delivered: capabilities also inject user-role messages (environment
-  // context, reminders), and those are not deliveries.
+  // context, reminders), and those answer no delivery — ours carries the delivery it came in as.
   const delivered = (page: readonly AgentEvent[]): number =>
-    page.filter((e) => e.type === "message.appended" && e.origin?.kind === "external").length;
+    page.filter((e) =>
+      e.type === "message.appended"
+      && (e.origin?.kind === "user" || e.origin?.kind === "user_follow_up" || e.origin?.kind === "external")
+      && e.origin.deliveryId !== undefined).length;
   check("the accepted input entered the conversation exactly once", delivered(events.data) === 1);
 
   // ── draining again is a no-op: the cursor says it is done ─────────────────────
