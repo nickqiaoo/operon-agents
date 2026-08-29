@@ -303,6 +303,11 @@ export class OperonTui<TContext = unknown> {
         this.assistantFor(event.address).appendThinking(event.delta);
         break;
       case "tool.call.started": {
+        // A nested call (a Code Mode program's `tools.X()`) is a line on its parent's card, not a card.
+        if (event.parentToolCallId !== undefined) {
+          this.toolCalls.get(toolKey(event.address, event.parentToolCallId))?.addNested(event.toolCallId, event.toolName, event.args);
+          break;
+        }
         const component = new ToolCallComponent(event.toolCallId, event.toolName, event.args, event.address);
         this.toolCalls.set(toolKey(event.address, event.toolCallId), component);
         this.appendTranscript(component);
@@ -310,6 +315,7 @@ export class OperonTui<TContext = unknown> {
         break;
       }
       case "tool.progress": {
+        if (event.parentToolCallId !== undefined) break;
         const text = event.update.text ?? (event.update.percent === undefined ? event.update.kind : `${String(event.update.percent)}%`);
         this.toolCalls.get(toolKey(event.address, event.toolCallId))?.setProgress(text);
         break;
@@ -321,6 +327,10 @@ export class OperonTui<TContext = unknown> {
         this.toolCalls.get(toolKey(event.address, event.toolCallId))?.suspend();
         break;
       case "tool.result":
+        if (event.parentToolCallId !== undefined) {
+          this.toolCalls.get(toolKey(event.address, event.parentToolCallId))?.completeNested(event.toolCallId, event.isError);
+          break;
+        }
         this.toolCalls.get(toolKey(event.address, event.toolCallId))?.complete(event.result, event.isError);
         this.setBusy(true, "Thinking");
         break;

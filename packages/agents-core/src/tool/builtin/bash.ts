@@ -366,7 +366,8 @@ function backgroundLogPath(machine: Machine): string | undefined {
 /** Allocate the canonical command log before the user's process starts. The shell only owns
  * appending command output; directory/file setup failures therefore fail the tool cleanly
  * instead of escaping through an uncaptured outer stderr stream. */
-async function prepareBackgroundLog(machine: Machine): Promise<string> {
+/** Create an empty task log on the machine and return its path — where a background program or command writes its output. */
+export async function prepareBackgroundLog(machine: Machine): Promise<string> {
   const logPath = backgroundLogPath(machine);
   if (logPath === undefined) {
     throw new Error("Background Bash execution requires a durable output log, but this machine has no safe task-log directory.");

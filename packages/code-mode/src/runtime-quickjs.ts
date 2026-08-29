@@ -75,7 +75,7 @@ export function createQuickJSRuntime(options: QuickJSRuntimeOptions = {}): CodeR
 }
 
 async function runProgram(module: QuickJSWASMModule, request: CodeRunRequest, maxStackBytes: number, invalidate: () => void): Promise<CodeRunResult> {
-  const output = new OutputLedger(request.limits.maxOutputBytes);
+  const output = new OutputLedger(request.limits.maxOutputBytes, request.onLog);
   const compiled = compile(request.program);
   if (compiled.error !== undefined) return { logs: [], truncated: false, error: compiled.error };
 
@@ -426,10 +426,13 @@ class OutputLedger {
   truncated = false;
   private used = 0;
   private readonly capBytes: number;
-  constructor(capBytes: number) {
+  private readonly onLine: ((line: string) => void) | undefined;
+  constructor(capBytes: number, onLine?: (line: string) => void) {
     this.capBytes = capBytes;
+    this.onLine = onLine;
   }
   log(line: string): void {
+    this.onLine?.(line);
     if (this.truncated) return;
     const bytes = Buffer.byteLength(line, "utf8") + 1;
     if (this.used + bytes > this.capBytes) {

@@ -1,6 +1,7 @@
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "../protocol/index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import type { NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
+import type { ApprovalResponse } from "../permission/types.ts";
 import type { Machine } from "../tool/machine.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
@@ -47,6 +48,12 @@ export interface ToolCallStepContext {
   readonly logger?: Logger;
   /** Present when re-running a previously interrupted batch (HITL resume). */
   readonly resume?: BatchResume;
+  /**
+   * The run's approval answers by tool call id — the table the authorize hook consults. Shared
+   * with the runner (the same object), so a nested call handed an answer can add it here and
+   * be authorized through the ordinary audited path.
+   */
+  readonly answers?: Record<string, ApprovalResponse>;
 }
 
 export interface ToolBatchResult {
@@ -356,7 +363,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
   let sequence = 0;
   return {
     schemas: [...step.tools.values()].map((tool) => tool.schema),
-    async call(name, args) {
+    async call(name, args, options) {
       sequence += 1;
       const call: ToolCall = {
         type: "toolCall",
@@ -365,11 +372,29 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
         arguments: (args ?? {}) as Record<string, unknown>,
       };
       if (step.signal.aborted) return errorResult(`nested call to ${name} not dispatched: the run was aborted`);
+      // An answer the caller obtained for this very call (it paused, the user answered, the
+      // program re-ran): file it where a resumed batch's answers live, so the authorize hook
+      // records and applies it like any other.
+      if (options?.approval !== undefined && step.answers !== undefined) step.answers[call.id] = options.approval;
       const prepared = await prepareCall(nestedStep, call);
       if (prepared.kind === "interrupt" || prepared.kind === "repark") {
-        return errorResult(
-          `${name} requires the user's approval, which cannot be requested from inside a nested call. Call the tool directly.`,
-        );
+        const pending = prepared.pending;
+        return {
+          ...errorResult(
+            `${name} requires the user's approval, which cannot be requested from inside a nested call. Call the tool directly.`,
+          ),
+          ...(pending.kind === "approval"
+            ? {
+                interrupt: {
+                  toolCallId: call.id,
+                  toolName: name,
+                  approvalRule: pending.approvalRule,
+                  ...(pending.policyName !== undefined ? { policyName: pending.policyName } : {}),
+                  ...(pending.display !== undefined ? { display: pending.display } : {}),
+                },
+              }
+            : {}),
+        };
       }
       step.dispatchEvent?.({
         type: "tool.call.started",

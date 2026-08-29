@@ -863,6 +863,9 @@ class Engine<TContext> {
           this.run(agent, childContext, childState, childResume),
         model,
       );
+      // The approval table is shared between the authorize hook and the tool-call layer (a
+      // nested call may add to it mid-batch), so it must exist before either captures it.
+      state.answers ??= {};
       const hooks = buildRunHooks(current, state, context, toolset.tools);
       const visibleTools = activeDeferredTools(
         toolset.tools,
@@ -907,6 +910,7 @@ class Engine<TContext> {
           tools: toolset.tools,
           deferredToolNames: toolset.deferredToolNames,
           hooks,
+          answers: state.answers,
           params: resolveModelParams(current.modelSettings, state.session.thinkingSetting),
           createOutputGuardrailMonitor: outputGuardrails.length > 0
             ? (options) => createOutputGuardrailMonitor(outputGuardrails, current, runCtxFor(state), options)

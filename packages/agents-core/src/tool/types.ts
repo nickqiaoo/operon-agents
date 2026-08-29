@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent, ToolSchema } from "../protocol/index.ts";
+import type { ApprovalResponse } from "../permission/types.ts";
 import type { ToolAccesses } from "./access.ts";
 import type { Machine } from "./machine.ts";
 import type { BackgroundSpawner } from "./background.ts";
@@ -94,10 +95,32 @@ export interface NestedToolDispatcher {
    * Run `name` with `args`. Resolves to the tool's result; an unknown, denied or failed call is
    * an error RESULT (`isError: true`), never a rejection. A call that would pause the run — an
    * approval with no live approver, a tool that suspends for input — also comes back as an
-   * error result: a nested call cannot park the turn, so such tools must be called directly.
+   * error result: a nested call cannot park the turn. For the approval case the result carries
+   * `interrupt`, so a caller able to pause ITSELF (`ToolRunContext.suspend`) can, and later
+   * re-issue the same call with the user's answer in `options.approval`.
    */
-  call(name: string, args: unknown): Promise<ToolResult>;
+  call(name: string, args: unknown, options?: NestedCallOptions): Promise<NestedCallResult>;
 }
+
+export interface NestedCallOptions {
+  /**
+   * The user's answer to the approval this same call reported earlier (`interrupt`). Applied
+   * exactly as a resumed batch applies its answers — recorded for audit, then honoured — so a
+   * rejection blocks the call and an approval runs it without asking again.
+   */
+  readonly approval?: ApprovalResponse;
+}
+
+/** An approval a nested call needs and cannot obtain in place: what to ask the user. */
+export interface NestedCallInterrupt {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly approvalRule: string;
+  readonly policyName?: string;
+  readonly display?: unknown;
+}
+
+export type NestedCallResult = ToolResult & { readonly interrupt?: NestedCallInterrupt };
 
 export interface ToolRunContext extends ToolContextBase {
   readonly onUpdate?: (update: ToolUpdate) => void;

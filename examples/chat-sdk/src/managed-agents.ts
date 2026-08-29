@@ -421,7 +421,8 @@ async function streamTurn(
           const call = toolCallOf(event.toolName, event.args);
           tools.push(call);
           openCalls.set(event.toolCallId, call);
-          note({ kind: "tool", label: toolLabel(call) });
+          // A nested call (a Code Mode program's `tools.X()`) reads as a step of its parent.
+          note({ kind: "tool", label: event.parentToolCallId !== undefined ? `\u21b3 ${toolLabel(call)}` : toolLabel(call) });
           console.log(`[managed-agent] ${sessionId} tool: ${event.toolName}`);
           break;
         }

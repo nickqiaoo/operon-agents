@@ -67,10 +67,49 @@ wall clock for a program merely waiting on tools, a cap on tool calls per progra
 flight, and the output cap. Each run gets a fresh runtime, torn down afterwards: nothing survives
 between programs.
 
-Two things a program cannot do, by design: pause the run, and answer the user. A nested call that
-needs an approval when no live approver is present, or a tool that suspends for input
-(`AskUserQuestion`), fails inside the program with a message telling the model to call that tool
-directly — the turn goes on rather than parking a half-run program.
+## Pausing for an approval
+
+With a live approver (a terminal, a chat window answering prompts), a nested call that needs an
+approval simply waits for the answer, like a direct call. With none — a server, a session the user
+comes back to tomorrow — the program **pauses**: RunCode records every nested call that already
+ran in a journal (the extension's durable state), and suspends the run with the approval request.
+The pending item is an input request whose `request.kind` is `"approval"`; its `display` carries the
+nested call's tool, approval rule and position in the program (`RunCodeApprovalRequest`). Answer it
+with an approval response:
+
+```ts
+await session.resume({ [pending.approvalId]: { kind: "input", data: { decision: "approved" } } });
+```
+
+The program then runs again from the top — possibly in another process — with calls found in the
+journal answered from it (not re-executed), the call that asked dispatched with the user's answer
+(a rejection reaches the program as a `ToolCallError`), and the rest running live. The result's
+`details.replayed` counts the replayed calls. A program that branches on `Date.now()` or
+`Math.random()` may stop matching its journal on the re-run; from that call on everything runs live
+and the result says so (`details.divergedAt`).
+
+One thing a program still cannot do is ask the user a question: a tool that suspends for input
+(`AskUserQuestion`) fails inside a program with a message telling the model to call it directly.
+
+## Long programs: the background
+
+A program that polls, or makes many slow calls, need not hold the turn. `run_in_background: true`
+returns a task id at once; a program already running can be moved with `session.detachTool(id)`
+(the tool announces `tool.detachable`, the cue a UI uses to offer "move to background"). Either
+way it becomes a `code` background task: its `console.log` lines, each nested call's outcome and
+the final result go to a log file on the machine — where a background command's output goes — and
+`BackgroundOutput` reads it. A program in the background has no turn to pause, so an approval
+nobody can give fails inside it instead of pausing.
+
+While attached, `console.log` lines stream as `tool.progress` (`update.kind: "stdout"`), and each
+nested call's outcome as a `status` update.
+
+## Measuring it
+
+`pnpm --filter operon-code-mode evals` runs a small suite against a real model (credentials in the
+environment): each task twice, with and without the extension, measuring model calls, tokens,
+whether the model reached for `RunCode`, and whether the answer was right. `--update-baseline`
+records the run; later runs fail on a regression. `evals:selftest` checks the plumbing offline.
 
 ## Options
 

@@ -55,10 +55,10 @@ function buildAuthorizer<TContext>(
   // ctx carries neither). Bind them per turn as closure state — the manager is a session
   // singleton shared by concurrent frames, so they must never be stored on it.
   const base = state.permission.authorizerFor({ getTranscript: () => context.messages, getTools: () => tools });
-  const answers = state.answers;
-  if (!answers) return base;
   return async (ctx) => {
-    const answer = answers[ctx.toolCall.id];
+    // Read at call time, not captured: a nested call (`ToolRunContext.dispatch`) may add an
+    // answer while the batch runs.
+    const answer = state.answers?.[ctx.toolCall.id];
     if (answer) {
       // Audit record: this is the single chokepoint both live and durable approvals
       // flow through (the responder/resume answer is applied here).

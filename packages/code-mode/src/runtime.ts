@@ -33,6 +33,8 @@ export interface CodeRunRequest {
   readonly globals?: Readonly<Record<string, unknown>>;
   readonly limits: CodeRunLimits;
   readonly signal?: AbortSignal;
+  /** Called with each `console.log` line as the program produces it (the same lines `logs` collects). */
+  readonly onLog?: (line: string) => void;
 }
 
 export type CodeRunFailureKind =

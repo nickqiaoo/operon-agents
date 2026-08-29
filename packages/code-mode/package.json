@@ -34,8 +34,10 @@
     "clean": "rm -rf dist *.tsbuildinfo",
     "build": "pnpm --filter operon-agents build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "for f in test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
-    "prepack": "pnpm build"
+    "test": "for f in test/e2e*.ts; do echo \"\\n\u25b6 $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build",
+    "evals": "node --experimental-strip-types --no-warnings evals/run.ts",
+    "evals:selftest": "node --experimental-strip-types --no-warnings evals/selftest.ts"
   },
   "dependencies": {
     "@jitl/quickjs-ng-wasmfile-release-sync": "0.32.0",

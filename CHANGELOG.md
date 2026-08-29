@@ -22,8 +22,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the direct tool surface to a keep-set. The engine gained one entry for it:
   `ToolRunContext.dispatch` (a `NestedToolDispatcher`) lets a running tool call other tools as
   nested calls, whose `tool.call.started` / `tool.result` events carry `parentToolCallId`. A
-  nested call that would pause the run (an approval with no live approver, a tool that suspends)
-  fails with a message telling the model to call that tool directly; the turn goes on.
+  nested call that needs an approval nobody can give pauses the run: RunCode journals the calls
+  already made and suspends with the request (`request.kind: "approval"`); on resume the program
+  re-runs with those calls replayed, the asking call dispatched with the answer, and the rest live
+  — from another process too. A tool that suspends for input fails inside a program with a message
+  telling the model to call it directly. For this, `NestedToolDispatcher.call` reports an
+  unobtainable approval as `interrupt` and accepts the answer as `options.approval`. A long
+  program can run detached (`run_in_background`, or `session.detachTool` while it runs) as a
+  `code` background task whose log file `BackgroundOutput` reads; attached, its `console.log`
+  lines stream as `tool.progress`. The TUI folds a program's nested calls under its card and the
+  codex chat UI shows them as progress on its item. `pnpm --filter operon-code-mode evals`
+  measures model calls, tokens, adoption and correctness with and without the extension.
 - **Managed API: `sessions.update`** (`operon-managed-agents`). `PATCH /v1/sessions/{id}` renames
   a session; the new `sessions.update` authorization action guards it.
 

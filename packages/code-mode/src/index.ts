@@ -16,7 +16,7 @@
 export { codeMode, CODE_MODE_EXTENSION_ID, DEFAULT_DIRECT_TOOLS } from "./extension.ts";
 export type { CodeModeMode, CodeModeOptions } from "./extension.ts";
 export { createRunCodeTool, DEFAULT_RUN_CODE_LIMITS } from "./run-code-tool.ts";
-export type { RunCodeDetails, RunCodeDispatch, RunCodeLimits, RunCodeToolOptions } from "./run-code-tool.ts";
+export type { RunCodeApprovalRequest, RunCodeDetails, RunCodeDispatch, RunCodeJournalStore, RunCodeLimits, RunCodeSuspendState, RunCodeToolOptions } from "./run-code-tool.ts";
 export { createQuickJSRuntime } from "./runtime-quickjs.ts";
 export type { QuickJSRuntimeOptions } from "./runtime-quickjs.ts";
 export { ToolCallFailure } from "./runtime.ts";

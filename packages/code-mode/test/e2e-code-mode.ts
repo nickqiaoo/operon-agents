@@ -3,14 +3,14 @@
  * `tools.X()` inside it goes through the engine's own tool pipeline — events, permissions and
  * all. The runtime's own behaviour is `e2e-runtime.ts`; this is the seam between the two.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness } from "operon-agents";
+import { createHarness, createLocalHarness } from "operon-agents";
 import type { AgentEvent, ExtensionDefinition, PermissionManagerOptions, ToolSchema } from "operon-agents";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
 import { codeMode, DEFAULT_DIRECT_TOOLS, RUN_CODE_NAME } from "../src/index.ts";
-import type { CodeModeOptions, RunCodeDetails } from "../src/index.ts";
+import type { CodeModeOptions, RunCodeApprovalRequest, RunCodeDetails } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -115,17 +115,172 @@ return { hits };`);
     check("deny: RunCode is control flow — the approver was never asked about it", !s.events.some((event) => event.type === "turn.paused"));
   }
 
-  // ── No live approver: a call that needs approval fails inside the program instead of pausing the run ──
+  // ── No live approver: the program pauses; the user answers later, from another process; the
+  //    program continues without repeating what it already did ──
   {
-    const s = await scenario(
-      {},
-      { mode: "manual" },
-      // A command that writes: read-only commands are approved without asking, this one must ask.
-      `try { await tools.Bash({ command: "echo hi > out.txt" }); return "ran" } catch (e) { return e.message }`,
+    const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
+    const open = () =>
+      createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode()] });
+    let harness = await open();
+    const session = await harness.createSession();
+    const sessionId = session.id;
+    const before: AgentEvent[] = [];
+    session.onEvent((event) => before.push(event));
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(RUN_CODE_NAME, {
+          code: `const a = await tools.Read({ path: "a.txt" });
+await tools.Bash({ command: "echo approved > out.txt" });
+const c = await tools.Read({ path: "c.txt" });
+return { a: a.includes("hello"), c: c.includes("again") };`,
+          description: "Read, write, read",
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done", { stopReason: "stop" }),
+    ]);
+    let result = await session.prompt("go");
+    const pending = result.interruptions?.[0];
+    const request = pending?.kind === "input" ? (pending.request as { kind?: string; display?: RunCodeApprovalRequest }) : undefined;
+    check("pause: the run interrupts instead of failing the call", result.status === "interrupted" && result.interruptions?.length === 1);
+    check(
+      "pause: the pending item is an input request shaped as the nested call's approval",
+      request?.kind === "approval" && request.display?.toolName === "Bash" && request.display.sequence === 2 && request.display.approvalRule.startsWith("Bash(") && request.display.program === "Read, write, read",
     );
-    const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
-    check("no approver: the program is told the call needs approval and to call the tool directly", text.includes("requires the user's approval") && text.includes("Call the tool directly"));
-    check("no approver: the run finishes instead of pausing", s.result.output === "done" && !s.events.some((event) => event.type === "turn.paused"));
+    check("pause: the call before it ran once, the call after it not at all", before.filter((event) => event.type === "tool.call.started" && event.toolName === "Read").length === 1 && !existsSync(join(work, "out.txt")));
+    check("pause: the RunCode call is reported suspended", before.some((event) => event.type === "tool.suspended" && event.toolName === RUN_CODE_NAME));
+
+    // "Process 2": a fresh harness over the same home, the session reopened from disk.
+    await session.close();
+    await harness.close();
+    harness = await open();
+    const reopened = await harness.resumeSession(sessionId);
+    const after: AgentEvent[] = [];
+    reopened.onEvent((event) => after.push(event));
+    faux.setResponses([fauxAssistantMessage("done", { stopReason: "stop" })]);
+    result = await reopened.resume({ [pending!.approvalId]: { kind: "input", data: { decision: "approved" } } });
+    const finished = after.find(
+      (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
+    );
+    const details = finished?.result.details as RunCodeDetails | undefined;
+    const text = finished === undefined ? "" : textOf(finished);
+    check("resume: the run completes and the model answers", result.status === "completed" && result.output === "done");
+    check("resume: the approved call ran", existsSync(join(work, "out.txt")));
+    check("resume: the call before the pause was replayed, not repeated", details?.replayed === 1 && details.dispatches[0]?.replayed === true && after.filter((event) => event.type === "tool.call.started" && event.toolName === "Read").length === 1);
+    check("resume: the program's result is complete", text.includes('"a": true') && text.includes('"c": true') && details?.divergedAt === undefined);
+    await reopened.close();
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+
+  // ── A rejection reaches the program as a catchable error, and the call never runs ──
+  {
+    const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
+    const harness = await createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode()] });
+    const session = await harness.createSession();
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(RUN_CODE_NAME, {
+          code: `try { await tools.Bash({ command: "echo no > rejected.txt" }); return "ran" } catch (e) { return { name: e.name, msg: e.message } }`,
+          description: "Try a write",
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done", { stopReason: "stop" }),
+    ]);
+    let result = await session.prompt("go");
+    const pending = result.interruptions?.[0];
+    check("reject: the run paused for the approval", result.status === "interrupted" && pending !== undefined);
+    const after: AgentEvent[] = [];
+    session.onEvent((event) => after.push(event));
+    result = await session.resume({ [pending!.approvalId]: { kind: "input", data: { decision: "rejected", feedback: "not on this box" } } });
+    const finished = after.find(
+      (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
+    );
+    const text = finished === undefined ? "" : textOf(finished);
+    check("reject: the program catches a ToolCallError carrying the user's feedback", result.status === "completed" && text.includes('"name": "ToolCallError"') && text.includes("not on this box"));
+    check("reject: the rejected call never ran", !existsSync(join(work, "rejected.txt")));
+    await session.close();
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+
+  // ── A long program runs in the background: its console lines and result land in a task log ──
+  {
+    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode()] });
+    const session = await harness.createSession();
+    const events: AgentEvent[] = [];
+    session.onEvent((event) => events.push(event));
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(RUN_CODE_NAME, {
+          code: `console.log("starting");\nconst out = await tools.Bash({ command: "sleep 0.3 && echo slow-result" });\nconsole.log("finished");\nreturn out.trim();`,
+          description: "A slow program",
+          run_in_background: true,
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done", { stopReason: "stop" }),
+    ]);
+    const result = await session.prompt("go");
+    const parentResult = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
+    );
+    const details = parentResult?.result.details as RunCodeDetails | undefined;
+    check("background: the call returns at once with a task id", result.output === "done" && details?.movedToBackground === true && typeof details.taskId === "string");
+    const taskId = details?.taskId ?? "";
+    let task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    for (let i = 0; i < 100 && (task === undefined || task.status === "running"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    }
+    check("background: the task is a code task that completes on its own", task?.kind === "code" && task.status === "completed");
+    const output = await session.readBackgroundTaskOutput(taskId);
+    check("background: the task log carries console lines, nested call outcomes and the result", output.content.includes("starting") && output.content.includes("tools.Bash -> ok") && output.content.includes("finished") && output.content.includes("--- result ---") && output.content.includes("slow-result"));
+    check("background: nested calls still went through the engine", events.some((event) => event.type === "tool.call.started" && event.toolName === "Bash" && event.parentToolCallId !== undefined));
+    await harness.close();
+  }
+
+  // ── A running program can be moved to the background; console lines stream as progress meanwhile ──
+  {
+    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode()] });
+    const session = await harness.createSession();
+    const events: AgentEvent[] = [];
+    let detachedAt: string | undefined;
+    session.onEvent((event) => {
+      events.push(event);
+      if (event.type === "tool.detachable" && event.toolName === RUN_CODE_NAME && detachedAt === undefined) {
+        detachedAt = event.toolCallId;
+        // Let the program get going, then move it: the same thing a UI's "move to background" does.
+        setTimeout(() => session.detachTool(event.toolCallId), 120);
+      }
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(RUN_CODE_NAME, {
+          code: `console.log("tick");\nawait tools.Bash({ command: "sleep 0.6" });\nconsole.log("tock");\nreturn "late";`,
+          description: "A program that outlives the turn",
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done", { stopReason: "stop" }),
+    ]);
+    const result = await session.prompt("go");
+    const parentResult = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
+    );
+    const details = parentResult?.result.details as RunCodeDetails | undefined;
+    check("detach: the tool announced it could be detached, and was", detachedAt !== undefined && details?.movedToBackground === true && result.output === "done");
+    check("detach: console lines streamed as progress while attached", events.some((event) => event.type === "tool.progress" && event.toolName === RUN_CODE_NAME && event.update.kind === "stdout" && event.update.text === "tick"));
+    const taskId = details?.taskId ?? "";
+    let task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    for (let i = 0; i < 100 && (task === undefined || task.status === "running"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    }
+    const output = await session.readBackgroundTaskOutput(taskId);
+    check("detach: the program kept running after the turn ended and its result reached the log", task?.status === "completed" && output.content.includes("tock") && output.content.includes("late"));
+    await harness.close();
   }
 
   // ── `only`: the direct surface shrinks; everything else is reachable through the program ──

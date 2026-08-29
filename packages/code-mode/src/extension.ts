@@ -78,6 +78,9 @@ export function codeMode(options: CodeModeOptions = {}): ExtensionDefinition {
         limits,
         exclude: options.exclude,
         description: describe([]),
+        // The replay journal lives in this extension's durable KV, so a program paused for an
+        // approval can be continued from another process.
+        journal: api.state,
       });
       const unregisterTool = api.registerTool(tool);
 

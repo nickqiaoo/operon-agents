@@ -53,3 +53,5 @@ jobs:
 
       - name: Evals harness self-test (offline, faux model)
         run: pnpm --filter operon-agents-core evals:selftest
+      - name: Eval self-test (code-mode)
+        run: pnpm --filter operon-code-mode evals:selftest

@@ -12,6 +12,7 @@ import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
 import { NullMachine } from "../tool/machine-null.ts";
 import type { Tool, ToolResult } from "../tool/types.ts";
+import type { ApprovalResponse } from "../permission/types.ts";
 import { registerFauxProvider } from "./faux.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -144,6 +145,50 @@ async function main(): Promise<void> {
     });
     check("a blocked nested call carries the policy's reason", result !== undefined && text(result) === "ERR denied by policy");
     check("the finalize hook runs for nested calls that executed (the parent here)", seen.includes("call_1"));
+  }
+
+  // ── the approval channel: a paused caller can carry the answer back ──
+  {
+    const answers: Record<string, ApprovalResponse> = {};
+    const reporter = tool({
+      name: "Reporter",
+      description: "reports what a nested call came back with",
+      parameters: z.object({ approval: z.enum(["approved", "rejected"]).optional() }),
+      execute: async (args, ctx) => {
+        const r = await ctx.dispatch!.call("Inner", { x: 3 }, args.approval ? { approval: { decision: args.approval } } : undefined);
+        return { content: [{ type: "text", text: JSON.stringify({ text: text(r), isError: r.isError === true, interrupt: r.interrupt ?? null }) }] };
+      },
+    });
+    const withReporter = new Map(tools);
+    withReporter.set("Reporter", reporter);
+    const runReporter = async (approval?: "approved" | "rejected") => {
+      const step: ToolCallStepContext = {
+        turnId: "t2",
+        stepNumber: 1,
+        signal: new AbortController().signal,
+        model: faux.getChatModel(),
+        machine: new NullMachine(),
+        tools: withReporter,
+        answers,
+        hooks: {
+          // Mirrors buildAuthorizer: an answer on file wins; otherwise Inner needs an approval nobody can give.
+          authorizeToolExecution: async (ctx) => {
+            const answer = answers[ctx.toolCall.id];
+            if (answer !== undefined) return answer.decision === "approved" ? undefined : { block: true, reason: "rejected by the user" };
+            if (ctx.toolCall.name !== "Inner") return undefined;
+            return { interrupt: { kind: "approval", toolCallId: ctx.toolCall.id, toolName: "Inner", approvalRule: "Inner", policyName: "fallback-ask", display: { title: "run Inner" } } };
+          },
+        },
+      };
+      const batch = await runCalls(step, [{ type: "toolCall", id: "call_9", name: "Reporter", arguments: approval ? { approval } : {} }]);
+      return JSON.parse(text(batch.results[0]!)) as { text: string; isError: boolean; interrupt: { toolCallId: string; toolName: string; approvalRule: string; policyName?: string; display?: unknown } | null };
+    };
+    const asked = await runReporter();
+    check("an approval nobody can give comes back as an error result that carries the request", asked.isError && asked.interrupt?.toolCallId === "call_9:code:1" && asked.interrupt.approvalRule === "Inner" && asked.interrupt.policyName === "fallback-ask");
+    const approved = await runReporter("approved");
+    check("re-issued with the user's approval, the call is filed in the answer table and runs", !approved.isError && approved.text === "inner:3" && answers["call_9:code:1"]?.decision === "approved");
+    const rejected = await runReporter("rejected");
+    check("re-issued with a rejection, the call is blocked with the rejection's reason", rejected.isError && rejected.text.includes("rejected by the user") && rejected.interrupt === null);
   }
 
   // ── scheduling: nested calls obey the batch's conflict rule ──

@@ -13,6 +13,9 @@ export const CODE_PARAM_DESCRIPTION =
 export const DESCRIPTION_PARAM_DESCRIPTION =
   'Clear, concise description of what this program does in active voice, 5-10 words (shown in the UI). Examples: "Count TODO markers across packages"; "Read failing test and its fixture".';
 
+export const BACKGROUND_PARAM_DESCRIPTION =
+  "Run the program detached and return a task_id immediately — for a long program (polling, many slow tool calls) that should not hold the turn. Read its console output and final result with BackgroundOutput. Requires the background capability.";
+
 export interface RunCodePromptInput {
   /** The members of `declare const tools: { … }`, already rendered (see `declarations.ts`). */
   readonly declarations: string;
@@ -33,12 +36,13 @@ Use it when the same operation applies to many items (read N files and grep each
 ## Writing the program
 - \`code\` is the BODY of an async function: top-level \`await\` and \`return\` work. Erasable TypeScript only — type annotations are fine; \`enum\`, \`namespace\` and decorators are not.
 - Pass raw source text: not JSON, not a quoted string, not a markdown code fence.
-- Call tools as \`await tools.Name(args)\`, exactly per the declarations below. A call resolves to the tool's text output. A failed call throws \`ToolCallError\` (\`.toolName\`, \`.message\`) — catch it if the program should carry on. A tool that needs the user's approval or input fails inside a program; call such tools directly instead.
+- Call tools as \`await tools.Name(args)\`, exactly per the declarations below. A call resolves to the tool's text output. A failed call throws \`ToolCallError\` (\`.toolName\`, \`.message\`) — catch it if the program should carry on. If a call needs the user's approval and nobody is there to give it, the program pauses until they answer and then continues without repeating the calls it already made; a rejection reaches it as a \`ToolCallError\`. A tool that asks the user a question (AskUserQuestion) cannot run inside a program; call it directly.
 - Independent read-only calls MAY run concurrently under \`Promise.all\`; calls that write run one at a time, in the order they were made. Dependent work sequences with \`await\`.
 - Only what you \`console.log(...)\` or \`return\` comes back to you — curate it. Return structured data (objects, arrays) rather than prose, and summarize inside the program instead of returning raw file contents: output beyond ${cap} is cut.
 - The program runs in a fresh, isolated environment: no filesystem, network, timers, imports, or state from earlier calls. Every effect goes through \`tools.*\`, with the same permissions as a direct call.
 - When the program finishes, unawaited promises are discarded silently — await everything you need.
 - \`ALL_TOOLS\` lists every callable tool as \`{ name, description }\`, including any not declared below; call those as \`tools[name](args)\`.
+- A long program (polling, many slow calls) can run detached: pass \`run_in_background: true\` and read its output later with BackgroundOutput. A detached program cannot pause for an approval — a call that needs one fails inside it.
 
 ## Available tools
 \`\`\`ts

@@ -3,6 +3,7 @@ import type { AgentBackgroundTaskInfo } from "./agent-task.ts";
 import type { CommandBackgroundTaskInfo } from "./command-task.ts";
 import type { QuestionBackgroundTaskInfo } from "./question-task.ts";
 import type { WorkflowBackgroundTaskInfo } from "./workflow-task.ts";
+import type { CodeBackgroundTaskInfo } from "./code-task.ts";
 
 export type BackgroundTaskStatus = "running" | "completed" | "failed" | "paused" | "timed_out" | "killed" | "lost";
 
@@ -45,7 +46,8 @@ export type BackgroundTaskInfo =
   | CommandBackgroundTaskInfo
   | AgentBackgroundTaskInfo
   | QuestionBackgroundTaskInfo
-  | WorkflowBackgroundTaskInfo;
+  | WorkflowBackgroundTaskInfo
+  | CodeBackgroundTaskInfo;
 
 export interface BackgroundTaskSink {
   readonly signal: AbortSignal;
