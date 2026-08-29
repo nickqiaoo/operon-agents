@@ -14,7 +14,7 @@ export const DESCRIPTION_PARAM_DESCRIPTION =
   'Clear, concise description of what this program does in active voice, 5-10 words (shown in the UI). Examples: "Count TODO markers across packages"; "Read failing test and its fixture".';
 
 export const BACKGROUND_PARAM_DESCRIPTION =
-  "Run the program detached and return a task_id immediately — for a long program (polling, many slow tool calls) that should not hold the turn. Read its console output and final result with BackgroundOutput. Requires the background capability.";
+  "Run the program detached and return a task_id immediately — for a long program (polling, many slow tool calls) that should not hold the turn. Its console output and final result go to a log file whose path the result names; Read that file, and use BackgroundOutput(task_id) for its status. Requires the background capability.";
 
 export interface RunCodePromptInput {
   /** The members of `declare const tools: { … }`, already rendered (see `declarations.ts`). */
@@ -42,7 +42,7 @@ Use it when the same operation applies to many items (read N files and grep each
 - The program runs in a fresh, isolated environment: no filesystem, network, timers, imports, or state from earlier calls. Every effect goes through \`tools.*\`, with the same permissions as a direct call.
 - When the program finishes, unawaited promises are discarded silently — await everything you need.
 - \`ALL_TOOLS\` lists every callable tool as \`{ name, description }\`, including any not declared below; call those as \`tools[name](args)\`.
-- A long program (polling, many slow calls) can run detached: pass \`run_in_background: true\` and read its output later with BackgroundOutput. A detached program cannot pause for an approval — a call that needs one fails inside it.
+- A long program (polling, many slow calls) can run detached: pass \`run_in_background: true\`; its console output and result go to a log file you Read later (the result names the path). A detached program cannot pause for an approval — a call that needs one fails inside it.
 
 ## Available tools
 \`\`\`ts

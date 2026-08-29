@@ -97,9 +97,11 @@ A program that polls, or makes many slow calls, need not hold the turn. `run_in_
 returns a task id at once; a program already running can be moved with `session.detachTool(id)`
 (the tool announces `tool.detachable`, the cue a UI uses to offer "move to background"). Either
 way it becomes a `code` background task: its `console.log` lines, each nested call's outcome and
-the final result go to a log file on the machine — where a background command's output goes — and
-`BackgroundOutput` reads it. A program in the background has no turn to pause, so an approval
-nobody can give fails inside it instead of pausing.
+the final result go to a log file on the machine — where a background command's output goes. The
+model `Read`s that file (the result names its path) and asks `BackgroundOutput` for the task's
+status; a completion notice reaches it on its own. A host reads the same file through
+`session.readBackgroundTaskOutput` / `readBackgroundTaskOutputDelta`. A program in the background
+has no turn to pause, so an approval nobody can give fails inside it instead of pausing.
 
 While attached, `console.log` lines stream as `tool.progress` (`update.kind: "stdout"`), and each
 nested call's outcome as a `status` update.
