@@ -81,9 +81,29 @@ export interface ToolContextBase {
   readonly fileLedger?: FileFreshnessLedger;
 }
 
+/**
+ * Run another tool from inside a running tool, through the same pipeline a model-issued call
+ * takes — prepare hook, plan resolution, authorization, execution, finalize hook — so a program
+ * the model wrote (Code Mode) cannot reach a tool without the permissions and hooks a direct
+ * call would face. The loop hands one to every tool run; a hand-built context may omit it.
+ */
+export interface NestedToolDispatcher {
+  /** Schemas of every tool the calling step can execute: the full registry, deferred ones included. */
+  readonly schemas: readonly ToolSchema[];
+  /**
+   * Run `name` with `args`. Resolves to the tool's result; an unknown, denied or failed call is
+   * an error RESULT (`isError: true`), never a rejection. A call that would pause the run — an
+   * approval with no live approver, a tool that suspends for input — also comes back as an
+   * error result: a nested call cannot park the turn, so such tools must be called directly.
+   */
+  call(name: string, args: unknown): Promise<ToolResult>;
+}
+
 export interface ToolRunContext extends ToolContextBase {
   readonly onUpdate?: (update: ToolUpdate) => void;
   readonly background?: BackgroundSpawner;
+  /** Run other tools through the full pipeline (see {@link NestedToolDispatcher}). */
+  readonly dispatch?: NestedToolDispatcher;
   /**
    * Client channel for interactive questions (AskUserQuestion). Absent — or present
    * without `requestQuestion` — when the connected client cannot render questions;

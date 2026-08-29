@@ -1,13 +1,31 @@
 # Changelog
 
-All six publishable packages (`operon-agents`, `operon-agents-core`, `operon-agents-peers`,
-`operon-managed-agents`, `operon-sandbox`, `operon-os-sandbox`) share one version and are
-released together, so this file covers all of them.
+All seven publishable packages (`operon-agents`, `operon-agents-core`, `operon-agents-peers`,
+`operon-managed-agents`, `operon-sandbox`, `operon-os-sandbox`, `operon-code-mode`) share one
+version and are released together, so this file covers all of them.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- **Code Mode** (`operon-code-mode`, new package; `operon-agents-core`). The model writes a
+  TypeScript program that calls its tools, and one `RunCode` call does what would otherwise take
+  a model round-trip per tool call — read N files and grep each, branch on a result, aggregate.
+  The program runs in QuickJS compiled to WebAssembly, in-process: it can reach nothing but
+  `tools.*` (no filesystem, network, `require` or `process` exist on that side), and every
+  `tools.X(args)` is a nested call the engine runs through its own pipeline, so permissions,
+  hooks and the `Machine` apply exactly as for a direct call — including when Bash lives in
+  E2B or under os-sandbox. `createHarness({ extensions: [codeMode()] })`; `mode: "only"` shrinks
+  the direct tool surface to a keep-set. The engine gained one entry for it:
+  `ToolRunContext.dispatch` (a `NestedToolDispatcher`) lets a running tool call other tools as
+  nested calls, whose `tool.call.started` / `tool.result` events carry `parentToolCallId`. A
+  nested call that would pause the run (an approval with no live approver, a tool that suspends)
+  fails with a message telling the model to call that tool directly; the turn goes on.
+- **Managed API: `sessions.update`** (`operon-managed-agents`). `PATCH /v1/sessions/{id}` renames
+  a session; the new `sessions.update` authorization action guards it.
 
 ### Changed
 

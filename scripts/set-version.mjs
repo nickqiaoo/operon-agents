@@ -13,7 +13,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 /** Publish order is irrelevant here, but this is the same set the publish workflow ships. */
-const PACKAGES = ["agents-core", "agents", "agents-peers", "managed-agents", "sandbox", "os-sandbox"];
+const PACKAGES = ["agents-core", "agents", "agents-peers", "managed-agents", "sandbox", "os-sandbox", "code-mode"];
 
 // Deliberately strict: a typo here becomes an unpublishable tag or, worse, a wrong one that
 // cannot be taken back once npm has it.

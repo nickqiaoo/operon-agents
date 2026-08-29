@@ -332,8 +332,11 @@ When a feature is 99% behavior and the remaining 1% is out of reach, do not prom
 capability: add **the narrowest possible seam** to core and leave the body in an extension. peers is
 the model case — core gained only `steerTo`, `SteerOrigin` and idle wake-up, while the entire
 inter-agent communication system (store-backed mailboxes, deny-by-default visibility, rate limiting)
-went into the engine at zero lines, "built entirely on public seams". The bar for opening a seam: at
-least two imaginable consumers, and core remains ignorant of who uses it.
+went into the engine at zero lines, "built entirely on public seams". Code Mode (`operon-code-mode`)
+is the second case: core gained one entry, `ToolRunContext.dispatch` — a running tool may call other
+tools as nested calls through the batch's own pipeline — and the whole feature (the `RunCode` tool,
+the QuickJS runtime, the generated declarations, the `only` mode) is an extension over it. The bar
+for opening a seam: at least two imaginable consumers, and core remains ignorant of who uses it.
 
 ---
 
