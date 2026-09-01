@@ -319,12 +319,34 @@ export type LiveOnlyEvent = Extract<
   }
 >;
 
-/** Lifecycle bodies persisted separately because they affect Projection state but are not
- *  already encoded in a context/workflow/audit record. */
+/**
+ * Lifecycle bodies persisted separately because they affect Projection state but are not
+ * already encoded in a context/workflow/audit record.
+ *
+ * ADMISSION TEST — this is the one record class defined by what a CONSUMER needs rather
+ * than by a domain fact, so it has no natural boundary and will accrete unless the bar is
+ * explicit. A lifecycle event earns a record only if, after a crash and reopen, its absence
+ * would leave state WRONG or lose completed work. "A client would like to display it" is
+ * not sufficient: losing detail on replay is the accepted cost of not journaling it.
+ *
+ * Applying the test to what is here:
+ * - `agent.*` / `turn.started` / `turn.ended`: turn and agent boundaries cannot be recovered
+ *   from the message sequence, and `turn.ended` carries the failure reason.
+ * - `tool.detachable` / `tool.suspended` / `turn.paused`: mid-flight tool state that never
+ *   reaches a message (history holds only settled results). Losing it strands live work.
+ * - `steer.queued`: derivable in principle by joining `inbox.received` against the
+ *   `deliveryId` of later history, but the join is the kind of reconstruction this test
+ *   exists to avoid paying for at every read.
+ *
+ * `turn.step.started` was removed by this test: `step` is the count of assistant messages
+ * within the turn and `stepId` is literally `${turnId}.${step}` (see loop/turn-step.ts), so
+ * the record duplicated derivable data — and journaling it grew the log linearly in steps.
+ * It remains a live event; only its record is gone.
+ */
 export type PersistedLifecycleEvent = Extract<
   LifecycleEvent,
   | { readonly type: "agent.started" | "agent.ended" }
-  | { readonly type: "turn.started" | "turn.ended" | "turn.step.started" | "turn.paused" }
+  | { readonly type: "turn.started" | "turn.ended" | "turn.paused" }
   | { readonly type: "steer.queued" }
   | { readonly type: "tool.detachable" | "tool.suspended" }
 >;

@@ -569,6 +569,17 @@ export class SessionProjection {
         if (turn !== undefined) turn.paused = event.pending;
         break;
       }
+      // A handoff is this shard's LAST event: control moved to `toAddress`, and the
+      // runtime emits the next `agent.started` against that new address. Only the
+      // final agent in a handoff chain ever reaches `finish()` and its `agent.ended`,
+      // so without closing the source here every handed-off shard would sit at
+      // `live: true` forever and read as a running agent. `agent.handoff` is emitted
+      // BEFORE `state.address` moves (see handoff-executor), so this event lands on
+      // the source shard and `state` is the one to close.
+      case "agent.handoff":
+        state.live = false;
+        state.turn = undefined;
+        break;
       // Directory-level or audit-only signals: they bump lastEventAt (done in apply)
       // but carry no per-agent state the projection tracks.
       case "goal.updated":
@@ -577,7 +588,6 @@ export class SessionProjection {
       case "background.task.started":
       case "background.task.terminated":
       case "extension":
-      case "agent.handoff":
       case "compaction.started":
       // compaction.completed is a process signal; history.compacted already performed the
       // transcript fold from the same journal mutation.
