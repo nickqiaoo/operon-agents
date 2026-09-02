@@ -617,14 +617,25 @@ export interface ExtensionAPI {
 /**
  * What an extension's `create` half is handed — the harness reach it needs to build a
  * process-shared instance. Deliberately narrow: session creation (a spawn factory's one
- * requirement) and a data directory (the file form's own folder; absent by value). No
- * service-registration call: the instance IS the return value, registered under the extension's `id`.
+ * requirement), a data directory (the file form's own folder; absent by value) and the handles
+ * of the services it declared in `uses`. No service-registration call: the instance IS the
+ * return value, registered under the extension's `id`.
  */
-export interface ExtensionHostContext {
+export interface ExtensionHostContext<
+  TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
+> {
   /** Open a brand-new session on this harness — what a spawn factory calls. */
   createSession(
     options?: { readonly title?: string; readonly extensions?: readonly ExtensionDefinition[]; readonly params?: Record<string, unknown> } & Record<string, unknown>,
   ): Promise<{ readonly id: string }>;
+  /**
+   * Handles to the services named in `uses`, by name — the same handles `setup` gets as
+   * `ctx.services`, available to the process half too. What lets a file-loaded bundle take its
+   * configuration from a host-registered service (`createHarness({ services })`) instead of
+   * baking it in: a reload re-runs `create`, so re-reading the service IS the config update.
+   * Method calls resolve the CURRENT provider; the handles expose methods only.
+   */
+  readonly services: TServices;
   /** The extension's own folder when it was file-loaded; `undefined` when passed by value.
    *  Code only — an update replaces it wholesale. Keep files in `dataDir`. */
   readonly dir?: string;
@@ -691,7 +702,7 @@ export interface ExtensionDefinition<
   /** Per-handler invocation budget. Defaults to 30s for decision points, 1s for observers. */
   readonly timeoutMs?: number;
   /** The process-shared half. Absent ⇒ an ordinary per-session extension. See above. */
-  create?(host: ExtensionHostContext): TShared | Promise<TShared>;
+  create?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
   /** Services this extension consumes, by name — other extensions' `create` results (their
    *  `id`s) or host-registered `services`. Resolved into `ctx.services` for `setup`. */
   readonly uses?: readonly (keyof TServices & string)[];

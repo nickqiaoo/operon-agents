@@ -39,7 +39,7 @@ import { type AgentRecord, DEFAULT_ADDRESS, type SessionStore } from "../store/i
 import { eventSinkTracingBridge, type TracingProcessor } from "../tracing/index.ts";
 import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
-import type { McpServersHandle, McpServerView } from "../mcp/index.ts";
+import type { McpServersHandle, McpServerView, MCPTool } from "../mcp/index.ts";
 import { SteerBus, steerOriginToPromptOrigin, type SteerContent, type SteerOrigin } from "../loop/steer.ts";
 import type { Capability, CapabilityDiagnostic, SessionContext, SessionControls } from "../capabilities/capability.ts";
 import { type SubagentRecord, type SubagentStatus } from "./subagent.ts";
@@ -685,6 +685,15 @@ export class Session implements SessionPort {
   /** Connected MCP servers and their status. Empty when no MCP capability is open. */
   listMcpServers(): readonly McpServerView[] {
     return this.mcp?.list() ?? [];
+  }
+
+  /**
+   * Tools one MCP server exposes — for showing a host's user what a server can do.
+   * Empty when the capability is off, the server is unknown, or it is not connected,
+   * for the same reason `listMcpServers` degrades to empty rather than throwing.
+   */
+  async listMcpTools(name: string): Promise<readonly MCPTool[]> {
+    return (await this.mcp?.listTools(name)) ?? [];
   }
 
   /** Force-reconnect one MCP server by name. Throws if no MCP capability is open. */

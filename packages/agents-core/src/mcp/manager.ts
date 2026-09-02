@@ -3,7 +3,7 @@ import { mcpStdioTransport, mcpStreamableHttpTransport } from "./sdk-transport.t
 import { mcpToolProvider } from "./provider.ts";
 import { qualifyMcpToolName } from "./tool-naming.ts";
 import { createMcpAuthTool } from "./auth-tool.ts";
-import type { MCPTransport } from "./types.ts";
+import type { MCPTool, MCPTransport } from "./types.ts";
 import type { MCPToolFilterStatic } from "./filter.ts";
 import type { McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -272,6 +272,20 @@ class McpServerController {
     await this.close();
   }
 
+  /**
+   * What this server offers, for a host that wants to SHOW it rather than call it.
+   *
+   * Separate from `toolProvider().listTools`, which exists to hand the model runnable
+   * tools: that one substitutes an auth tool while a server is stuck on OAuth, and it
+   * namespaces every name. This returns the server's own list, unwrapped, and an empty
+   * one whenever the server is not connected — a disconnected server has no tools to
+   * describe, and asking is not worth an exception.
+   */
+  async listTools(): Promise<readonly MCPTool[]> {
+    if (this._status !== "connected" || this.server === undefined) return [];
+    return await this.server.listTools().catch(() => []);
+  }
+
   toolProvider(): ToolProvider {
     return {
       id: `mcp:${this.name}`,
@@ -405,6 +419,8 @@ export interface McpServersCapabilityOptions {
 
 export interface McpServersHandle {
   list(): readonly McpServerView[];
+  /** Tools a connected server exposes. Empty for an unknown or disconnected server. */
+  listTools(name: string): Promise<readonly MCPTool[]>;
   reconnect(name: string): Promise<void>;
   onStatusChange(listener: McpStatusListener): () => void;
   shutdown(): Promise<void>;
@@ -457,6 +473,7 @@ export function mcpServersCapability(
 
   const handle: McpServersHandle = {
     list: () => controllers.map((c) => c.view()),
+    listTools: async (name) => (await byName.get(name)?.listTools()) ?? [],
     reconnect: async (name) => {
       const controller = byName.get(name);
       if (controller === undefined) throw new Error(`Unknown MCP server: ${name}`);

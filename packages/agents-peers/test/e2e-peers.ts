@@ -40,12 +40,12 @@ async function main(): Promise<void> {
 
   const roster = await net.list();
   check("roster: every member registered itself at birth", roster.length === 3);
-  check("roster: the name is the identity, not the session id", roster.find((r) => r.agentId === "alice")?.sessionId === alice.id);
+  check("roster: the name is the identity, not the session id", roster.find((r) => r.name === "alice")?.sessionId === alice.id);
   // Without a stated identity every teammate lists as an anonymous `member` and a model cannot
   // tell who to ask.
-  check("roster: a stated type distinguishes teammates", roster.find((r) => r.agentId === "bob")?.type === "dba");
-  check("roster: and its description rides along", roster.find((r) => r.agentId === "bob")?.description?.includes("Postgres") === true);
-  check("roster: an unstated one still falls back", roster.find((r) => r.agentId === "outsider")?.type === "member");
+  check("roster: a stated type distinguishes teammates", roster.find((r) => r.name === "bob")?.type === "dba");
+  check("roster: and its description rides along", roster.find((r) => r.name === "bob")?.description?.includes("Postgres") === true);
+  check("roster: an unstated one still falls back", roster.find((r) => r.name === "outsider")?.type === "member");
 
   // ── Alice sees only her team, and messages Bob ──
   let aliceTools: string[] = [];
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 
   // ── A closed teammate is parked, and a message wakes it ──
   await bob.close();
-  const bobRef = async () => (await net.list()).find((r) => r.agentId === "bob");
+  const bobRef = async () => (await net.list()).find((r) => r.name === "bob");
   check("park: closing leaves it on the roster", (await bobRef())?.status === "parked");
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Hub", { op: "send", to: "bob", message: "WAKE_UP" }), { stopReason: "toolUse" }),

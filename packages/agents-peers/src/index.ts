@@ -22,7 +22,7 @@
  * never `Team`: it is a member, not a team-former. `setup` reaches the network only through the
  * shared handle, which is what lets a reload swap the network under live sessions.
  */
-export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";
+export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, memberAgentId, LEAD_ALIAS, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";
 export type { PeerNetworkHandle } from "./network.ts";
 export type {
   PeerExtensionOptions,

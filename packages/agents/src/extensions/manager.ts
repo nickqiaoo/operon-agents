@@ -62,6 +62,8 @@ export interface StagingOptions {
   /** The extension's data folder, already created. */
   readonly dataDir?: string;
   createSession: ExtensionHostContext["createSession"];
+  /** Resolve one of the definition's `uses` names to its service handle. */
+  service(name: string): unknown;
   warn(message: string): void;
 }
 
@@ -83,6 +85,7 @@ export function stageDefinition(
   if (definition.create === undefined) return { sessionDef: definition };
   const host: ExtensionHostContext = {
     createSession: (sessionOptions) => options.createSession(sessionOptions),
+    services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, options.service(name)]))),
     ...(options.dir !== undefined ? { dir: options.dir } : {}),
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
     warn: (message) => options.warn(`[extension ${definition.id}] ${message}`),
@@ -226,6 +229,7 @@ export class HarnessExtensionManager {
       dir: await this.loader.manifestDir(definition.id),
       dataDir,
       createSession: (sessionOptions) => this.bridge.createSession(sessionOptions as Record<string, unknown>),
+      service: (name) => this.bridge.services.handle(name),
       warn: (message) => this.bridge.warn(message),
     });
   }

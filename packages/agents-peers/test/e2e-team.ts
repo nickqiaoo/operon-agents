@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     ],
   });
   const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
-  const rosterEntry = async (agentId: string) => (await net.list()).find((ref) => ref.agentId === agentId);
+  const rosterEntry = async (id: string) => (await net.list()).find((ref) => ref.agentId === id || ref.name === id);
 
   const helperRole = defineAgent({ name: "helper", model, instructions: "Do quick work." });
   const leadAgent = defineAgent({ name: "lead", model, instructions: "Coordinate.", subagents: [helperRole] });
@@ -92,7 +92,8 @@ async function main(): Promise<void> {
   const dba = await rosterEntry("dba");
   check("team: the lead joined the roster by creating the team", leadRef?.labels?.some((l) => l.endsWith(":db-migration")) === true);
   check("team: the label is namespaced by its creator, so a same-named team elsewhere is a different team", leadRef?.labels?.[0]?.startsWith(`team:${lead.id}:`) === true);
-  check("spawn: the teammate is a SESSION under the name the model chose", dba?.kind === "session" && dba.sessionId !== undefined && dba.sessionId !== "dba");
+  check("spawn: the teammate is a SESSION under the name the model chose", dba?.kind === "session" && dba.name === "dba" && dba.sessionId !== undefined && dba.sessionId !== "dba");
+  check("spawn: its roster id is scoped to the team, so another team's \"dba\" would be a different agent", dba?.agentId === `${leadRef?.labels?.[0]}/dba`);
   check("spawn: born into the team and nothing else", dba?.labels?.length === 1 && dba.labels[0] === leadRef?.labels?.[0]);
   check("spawn: reported to the model without waiting", JSON.stringify(formed.messages).includes("working on it"));
 
@@ -107,7 +108,7 @@ async function main(): Promise<void> {
   faux.setResponses([
     (context) => {
       memberTools = (context.tools ?? []).map((tool) => tool.name);
-      return fauxAssistantMessage(fauxToolCall("Hub", { op: "send", to: lead.id, message: "PLAN_READY" }), { stopReason: "toolUse" });
+      return fauxAssistantMessage(fauxToolCall("Hub", { op: "send", to: "lead", message: "PLAN_READY" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage("reported", { stopReason: "stop" }),
     fauxAssistantMessage("got the plan", { stopReason: "stop" }), // the lead's woken turn
@@ -115,7 +116,7 @@ async function main(): Promise<void> {
   await dbaSession!.prompt("report to your lead");
   await settle();
   check("birth: the member holds the Hub, not Team", memberTools.includes("Hub") && !memberTools.includes("Team"));
-  check("member: its report reached the lead", leadSaw.join("|").includes("PLAN_READY"));
+  check("member: its report reached the lead, addressed as \"lead\" rather than by session id", leadSaw.join("|").includes("PLAN_READY"));
   check("member: framed with the member as actor", leadSaw.join("|").includes('"dba"'));
 
   // ── The lead steers its member with Team send — scope, not visibility ───────────────────

@@ -52,7 +52,7 @@ export interface PeerReceipt {
   readonly status: "delivered" | "failed";
   /** Machine-readable cause, so a model can tell "wrong id" from "you sent too much" and stop
    *  retrying what cannot succeed. */
-  readonly reason?: "unknown_agent" | "not_visible" | "self_send" | "quota_exceeded" | "mailbox_full" | "unreachable";
+  readonly reason?: "unknown_agent" | "ambiguous" | "not_visible" | "self_send" | "quota_exceeded" | "mailbox_full" | "unreachable";
   readonly detail?: string;
 }
 
@@ -103,8 +103,9 @@ export interface PeerExtensionOptions {
   readonly description?: string;
 }
 
-/** Options for the member-side extension. `name` is the agent's peer identity (what teammates
- *  address), `team` the full label it belongs to. A host can also attach this directly to
+/** Options for the member-side extension. `name` is the agent's short name (what teammates
+ *  address it by — unique within `team`, not across the roster), `team` the full label it
+ *  belongs to; its roster id is `<team>/<name>`. A host can also attach this directly to
  *  pre-arrange a standing team without any model-driven spawn. */
 export interface PeerMemberOptions {
   readonly name: string;
@@ -142,6 +143,42 @@ function ownedTeamLabels(ref: AgentRef): readonly string[] {
   const prefix = `team:${ref.agentId}:`;
   return (ref.labels ?? []).filter((label) => label.startsWith(prefix));
 }
+
+/** The labels on `ref` that `creatorId` owns. */
+function ownedLabelsOf(creatorId: string, ref: AgentRef): readonly string[] {
+  const prefix = `team:${creatorId}:`;
+  return (ref.labels ?? []).filter((label) => label.startsWith(prefix));
+}
+
+/**
+ * A member's roster id: the team label plus its short name. Names are unique WITHIN a team, so
+ * the label is what keeps two teams' "dba"s apart — and the `/` cannot collide with a session
+ * id or a label (a team name admits neither `/` nor `:`).
+ */
+export function memberAgentId(team: string, name: string): string {
+  return `${team}/${name}`;
+}
+
+/** The creator segment of a `team:<creator>:<name>` label; `undefined` for host-arranged labels
+ *  that do not follow the convention. The name is the LAST segment (it admits no `:`), so a
+ *  creator id containing `:` is safe. */
+function creatorOfLabel(label: string): string | undefined {
+  if (!label.startsWith("team:")) return undefined;
+  const cut = label.lastIndexOf(":");
+  return cut <= "team:".length ? undefined : label.slice("team:".length, cut);
+}
+
+/** The short name `from` shows up as in `to`'s conversation: its own name when it has one, and
+ *  `lead` when it is the creator of a team `to` belongs to — the same word `Hub send` accepts
+ *  back, so a member can reply to whatever addressed it without ever seeing a session id. */
+function displayNameFor(from: AgentRef, to: AgentRef): string {
+  if (from.name !== undefined) return from.name;
+  const leads = (to.labels ?? []).some((label) => creatorOfLabel(label) === from.agentId);
+  return leads ? LEAD_ALIAS : from.agentId;
+}
+
+/** What a member calls the creator of its team in `Hub send`. Reserved: no teammate may take it. */
+export const LEAD_ALIAS = "lead";
 
 function invalidName(kind: "Team" | "Agent", name: string): string | undefined {
   if (name.length === 0 || name.length > 48) return `${kind} name must be 1-48 characters.`;
@@ -228,7 +265,8 @@ export class PeerNetwork {
   async registerMemberSession(options: PeerMemberOptions, sessionId: string): Promise<void> {
     await this.ready;
     await this.directory.register({
-      agentId: options.name,
+      agentId: memberAgentId(options.team, options.name),
+      name: options.name,
       type: options.type ?? "member",
       kind: "session",
       sessionId,
@@ -363,7 +401,10 @@ export class PeerNetwork {
   async spawnTeammate(
     creatorId: string,
     args: { readonly type: string; readonly name: string; readonly prompt: string; readonly team?: string },
-  ): Promise<{ readonly name: string; readonly sessionId: string; readonly team: string; readonly receipt: PeerReceipt } | { readonly error: string }> {
+  ): Promise<
+    | { readonly name: string; readonly agentId: string; readonly sessionId: string; readonly team: string; readonly receipt: PeerReceipt }
+    | { readonly error: string }
+  > {
     await this.ready;
     const factory = this.spawnable?.[args.type];
     if (factory === undefined) {
@@ -386,8 +427,11 @@ export class PeerNetwork {
     }
     const invalid = invalidName("Agent", args.name);
     if (invalid !== undefined) return { error: invalid };
-    if ((await this.directory.get(args.name)) !== undefined) {
-      return { error: `The name "${args.name}" is already taken on the roster. Pick another.` };
+    if (args.name === LEAD_ALIAS) return { error: `"${LEAD_ALIAS}" is reserved — it is what your members call you. Pick another name.` };
+    // Unique within THIS team only: another team's "dba" is a different agent with a different id.
+    const agentId = memberAgentId(label, args.name);
+    if ((await this.directory.get(agentId)) !== undefined) {
+      return { error: `The name "${args.name}" is already taken in team "${label.slice(`team:${creatorId}:`.length)}". Pick another.` };
     }
     const overspent = budgetExceeded(await this.statistics.snapshot(), this.budget);
     if (overspent !== undefined) return { error: `${overspent}. Spawning is paused.` };
@@ -401,7 +445,8 @@ export class PeerNetwork {
     // The member was registered at its session start (params.member → Hub); this merge
     // is belt-and-braces against a factory that resolved before that handler settled.
     await this.directory.register({
-      agentId: args.name,
+      agentId,
+      name: args.name,
       type: args.type,
       kind: "session",
       sessionId: session.id,
@@ -410,10 +455,81 @@ export class PeerNetwork {
       labels: [label],
       updatedAt: Date.now(),
     });
-    const to = await this.directory.get(args.name);
+    const to = await this.directory.get(agentId);
     if (to === undefined) return { error: `Teammate "${args.name}" was created but never appeared on the roster — did the spawn factory set params.member?` };
     const receipt = await this.dispatch(creator, to, args.prompt, {});
-    return { name: args.name, sessionId: session.id, team: label, receipt };
+    return { name: args.name, agentId, sessionId: session.id, team: label, receipt };
+  }
+
+  /**
+   * Tear a team down: every member leaves the roster (their undelivered mail is dropped), and the
+   * creator sheds the label — leaving the roster too once it owns no team. Returns the members'
+   * rows so the host can close their sessions; the roster never owned those.
+   */
+  async disbandTeam(label: string): Promise<{ readonly members: readonly AgentRef[]; readonly creatorId: string | undefined }> {
+    await this.ready;
+    const wearing = await this.directory.list({ label });
+    const creator = wearing.find((ref) => creatorOfLabel(label) === ref.agentId);
+    const members = wearing.filter((ref) => ref !== creator);
+    for (const member of members) {
+      for (const message of await this.mailbox.pending(member.agentId)) await this.mailbox.settle(member.agentId, message.messageId);
+      await this.directory.unregister(member.agentId);
+    }
+    if (creator !== undefined) {
+      const remaining = (creator.labels ?? []).filter((other) => other !== label);
+      if (remaining.length === 0) await this.directory.unregister(creator.agentId);
+      else await this.directory.register({ ...creator, labels: remaining, updatedAt: Date.now() });
+    }
+    return { members, creatorId: creator?.agentId };
+  }
+
+  /**
+   * What a MEMBER means by `to`: an exact roster id first; then `lead` for the creator of a team
+   * it belongs to; then a teammate's short name within its own teams. A short name that matches
+   * in several of its teams is refused rather than guessed.
+   */
+  private async resolvePeer(from: AgentRef, toId: string): Promise<AgentRef | { readonly reason: PeerReceipt["reason"]; readonly detail: string }> {
+    const exact = await this.directory.get(toId);
+    if (exact !== undefined) return exact;
+    const labels = from.labels ?? [];
+    if (toId === LEAD_ALIAS) {
+      const creators = new Set(labels.map(creatorOfLabel).filter((id): id is string => id !== undefined && id !== from.agentId));
+      if (creators.size === 0) return { reason: "unknown_agent", detail: "No team of yours has a lead on the roster. Use Hub list." };
+      if (creators.size > 1) return { reason: "ambiguous", detail: `You belong to several teams with different leads — address one by its id from Hub list.` };
+      const creator = await this.directory.get([...creators][0] as string);
+      if (creator === undefined) return { reason: "unknown_agent", detail: "Your lead has left the roster." };
+      return creator;
+    }
+    const matches: AgentRef[] = [];
+    for (const label of labels) {
+      const ref = await this.directory.get(memberAgentId(label, toId));
+      if (ref !== undefined) matches.push(ref);
+    }
+    if (matches.length === 1) return matches[0] as AgentRef;
+    if (matches.length > 1) return { reason: "ambiguous", detail: `"${toId}" names a teammate in several of your teams — address one by its id from Hub list.` };
+    // A name that exists only outside the sender's teams is a boundary refusal, not a typo — the
+    // distinction a model needs to stop retrying rather than re-spell.
+    const elsewhere = (await this.directory.list()).some((ref) => ref.name === toId);
+    if (elsewhere) return { reason: "not_visible", detail: `Agent "${toId}" is not addressable from here.` };
+    return { reason: "unknown_agent", detail: `No agent "${toId}" is on the roster. Use Hub list; never invent a name.` };
+  }
+
+  /**
+   * What a CREATOR means by `to`: an exact roster id, or a member's short name — qualified by
+   * `team` when the creator owns several and the name is used in more than one.
+   */
+  private async resolveMember(creatorId: string, toId: string, team: string | undefined): Promise<AgentRef | { readonly reason: PeerReceipt["reason"]; readonly detail: string }> {
+    const members = await this.ownedMembers(creatorId);
+    const exact = members.find((ref) => ref.agentId === toId);
+    if (exact !== undefined) return exact;
+    const label = team === undefined ? undefined : teamLabel(creatorId, team);
+    const matches = members.filter((ref) => ref.name === toId && (label === undefined || (ref.labels ?? []).includes(label)));
+    if (matches.length === 1) return matches[0] as AgentRef;
+    if (matches.length > 1) {
+      const teams = matches.flatMap((ref) => ownedLabelsOf(creatorId, ref)).map((l) => l.slice(`team:${creatorId}:`.length));
+      return { reason: "ambiguous", detail: `"${toId}" is a member of several of your teams (${teams.join(", ")}) — say which with team.` };
+    }
+    return { reason: "not_visible", detail: `"${toId}" is not a member of any team you created. Team list shows your members.` };
   }
 
   /** Charge one outbound message against the sender's per-turn budget. */
@@ -434,9 +550,9 @@ export class PeerNetwork {
   async route(from: AgentRef, toId: string, content: string, opts: { readonly replyTo?: string; readonly interrupt?: boolean } = {}): Promise<PeerReceipt> {
     await this.ready;
     const fail = (reason: PeerReceipt["reason"], detail: string): PeerReceipt => ({ messageId: newMessageId(), to: toId, status: "failed", reason, detail });
-    if (toId === from.agentId) return fail("self_send", "Cannot send a message to yourself.");
-    const to = await this.directory.get(toId);
-    if (to === undefined) return fail("unknown_agent", `No agent "${toId}" is on the roster. Use Hub list; never invent an id.`);
+    const to = await this.resolvePeer(from, toId);
+    if (!("agentId" in to)) return fail(to.reason, to.detail);
+    if (to.agentId === from.agentId) return fail("self_send", "Cannot send a message to yourself.");
     if (!this.visibility(from, to)) return fail("not_visible", `Agent "${toId}" is not addressable from here.`);
     return this.dispatch(from, to, content, opts);
   }
@@ -445,16 +561,18 @@ export class PeerNetwork {
    * CREATOR send: scope replaces policy — a creator reaches exactly the members wearing one of
    * its own team labels, and nothing else. No visibility function is consulted.
    */
-  async sendWithinTeam(fromId: string, toId: string, content: string, opts: { readonly replyTo?: string; readonly interrupt?: boolean } = {}): Promise<PeerReceipt> {
+  async sendWithinTeam(
+    fromId: string,
+    toId: string,
+    content: string,
+    opts: { readonly replyTo?: string; readonly interrupt?: boolean; readonly team?: string } = {},
+  ): Promise<PeerReceipt> {
     await this.ready;
     const fail = (reason: PeerReceipt["reason"], detail: string): PeerReceipt => ({ messageId: newMessageId(), to: toId, status: "failed", reason, detail });
     const from = await this.directory.get(fromId);
     if (from === undefined) return fail("unknown_agent", "Create a team first (Team create).");
-    const to = await this.directory.get(toId);
-    const prefix = `team:${fromId}:`;
-    if (to === undefined || !(to.labels ?? []).some((label) => label.startsWith(prefix))) {
-      return fail("not_visible", `"${toId}" is not a member of any team you created. Team list shows your members.`);
-    }
+    const to = await this.resolveMember(fromId, toId, opts.team);
+    if (!("agentId" in to)) return fail(to.reason, to.detail);
     return this.dispatch(from, to, content, opts);
   }
 
@@ -483,11 +601,14 @@ export class PeerNetwork {
     const { messageId, to: toId, content } = message;
     const fail = (reason: PeerReceipt["reason"], detail: string): PeerReceipt => ({ messageId, to: toId, status: "failed", reason, detail });
 
+    // The sender shows up under the name the recipient can answer to (`dba`, `lead`), never a
+    // roster id it would have to decode.
+    const sender = await this.directory.get(message.from);
     const origin: SteerOrigin = {
       kind: "external",
       source: PEER_SOURCE,
       deliveryId: messageId,
-      actor: message.from,
+      actor: sender === undefined ? message.from : displayNameFor(sender, to),
       // follow_up by default: peers interject between turns, they do not interrupt work in flight.
       channel: interrupt ? "steering" : "follow_up",
       ...(message.replyTo !== undefined ? { metadata: { replyTo: message.replyTo } } : {}),
@@ -583,6 +704,7 @@ export type PeerNetworkHandle = Pick<
   | "ownedMembers"
   | "createTeam"
   | "spawnTeammate"
+  | "disbandTeam"
   | "overBudget"
   | "route"
   | "sendWithinTeam"
@@ -620,18 +742,19 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
 /** Mount the member side (the `Hub` tool + identity registration) onto a session — what
  *  `peers().setup` does for a teammate. */
 export function mountHub(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerMemberOptions): void {
+  const selfId = memberAgentId(options.team, options.name);
   network.attachActions(api.actions);
   api.on("session.start", (event) => {
     void network.registerMemberSession(options, event.sessionId);
   });
   api.on("session.end", () => {
-    void network.parkAgent(options.name);
+    void network.parkAgent(selfId);
   });
   api.onEvent((event) => {
     network.attachActions(api.actions);
-    network.observe(event, options.name);
+    network.observe(event, selfId);
   });
-  api.registerTool(buildMemberTool(network, options.name));
+  api.registerTool(buildMemberTool(network, selfId, options.name));
 }
 
 export function createPeerNetwork(options: PeerNetworkOptions): PeerNetwork {

@@ -53,9 +53,11 @@ Team(op: "spawn",  type: "coder", name: "dba",      prompt: "…")
 Team(op: "spawn",  type: "coder", name: "reviewer", prompt: "…")
 ```
 
-`dba` and `reviewer` are independent sessions. They start on their prompts immediately, message each other and the lead directly over `Hub`, and report back by message — which wakes the lead in a later turn. The lead steers them with `Team send`, whose reach is **scope, not policy**: a creator reaches exactly the members wearing one of its own team labels, and nothing else.
+`dba` and `reviewer` are independent sessions. They start on their prompts immediately, message each other by name and the lead as `lead` over `Hub`, and report back by message — which wakes the lead in a later turn. The lead steers them with `Team send`, whose reach is **scope, not policy**: a creator reaches exactly the members wearing one of its own team labels, and nothing else.
 
 The team label is `team:<creator>:<name>`. That creator segment is stamped by the network, never by the model, so two agents that both name a team `migration` get two different teams — and membership can never widen past what its creator spawned.
+
+A teammate's name is unique **within its team**, not across the roster: its roster id is `<team label>/<name>`, so two teams can each have a `dba`. `Team send` and `Hub send` take the short name (`Team send` adds `team` when the creator has the same name in several teams; a member sees its creator as `lead`, which is reserved). Roster rows carry the `id` for exact addressing whenever it differs from the name.
 
 The `create` half runs synchronously inside `createHarness`, so the service exists before the first session; `harness.close()` takes it down again (unregister → `close()`). The host reaches the network the same way sessions do — `harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE)` — for `list()`, `stats()`, `reconcile()`.
 
@@ -105,7 +107,7 @@ const bob = await harness.createSession({
 
 The param persists with the session, so a `resumeSession` brings `alice` back as a member without repeating it.
 
-**State a `type` and `description`.** They are what makes the roster useful: without them every teammate lists as an anonymous `member` and a model has no way to tell who to ask. The `name` is the agent's peer identity — teammates address it by name, and it must be unique on the roster.
+**State a `type` and `description`.** They are what makes the roster useful: without them every teammate lists as an anonymous `member` and a model has no way to tell who to ask. The `name` is what teammates address it by — unique within `team` (its roster id is `<team>/<name>`).
 
 ## What it rests on
 
@@ -129,7 +131,7 @@ The param persists with the session, so a `resumeSession` brings `alice` back as
 
 **`send` never blocks.** There is no `wait` op, deliberately: a teammate answers by being woken, background work already has `BackgroundOutput(block)`, and a blocking op would introduce the one thing this design otherwise has none of — a way for two agents to deadlock.
 
-**Failures are explicit.** A `failed` receipt names its cause (`unknown_agent`, `not_visible`, `mailbox_full`, `quota_exceeded`, `unreachable`) so a model can tell "wrong name" from "you sent too much" and stop retrying what cannot succeed. A full mailbox rejects rather than dropping the oldest message.
+**Failures are explicit.** A `failed` receipt names its cause (`unknown_agent`, `ambiguous`, `not_visible`, `mailbox_full`, `quota_exceeded`, `unreachable`) so a model can tell "wrong name" from "you sent too much" and stop retrying what cannot succeed. A full mailbox rejects rather than dropping the oldest message.
 
 ## Permissions
 

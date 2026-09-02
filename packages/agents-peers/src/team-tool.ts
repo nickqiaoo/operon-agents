@@ -20,14 +20,15 @@ const teamInput = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("spawn").describe("Create one teammate in your team. It starts on the prompt immediately and reports back by message."),
     type: z.string().describe("A teammate type configured by the host. An unknown type fails and lists what is available."),
-    name: z.string().describe("The teammate's name — unique on the roster; it is how you and its teammates address it."),
+    name: z.string().describe('The teammate\'s name — unique within the team; it is how you and its teammates address it. "lead" is reserved for you.'),
     prompt: z.string().describe("Its initial assignment. Plain prose; share paths and ids, not pasted blobs."),
     team: z.string().optional().describe("Which of your teams it joins. Only needed when you created more than one."),
   }),
   z.object({
     op: z.literal("send").describe("Message one of YOUR team's members. Returns immediately; never waits for a reply."),
-    to: z.string().describe("Exact member name from Team list."),
+    to: z.string().describe("Member name (or id) from Team list."),
     message: z.string().describe("Plain prose."),
+    team: z.string().optional().describe("Which of your teams the member is in. Only needed when the same name exists in several of your teams."),
     replyTo: z.string().optional().describe("messageId you are answering, when this is a reply."),
     interrupt: z.boolean().optional().describe("Cut into the member's current work instead of waiting for its turn boundary. Reserve for 'stop, you're going the wrong way'."),
   }),
@@ -37,7 +38,8 @@ const teamInput = z.discriminatedUnion("op", [
 
 function memberRow(ref: AgentRef): Record<string, unknown> {
   return {
-    name: ref.agentId,
+    name: ref.name ?? ref.agentId,
+    ...(ref.name !== undefined ? { id: ref.agentId } : {}),
     type: ref.type,
     status: ref.status,
     ...(ref.description !== undefined ? { description: ref.description } : {}),
@@ -104,7 +106,7 @@ export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => str
             [
               `Team "${args.name}" formed.`,
               "",
-              "Recruit with Team spawn(type, name, prompt). Members join automatically and can message you and each other by name.",
+              "Recruit with Team spawn(type, name, prompt). Members join automatically and can message you (as \"lead\") and each other by name.",
             ].join("\n"),
             { op: args.op, label: result.label },
           );
@@ -122,7 +124,7 @@ export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => str
               "",
               "It reports back by message in a later turn — do not wait for it. Team send to steer it; Team list to see your members.",
             ].join("\n"),
-            { op: args.op, name: result.name, sessionId: result.sessionId, team: result.team, receipt: result.receipt },
+            { op: args.op, name: result.name, agentId: result.agentId, sessionId: result.sessionId, team: result.team, receipt: result.receipt },
           );
         }
 
@@ -148,6 +150,7 @@ export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => str
           return text("Outbound peer-message budget for this turn is exhausted. Continue your work; send again in a later turn.", { op: args.op, reason: "quota_exceeded" }, true);
         }
         const receipt = await network.sendWithinTeam(selfId, args.to, args.message, {
+          ...(args.team !== undefined ? { team: args.team } : {}),
           ...(args.replyTo !== undefined ? { replyTo: args.replyTo } : {}),
           ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
         });

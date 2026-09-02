@@ -65,7 +65,7 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
   const peersHandle = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
   const roster = await peersHandle.list();
   check(`${label}: the lead joined the roster by creating the team`, roster.some((r) => r.agentId === lead.id));
-  const dba = roster.find((r) => r.agentId === "dba");
+  const dba = roster.find((r) => r.name === "dba");
   check(`${label}: the teammate is a real session the create half spawned`, dba?.kind === "session" && dba.sessionId !== undefined && dba.sessionId !== "dba");
   const member = dba?.sessionId !== undefined ? harness.getSession(dba.sessionId) : undefined;
   const memberSaw: string[] = [];

@@ -39,6 +39,12 @@ export type AgentRefStatus = "running" | "idle" | "parked" | "error";
 
 export interface AgentRef {
   readonly agentId: string;
+  /**
+   * The short name agents use for each other. A spawned teammate's is the name the model chose,
+   * unique WITHIN ITS TEAM (its `agentId` is `<team label>/<name>`, which is what keeps two
+   * teams' "dba"s apart on one roster). Absent for creators, whose `agentId` is their session id.
+   */
+  readonly name?: string;
   readonly type: string;
   readonly kind: AgentRefKind;
   readonly sessionId: string;
@@ -83,6 +89,8 @@ export interface AgentDirectory {
  */
 export interface PeerCard {
   readonly type: string;
+  /** The short name (see `AgentRef.name`). */
+  readonly name?: string;
   readonly description?: string;
   readonly labels?: readonly string[];
   /** The session behind this agent. Spawned teammates are addressed by their NAME, which is not
@@ -122,6 +130,7 @@ export function refFromCard(agentId: string, card: PeerCard): AgentRef {
     sessionId: card.sessionId ?? agentId,
     address: "main",
     status: "parked",
+    ...(card.name !== undefined ? { name: card.name } : {}),
     ...(card.description !== undefined ? { description: card.description } : {}),
     ...(card.labels !== undefined ? { labels: card.labels } : {}),
     updatedAt: 0,
@@ -153,6 +162,7 @@ export class CardSyncedDirectory implements AgentDirectory {
     await this.cards.put(merged.agentId, {
       type: merged.type,
       sessionId: merged.sessionId,
+      ...(merged.name !== undefined ? { name: merged.name } : {}),
       ...(merged.description !== undefined ? { description: merged.description } : {}),
       ...(merged.labels !== undefined ? { labels: merged.labels } : {}),
     });

@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     await alice.prompt("ping bob");
     await settle();
 
-    check("ledger: settles once the recipient consumed it", (await repo.mailbox.pending("bob")).length === 0);
+    check("ledger: settles once the recipient consumed it", (await repo.mailbox.pending("t/bob")).length === 0);
     const cards = await readFile(join(dir, "cards.json"), "utf8");
     check("cards: both teammates' identity cards reached disk", cards.includes('"alice"') && cards.includes(bob.id) && cards.includes("Postgres tuning"));
     await harness.close();
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
     // ── "Restart": a fresh process over the same directory seeds the roster from the cards alone ──
     const restarted = boot(createFilePeerRepo(dir));
     // Through `list()`, the public entry point — it is what awaits seeding.
-    const bobRef = (await restarted.net.list()).find((ref) => ref.agentId === "bob");
+    const bobRef = (await restarted.net.list()).find((ref) => ref.name === "bob");
     check("seed: a parked teammate is back on the roster with no live event", bobRef?.status === "parked" && bobRef.kind === "session");
     check("seed: its team label and session id survived the restart", bobRef?.labels?.includes("t") === true && bobRef.sessionId === bob.id);
     check("seed: its card survived too", bobRef?.type === "dba" && bobRef.description === "Postgres tuning");
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
     const bob = await harness.createSession(asMember({ name: "bob", team: "t" }));
 
     // Plant a ledger entry as if a previous process had died mid-delivery.
-    await repo.mailbox.enqueue({ messageId: "pm_lost", from: "alice", to: "bob", content: "SURVIVED_THE_CRASH", queuedAt: Date.now() });
+    await repo.mailbox.enqueue({ messageId: "pm_lost", from: "t/alice", to: "t/bob", content: "SURVIVED_THE_CRASH", queuedAt: Date.now() });
     const bobSaw: string[] = [];
     bob.onEvent((event) => { if (event.type === "message.appended") bobSaw.push(JSON.stringify(event)); });
 
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 
     check("reconcile: redelivered the stranded message", report.redelivered === 1 && report.dropped === 0);
     check("reconcile: it reached the recipient's conversation", bobSaw.join("|").includes("SURVIVED_THE_CRASH"));
-    check("reconcile: and the ledger cleared itself again", (await repo.mailbox.pending("bob")).length === 0);
+    check("reconcile: and the ledger cleared itself again", (await repo.mailbox.pending("t/bob")).length === 0);
     await harness.close();
   }
 

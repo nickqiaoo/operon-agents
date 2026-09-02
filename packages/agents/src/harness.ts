@@ -1244,6 +1244,10 @@ export class HarnessSession<TContext = unknown> {
   }
 
   // ── MCP ──
+  listMcpTools(...args: Parameters<Session["listMcpTools"]>): ReturnType<Session["listMcpTools"]> {
+    return this.core.listMcpTools(...args);
+  }
+
   listMcpServers(...args: Parameters<Session["listMcpServers"]>): ReturnType<Session["listMcpServers"]> {
     return this.core.listMcpServers(...args);
   }
@@ -1381,6 +1385,7 @@ export class Harness<TContext = unknown> {
           }
           return this.createSession(sessionOptions as CreateSessionOptions<TContext>);
         },
+        service: (name) => this.services.handle(name),
         warn: (message) => console.warn(`[extensions] ${message}`),
       });
       return staged instanceof Promise ? staged.then(done, failed) : done(staged);

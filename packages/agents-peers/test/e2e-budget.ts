@@ -49,8 +49,8 @@ async function main(): Promise<void> {
     await settle();
 
     const stats = await net.stats();
-    const aliceRow = stats.agents.find((a) => a.agentId === "alice");
-    const bobRow = stats.agents.find((a) => a.agentId === "bob");
+    const aliceRow = stats.agents.find((a) => a.agentId === "t/alice");
+    const bobRow = stats.agents.find((a) => a.agentId === "t/bob");
 
     check("stats: the sender is credited with the send", aliceRow?.messagesSent === 1);
     check("stats: the recipient with the receipt", bobRow?.messagesReceived === 1);
