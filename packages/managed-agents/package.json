@@ -1,6 +1,6 @@
 {
   "name": "operon-managed-agents",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Managed server and TypeScript client for operon-agents.",
   "type": "module",
   "engines": {
