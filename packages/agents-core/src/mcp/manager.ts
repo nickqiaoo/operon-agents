@@ -14,6 +14,11 @@ import type { McpServerConfig } from "../config/schema.ts";
 
 export type McpServerStatus = "pending" | "connected" | "failed" | "disabled" | "needs-auth";
 
+/** The `ToolProvider.id` a server's provider carries — `mcp:<server name>`, unsanitized. */
+function mcpProviderId(serverName: string): string {
+  return `mcp:${serverName}`;
+}
+
 export interface McpServerView {
   readonly name: string;
   readonly transport: "stdio" | "http";
@@ -290,7 +295,7 @@ class McpServerController {
 
   toolProvider(): ToolProvider {
     return {
-      id: `mcp:${this.name}`,
+      id: mcpProviderId(this.name),
       listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
         if (this._status === "needs-auth") return [this.authToolInstance()];
         if (this._status !== "connected" || this.server === undefined) return [];
@@ -543,45 +548,102 @@ export function mcpServersCapability(
 }
 
 /**
- * The session-tier VIEW over the workspace's shared servers (`T.McpServers`): hands the model
- * their tools, exposes the handle as `T.Mcp` (so `session.listMcpServers()` and friends work),
- * and mirrors status changes into this session's event stream as warnings. It connects nothing
- * and shuts nothing down — the workspace scope owns the connections.
+ * The session-tier MCP capability: a VIEW over the workspace's shared servers (`T.McpServers`),
+ * optionally with servers PRIVATE to this session layered on top.
+ *
+ * The workspace half connects nothing and shuts nothing down — the workspace scope owns those
+ * connections; this capability only hands the model their tools, exposes them as `T.Mcp` (so
+ * `session.listMcpServers()` and friends work) and mirrors status changes into this session's
+ * event stream as warnings.
+ *
+ * `configs` (from `SessionCapabilityContext.mcpServers` — a REPL kernel keyed by conversation id,
+ * say) is the OVERLAY: those servers are built, connected and shut down with THIS session. A name
+ * in `configs` SHADOWS the workspace server of the same name for this session — the two would
+ * otherwise produce identical `mcp__<name>__<tool>` tool names. Shadowing is a view-level
+ * decision: the workspace connection itself keeps running for every other session.
  */
-export function mcpSessionCapability(): Capability {
+export function mcpSessionCapability(
+  configs: Record<string, McpServerConfig> = {},
+  options: McpServersCapabilityOptions = {},
+): Capability {
+  const ownNames = new Set(Object.keys(configs));
+  const ownProviderIds = new Set([...ownNames].map(mcpProviderId));
+  const own = ownNames.size > 0 ? createMcpServers(configs, options) : undefined;
   let unsubscribe: (() => void) | undefined;
+
+  const providers: ToolProvider[] = [
+    ...(own?.toolProviders() ?? []),
+    {
+      id: "mcp:workspace",
+      listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
+        const shared = ctx.scope.get(T.McpServers);
+        if (shared === undefined) return [];
+        const tools: Tool[] = [];
+        for (const provider of shared.toolProviders()) {
+          // Skip a workspace server this session overlays: same name, same qualified tool names.
+          if (ownProviderIds.has(provider.id)) continue;
+          tools.push(...(await provider.listTools(ctx)));
+        }
+        return tools;
+      },
+    },
+  ];
+
+  /** The merged handle behind `T.Mcp`: overlay first, workspace for everything it doesn't name. */
+  const merge = (shared: McpServersHandle, overlay: McpServersHandle): McpServersHandle => ({
+    list: () => [...overlay.list(), ...shared.list().filter((v) => !ownNames.has(v.name))],
+    listTools: (name) => (ownNames.has(name) ? overlay.listTools(name) : shared.listTools(name)),
+    reconnect: (name) => (ownNames.has(name) ? overlay.reconnect(name) : shared.reconnect(name)),
+    onStatusChange: (listener) => {
+      const offOwn = overlay.onStatusChange(listener);
+      const offShared = shared.onStatusChange((view) => {
+        if (!ownNames.has(view.name)) listener(view);
+      });
+      return () => {
+        offOwn();
+        offShared();
+      };
+    },
+    toolProviders: () => providers,
+    // Only the overlay is this session's to run: the workspace half is already connected, and
+    // outlives the session.
+    connect: (ctx) => overlay.connect(ctx),
+    shutdown: () => overlay.shutdown(),
+  });
+
   return {
     name: "mcp",
-    toolProviders: [
-      {
-        id: "mcp:workspace",
-        listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
-          const shared = ctx.scope.get(T.McpServers);
-          if (shared === undefined) return [];
-          const tools: Tool[] = [];
-          for (const provider of shared.toolProviders()) tools.push(...(await provider.listTools(ctx)));
-          return tools;
-        },
-      },
-    ],
+    toolProviders: providers,
     provides: [
       {
         token: T.Mcp,
-        create: (ctx) => {
-          const shared = ctx.scope.require(T.McpServers);
-          const events = ctx.scope.get(T.Events);
-          const warn = (view: McpServerView): void => {
-            if (view.status !== "failed" || view.error === undefined) return;
-            events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: `MCP server "${view.name}" failed: ${view.error}` });
-          };
-          // Servers that failed before this session existed: tell it once at open.
-          for (const view of shared.list()) warn(view);
-          unsubscribe = shared.onStatusChange(warn);
-          return shared;
+        create: async (ctx) => {
+          const shared = ctx.scope.get(T.McpServers);
+          // No shared servers and no overlay means this capability should never have been
+          // assembled — keep the original diagnostic rather than handing back an empty handle.
+          if (shared === undefined && own === undefined) return ctx.scope.require(T.McpServers);
+          // Session-owned controllers emit their own warnings once connected (they hold the
+          // session); the workspace ones have no session, so this session subscribes for them.
+          if (own !== undefined) await own.connect(ctx);
+          if (shared !== undefined) {
+            const events = ctx.scope.get(T.Events);
+            const warn = (view: McpServerView): void => {
+              if (ownNames.has(view.name)) return;
+              if (view.status !== "failed" || view.error === undefined) return;
+              events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: `MCP server "${view.name}" failed: ${view.error}` });
+            };
+            // Servers that failed before this session existed: tell it once at open.
+            for (const view of shared.list()) warn(view);
+            unsubscribe = shared.onStatusChange(warn);
+          }
+          if (shared === undefined) return own!;
+          if (own === undefined) return shared;
+          return merge(shared, own);
         },
-        dispose: () => {
+        dispose: async () => {
           unsubscribe?.();
           unsubscribe = undefined;
+          await own?.shutdown();
         },
       },
     ],

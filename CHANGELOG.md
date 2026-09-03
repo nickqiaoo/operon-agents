@@ -11,6 +11,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **MCP: `createSession({ mcpServers })` is honoured, layered over the workspace's**
+  (`operon-agents-core`, `operon-agents`). The option was carried to the capability factory and
+  then dropped: the default factory viewed the workspace's shared connections and ignored the
+  session's own configs, so a host that gives each conversation its own server (a REPL kernel
+  keyed by conversation id) silently got nothing. `mcpSessionCapability(configs?, options?)` now
+  takes that overlay — its servers are built, connected and shut down with the session, while the
+  workspace half is still only viewed — and `defaultCapabilities` takes `sessionMcpServers`, which
+  the local preset fills from `SessionCapabilityContext.mcpServers`. A name the session reuses
+  SHADOWS the workspace server of that name for this session (`list`, `listTools`, `reconnect` and
+  the model's `mcp__<name>__<tool>` tools all resolve to the session's); the workspace connection
+  underneath keeps running for every other session.
+
 - **Peers: teammate names are unique per team, not per roster** (`operon-agents-peers`). A
   teammate's roster id is now `<team label>/<name>` (`AgentRef.name` / `PeerCard.name` carry
   the short name), so two teams can each spawn a `dba`. `Hub send` and `Team send` resolve the

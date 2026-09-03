@@ -173,6 +173,13 @@ export interface DefaultCapabilitiesOptions {
   /** Workspace MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**
+   * MCP servers private to the session being built — `SessionCapabilityContext.mcpServers`, i.e.
+   * what the caller passed to `createSession({ mcpServers })`. They are layered OVER the
+   * workspace's shared servers (`T.McpServers`) and over `mcpServers` above: same name, the
+   * session's wins for this session only. Built, connected and shut down with the session.
+   */
+  readonly sessionMcpServers?: Record<string, McpServerConfig>;
+  /**
    * Installed-plugin manager. When set, the framework self-drives the plugin's contributions into
    * this capability set: its skills (merged into the skills capability), its MCP servers (merged
    * into the MCP capability), its shell hooks (merged into user-hooks), and its session-start skill
@@ -200,7 +207,7 @@ export interface DefaultCapabilitiesOptions {
  * on the agent (`filesystemTools()`), not a capability; so is AskUserQuestion
  * (`askUserQuestionTool`, wired through ToolRunContext.responder).
  *
- * With `mcpServers` and/or `pluginManager`, an MCP capability is added; with `pluginManager`, the
+ * With `mcpServers`, `sessionMcpServers` and/or `pluginManager`, an MCP capability is added; with `pluginManager`, the
  * plugin's skills/MCP/session-start are wired in too. Intended to be called fresh per session (via
  * a harness capability factory) so per-session state (goal/plan/todo/…) and the plugin set are
  * isolated per session, mirroring a fresh-Session-per-create model.
@@ -234,13 +241,17 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
   // Cron is a local-only capability (Invariant 7): the server host doesn't install it.
   // MCP: the workspace's shared connections when it has them (a view per session), else
   // workspace servers + enabled plugin servers (namespaced, so they can't collide) per session.
+  const sessionMcp = options.sessionMcpServers ?? {};
+  const mcpOptions = oauthService !== undefined ? { oauthService } : {};
   if (sharedMcp) {
-    capabilities.push(mcpSessionCapability());
-  } else if (options.mcpServers !== undefined || manager !== undefined) {
+    capabilities.push(mcpSessionCapability(sessionMcp, mcpOptions));
+  } else if (options.mcpServers !== undefined || manager !== undefined || Object.keys(sessionMcp).length > 0) {
+    // No workspace connections to view: everything this session sees is its own, session servers
+    // last so the same name still resolves to the session's.
     capabilities.push(
       mcpServersCapability(
-        { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}) },
-        oauthService !== undefined ? { oauthService } : {},
+        { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}), ...sessionMcp },
+        mcpOptions,
       ),
     );
   }
@@ -466,7 +477,9 @@ interface OpenSessionOptionsBase<TContext = unknown> {
   /**
    * MCP servers scoped to this session, surfaced to the capability factory via
    * {@link SessionCapabilityContext}. Merge policy is the factory's call — the
-   * harness only carries them across.
+   * harness only carries them across. `defaultCapabilities` (and so the local preset)
+   * layers them OVER the workspace's shared servers, a reused name shadowing the
+   * workspace one for this session; a custom factory can decide otherwise.
    */
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**

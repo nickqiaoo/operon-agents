@@ -107,9 +107,11 @@ export async function localHarnessOptions<TContext>(
     },
     session:
       session ??
-      ((scope) =>
+      ((scope, ctx) =>
         defaultCapabilities({
           scope,
+          // `createSession({ mcpServers })` — layered over the workspace's shared connections.
+          ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
           ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
           ...(pluginManager !== undefined ? { pluginManager } : {}),
           ...(hooks !== undefined ? { hooks } : {}),
