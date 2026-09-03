@@ -165,7 +165,7 @@ export interface SessionPort {
 export class Session implements SessionPort {
   readonly id: string;
   /** The session-tier scope: every session-lived object, registered by the opener or by `open`. */
-  readonly scope: Scope;
+  readonly scope: Scope<"session">;
   readonly machine: Machine;
   readonly store?: SessionStore;
   readonly events: EventSink;
@@ -208,7 +208,7 @@ export class Session implements SessionPort {
   // Undefined until the first turn assembles a request.
   private lastContextBreakdown?: ContextBreakdown;
 
-  private constructor(scope: Scope, id: string, signal: AbortSignal, ownController: AbortController, opts: SessionOpenOptions) {
+  private constructor(scope: Scope<"session">, id: string, signal: AbortSignal, ownController: AbortController, opts: SessionOpenOptions) {
     this.scope = scope;
     this.id = id;
     this.signal = signal;
@@ -252,7 +252,7 @@ export class Session implements SessionPort {
    * (signal, event publisher, log reader, controls), runs every capability's provisions in
    * order, then builds the permission manager. From here on the session owns the scope.
    */
-  static async open(scope: Scope, opts: SessionOpenOptions = {}): Promise<Session> {
+  static async open(scope: Scope<"session">, opts: SessionOpenOptions = {}): Promise<Session> {
     if (scope.kind !== "session") throw new Error(`Session.open needs a session scope, got a ${scope.kind} scope`);
     scope.provide(T.SessionId, () => newSessionId());
     const id = scope.require(T.SessionId);

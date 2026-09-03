@@ -24,6 +24,9 @@
  */
 import { SCOPE_ORDER, type ScopeKind, type Token } from "./token.ts";
 
+/** The tiers a scope of kind `K` may open beneath it. */
+export type Below<K extends ScopeKind> = K extends "harness" ? "workspace" | "session" : K extends "workspace" ? "session" : never;
+
 export type ServiceUnavailableReason = "missing" | "draining";
 
 export class ServiceUnavailableError extends Error {
@@ -66,7 +69,7 @@ interface ServiceEntry {
 }
 
 interface Provider {
-  readonly create: (scope: Scope) => unknown;
+  readonly create: (scope: never) => unknown;
   readonly options: RegisterOptions;
 }
 
@@ -97,8 +100,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-export class Scope {
-  readonly kind: ScopeKind;
+export class Scope<K extends ScopeKind = ScopeKind> {
+  readonly kind: K;
   readonly parent: Scope | undefined;
   private readonly table = new Map<string, ServiceEntry>();
   private readonly providers = new Map<string, Provider>();
@@ -111,7 +114,7 @@ export class Scope {
   private readonly warn: (message: string) => void;
   private _closed = false;
 
-  constructor(kind: ScopeKind, parent?: Scope, options: { readonly warn?: (message: string) => void } = {}) {
+  constructor(kind: K, parent?: Scope, options: { readonly warn?: (message: string) => void } = {}) {
     this.kind = kind;
     this.parent = parent;
     this.warn = options.warn ?? parent?.warn ?? ((message) => console.warn(`[scope] ${message}`));
@@ -123,17 +126,17 @@ export class Scope {
   }
 
   /** Open a nested scope. Tiers only go down: harness → workspace | session, workspace → session. */
-  child(kind: ScopeKind): Scope {
+  child<C extends Below<K>>(kind: C): Scope<C> {
     this.assertOpen();
     if (SCOPE_ORDER.indexOf(kind) <= SCOPE_ORDER.indexOf(this.kind)) {
       throw new Error(`cannot open a ${kind} scope under a ${this.kind} scope`);
     }
-    return new Scope(kind, this);
+    return new Scope<C>(kind, this);
   }
 
   /** Register a built instance under a token. Duplicate names fail closed — a scope that wants
    *  to take over an existing name must go through `replace`, never shadow within one tier. */
-  register<T>(tok: Token<T>, instance: T, options: RegisterOptions = {}): void {
+  register<T>(tok: Token<T, K>, instance: T, options: RegisterOptions = {}): void {
     this.assertOpen();
     this.assertTier(tok);
     if (this.table.has(tok.name)) throw new Error(`service "${tok.name}" is already registered in this ${this.kind} scope`);
@@ -147,11 +150,11 @@ export class Scope {
    * (and disposed here). A prior `register` or `provide` of the same token wins silently — that
    * is what "default" means; overriding is done with `register`.
    */
-  provide<T>(tok: Token<T>, create: (scope: Scope) => T, options: RegisterOptions = {}): void {
+  provide<T>(tok: Token<T, K>, create: (scope: Scope<K>) => T, options: RegisterOptions = {}): void {
     this.assertOpen();
     this.assertTier(tok);
     if (this.table.has(tok.name) || this.providers.has(tok.name)) return;
-    this.providers.set(tok.name, { create, options });
+    this.providers.set(tok.name, { create: create as (scope: never) => unknown, options });
   }
 
   /** This scope's entry, materializing a pending default, else the parent's. */
@@ -236,7 +239,7 @@ export class Scope {
    * live owner that never agreed to it), which is why it stays closed by default.
    */
   replace<T>(
-    tok: Token<T>,
+    tok: Token<T, K>,
     next: T,
     options: { readonly drainTimeoutMs?: number; readonly force?: boolean } = {},
   ): Promise<void> {
@@ -267,7 +270,7 @@ export class Scope {
    * "draining" during the drain and "missing" after — there is deliberately no replaceable gate
    * here: unload is the owner tearing its service down, not swapping code under consumers.
    */
-  unregister<T>(tok: Token<T>, options: CloseOptions = {}): Promise<void> {
+  unregister<T>(tok: Token<T, K>, options: CloseOptions = {}): Promise<void> {
     const name = tok.name;
     return this.enqueueOp(name, async () => {
       this.providers.delete(name);
@@ -293,7 +296,7 @@ export class Scope {
     for (const child of [...this.children].reverse()) await child.close(options);
     this.children.clear();
     for (const name of [...this.order].reverse()) {
-      await this.unregister({ name, scope: this.kind }, options);
+      await this.unregister({ name, scope: this.kind } as Token<unknown, K>, options);
     }
     this.providers.clear();
     this.parent?.children.delete(this);
@@ -305,7 +308,7 @@ export class Scope {
     const provider = this.providers.get(name);
     if (provider !== undefined) {
       this.providers.delete(name);
-      const entry = entryOf(provider.create(this), provider.options);
+      const entry = entryOf(provider.create(this as never), provider.options);
       this.table.set(name, entry);
       this.order.push(name);
       return entry;
@@ -408,7 +411,7 @@ export class Scope {
     if (this._closed) throw new Error(`${this.kind} scope is closed`);
   }
 
-  private assertTier(tok: Token<unknown>): void {
+  private assertTier(tok: Token<unknown, ScopeKind>): void {
     if (tok.scope !== this.kind) {
       throw new Error(`token "${tok.name}" is declared ${tok.scope}-scoped; cannot register it in a ${this.kind} scope`);
     }

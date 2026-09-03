@@ -18,20 +18,20 @@ export type { ServiceUnavailableReason } from "operon-agents-core";
 
 export type ServiceOptions = Pick<RegisterOptions, "replaceable" | "dispose">;
 
-function serviceToken<T = unknown>(name: string): Token<T> {
+function serviceToken<T = unknown>(name: string): Token<T, "harness"> {
   if (name.length === 0) throw new Error("service name must be non-empty");
-  return token<T>(name, "harness");
+  return token<T, "harness">(name, "harness");
 }
 
 export class ServiceRegistry {
-  readonly scope: Scope;
+  readonly scope: Scope<"harness">;
 
   /** Over the given harness scope, or a fresh standalone one (tests, thin hosts) — optionally
    *  with its own `warn` sink. */
-  constructor(scopeOrOptions: Scope | { readonly warn?: (message: string) => void; readonly scope?: Scope } = {}) {
+  constructor(scopeOrOptions: Scope<"harness"> | { readonly warn?: (message: string) => void; readonly scope?: Scope<"harness"> } = {}) {
     const scope = scopeOrOptions instanceof Scope
       ? scopeOrOptions
-      : scopeOrOptions.scope ?? new Scope("harness", undefined, scopeOrOptions.warn !== undefined ? { warn: scopeOrOptions.warn } : {});
+      : scopeOrOptions.scope ?? new Scope("harness" as const, undefined, scopeOrOptions.warn !== undefined ? { warn: scopeOrOptions.warn } : {});
     if (scope.kind !== "harness") throw new Error("extension services live in the harness scope");
     this.scope = scope;
   }

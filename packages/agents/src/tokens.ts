@@ -4,5 +4,5 @@ import type { ExtensionRuntime } from "./extensions/runtime.ts";
 
 export const HT = Object.freeze({
   /** The session's extension runtime (the `extensions` capability's service). */
-  Extensions: token<ExtensionRuntime>("extensions", "session"),
+  Extensions: token<ExtensionRuntime, "session">("extensions", "session"),
 });

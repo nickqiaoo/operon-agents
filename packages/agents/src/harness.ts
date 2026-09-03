@@ -167,7 +167,7 @@ export interface DefaultCapabilitiesOptions {
    * per working directory), `T.McpOAuth` — the bundle uses those instead of building per-session
    * ones. Without it (or without those registrations) everything is built per session.
    */
-  readonly scope?: Scope;
+  readonly scope?: Scope<"session">;
   /** Context window budget used to size compaction. Defaults to 200_000. */
   readonly maxContextTokens?: number;
   /** Workspace MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
@@ -297,7 +297,7 @@ export interface HarnessOptions<TContext = unknown> {
    * own `workDir`), `T.PluginManager`, `T.Tracing`. Runs before the by-value extensions'
    * `create` halves, so they can consume what it registers.
    */
-  readonly harness?: (scope: Scope) => void | Promise<void>;
+  readonly harness?: (scope: Scope<"harness">) => void | Promise<void>;
   /**
    * Workspace-tier composition — one scope per workspace key (the working directory locally; a
    * tenant / environment id on a server, via `createSession({ workspaceKey })`), shared by every
@@ -306,7 +306,7 @@ export interface HarnessOptions<TContext = unknown> {
    * (one skill scan), `T.McpOAuth`, `T.WorkspaceMachineFactory`. `defaultCapabilities({ scope })`
    * picks those up. A session that brings its own `machine` instance gets a private workspace.
    */
-  readonly workspace?: (scope: Scope, ctx: WorkspaceContext) => void | Promise<void>;
+  readonly workspace?: (scope: Scope<"workspace">, ctx: WorkspaceContext) => void | Promise<void>;
   /**
    * Session-tier composition: called once per session being opened, with that session's scope
    * (the opener has already registered `T.SessionId`, `T.Store`, `T.Events`, `T.Responder`,
@@ -315,7 +315,7 @@ export interface HarnessOptions<TContext = unknown> {
    * Always called fresh per session, so per-session state (goal/plan/todo/background/skills/mcp)
    * is isolated by construction.
    */
-  readonly session?: (scope: Scope, ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
+  readonly session?: (scope: Scope<"session">, ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
   /** Default working directory for new sessions. Defaults to `process.cwd()`. */
   readonly workDir?: string;
   /**
@@ -1299,9 +1299,9 @@ export class Harness<TContext = unknown> {
   private readonly activeSessions = new Map<string, HarnessSession<TContext>>();
 
   /** The harness-tier scope: every process-lived object, and the parent of every workspace scope. */
-  readonly scope: Scope;
+  readonly scope: Scope<"harness">;
   /** Workspace scopes by key, reference-counted by the sessions open under them. */
-  private readonly workspaces = new Map<string, { readonly scope: Scope; readonly ready: Promise<void>; refs: number }>();
+  private readonly workspaces = new Map<string, { readonly scope: Scope<"workspace">; readonly ready: Promise<void>; refs: number }>();
   /** Process-level extension services by name (a facade over `scope`). The host replaces
    *  providers here (`services.replace`); sessions only ever see handles (`ctx.shared`, `ctx.services`). */
   readonly services: ServiceRegistry;
@@ -1761,7 +1761,7 @@ export class Harness<TContext = unknown> {
 
   /** Resolve the capability set for one session — the `session` hook, called fresh every time. */
   private async resolveCapabilities(
-    scope: Scope,
+    scope: Scope<"session">,
     ctx: SessionCapabilityContext,
     params: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly Capability[]> {
@@ -1831,7 +1831,7 @@ export class Harness<TContext = unknown> {
     // and from then on the session owns the scope.
     const workspaceKey = (opts as CreateSessionOptions<TContext>).workspaceKey ?? (opts.machine !== undefined && typeof opts.machine !== "function" ? `private::${id}` : `dir::${workDir}`);
     const workspace = await this.acquireWorkspace(workspaceKey, workDir);
-    let scope: Scope;
+    let scope: Scope<"session">;
     try {
       scope = workspace.child("session");
     } catch (error) {
@@ -1910,7 +1910,7 @@ export class Harness<TContext = unknown> {
   }
 
   /** The workspace scope for `key`, composed on first use (`options.workspace`), ref-counted. */
-  private async acquireWorkspace(key: string, workDir: string): Promise<Scope> {
+  private async acquireWorkspace(key: string, workDir: string): Promise<Scope<"workspace">> {
     let entry = this.workspaces.get(key);
     if (entry === undefined) {
       const scope = this.scope.child("workspace");

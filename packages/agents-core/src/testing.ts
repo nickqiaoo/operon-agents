@@ -41,7 +41,7 @@ export interface TestSessionWiring {
 export type TestRunnerOptions<TContext = unknown> = TestSessionWiring & RunnerConfig<TContext>;
 
 /** A harness scope carrying the harness-tier parts of a wiring bag. */
-export function testHarnessScope(wiring: TestSessionWiring = {}): Scope {
+export function testHarnessScope(wiring: TestSessionWiring = {}): Scope<"harness"> {
   const harness = new Scope("harness");
   if (wiring.machine !== undefined) harness.register(T.MachineFactory, wiring.machine, { owned: false });
   if (wiring.tracing !== undefined) harness.register(T.Tracing, wiring.tracing, { owned: false });
@@ -51,7 +51,7 @@ export function testHarnessScope(wiring: TestSessionWiring = {}): Scope {
 }
 
 /** Register the session-tier parts of a wiring bag on a session scope (skipping what's set). */
-export function wireTestSession(scope: Scope, wiring: TestSessionWiring): void {
+export function wireTestSession(scope: Scope<"session">, wiring: TestSessionWiring): void {
   if (wiring.store !== undefined && !scope.hasLocal(T.StoreBackend)) scope.register(T.StoreBackend, wiring.store, { owned: false });
   if (wiring.events !== undefined && !scope.hasLocal(T.Events)) scope.register(T.Events, wiring.events, { owned: false });
   if (wiring.responder !== undefined && !scope.hasLocal(T.Responder)) scope.register(T.Responder, wiring.responder, { owned: false });
@@ -78,7 +78,7 @@ export interface TestSessionOptions extends TestSessionWiring, SessionOpenOption
   readonly sessionId?: string;
   readonly signal?: AbortSignal;
   /** Reuse an existing harness scope (e.g. a runner's) instead of building one from the bag. */
-  readonly parent?: Scope;
+  readonly parent?: Scope<"harness" | "workspace">;
   readonly preloadedLog?: readonly AgentRecord[];
 }
 
@@ -105,7 +105,7 @@ export interface TestCapabilityHandle {
 }
 
 /** A session scope wired from the bag, with the defaults `Session.open` would provide. */
-export function testSessionScope(wiring: TestSessionWiring = {}): Scope {
+export function testSessionScope(wiring: TestSessionWiring = {}): Scope<"session"> {
   const scope = testHarnessScope(wiring).child("session");
   wireTestSession(scope, wiring);
   scope.provide(T.SessionId, () => "s");

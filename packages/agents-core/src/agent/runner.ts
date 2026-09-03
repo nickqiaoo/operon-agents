@@ -73,7 +73,7 @@ export interface RunnerConfig<TContext = unknown> {
    * this session's objects (`T.Store`, `T.Machine`, `T.PermissionOptions`, …) on `scope` and
    * return its capabilities. A caller-supplied session is never passed through here.
    */
-  readonly session?: (scope: Scope, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
+  readonly session?: (scope: Scope<"session">, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
   readonly maxTurns?: number;
   readonly maxStepsPerTurn?: number;
   readonly maxRetriesPerStep?: number;
@@ -266,12 +266,12 @@ export interface SubagentSpawner<TContext> {
 
 export class Runner<TContext = unknown> {
   /** The harness-tier scope every Runner-opened session hangs under. */
-  readonly scope: Scope;
+  readonly scope: Scope<"harness" | "workspace">;
   private readonly config: RunnerConfig<TContext>;
   private readonly engine: Engine<TContext>;
 
-  constructor(scope: Scope, config: RunnerConfig<TContext> = {}) {
-    if (scope.kind === "session") throw new Error("Runner needs a harness or workspace scope, not a session scope");
+  constructor(scope: Scope<"harness" | "workspace">, config: RunnerConfig<TContext> = {}) {
+    if ((scope as Scope).kind === "session") throw new Error("Runner needs a harness or workspace scope, not a session scope");
     this.scope = scope;
     this.config = config;
     this.engine = new Engine(config);

@@ -43,7 +43,7 @@ async function main(): Promise<void> {
         composed += 1;
         keys.push(ctx.key);
         const servers = createMcpServers({ srv: { transport: "http", url: "http://srv.example" } }, { transportFactory });
-        await servers.connect({ scope, sessionId: "", signal: new AbortController().signal });
+        await servers.connect({ scope, sessionId: "" });
         scope.register(T.McpServers, servers, { dispose: async () => { shutdowns += 1; await servers.shutdown(); } });
       },
       session: (scope) => defaultCapabilities({ scope }),

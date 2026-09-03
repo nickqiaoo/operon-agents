@@ -95,7 +95,7 @@ export async function localHarnessOptions<TContext>(
       const configs = { ...(mcpServers ?? {}), ...(pluginManager?.mcpServerConfigs() ?? {}) };
       if (Object.keys(configs).length > 0) {
         const servers = createMcpServers(configs, { oauthService });
-        await servers.connect({ scope, sessionId: "", signal: new AbortController().signal });
+        await servers.connect({ scope, sessionId: "" });
         scope.register(T.McpServers, servers, { dispose: () => servers.shutdown() });
       }
       const registry = new SkillRegistry();

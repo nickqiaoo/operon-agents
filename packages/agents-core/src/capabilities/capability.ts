@@ -42,7 +42,7 @@ export interface SessionControls {
  * provision needs. Everything else is a `ctx.scope.get(T.…)` away.
  */
 export interface ProvisionContext {
-  readonly scope: Scope;
+  readonly scope: Scope<"session">;
   readonly sessionId: string;
   /** The session's signal (aborts when the session is cancelled). */
   readonly signal: AbortSignal;
@@ -57,14 +57,15 @@ export interface ProvisionContext {
  * to something). `dispose` defaults to `instance.close()` when present.
  */
 export interface Provision<T = unknown> {
-  readonly token: Token<T>;
+  /** Session-tier by contract: a provision lives exactly as long as the session. */
+  readonly token: Token<T, "session">;
   create(ctx: ProvisionContext): T | Promise<T>;
   dispose?(instance: T): void | Promise<void>;
 }
 
 /** What a capability's per-run `start` (and its tool providers) receive. */
 export interface RunContext {
-  readonly scope: Scope;
+  readonly scope: Scope<"session">;
   readonly sessionId: string;
   /** Aborts when this RUN is cancelled (downstream of the session signal). */
   readonly signal: AbortSignal;

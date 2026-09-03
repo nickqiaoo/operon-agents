@@ -7,7 +7,7 @@ import type { MCPTool, MCPTransport } from "./types.ts";
 import type { MCPToolFilterStatic } from "./filter.ts";
 import type { McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { Capability, ProvisionContext, RunContext, Tool, ToolProvider } from "../index.ts";
+import type { Capability, ProvisionContext, RunContext, Scope, Tool, ToolProvider } from "../index.ts";
 import { T } from "../scope/tokens.ts";
 import type { EventSink } from "../events/index.ts";
 import type { McpServerConfig } from "../config/schema.ts";
@@ -187,7 +187,7 @@ class McpServerController {
     this.onStatusChange?.(this.view());
   }
 
-  async connect(ctx: ProvisionContext): Promise<void> {
+  async connect(ctx: McpConnectContext): Promise<void> {
     if (this.disposed) return;
     this.session = { events: ctx.scope.get(T.Events), sessionId: ctx.sessionId };
     if (this.config.enabled === false) {
@@ -419,6 +419,16 @@ export interface McpServersCapabilityOptions {
   readonly timer?: McpTimer;
 }
 
+/**
+ * What `connect` binds the controllers to: the scope whose `T.Events` receives status warnings
+ * (a session's, or a workspace's — which has none, so warnings go through `onStatusChange`)
+ * and the session id stamped on them. A `ProvisionContext` is one of these.
+ */
+export interface McpConnectContext {
+  readonly scope: Scope;
+  readonly sessionId: string;
+}
+
 export interface McpServersHandle {
   list(): readonly McpServerView[];
   /** Tools a connected server exposes. Empty for an unknown or disconnected server. */
@@ -428,7 +438,7 @@ export interface McpServersHandle {
   /** One runnable-tool provider per server (what a session hands the model). */
   toolProviders(): readonly ToolProvider[];
   /** Connect every server in parallel, fault-isolated (a failure is a status, never a throw). */
-  connect(ctx: ProvisionContext): Promise<void>;
+  connect(ctx: McpConnectContext): Promise<void>;
   shutdown(): Promise<void>;
 }
 
