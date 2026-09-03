@@ -366,6 +366,16 @@ lifetime are the scope's job, the hot path reads plain fields.
 Extension services are the one string-keyed corner (§5.5): an extension is loaded by its id and
 names what it consumes in `uses`, so `harness.services` maps those ids onto harness-tier tokens.
 
+**Workspace entries are never replaced; a new generation is a new key.** A session's provisions
+pin the workspace objects they were opened against (`create` takes instances, on purpose: a
+session stays on the generation it started on), so `replace` on a workspace scope would leave
+old sessions holding retired objects. When what a workspace is backed by changes — a sandbox
+restarted, a remote runtime reconnected — the host opens new sessions under a new
+`workspaceKey` (say `<workspaceId>@<generation>`): the `workspace` hook composes the new
+generation, old sessions keep the old scope alive through its reference count, and the last one
+out tears it down in reverse. `replace` stays with the harness tier, whose consumers all go
+through handles.
+
 ### 5.6 "The seam in core, the behavior in an extension" — the most useful third pattern
 
 When a feature is 99% behavior and the remaining 1% is out of reach, do not promote it to a

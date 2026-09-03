@@ -502,7 +502,10 @@ export interface CreateSessionOptions<TContext = unknown> extends OpenSessionOpt
   readonly workDir?: string;
   /**
    * Which workspace scope this session lives under (see `HarnessOptions.workspace`). Defaults
-   * to the working directory; a server passes its tenant / environment id.
+   * to the working directory; a server passes its tenant / environment id. A key is also how a
+   * workspace changes generation (its runtime restarted or reconnected): new sessions get
+   * `<workspace>@<generation>`, old ones keep the old scope until the last of them closes —
+   * workspace entries are never `replace`d in place.
    */
   readonly workspaceKey?: string;
   /** Partition this session under an owner — see {@link CreateSessionInput.ownerKey}. */
