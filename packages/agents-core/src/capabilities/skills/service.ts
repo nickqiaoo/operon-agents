@@ -75,7 +75,7 @@ export class SkillsService {
     const activationId = randomUUID();
     const skillArgs = request.args ?? "";
     const trigger = request.trigger ?? "user-slash";
-    const body = this.registry.renderSkillPrompt(skill, skillArgs);
+    const body = this.registry.renderSkillPrompt(skill, skillArgs, runtime.sessionId);
     const argsAttr = skillArgs.length > 0 ? ` args="${escapeXmlAttr(skillArgs)}"` : "";
     const wrapped = systemReminder(
       `<skill-loaded name="${escapeXmlAttr(skill.name)}"${argsAttr}>\n${body}\n</skill-loaded>`,

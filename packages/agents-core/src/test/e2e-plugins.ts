@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
@@ -241,7 +242,7 @@ async function main(): Promise<void> {
 
     // 8b. dynamicRoots bridge — skillsCapability merges plugin skill roots at session-open, so an
     //     enabled plugin's skill shows up in the session's skill list (how operon loads them).
-    const skillSession = await Session.open({
+    const skillSession = await openTestSession({
       machine: MACHINE,
       capabilities: [skillsCapability({ dynamicRoots: () => mgr.skillRoots() })],
     });
@@ -256,11 +257,10 @@ async function main(): Promise<void> {
     //     enabled plugin's MCP server becomes a controller (inspected pre-connect, no spawn).
     //     Uses mgr2, where the weather server is enabled (mgr disabled it earlier in section 4).
     const mcpCap = mcpServersCapability(mgr2.mcpServerConfigs());
-    const mcpHandle = mcpCap.service as { list: () => Array<{ name: string }> };
-    check("mcp bridge: enabled plugin MCP server becomes a controller in mcpServersCapability", mcpHandle.list().some((s) => s.name === "plugin-demo-plugin:weather"));
+    check("mcp bridge: enabled plugin MCP server becomes a controller in mcpServersCapability", (mcpCap.toolProviders ?? []).some((p) => p.id === "mcp:plugin-demo-plugin:weather"));
 
     // 9. session facade — the plugin manager is reachable through Session.
-    const session = await Session.open({
+    const session = await openTestSession({
       machine: MACHINE,
       capabilities: [pluginsCapability(mgr2, () => undefined)],
     });

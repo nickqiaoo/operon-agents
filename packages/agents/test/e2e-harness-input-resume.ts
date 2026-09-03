@@ -1,3 +1,4 @@
+import { T } from "operon-agents-core";
 // Durable INPUT suspension answered through the Harness facade.
 //
 // `HarnessSession.resume` used to wrap every answer as `{ kind: "approval" }` — a run
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
 
   try {
     // ── Process 1: the tool suspends for input; the run interrupts durably ──
-    const harness1 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" } });
+    const harness1 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" } });
     const session1 = await harness1.createSession({ agent: picker });
     const sessionId = session1.id;
 
@@ -79,7 +80,7 @@ async function main(): Promise<void> {
     await harness1.close();
 
     // ── Process 2: a fresh harness answers the INPUT suspension via resume ──
-    const harness2 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" } });
+    const harness2 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" } });
     const session2 = await harness2.resumeSession(sessionId, { agent: picker });
     check("input-resume: reopened durable pause reports interrupted", session2.status.state === "interrupted");
     check("input-resume: reopened pause exposes pending input", (await session2.pendingInterruptions())[0]?.kind === "input");

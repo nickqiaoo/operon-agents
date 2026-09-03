@@ -22,6 +22,8 @@ export class NestedSkillTooDeepError extends Error {
 
 export interface SkillToolOptions {
   readonly initialQueryDepth?: number;
+  /** The session whose `${SESSION_ID}` a rendered skill expands to (the registry is shareable). */
+  readonly sessionId?: () => string | undefined;
 }
 
 function errorResult(message: string): ToolResult {
@@ -62,7 +64,7 @@ export function skillTool(registry: SkillRegistry, options: SkillToolOptions = {
           return errorResult(`Skill "${skill.name}" is a flow skill — invoke it via its skill_${toToolSuffix(skill.name)} tool, not Skill.`);
         }
         const skillArgs = args.args ?? "";
-        const body = registry.renderSkillPrompt(skill, skillArgs);
+        const body = registry.renderSkillPrompt(skill, skillArgs, options.sessionId?.());
         const argsAttr = skillArgs.length > 0 ? ` args="${escapeXmlAttr(skillArgs)}"` : "";
         return {
           content: [

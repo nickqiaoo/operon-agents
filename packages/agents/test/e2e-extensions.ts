@@ -1,3 +1,5 @@
+import { T } from "operon-agents-core";
+import { testRunner, openTestSession } from "operon-agents-core/internal";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import {
@@ -128,7 +130,7 @@ async function coreSurface(): Promise<void> {
 
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "extension-test", model, instructions: "x" });
-  const result = await new Runner({
+  const result = await testRunner({
     machine: new LocalMachine(process.cwd()),
     store,
     events,
@@ -197,7 +199,7 @@ async function interventions(): Promise<void> {
   };
 
   const agent = defineAgent({ name: "intervention-test", model, instructions: "x" });
-  const result = await new Runner({
+  const result = await testRunner({
     machine: new LocalMachine(process.cwd()),
     events,
     permission: { mode: "yolo" },
@@ -236,7 +238,7 @@ async function runTierHooks(): Promise<void> {
   };
 
   const agent = defineAgent({ name: "run-tier", model, instructions: "ORIGINAL_SYSTEM" });
-  const result = await new Runner({
+  const result = await testRunner({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
@@ -262,7 +264,7 @@ async function runTierHooks(): Promise<void> {
       api.on("tool.call", () => ({ block: true, reason: "halted", terminate: true }));
     },
   };
-  const stopResult = await new Runner({
+  const stopResult = await testRunner({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
@@ -301,13 +303,13 @@ async function toolGating(): Promise<void> {
     },
   };
 
-  const session = await Session.open({
+  const session = await openTestSession({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
   });
-  const runner = new Runner({});
+  const runner = testRunner({});
   const agent = defineAgent({ name: "gating", model, instructions: "x" });
   const first = await runner.run(agent, "go", { session });
   const second = await runner.run(agent, "again", { session });
@@ -352,13 +354,13 @@ async function abortControl(): Promise<void> {
     },
   };
 
-  const session = await Session.open({
+  const session = await openTestSession({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
   });
-  const runner = new Runner({});
+  const runner = testRunner({});
   const agent = defineAgent({ name: "abort-test", model, instructions: "x" });
 
   const aborted = await runner.run(agent, "go", { session });
@@ -408,7 +410,7 @@ async function collision(): Promise<void> {
       api.registerTool(tool({ name: "Collision", description: "extension-owned", parameters: z.object({}), execute: () => "extension-tool" }));
     },
   };
-  const result = await new Runner({
+  const result = await testRunner({
     machine: new LocalMachine(process.cwd()),
     events,
     permission: { mode: "yolo" },
@@ -464,7 +466,7 @@ async function hostReach(): Promise<void> {
 
   const harness = createHarness({
     model,
-    modelRuntime: faux.runtime,
+    harness: (s) => s.register(T.ModelRuntime, faux.runtime, { owned: false }),
     workDir: process.cwd(),
     permission: { mode: "yolo" },
     extensions: [extension],
@@ -540,7 +542,7 @@ async function providerHooks(): Promise<void> {
     },
   };
 
-  await new Runner({
+  await testRunner({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
@@ -576,7 +578,7 @@ async function providerHooks(): Promise<void> {
       },
     },
   };
-  await new Runner({
+  await testRunner({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
@@ -618,13 +620,13 @@ async function handledInput(): Promise<void> {
     },
   };
 
-  const session = await Session.open({
+  const session = await openTestSession({
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
   });
-  const runner = new Runner({});
+  const runner = testRunner({});
   const agent = defineAgent({ name: "handled-test", model, instructions: "x" });
 
   const short = await runner.run(agent, "status", { session });
@@ -655,13 +657,13 @@ async function compactionGate(): Promise<void> {
       fauxAssistantMessage("third answer", { stopReason: "stop" }),
     ]);
     const model = faux.getChatModel()!;
-    const session = await Session.open({
+    const session = await openTestSession({
       machine: new LocalMachine(process.cwd()),
       events: new ListenerSink(),
       permission: { mode: "yolo" },
       capabilities: [extensionsCapability([extension]), compactionCapability({ maxContextTokens: 48_000 })],
     });
-    const runner = new Runner({});
+    const runner = testRunner({});
     const agent = defineAgent({ name: "gate-test", model, instructions: "x" });
     await runner.run(agent, "one", { session });
     await runner.run(agent, "two", { session });

@@ -9,7 +9,7 @@
  * redirect console.log/info/debug to stderr so a stray log can never corrupt the
  * protocol stream.
  */
-import { defineModel, DiskSessionRepository, type ChatModel } from "operon-agents-core";
+import { defineModel, DiskSessionRepository, T, type ChatModel, type Scope } from "operon-agents-core";
 import { createHarness } from "../harness.ts";
 import { nodeStreamTransport } from "./codec.ts";
 import { AppServer } from "./server.ts";
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
   const harness = createHarness({
     model: args.model ?? "anthropic/claude-opus-4-8",
     resolveModel,
-    ...(args.home !== undefined ? { repository: new DiskSessionRepository(args.home) } : {}),
+    ...(args.home !== undefined ? { harness: (scope: Scope) => scope.register(T.SessionRepository, new DiskSessionRepository(args.home!)) } : {}),
     ...(args.workdir !== undefined ? { workDir: args.workdir } : {}),
     permission: { mode: args.permission ?? "yolo" },
   });

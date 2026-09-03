@@ -1,6 +1,7 @@
 import type { Capability } from "operon-agents-core";
 import type { ExtensionDefinition, ExtensionHost } from "./types.ts";
 import { ExtensionRuntime } from "./runtime.ts";
+import { HT } from "../tokens.ts";
 
 export { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionLoader, createExtensionLoader } from "./loader.ts";
@@ -75,11 +76,20 @@ export function extensionsCapability(
   const runtime = new ExtensionRuntime(definitions, options.host, options.params);
   return {
     name: "extensions",
-    service: runtime,
+    provides: [
+      {
+        token: HT.Extensions,
+        create: async (ctx) => {
+          await runtime.open(ctx);
+          return runtime;
+        },
+        dispose: () => runtime.close(),
+      },
+    ],
     toolProviders: [{ id: "extensions", listTools: () => runtime.listTools() }],
     toolFilters: [runtime.filterTools],
     gates: { compaction: runtime.compactionGate },
-    // Stable array reference — `setup` (openSession) fills it before any run assembles.
+    // Stable array reference — `setup` (the provision's `create`) fills it before any run assembles.
     injectors: runtime.listInjectors(),
     hooks: {
       beforeRun: async (ctx) => runtime.beforeRun(ctx, ctx.input),
@@ -95,8 +105,6 @@ export function extensionsCapability(
       finalizeToolResult: async (ctx) =>
         runtime.afterToolResult(ctx, ctx.toolCall.name, ctx.toolCall.id, ctx.tool, ctx.args, ctx.result),
     },
-    openSession: (ctx) => runtime.open(ctx),
-    closeSession: () => runtime.close(),
     start: (ctx) => runtime.attachRun(ctx),
     stop: () => runtime.detachRun(),
   };

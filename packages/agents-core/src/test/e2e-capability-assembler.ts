@@ -14,7 +14,8 @@
  */
 import { NullMachine, type Tool } from "../index.ts";
 import { assembleCapabilities, type AssembleCapabilitiesOptions } from "../internal.ts";
-import type { Capability, CapabilityContext } from "../capabilities/capability.ts";
+import type { Capability, RunContext } from "../capabilities/capability.ts";
+import { testRunContext } from "./faux.ts";
 import type { ToolProvider } from "../capabilities/tool-provider.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -23,8 +24,8 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-function baseCtx(): CapabilityContext {
-  return { sessionId: "s1", machine: new NullMachine(), signal: new AbortController().signal };
+function baseCtx(): RunContext {
+  return testRunContext({ machine: new NullMachine() });
 }
 
 function fakeTool(name: string): Tool {

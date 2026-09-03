@@ -26,7 +26,7 @@ export { mcpToolProvider, wrapMcpTool } from "./provider.ts";
 export { mcpCapability } from "./capability.ts";
 export type { MCPCapabilityOptions } from "./capability.ts";
 
-export { serverFromConfig, mcpServersCapability, DEFAULT_RECONNECT_POLICY } from "./manager.ts";
+export { serverFromConfig, mcpServersCapability, createMcpServers, mcpSessionCapability, DEFAULT_RECONNECT_POLICY } from "./manager.ts";
 export type {
   McpServerStatus,
   McpServerView,

@@ -1,3 +1,5 @@
+import { testRunner, openTestSession } from "./faux.ts";
+import { T } from "../index.ts";
 // Agent profiles: YAML defs with `extends` inheritance + a nunjucks system-prompt renderer that
 // pulls live context (cwd/os/AGENTS.md). Builtin profiles (agent + coder/explore/plan) ship
 // inline; a profile builds into a runnable Agent whose system prompt renders at run time.
@@ -108,7 +110,7 @@ async function main(): Promise<void> {
       writeFileSync(join(dir, "AGENTS.md"), "initial project instruction");
       const machine = new CountingLocalMachine(dir);
       const compaction = new CompactionService();
-      const session = await Session.open({ machine, capabilities: [{ name: "compaction", service: compaction }] });
+      const session = await openTestSession({ machine, capabilities: [{ name: "compaction", provides: [{ token: T.Compaction, create: () => compaction }] }] });
       const unknown: string[] = [];
       const agent = await buildAgentFromProfile(DEFAULT_AGENT_PROFILES["coder"]!, {
         tools: { Read: readTool, Write: writeTool }, // only these resolve; the rest are skipped
@@ -157,7 +159,7 @@ async function main(): Promise<void> {
 
       await session.close();
       const readsBeforeResume = machine.readCount;
-      const resumed = await Session.open({ machine });
+      const resumed = await openTestSession({ machine });
       await resumed.resolveSystemPromptContext(machine);
       check("resume: a newly opened Session rereads prompt context", machine.readCount > readsBeforeResume);
       await resumed.close();

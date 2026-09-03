@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Regression test for Runner.resume()'s finally block flushing the WRONG context.
  *
@@ -104,7 +105,7 @@ async function main(): Promise<void> {
 
   const inner = new MemoryStore();
   const store = new DelayingStore(inner, 40);
-  const runner = new Runner({ store, permission: { mode: "yolo" } });
+  const runner = testRunner({ store, permission: { mode: "yolo" } });
 
   faux.setResponses([fauxAssistantMessage(fauxToolCall("pause", {}), { stopReason: "toolUse" })]);
   const first = await runner.run(router, "start");

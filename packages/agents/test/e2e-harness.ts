@@ -1,3 +1,4 @@
+import { T } from "operon-agents-core";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +28,7 @@ async function main(): Promise<void> {
   const model = faux.getChatModel()!;
 
   try {
-    const harness = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" } });
+    const harness = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" } });
 
     const session = await harness.createSession();
     check("harness: createSession returns a session with an id", typeof session.id === "string" && session.id.length > 0);

@@ -2,8 +2,8 @@ import {
   LocalMachine,
   ListenerSink,
   SteerBus,
-  type SessionContext,
 } from "../index.ts";
+import { openCapability, type TestSessionWiring } from "./faux.ts";
 import {
   mcpServersCapability,
   type McpServersHandle,
@@ -110,7 +110,7 @@ class GatedTransport implements MCPTransport {
 // A manual reconnect() firing while a scheduled attempt is still awaiting connect() used
 // to let the loser's cleanup tear down the winner's live connection (and leak the loser's).
 // Identity-guarded attempt() must keep the winner connected and close only the loser.
-async function testSupersededAttempt(baseCtx: SessionContext): Promise<void> {
+async function testSupersededAttempt(wiring: TestSessionWiring): Promise<void> {
   const built: GatedTransport[] = [];
   let gated = false;
   const factory = (name: string): MCPTransport => {
@@ -125,8 +125,7 @@ async function testSupersededAttempt(baseCtx: SessionContext): Promise<void> {
     reconnectPolicy: { maxRetries: 3, initialDelayMs: 100, maxDelayMs: 1000, factor: 2 },
     timer,
   });
-  const handle = cap.service as McpServersHandle;
-  await cap.openSession?.(baseCtx); // t0 auto-connects
+  const handle = (await openCapability(cap, wiring)).service as McpServersHandle; // t0 auto-connects
   const t0 = built[0]!;
 
   gated = true; // subsequent connects are held open until released/failed
@@ -185,7 +184,7 @@ async function main(): Promise<void> {
   events.subscribe((e) => {
     if (e.type === "warning") warnings.push(e.message);
   });
-  const sessionCtx: SessionContext = { sessionId: "s", machine, events, signal: new AbortController().signal, steer: new SteerBus() };
+  const wiring: TestSessionWiring = { machine, events, steer: new SteerBus() };
 
   const built: ControlledTransport[] = [];
   let failNextConnects = 0;
@@ -207,15 +206,13 @@ async function main(): Promise<void> {
     reconnectPolicy: { maxRetries: 3, initialDelayMs: 100, maxDelayMs: 1000, factor: 2 },
     timer,
   });
-  const handle = cap.service as McpServersHandle;
-
-  // Subscribe BEFORE connecting so we see the initial transition.
+  // The provision connects on create and hands back the handle, so the listener below sees
+  // every transition from the first drop on (the initial connect is asserted by status).
   const transitions: McpServerView[] = [];
+  const opened = await openCapability(cap, wiring);
+  const handle = opened.service as McpServersHandle;
   const unsub = handle.onStatusChange((v) => transitions.push(v));
-
-  await cap.openSession?.(sessionCtx);
   check("status: initial connect → connected", handle.list()[0]?.status === "connected");
-  check("onStatusChange: fired connected transition", transitions.some((t) => t.status === "connected"));
 
   // 1. Drop → schedule reconnect (delay = initial 100). Reconnect succeeds.
   current().drop();
@@ -224,6 +221,7 @@ async function main(): Promise<void> {
   const d0 = fire();
   await flush();
   check("reconnect: recovered to connected after backoff", d0 === 100 && handle.list()[0]?.status === "connected");
+  check("onStatusChange: fired failed → connected transitions", transitions.some((t) => t.status === "failed") && transitions.some((t) => t.status === "connected"));
 
   // 2. Backoff growth: next two reconnect attempts fail, the third succeeds → delays 100,200,400.
   const delays: number[] = [];
@@ -266,7 +264,7 @@ async function main(): Promise<void> {
   // Firing a stale timer (if any leaked) must not revive the server.
   check("shutdown: server stays down", handle.list()[0]?.status === "failed");
 
-  await testSupersededAttempt(sessionCtx);
+  await testSupersededAttempt(wiring);
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

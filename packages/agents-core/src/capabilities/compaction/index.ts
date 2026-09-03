@@ -1,4 +1,5 @@
-import type { Capability, CapabilityContext, CompactionGate } from "../capability.ts";
+import type { Capability, RunContext, CompactionGate } from "../capability.ts";
+import { T } from "../../scope/tokens.ts";
 import { APIContextOverflowError } from "../../llm/errors.ts";
 import type { InjectionManager } from "../injection.ts";
 import type { EventSink } from "../../events/index.ts";
@@ -109,7 +110,7 @@ export function compactionCapability(options: CompactionOptions): Capability {
 
   return {
     name: "compaction",
-    service,
+    provides: [{ token: T.Compaction, create: () => service }],
     hooks: {
       beforeStep: async (ctx) => {
         maxOutputTokens = ctx.model.maxOutputTokens;
@@ -150,11 +151,11 @@ export function compactionCapability(options: CompactionOptions): Capability {
         return { recovered: true };
       },
     },
-    start: (ctx: CapabilityContext) => {
+    start: (ctx: RunContext) => {
       injection = ctx.injection;
-      gates = ctx.gates?.compaction;
-      events = ctx.events;
-      logger = ctx.logger ?? noopLogger;
+      gates = ctx.gates.compaction;
+      events = ctx.scope.get(T.Events);
+      logger = ctx.scope.get(T.Logger) ?? noopLogger;
       sessionId = ctx.sessionId;
       lastAssistantAtMs = Date.now();
     },

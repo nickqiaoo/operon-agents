@@ -1,4 +1,6 @@
-import type { Capability, SessionContext } from "../capability.ts";
+import type { Capability } from "../capability.ts";
+import type { Machine } from "../../tool/machine.ts";
+import { T } from "../../scope/tokens.ts";
 import { SkillRegistry } from "./registry.ts";
 import { resolveSkillRoots } from "./scanner.ts";
 import { skillTool } from "./skill-tool.ts";
@@ -48,7 +50,11 @@ export type {
 } from "./types.ts";
 
 export interface SkillsOptions {
+  /** A pre-built registry — e.g. the workspace's shared one (`T.SkillRegistry`). */
   readonly registry?: SkillRegistry;
+  /** `false` = the registry is already loaded (a workspace scanned it once); skip the per-session
+   *  scan and only bind this session to it. Default `true`. */
+  readonly scan?: boolean;
   readonly roots?: readonly SkillRoot[];
   /**
    * Additional skill roots resolved lazily at session-open (merged after `roots`). Use this for
@@ -74,36 +80,53 @@ export interface SkillsOptions {
   readonly onWarning?: (message: string, cause?: unknown) => void;
 }
 
+/**
+ * Scan the skill roots into `registry` — the static roots, the lazily-provided ones (e.g. enabled
+ * plugins' skill dirs), and the default project/user roots when asked. Called per session by
+ * `skillsCapability` (unless `scan: false`), or once per workspace by a host that shares one
+ * registry across the sessions of a working directory.
+ */
+export async function loadSkillRoots(
+  machine: Machine,
+  registry: SkillRegistry,
+  options: Omit<SkillsOptions, "registry" | "scan" | "flowExecutor" | "onWarning"> = {},
+): Promise<void> {
+  for (const skill of options.builtinSkills ?? []) registry.registerBuiltinSkill(skill);
+  const dynamic = options.dynamicRoots ? await options.dynamicRoots() : [];
+  const explicitRoots = [...(options.roots ?? []), ...dynamic];
+  const roots = await resolveSkillRoots(machine, {
+    ...(explicitRoots.length > 0 ? { explicitRoots } : {}),
+    ...(options.includeDefaultRoots === true ? { includeDefaults: true } : {}),
+    // Default the project root to the machine's working directory, so `<cwd>/.agents/skills`
+    // is scanned for the directory this machine actually operates.
+    projectDir: options.projectDir ?? machine.getcwd(),
+    ...(options.userHomeDir !== undefined ? { userHomeDir: options.userHomeDir } : {}),
+    ...(options.builtinDir !== undefined ? { builtinDir: options.builtinDir } : {}),
+    ...(options.extraDirs !== undefined ? { extraDirs: options.extraDirs } : {}),
+  });
+  await registry.loadRoots(machine, roots);
+}
+
 export function skillsCapability(options: SkillsOptions = {}): Capability {
   const registry = options.registry ?? new SkillRegistry({ onWarning: options.onWarning });
   const service = new SkillsService(registry);
+  let sessionId: string | undefined;
 
   return {
     name: "skills",
-    tools: [skillTool(registry)],
+    tools: [skillTool(registry, { sessionId: () => sessionId })],
     toolProviders: [flowSkillProvider(registry, options.flowExecutor)],
     injectors: [new SkillCatalogInjector(registry)],
-    service,
-    openSession: async (ctx: SessionContext) => {
-      registry.setSessionId(ctx.sessionId);
-      for (const skill of options.builtinSkills ?? []) registry.registerBuiltinSkill(skill);
-      // Static roots + any lazily-provided ones (e.g. enabled plugins' skill dirs). The provider
-      // runs per session-open so it reflects the current set even though the harness is shared.
-      const dynamic = options.dynamicRoots ? await options.dynamicRoots() : [];
-      const explicitRoots = [...(options.roots ?? []), ...dynamic];
-      const roots = await resolveSkillRoots(ctx.machine, {
-        ...(explicitRoots.length > 0 ? { explicitRoots } : {}),
-        ...(options.includeDefaultRoots === true ? { includeDefaults: true } : {}),
-        // Default the project root to the session's working directory so
-        // `<cwd>/.agents/skills` is scanned per-session (the harness is shared,
-        // so this can't be a static option).
-        projectDir: options.projectDir ?? ctx.machine.getcwd(),
-        ...(options.userHomeDir !== undefined ? { userHomeDir: options.userHomeDir } : {}),
-        ...(options.builtinDir !== undefined ? { builtinDir: options.builtinDir } : {}),
-        ...(options.extraDirs !== undefined ? { extraDirs: options.extraDirs } : {}),
-      });
-      await registry.loadRoots(ctx.machine, roots);
-      service.attach({ sessionId: ctx.sessionId, events: ctx.events, steer: ctx.steer });
-    },
+    provides: [
+      {
+        token: T.Skills,
+        create: async (ctx) => {
+          sessionId = ctx.sessionId;
+          if (options.scan !== false) await loadSkillRoots(ctx.scope.require(T.Machine), registry, options);
+          service.attach({ sessionId: ctx.sessionId, events: ctx.scope.require(T.Events), steer: ctx.scope.require(T.Steer) });
+          return service;
+        },
+      },
+    ],
   };
 }

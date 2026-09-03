@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     workDir: work,
     permission: { mode: "yolo" },
     // Fresh capabilities per session, self-driven from the plugin manager.
-    capabilities: () => {
+    session: () => {
       factoryCalls += 1;
       return defaultCapabilities({ pluginManager: pm });
     },

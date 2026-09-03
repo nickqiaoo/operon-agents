@@ -70,3 +70,16 @@ export function registerFauxProvider(
     },
   };
 }
+
+
+export {
+  testHarnessScope,
+  wireTestSession,
+  testRunner,
+  openTestSession,
+  testSessionScope,
+  testProvisionContext,
+  testRunContext,
+  openCapability,
+} from "../testing.ts";
+export type { TestSessionWiring, TestRunnerOptions, TestSessionOptions, TestCapabilityHandle } from "../testing.ts";

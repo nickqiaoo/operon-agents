@@ -6,10 +6,10 @@ import {
   ListenerSink,
   SteerBus,
   type AgentEvent,
-  type SessionContext,
-  type CapabilityContext,
+  type RunContext,
   type Capability,
 } from "../index.ts";
+import { openCapability, testRunContext } from "./faux.ts";
 import {
   mcpServersCapability,
   MockMCPTransport,
@@ -78,7 +78,7 @@ function okTransport(name: string, tools: readonly MCPTool[]): MockMCPTransport 
   });
 }
 
-function providerNames(cap: Capability, server: string, ctx: CapabilityContext): Promise<string[]> {
+function providerNames(cap: Capability, server: string, ctx: RunContext): Promise<string[]> {
   const provider = (cap.toolProviders ?? []).find((p) => p.id === `mcp:${server}`);
   if (provider === undefined) return Promise.resolve([]);
   return Promise.resolve(provider.listTools(ctx)).then((tools) => tools.map((t) => t.schema.name));
@@ -131,18 +131,11 @@ async function main(): Promise<void> {
     if (e.type === "warning") warnings.push(e.message);
   });
 
-  const sessionCtx: SessionContext = {
-    sessionId: "s",
-    machine,
-    events,
-    signal: new AbortController().signal,
-    steer: new SteerBus(),
-  };
-  const capCtx: CapabilityContext = { sessionId: "s", machine, signal: new AbortController().signal };
+  const capCtx = testRunContext({ machine });
 
-  await cap.openSession?.(sessionCtx);
+  const opened = await openCapability(cap, { machine, events, steer: new SteerBus() });
 
-  const handle = cap.service as McpServersHandle;
+  const handle = opened.service as McpServersHandle;
   const status = (name: string): string => handle.list().find((v) => v.name === name)?.status ?? "missing";
 
   // 1. status machine
@@ -176,8 +169,8 @@ async function main(): Promise<void> {
   check("warning: generic failure emitted a warning", warnings.some((m) => m.includes("broken") && m.includes("connection refused")));
   check("warning: needs-auth did NOT emit a warning", !warnings.some((m) => m.includes("remote")));
 
-  await cap.closeSession?.();
-  check("lifecycle: closeSession resolves cleanly", true);
+  await opened.close();
+  check("lifecycle: scope close resolves cleanly", true);
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

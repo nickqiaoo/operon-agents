@@ -1,3 +1,5 @@
+import { testRunner, openTestSession } from "./faux.ts";
+import { token } from "../index.ts";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -85,7 +87,7 @@ async function main(): Promise<void> {
     });
 
     const manager = new PluginManager({ machine, homeDir: home, now: () => 1_700_000_000_000 });
-    const session = await Session.open({
+    const session = await openTestSession({
       machine,
       events,
       steer,
@@ -98,11 +100,16 @@ async function main(): Promise<void> {
         backgroundCapability(),
         {
           name: "dyn-commands",
-          service: {
-            sessionCommands: () => [
-              { name: "dyncmd", description: "dynamic test command", run: async (_ctx, args) => ({ ok: true, message: `dyn:${args}` }) },
-            ],
-          },
+          provides: [
+            {
+              token: token("dyn-commands", "session"),
+              create: () => ({
+                sessionCommands: () => [
+                  { name: "dyncmd", description: "dynamic test command", run: async (_ctx, args) => ({ ok: true, message: `dyn:${args}` }) },
+                ],
+              }),
+            },
+          ],
         },
       ],
     });

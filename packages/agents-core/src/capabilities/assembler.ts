@@ -1,6 +1,6 @@
 import type { BeforeRunHook, LoopHooks, ShouldContinueAfterStopHook } from "../loop/types.ts";
 import type { Tool } from "../tool/types.ts";
-import type { AssembledGates, Capability, CapabilityContext, CapabilityDiagnostic, CompactionGate, ToolFilter } from "./capability.ts";
+import type { AssembledGates, Capability, RunContext, CapabilityDiagnostic, CompactionGate, ToolFilter } from "./capability.ts";
 import { InjectionManager } from "./injection.ts";
 import type { ToolProvider } from "./tool-provider.ts";
 
@@ -20,7 +20,7 @@ export class AssembledCapabilities {
   readonly boundaryContinuations: ShouldContinueAfterStopHook[] = [];
   readonly runStarts: BeforeRunHook[] = [];
   /**
-   * Stable arrays handed to `CapabilityContext.gates`. Capabilities are started and absorbed one
+   * Stable arrays handed to `RunContext.gates`. Capabilities are started and absorbed one
    * at a time, so a consumer that snapshotted at `start()` would miss every gate registered by a
    * capability ordered after it — reading through this live reference avoids depending on order.
    */
@@ -31,12 +31,17 @@ export class AssembledCapabilities {
   private readonly toolProviders: ToolProvider[] = [];
   private readonly toolFilters: ToolFilter[] = [];
   private readonly started: Capability[] = [];
-  private readonly ctx: CapabilityContext;
+  private readonly ctx: RunContext;
   private readonly stopTimeoutMs: number;
 
-  constructor(ctx: CapabilityContext, options: AssembleCapabilitiesOptions = {}) {
-    this.ctx = ctx;
+  constructor(base: Omit<RunContext, "injection" | "gates">, options: AssembleCapabilitiesOptions = {}) {
+    this.ctx = { ...base, injection: this.injection, gates: this.gates };
     this.stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
+  }
+
+  /** The run context handed to every capability's `start` and tool provider. */
+  get context(): RunContext {
+    return this.ctx;
   }
 
   async listTools(): Promise<Tool[]> {
@@ -126,14 +131,15 @@ export class AssembledCapabilities {
 
 export async function assembleCapabilities(
   capabilities: readonly Capability[],
-  ctx: CapabilityContext,
+  ctx: Omit<RunContext, "injection" | "gates">,
   options: AssembleCapabilitiesOptions = {},
 ): Promise<AssembledCapabilities> {
   const assembled = new AssembledCapabilities(ctx, options);
   const startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
   const seenNames = new Set<string>();
-  // like compaction can resync injector watermarks after collapsing the prefix.
-  const startCtx: CapabilityContext = { ...ctx, injection: assembled.injection, gates: assembled.gates };
+  // The live injection manager + gate arrays ride along so a capability like compaction can
+  // resync injector watermarks after collapsing the prefix.
+  const startCtx = assembled.context;
 
   for (const capability of capabilities) {
     if (seenNames.has(capability.name)) {

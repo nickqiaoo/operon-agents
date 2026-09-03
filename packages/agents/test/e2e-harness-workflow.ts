@@ -1,3 +1,4 @@
+import { T } from "operon-agents-core";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
     // ── Case 1: default Harness exposes the Agent + Workflow tools ──
     offered = [];
     faux.setResponses([captureThen(fauxAssistantMessage("ok", { stopReason: "stop" }))]);
-    const h1 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" } });
+    const h1 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" } });
     const s1 = await h1.createSession();
     s1.setModel(model); // real consumers (e.g. operon) set the session model; subagents inherit it
     await s1.prompt("hello");
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
       fauxAssistantMessage("CODER-DID-IT", { stopReason: "stop" }), // the coder subagent's answer
       fauxAssistantMessage("done", { stopReason: "stop" }), // parent closing text
     ]);
-    const h2 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" } });
+    const h2 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" } });
     const s2 = await h2.createSession();
     s2.setModel(model); // so the modelless builtin coder profile inherits the session model
     const r2 = await s2.prompt("run the demo workflow");
@@ -101,7 +102,7 @@ async function main(): Promise<void> {
     // ── Case 3: `subagentProvider: null` hides the Agent + Workflow tools ──
     offered = [];
     faux.setResponses([captureThen(fauxAssistantMessage("ok", { stopReason: "stop" }))]);
-    const h3 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" }, subagentProvider: null });
+    const h3 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" }, subagentProvider: null });
     const s3 = await h3.createSession();
     s3.setModel(model);
     await s3.prompt("hello");
@@ -116,7 +117,7 @@ async function main(): Promise<void> {
     // must leave subagents (and therefore the Agent tool) fully intact.
     offered = [];
     faux.setResponses([captureThen(fauxAssistantMessage("ok", { stopReason: "stop" }))]);
-    const h4 = createHarness({ model, repository: new DiskSessionRepository(home), workDir: work, permission: { mode: "yolo" }, workflowTool: false });
+    const h4 = createHarness({ model, harness: (s) => s.register(T.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "yolo" }, workflowTool: false });
     const s4 = await h4.createSession();
     s4.setModel(model);
     await s4.prompt("hello");

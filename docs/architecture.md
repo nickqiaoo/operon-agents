@@ -155,11 +155,19 @@ These belong to the kernel rather than a host, because skipping any one of them 
 interface Capability {
   name;  tools?;  toolProviders?;  toolFilters?;        // add/remove tools
   hooks?: Partial<LoopHooks>;                            // participate in the step machine (10 slots)
-  injectors?;  policies?;  gates?;  service?;            // injection, permission rules, arbitration, named service
-  start?(ctx, signal); stop?(signal);                    // per run
-  openSession?(ctx); closeSession?();                    // per session
+  injectors?;  policies?;  gates?;                       // injection, permission rules, arbitration
+  provides?: Provision[];                                // per session: { token, create(ctx), dispose? }
+  start?(ctx: RunContext, signal); stop?(signal);        // per run
 }
 ```
+
+A capability's session-lived state is a **provision**: `Session.open` runs each `create` in order
+and registers the result in the session scope under the provision's token (`T.Goal`, `T.Mcp`, …);
+`scope.close()` disposes them in reverse. `create` receives `{ scope, sessionId, signal }` and reads
+everything else from the scope (`T.Machine`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`, and
+whatever earlier capabilities provided). There is no separate `openSession`/`closeSession`: the
+provision IS the session-tier lifecycle, and one teardown path serves capabilities, the session's
+own objects, and the harness alike (§5.7).
 
 The ten `LoopHooks` slots: `beforeRun / beforeStep / afterStep / beforeModelRequest /
 afterModelResponse / prepareToolExecution / authorizeToolExecution / finalizeToolResult /
@@ -215,19 +223,23 @@ which is why an outer ring is required:
 | Only the harness has this | Where it shows up |
 |---|---|
 | **Another session** | `ExtensionHost.newSession / fork / openSession / listSessions`; the peers spawn factory |
-| **A process-level shared instance** | `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
+| **A process-level shared instance** | the harness-tier `Scope` (§5.7); extension services sit in it by id through `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
+| **A per-directory shared instance** | the workspace-tier `Scope`: one per working directory (or tenant / environment key), composed by the `workspace` hook — MCP connections, the skill scan, credential stores — shared by its sessions and closed with the last of them |
 | **Extension runtime** | `ExtensionRuntime` (`extensions/runtime.ts`) projects capability hooks **one by one** into extension events, giving each hook a timeout and fault isolation |
 | **File loading** | `extensions/loader.ts`: file → import → value → attach; manual approval accounted by mtime |
-| **Model provider registry** | `modelRuntime`, global to the harness |
+| **Model provider registry** | `T.ModelRuntime`, registered on the harness scope by the `harness` hook |
 | **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalMachine, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |
 
 The comment on `createHarness()` pins down its nature: **"pure composition of core primitives — no new
 engine behavior"**. The harness is not a second engine; it is a composition root.
 
-> **Why there is a local preset but no server preset** (see the header comment in `local.ts`): a
-> server preset would save three lines while forcing every session to share one `McpOAuthService` —
-> and therefore one credential store with no tenant dimension. What a server should inject is the
-> host's own business; `examples/managed-agents` shows how to call `createHarness` directly.
+> **Composition is three hooks, config is data.** `createHarness` takes engine configuration as
+> plain values (model, turn caps, work dir, permission mode) and everything with a lifetime through
+> three hooks — `harness(scope)` for process-lived objects, `workspace(scope, ctx)` for per-directory
+> ones, `session(scope, ctx)` for each session's capabilities. `createLocalHarness` is a preset that
+> turns local conventions into those hooks; a server writes its own preset the same way
+> (`examples/managed-agents`), registering per-tenant stores on the workspace scope — which is what
+> the old "one `McpOAuthService` for every session" objection was missing.
 
 ---
 
@@ -326,6 +338,34 @@ Two layers:
 > incremental lines), whereas an engine model cannot be taken apart in reverse — the asymmetry favors
 > the flat model.
 
+### 5.7 Scopes: who builds it, how many exist, how long it lives
+
+Every object with a lifetime sits in a `Scope` (`agents-core/src/scope/`), addressed by a typed token
+that declares its tier (`T.Logger` is harness-scoped, `T.McpServers` workspace-scoped, `T.Goal`
+session-scoped). Three tiers, each a scope with a parent:
+
+```
+Harness   (one per process)      T.Logger, T.SessionRepository, T.ModelRuntime, T.MachineFactory, extension create results
+ └ Workspace (one per key)        T.McpServers, T.SkillRegistry, T.McpOAuth, T.WorkspaceMachineFactory
+    └ Session (one per session)   T.Machine, T.Store, T.Events, T.Steer, T.Permission, T.Goal / T.Plan / … (provisions)
+```
+
+Four rules carry the whole design: a lookup walks UP the chain (a session reads harness services
+without anything threaded through by hand); a child that registers the same token OVERRIDES its
+parent's (`createSession({ machine })` beats the harness-level `T.MachineFactory`); `provide` is a
+default that a prior `register` silently beats (the old `a ?? b ?? new X()` chains became
+registrations at the right tier); and `close()` runs children first, then a scope's own entries in
+reverse registration order — one teardown path for capabilities, session infrastructure, workspace
+resources and extension services. Registering a token in the wrong tier throws, which is the one
+mechanism that keeps session state from leaking across sessions.
+
+Run and frame are deliberately NOT scopes: `RunState` is a snapshot the runner resolves from the
+session scope once per run, and the loop (`loop/`) never touches a scope — construction and
+lifetime are the scope's job, the hot path reads plain fields.
+
+Extension services are the one string-keyed corner (§5.5): an extension is loaded by its id and
+names what it consumes in `uses`, so `harness.services` maps those ids onto harness-tier tokens.
+
 ### 5.6 "The seam in core, the behavior in an extension" — the most useful third pattern
 
 When a feature is 99% behavior and the remaining 1% is out of reach, do not promote it to a
@@ -402,7 +442,8 @@ provides.
 | Requirement | Lands in | Example |
 |---|---|---|
 | A safety/correctness invariant (permissions, compaction, single owner) | ① kernel / ② capability | permission, compaction, SessionLock |
-| Changes run semantics, needs the compaction gate / a toolFilter / the `service` slot | ② capability | background, skills, mcp |
+| Changes run semantics, needs the compaction gate / a toolFilter / a session-lived `provides` service | ② capability | background, skills, mcp |
+| An object with a lifetime — shared by the process, by a working directory, or owned by one session | the matching scope tier (§5.7), via the `harness` / `workspace` / `session` hook | repository, MCP connections, a session's goal store |
 | Tools, injection, commands, notifications, telemetry, shared resources, external integrations | ④ extension | cron, peers, browser |
 | 99% behavior plus 1% out of reach | open the narrowest seam in core, keep the body in ④ | peers' `steerTo` |
 | Where it runs / where it is stored / which model | ⑥ adapter | sandbox, pg, provider |

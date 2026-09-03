@@ -21,6 +21,7 @@ import {
   FirecrawlProvider,
   LocalMachine,
   sinkLogger,
+  T,
   TavilySearchProvider,
   webSearchTool,
   type Tool,
@@ -61,7 +62,10 @@ const harness = createHarness({
     if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
     return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
   },
-  repository,
+  harness: (scope) => {
+    scope.register(T.SessionRepository, repository);
+    scope.register(T.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
+  },
   // The agent IS the configuration: a custom Agent replaces the builtin coding profile (and
   // its filesystem-shaped prompt) wholesale, so the analyst never hears about files or shells.
   agent: defineAgent({ name: AGENT_ID, model: MODEL, instructions: SYSTEM_PROMPT, tools }),
@@ -71,8 +75,7 @@ const harness = createHarness({
   workflowTool: false,
   // Only what a long chat needs. The task/background/skills capabilities would add tools this
   // agent has no use for.
-  capabilities: () => [compactionCapability({ maxContextTokens: 200_000 })],
-  logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
+  session: () => [compactionCapability({ maxContextTokens: 200_000 })],
   workDir: WORK,
   // Web tools are always allowed by policy; nothing else exists to ask about. If you re-enable
   // a tool that prompts (Bash, Edit), the chat has no approval surface: the session will park

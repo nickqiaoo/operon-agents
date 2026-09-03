@@ -2,24 +2,20 @@ import type { LoopHooks } from "../loop/types.ts";
 import type { PermissionPolicy } from "../permission/types.ts";
 import type { Message } from "../protocol/index.ts";
 import type { Tool } from "../tool/types.ts";
-import type { Machine } from "../tool/machine.ts";
-import type { BackgroundSpawner } from "../tool/background.ts";
-import type { EventSink } from "../events/index.ts";
-import type { AgentRecord, SessionStore } from "../store/index.ts";
-import type { SteerBus } from "../loop/steer.ts";
-import type { Responder } from "../permission/types.ts";
 import type { Injector } from "./injection.ts";
 import type { ToolProvider } from "./tool-provider.ts";
-import type { Logger } from "../logging/index.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { ThinkingLevel } from "../llm/model.ts";
 import type { ContextBreakdown } from "../agent/context-report.ts";
 import type { CompactRequestOptions, PendingCompaction } from "./compaction/index.ts";
+import type { Scope } from "../scope/scope.ts";
+import type { Token } from "../scope/token.ts";
 
 /**
  * The narrow slice of the owning Session a capability may ACT on (as opposed to observe).
- * Implemented by `Session`; handed to capabilities that participate in the run rather than
- * just watching it — today the extension runtime's `ctx.actions`.
+ * Implemented by `Session`; registered as `T.SessionControls` and handed to capabilities that
+ * participate in the run rather than just watching it — today the extension runtime's
+ * `ctx.actions`.
  *
  * Deliberately narrow: everything here is already a public Session operation, so nothing new
  * becomes reachable — a capability simply gets a typed handle instead of the whole Session.
@@ -28,9 +24,9 @@ import type { CompactRequestOptions, PendingCompaction } from "./compaction/inde
  */
 export interface SessionControls {
   /**
-   * Cancel work. Scope depends on where the controls came from: from a `CapabilityContext`
-   * (per run) this aborts THAT run and leaves the session usable; from a `SessionContext` it
-   * aborts the session. Either way the affected run(s) settle as `status: "aborted"`.
+   * Cancel work. Scope depends on where the controls came from: from a `RunContext` (per run)
+   * this aborts THAT run and leaves the session usable; from `T.SessionControls` it aborts the
+   * session. Either way the affected run(s) settle as `status: "aborted"`.
    */
   abort(reason?: string): void;
   compact(options?: CompactRequestOptions): Promise<PendingCompaction>;
@@ -39,39 +35,49 @@ export interface SessionControls {
   setThinking(level: ThinkingLevel): void;
 }
 
-export interface CapabilityContext {
+/**
+ * What a capability's `Provision.create` receives: the session scope (everything the session
+ * registered — `T.Machine`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`,
+ * `T.SessionControls`, plus whatever earlier capabilities provided) and the two values every
+ * provision needs. Everything else is a `ctx.scope.get(T.…)` away.
+ */
+export interface ProvisionContext {
+  readonly scope: Scope;
   readonly sessionId: string;
-  readonly machine: Machine;
-  readonly store?: SessionStore;
-  readonly events?: EventSink;
-  readonly responder?: Responder;
+  /** The session's signal (aborts when the session is cancelled). */
   readonly signal: AbortSignal;
-  readonly background?: BackgroundSpawner;
-  readonly injection?: import("./injection.ts").InjectionManager;
-  readonly steer?: SteerBus;
-  readonly logger?: Logger;
-  readonly controls?: SessionControls;
+}
+
+/**
+ * A service a capability contributes, declaring where it lives (the token's scope), how it is
+ * built and how it is torn down. `Session.open` runs `create` for each capability in order and
+ * registers the result under `token`; `scope.close()` disposes it in reverse registration order.
+ *
+ * `create` may be async (it typically folds the session log, attaches to the store, or connects
+ * to something). `dispose` defaults to `instance.close()` when present.
+ */
+export interface Provision<T = unknown> {
+  readonly token: Token<T>;
+  create(ctx: ProvisionContext): T | Promise<T>;
+  dispose?(instance: T): void | Promise<void>;
+}
+
+/** What a capability's per-run `start` (and its tool providers) receive. */
+export interface RunContext {
+  readonly scope: Scope;
+  readonly sessionId: string;
+  /** Aborts when this RUN is cancelled (downstream of the session signal). */
+  readonly signal: AbortSignal;
+  readonly injection: import("./injection.ts").InjectionManager;
   /** Gates contributed by every capability in this run, for whoever needs to consult them. */
-  readonly gates?: AssembledGates;
+  readonly gates: AssembledGates;
+  /** Same operations as the session's controls, except `abort` is scoped to this run. */
+  readonly controls: SessionControls;
 }
 
 /** Collected gate implementations, in capability registration order. */
 export interface AssembledGates {
   readonly compaction: readonly CompactionGate[];
-}
-
-export interface SessionContext {
-  readonly sessionId: string;
-  readonly machine: Machine;
-  readonly store?: SessionStore;
-  readonly events: EventSink;
-  readonly signal: AbortSignal;
-  readonly steer: SteerBus;
-  readonly controls?: SessionControls;
-  /** The session's records (append order), read once at open and memoized, so log-fold
-   *  capabilities (goal/plan/todo) share one read instead of each calling `readLog`.
-   *  Use `readSessionLog(ctx)` — it falls back to a direct read when this is absent. */
-  readonly logRecords?: () => Promise<readonly AgentRecord[]>;
 }
 
 /**
@@ -121,6 +127,13 @@ export interface CapabilityGates {
   compaction?: CompactionGate;
 }
 
+/**
+ * A detachable part of the engine. Two tiers of lifecycle:
+ *  - SESSION — `provides`: the services this capability contributes for the session's lifetime,
+ *    each registered in the session scope by `Session.open` and disposed by `scope.close()`.
+ *  - RUN — `start` / `stop`: per-run wiring, driven by the assembler.
+ * Everything else (tools, hooks, injectors, policies, gates) is static contribution.
+ */
 export interface Capability {
   readonly name: string;
   readonly tools?: readonly Tool[];
@@ -131,17 +144,16 @@ export interface Capability {
   readonly policies?: readonly PermissionPolicy[];
   readonly hooks?: Partial<LoopHooks>;
   readonly injectors?: readonly Injector[];
-  readonly service?: unknown;
+  /** Session-lived services, in dependency order. See {@link Provision}. */
+  readonly provides?: readonly Provision[];
   /** Per-run startup. `signal` aborts when the assembler's start timeout expires — the
    *  timeout itself still wins the race (the capability is marked absent), but a
    *  signal-respecting implementation can release whatever it was holding. */
-  start?(ctx: CapabilityContext, signal?: AbortSignal): Promise<void> | void;
+  start?(ctx: RunContext, signal?: AbortSignal): Promise<void> | void;
   /** Per-run teardown. `signal` aborts when the stop timeout expires; the run does not
    *  wait past the timeout either way, so use the signal to abandon slow flushes
    *  instead of leaking them into the background. */
   stop?(signal?: AbortSignal): Promise<void> | void;
-  openSession?(ctx: SessionContext): Promise<void> | void;
-  closeSession?(): Promise<void> | void;
 }
 
 export interface CapabilityDiagnostic {

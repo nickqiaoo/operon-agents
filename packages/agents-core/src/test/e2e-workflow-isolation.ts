@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,8 +100,8 @@ async function testBackground(): Promise<void> {
   try {
     const store = new DiskSessionStore(join(root, "s"));
     const mgr = new BackgroundManager();
-    const session = await Session.open({ store, background: mgr, capabilities: [backgroundCapability(mgr)] });
-    const runner = new Runner({ background: mgr, capabilities: [backgroundCapability(mgr)] });
+    const session = await openTestSession({ store, background: mgr, capabilities: [backgroundCapability(mgr)] });
+    const runner = testRunner({ background: mgr, capabilities: [backgroundCapability(mgr)] });
     const faux = registerFauxProvider();
     const model = faux.getChatModel()!;
     const worker = defineAgent({ name: "worker", model, instructions: "Do." });
@@ -150,8 +151,8 @@ async function testFailedWorkflowClosesItsJournal(): Promise<void> {
   try {
     const store = new DiskSessionStore(join(root, "s"));
     const mgr = new BackgroundManager();
-    const session = await Session.open({ store, background: mgr, capabilities: [backgroundCapability(mgr)] });
-    const runner = new Runner({ background: mgr, capabilities: [backgroundCapability(mgr)] });
+    const session = await openTestSession({ store, background: mgr, capabilities: [backgroundCapability(mgr)] });
+    const runner = testRunner({ background: mgr, capabilities: [backgroundCapability(mgr)] });
     const faux = registerFauxProvider();
     const model = faux.getChatModel()!;
     const worker = defineAgent({ name: "worker", model, instructions: "Do." });
@@ -191,7 +192,7 @@ async function testStorelessWorkflowIsRejected(): Promise<void> {
     fauxAssistantMessage(fauxToolCall("Workflow", { script, run_in_background: true }), { stopReason: "toolUse" }),
     fauxAssistantMessage("handled", { stopReason: "stop" }),
   ]);
-  const result = await new Runner({ background: mgr, capabilities: [backgroundCapability(mgr)] }).run(mainAgent, "go");
+  const result = await testRunner({ background: mgr, capabilities: [backgroundCapability(mgr)] }).run(mainAgent, "go");
   faux.unregister();
   check(
     "storeless workflow is rejected before a task id is issued",

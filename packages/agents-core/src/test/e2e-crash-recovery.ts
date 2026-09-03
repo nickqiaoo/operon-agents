@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import {
   BackgroundManager,
   MemoryStore,
@@ -101,8 +102,8 @@ async function main(): Promise<void> {
     },
   ]);
   const manager = new BackgroundManager();
-  const session = await Session.open({ store, capabilities: [backgroundCapability(manager)] });
-  const runner = new Runner();
+  const session = await openTestSession({ store, capabilities: [backgroundCapability(manager)] });
+  const runner = testRunner();
   const agent = defineAgent({ name: "main", model: faux.getChatModel()!, instructions: "coordinate" });
   const result = await runner.run(agent, "continue", { session });
   faux.unregister();

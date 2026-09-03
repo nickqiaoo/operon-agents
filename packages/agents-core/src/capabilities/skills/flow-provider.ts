@@ -12,7 +12,7 @@ export function flowSkillToolName(skillName: string): string {
   return `skill_${suffix}`;
 }
 
-function flowSkillTool(skill: SkillDefinition, registry: SkillRegistry, executor?: FlowSkillExecutor): Tool {
+function flowSkillTool(skill: SkillDefinition, registry: SkillRegistry, executor: FlowSkillExecutor | undefined, sessionId: string): Tool {
   const toolName = flowSkillToolName(skill.name);
   return defineTool({
     name: toolName,
@@ -42,7 +42,7 @@ function flowSkillTool(skill: SkillDefinition, registry: SkillRegistry, executor
             isError: true,
           };
         }
-        const instructions = registry.renderSkillPrompt(skill, "");
+        const instructions = registry.renderSkillPrompt(skill, "", sessionId);
         const output = await executor({ skill, instructions, input: args.input, signal: ctx.signal });
         return { content: [{ type: "text", text: output }], details: { skill: skill.name, source: skill.source } };
       },
@@ -53,6 +53,6 @@ function flowSkillTool(skill: SkillDefinition, registry: SkillRegistry, executor
 export function flowSkillProvider(registry: SkillRegistry, executor?: FlowSkillExecutor): ToolProvider {
   return {
     id: "skill-flow",
-    listTools: () => registry.listFlowSkills().map((skill) => flowSkillTool(skill, registry, executor)),
+    listTools: (ctx) => registry.listFlowSkills().map((skill) => flowSkillTool(skill, registry, executor, ctx.sessionId)),
   };
 }

@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 // On reopening a session, background subagents that were spawned but never settled (their process
 // died) are reclassified as the terminal `lost` and surfaced. Subagent lifecycle now lives in the
 // durable TASK STORE (not a fold over the conversation): a prior process wrote a PersistedTask per
@@ -44,7 +45,7 @@ async function main(): Promise<void> {
   sink.subscribe((e) => {
     events.push(e);
   });
-  const session = await Session.open({ store, events: sink, capabilities: [backgroundCapability()] });
+  const session = await openTestSession({ store, events: sink, capabilities: [backgroundCapability()] });
 
   const listed = await session.listSubagents();
   check("store: both background subagents are listed", listed.length === 2);

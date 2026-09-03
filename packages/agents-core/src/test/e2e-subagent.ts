@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,8 +31,8 @@ function agentIdOf(messages: readonly Message[]): string | undefined {
 // ── A+B+C: spawn returns an id, resume reloads the SAME shard and continues it ──
 async function testResume(root: string): Promise<void> {
   const store = new DiskSessionStore(join(root, "resume"));
-  const session = await Session.open({ store });
-  const runner = new Runner({});
+  const session = await openTestSession({ store });
+  const runner = testRunner({});
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const researcher = defineAgent({ name: "researcher", model, instructions: "Research and remember." });
@@ -82,8 +83,8 @@ async function testResume(root: string): Promise<void> {
 // ── Error: resuming an unknown id is reported, not crashed ──
 async function testUnknownId(root: string): Promise<void> {
   const store = new DiskSessionStore(join(root, "unknown"));
-  const session = await Session.open({ store });
-  const runner = new Runner({});
+  const session = await openTestSession({ store });
+  const runner = testRunner({});
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const sub = defineAgent({ name: "researcher", model, instructions: "x" });
@@ -100,7 +101,7 @@ async function testUnknownId(root: string): Promise<void> {
 
 // ── Error: resume without a durable store is refused (foundation requires persistence) ──
 async function testNoStore(): Promise<void> {
-  const runner = new Runner({}); // owned session, no store
+  const runner = testRunner({}); // owned session, no store
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const sub = defineAgent({ name: "researcher", model, instructions: "x" });
@@ -129,7 +130,7 @@ async function testProfiles(root: string): Promise<void> {
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const store = new DiskSessionStore(join(root, "prof-store"));
-  const session = await Session.open({ store });
+  const session = await openTestSession({ store });
   const built = await buildAgentFromProfile(profiles["analyst"]!, { resolveModel: async () => model });
   const rendered = await built.resolveInstructions({
     sessionId: "t",
@@ -144,7 +145,7 @@ async function testProfiles(root: string): Promise<void> {
   check("profile: provider lists the agent", (await provider.list()).some((a) => a.name === "analyst"));
 
   // The model spawns a profile-based subagent type that was never statically declared.
-  const runner = new Runner({ subagentProvider: provider });
+  const runner = testRunner({ subagentProvider: provider });
   const mainAgent = defineAgent({ name: "main", model, instructions: "Coordinate." }); // no static subagents
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "analyst", prompt: "Analyze the data.", description: "analyze" }), { stopReason: "toolUse" }),

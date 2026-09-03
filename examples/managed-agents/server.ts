@@ -14,6 +14,7 @@ import {
   McpOAuthService,
   MemoryMcpCredentialStore,
   sinkLogger,
+  T,
 } from "operon-agents";
 import {
   allowAllRequests,
@@ -46,13 +47,16 @@ const harness = createHarness({
     if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
     return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
   },
-  repository,
-  machine: new LocalMachine(WORK),
-  // Diagnostics go to stdout for the platform's log collector, not to a local rotating file.
-  logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
+  // Process-tier objects go on the harness scope: the store, the shared machine, and the logger
+  // (stdout for the platform's log collector, not a local rotating file).
+  harness: (scope) => {
+    scope.register(T.SessionRepository, repository);
+    scope.register(T.MachineFactory, new LocalMachine(WORK), { owned: false });
+    scope.register(T.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
+  },
   // Built per session, so the OAuth service (and its credential store) is never shared
   // across sessions — the reason the old preset's shared instance was a problem.
-  capabilities: () =>
+  session: () =>
     defaultCapabilities({
       oauthService: new McpOAuthService({ store: new MemoryMcpCredentialStore() }),
     }),

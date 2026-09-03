@@ -1,5 +1,6 @@
 import type { PermissionPolicy } from "../../permission/types.ts";
 import type { Capability } from "../capability.ts";
+import { T } from "../../scope/tokens.ts";
 import { BoundaryInjector, type InjectionContext, type InjectionResult } from "../injection.ts";
 import { HookEngine } from "./engine.ts";
 import type { HookDef } from "./types.ts";
@@ -72,21 +73,26 @@ export function userHooksCapability(hooks: readonly HookDef[]): Capability {
         return undefined;
       },
     },
-    service: engine,
-    openSession: async (ctx) => {
-      engine.attachMachine(ctx.machine);
-      if (engine.has("SessionStart")) {
-        sessionStartOutput = await engine
-          .trigger("SessionStart", { inputData: { session_id: ctx.sessionId }, signal: ctx.signal })
-          .catch(() => null);
-      }
-      unsubscribe = ctx.events.subscribe((event) => observeShellHookEvent(engine, event));
-    },
-    closeSession: () => {
-      unsubscribe?.();
-      unsubscribe = undefined;
-      if (engine.has("SessionEnd")) engine.fireAndForgetTrigger("SessionEnd", {});
-    },
+    provides: [
+      {
+        token: T.HookEngine,
+        create: async (ctx) => {
+          engine.attachMachine(ctx.scope.require(T.Machine));
+          if (engine.has("SessionStart")) {
+            sessionStartOutput = await engine
+              .trigger("SessionStart", { inputData: { session_id: ctx.sessionId }, signal: ctx.signal })
+              .catch(() => null);
+          }
+          unsubscribe = ctx.scope.require(T.Events).subscribe((event) => observeShellHookEvent(engine, event));
+          return engine;
+        },
+        dispose: () => {
+          unsubscribe?.();
+          unsubscribe = undefined;
+          if (engine.has("SessionEnd")) engine.fireAndForgetTrigger("SessionEnd", {});
+        },
+      },
+    ],
   };
 }
 

@@ -1,6 +1,7 @@
 import type { ShouldContinueAfterStopHook } from "../../loop/types.ts";
 import { readSessionLog } from "../capability-state.ts";
 import type { Capability } from "../capability.ts";
+import { T } from "../../scope/tokens.ts";
 import { GoalStore } from "./goal-store.ts";
 import { getGoalTool, setGoalBudgetTool, updateGoalTool } from "./tools.ts";
 import { GoalInjector } from "./injector.ts";
@@ -18,17 +19,23 @@ function goalDriver(store: GoalStore): ShouldContinueAfterStopHook {
   };
 }
 
+/** `store` may be pre-built by an embedder (or a test) that wants to hold the instance. */
 export function goalCapability(store: GoalStore = new GoalStore()): Capability {
   return {
     name: "goal",
     tools: [updateGoalTool(store), getGoalTool(store), setGoalBudgetTool(store)],
-    service: store,
     injectors: [new GoalInjector(store)],
     hooks: { shouldContinueAfterStop: goalDriver(store) },
-    // Rebuild the goal (incl. turn/token counters) by replaying the session log, so resume
-    // and fork restore it instead of starting from an empty in-memory store.
-    openSession: async (ctx) => {
-      store.reconstruct(await readSessionLog(ctx));
-    },
+    provides: [
+      {
+        token: T.Goal,
+        // Rebuild the goal (incl. turn/token counters) by replaying the session log, so resume
+        // and fork restore it instead of starting from an empty in-memory store.
+        create: async (ctx) => {
+          store.reconstruct(await readSessionLog(ctx));
+          return store;
+        },
+      },
+    ],
   };
 }

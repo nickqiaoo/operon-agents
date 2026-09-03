@@ -17,7 +17,6 @@ export class SkillNotFoundError extends Error {
 
 export interface SkillRegistryOptions {
   readonly onWarning?: (message: string, cause?: unknown) => void;
-  readonly sessionId?: string;
 }
 
 export class SkillRegistry implements SkillCatalog {
@@ -25,15 +24,9 @@ export class SkillRegistry implements SkillCatalog {
   private readonly roots: string[] = [];
   private readonly skipped: SkippedSkill[] = [];
   private readonly onWarning: (message: string, cause?: unknown) => void;
-  private sessionId?: string;
 
   constructor(options: SkillRegistryOptions = {}) {
     this.onWarning = options.onWarning ?? (() => {});
-    this.sessionId = options.sessionId;
-  }
-
-  setSessionId(sessionId: string): void {
-    this.sessionId = sessionId;
   }
 
   async loadRoots(machine: Machine, roots: readonly SkillRoot[]): Promise<void> {
@@ -88,10 +81,12 @@ export class SkillRegistry implements SkillCatalog {
     return [...this.skipped];
   }
 
-  renderSkillPrompt(skill: SkillDefinition, rawArgs: string): string {
+  /** `sessionId` fills `${SESSION_ID}`: the registry is shareable across sessions, so the
+   *  caller (a session's tool or service) supplies its own. */
+  renderSkillPrompt(skill: SkillDefinition, rawArgs: string, sessionId?: string): string {
     const content = expandSkillParameters(skill.content, rawArgs, {
       skillDir: skill.dir,
-      sessionId: this.sessionId,
+      sessionId,
       argumentNames: skillArgumentNames(skill.metadata),
     });
     const plugin = skill.plugin;

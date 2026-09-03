@@ -29,6 +29,7 @@ export * from "./store/index.ts";
 export * from "./logging/index.ts";
 export * from "./net/index.ts";
 export * from "./tracing/index.ts";
+export * from "./scope/index.ts";
 export * from "./agent/index.ts";
 export * from "./capabilities/index.ts";
 export * from "./config/index.ts";
@@ -64,5 +65,5 @@ export type {
 } from "./plugins/index.ts";
 // The per-workspace MCP capability, exposed so `defaultCapabilities` can build it from
 // workspace + plugin servers (it lives under the ./mcp subtree, not the main capabilities barrel).
-export { mcpServersCapability, McpOAuthService, JsonFileStore, MemoryMcpCredentialStore } from "./mcp/index.ts";
+export { mcpServersCapability, createMcpServers, mcpSessionCapability, McpOAuthService, JsonFileStore, MemoryMcpCredentialStore } from "./mcp/index.ts";
 export type { McpServersCapabilityOptions, McpOAuthServiceOptions, McpCredentialStore } from "./mcp/index.ts";

@@ -1,49 +1,40 @@
-import type { Machine, MachineFactory, MachineOpenContext } from "../tool/machine.ts";
+import type { Machine } from "../tool/machine.ts";
 import { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { ThinkingLevel } from "../llm/model.ts";
 import type { PermissionMode, PermissionPolicy, Responder } from "../permission/types.ts";
-import { PermissionManager, type PermissionManagerOptions } from "../permission/manager.ts";
+import { PermissionManager } from "../permission/manager.ts";
 import { STAGED_POLICY_SLOTS } from "../permission/policies.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import { NullMachine } from "../tool/machine-null.ts";
 import type {
-  BackgroundManager,
   BackgroundTaskInfo,
   BackgroundTaskOutputDelta,
   BackgroundTaskOutputSnapshot,
   BackgroundTaskStatus,
 } from "../capabilities/background/index.ts";
-import type { GoalSnapshot, GoalStore } from "../capabilities/goal/index.ts";
-import type { WorkflowManager } from "../capabilities/workflow/index.ts";
+import type { GoalSnapshot } from "../capabilities/goal/index.ts";
+import { WorkflowManager } from "./workflow/manager.ts";
 import type { WorkflowSnapshot, WorkflowSnapshotStatus } from "./workflow/snapshot.ts";
 import type { ContextBreakdown } from "./context-report.ts";
-import type { PlanData, PlanMode } from "../capabilities/plan/index.ts";
-import type { CompactRequestOptions, CompactionService, PendingCompaction } from "../capabilities/compaction/index.ts";
-import type {
-  ActivateSkillRequest,
-  SkillActivationResult,
-  SkillSummary,
-  SkillsService,
-} from "../capabilities/skills/index.ts";
-import type { PluginInfo, PluginManager, PluginSummary, ReloadSummary } from "../plugins/index.ts";
-import {
-  type EventPublicationMode,
-  type EventSink,
-  joinAddress,
-  ListenerSink,
-  SessionEventPublisher,
-} from "../events/index.ts";
+import type { PlanData } from "../capabilities/plan/index.ts";
+import type { CompactRequestOptions, PendingCompaction } from "../capabilities/compaction/index.ts";
+import type { ActivateSkillRequest, SkillActivationResult, SkillSummary } from "../capabilities/skills/index.ts";
+import type { PluginInfo, PluginSummary, ReloadSummary } from "../plugins/index.ts";
+import { type EventSink, joinAddress, ListenerSink, SessionEventPublisher } from "../events/index.ts";
 import { type Logger, envLogger, noopLogger } from "../logging/index.ts";
 import { type AgentRecord, DEFAULT_ADDRESS, type SessionStore } from "../store/index.ts";
 import { eventSinkTracingBridge, type TracingProcessor } from "../tracing/index.ts";
 import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
-import type { McpServersHandle, McpServerView, MCPTool } from "../mcp/index.ts";
+import type { McpServerView, MCPTool } from "../mcp/index.ts";
 import { SteerBus, steerOriginToPromptOrigin, type SteerContent, type SteerOrigin } from "../loop/steer.ts";
-import type { Capability, CapabilityDiagnostic, SessionContext, SessionControls } from "../capabilities/capability.ts";
+import type { Capability, CapabilityDiagnostic, ProvisionContext, SessionControls } from "../capabilities/capability.ts";
 import { type SubagentRecord, type SubagentStatus } from "./subagent.ts";
 import { SystemPromptContextCache, type SystemPromptContext } from "./instruction-context.ts";
+import { Scope } from "../scope/scope.ts";
+import type { Token } from "../scope/token.ts";
+import { T, type SessionLogReader } from "../scope/tokens.ts";
 
 let CLOSE_TIMEOUT_MS = 5_000;
 /** store.flush persists data (vs. telemetry), so it gets a longer grace. The run journal
@@ -66,31 +57,14 @@ export function newSessionId(): string {
   return `s${Date.now().toString(36)}-${sessionCounter.toString(36)}`;
 }
 
-export interface SessionConfig {
-  /**
-   * The machine this session operates. Pass a {@link Machine} directly, or a
-   * {@link MachineFactory} when it can only be built once the session id is known.
-   * Omitted → a {@link NullMachine}: a stateless session with no filesystem, where any
-   * file tool that slips through fails loudly instead of touching the host disk.
-   *
-   * Either way the session only OPERATES the machine — disposal stays with whoever
-   * created it. See {@link MachineFactory}.
-   */
-  readonly machine?: Machine | MachineFactory;
-  readonly store?: SessionStore;
-  readonly events?: EventSink;
-  /** `immediate` is optimized for an in-process UI. `committed` makes one ordered stream in
-   *  which record-backed events are emitted only after durable append succeeds. */
-  readonly eventPublication?: EventPublicationMode;
-  readonly tracing?: TracingProcessor;
-  readonly responder?: Responder;
-  readonly permission?: PermissionManagerOptions;
+/**
+ * What `Session.open` takes besides the scope. Everything with a lifetime — machine, store,
+ * events, steer, responder, logger, permission options — is READ FROM THE SCOPE, registered
+ * there by whoever opened it (the harness, a runner, a test). `open` only fills the gaps with
+ * defaults (`provide`), never overrides what the creator registered.
+ */
+export interface SessionOpenOptions {
   readonly capabilities?: readonly Capability[];
-  readonly steer?: SteerBus;
-  readonly background?: BackgroundSpawner;
-  readonly sessionId?: string;
-  readonly signal?: AbortSignal;
-  readonly logger?: Logger;
   /**
    * The session's full append log, pre-read by the caller. `open` then skips its own
    * `readLog` and every open-time consumer (log-fold capabilities, context pre-build)
@@ -100,21 +74,6 @@ export interface SessionConfig {
    * Must be the complete log (all addresses, append order) as `readRecords()` returns it.
    */
   readonly preloadedLog?: readonly AgentRecord[];
-}
-
-/**
- * Thrown by `Session`'s capability-backed convenience methods when the capability they
- * wrap is not open on this session. Detect with `instanceof`; `capability` names the
- * missing one. The probe tier never throws — the getters (`session.cron`, `.goal`, …)
- * return `undefined` instead.
- */
-export class CapabilityMissingError extends Error {
-  readonly capability: string;
-  constructor(capability: string) {
-    super(`Session has no open "${capability}" capability.`);
-    this.name = "CapabilityMissingError";
-    this.capability = capability;
-  }
 }
 
 /** The current owner and root conversation shard for the next user prompt. */
@@ -175,7 +134,8 @@ export interface SessionPort {
   readonly thinkingSetting: ThinkingLevel | undefined;
   /** Compaction service view: reserved headroom plus full-compaction invalidation revision. */
   readonly compaction: { readonly reservedContextTokens: number; readonly revision: number } | undefined;
-  readonly workflow: WorkflowManager | undefined;
+  /** Always present: the workflow capability's manager, or the session's in-memory fallback. */
+  readonly workflow: WorkflowManager;
   resolveSystemPromptContext(machine: Machine): Promise<SystemPromptContext>;
   recordContextBreakdown(breakdown: ContextBreakdown): void;
   flushEvents(): Promise<void>;
@@ -186,27 +146,28 @@ export interface SessionPort {
 }
 
 /**
- * Capability access on a session has two tiers, one rule each:
- *  - PROBE — the service getters (`session.cron`, `.goal`, `.plan`, `.backgroundManager`,
- *    `.mcp`, …) return `undefined` when that capability is not open. Use these to feature-test.
- *  - REQUIRE — the convenience wrappers (`createCronTask()`, `compact()`, `listSkills()`, …)
- *    assume the capability and throw {@link CapabilityMissingError} when it is missing.
+ * Service access on a session has two tiers, one rule each:
+ *  - PROBE — `session.get(T.X)` returns `undefined` when that service is not registered
+ *    (the capability is not open). Use it to feature-test.
+ *  - REQUIRE — `session.require(T.X)` and the convenience wrappers (`createCronTask()`,
+ *    `compact()`, `listSkills()`, …) assume the service and throw `ServiceUnavailableError`
+ *    when it is missing.
  * The only exceptions are list views documented as degrading to empty when the capability
  * is off (`listWorkflows`, `listSubagents`, `listMcpServers`) — views over durable state
  * that stay meaningful on a session opened without the capability.
+ *
+ * The session OWNS its scope: `close()` closes it, disposing every service registered there
+ * (capability provisions first, in reverse order, then the infrastructure).
  */
 export class Session implements SessionPort {
   readonly id: string;
+  /** The session-tier scope: every session-lived object, registered by the opener or by `open`. */
+  readonly scope: Scope;
   readonly machine: Machine;
   readonly store?: SessionStore;
   readonly events: EventSink;
   private readonly eventPublisher: SessionEventPublisher;
   readonly responder?: Responder;
-  private readonly permissionOptions?: PermissionManagerOptions;
-  /** Session-lived permission manager: one policy chain + approval memory +
-   *  mode for the whole session. Constructed in `openCapabilities` (needs capability policy
-   *  slots and the replayed log); runs reference it instead of building their own. */
-  private _permission!: PermissionManager;
   readonly steer: SteerBus;
   readonly signal: AbortSignal;
   /** Upstream of `signal`. Fires only via `abort()`; a host signal aborts independently. */
@@ -215,9 +176,7 @@ export class Session implements SessionPort {
   private readonly tracing?: TracingProcessor;
   private readonly unsubscribeTracing?: () => void;
 
-  private readonly injectedBackground?: BackgroundSpawner;
   private readonly allCapabilities: readonly Capability[];
-  private readonly services = new Map<string, unknown>();
   // Runtime prompt data is live-Session state, not Agent state: machine identity + cwd isolate
   // root/subagent/worktree frames, and the date stays fixed for the Session's lifetime.
   private readonly systemPromptContexts = new SystemPromptContextCache();
@@ -234,7 +193,7 @@ export class Session implements SessionPort {
   // has not "read" what its parent read, so ledgers are never shared across addresses.
   private readonly fileLedgers = new Map<string, FileFreshnessLedger>();
   private modelOverride?: string | ChatModel;
-  /** Caller-supplied one-shot log for open (see SessionConfig.preloadedLog); cleared after
+  /** Caller-supplied one-shot log for open (see SessionOpenOptions.preloadedLog); cleared after
    *  openCapabilities so the array itself is not pinned for the session's lifetime. */
   private preloadedLog?: readonly AgentRecord[];
   private thinkingOverride?: ThinkingLevel;
@@ -246,30 +205,25 @@ export class Session implements SessionPort {
   // Undefined until the first turn assembles a request.
   private lastContextBreakdown?: ContextBreakdown;
 
-  private constructor(
-    cfg: SessionConfig,
-    id: string,
-    eventPublisher: SessionEventPublisher,
-    steer: SteerBus,
-    signal: AbortSignal,
-    machine: Machine,
-    ownController: AbortController,
-  ) {
+  private constructor(scope: Scope, id: string, signal: AbortSignal, ownController: AbortController, opts: SessionOpenOptions) {
+    this.scope = scope;
     this.id = id;
-    this.machine = machine;
+    this.signal = signal;
     this.ownController = ownController;
-    this.eventPublisher = eventPublisher;
-    this.store = eventPublisher.store;
-    this.events = eventPublisher;
-    this.tracing = cfg.tracing;
-    this.unsubscribeTracing = cfg.tracing === undefined ? undefined : eventSinkTracingBridge(this.events, cfg.tracing);
-    this.responder = cfg.responder;
-    this.permissionOptions = cfg.permission;
-    this.steer = steer;
+    this.machine = scope.require(T.Machine);
+    this.eventPublisher = scope.require(T.EventPublisher);
+    // The publishing wrapper around `T.Store`: record-backed events surface on `events` when
+    // the append commits, so everything in the session writes through THIS store.
+    this.store = this.eventPublisher.store;
+    this.events = this.eventPublisher;
+    this.tracing = scope.get(T.Tracing);
+    this.unsubscribeTracing = this.tracing === undefined ? undefined : eventSinkTracingBridge(this.events, this.tracing);
+    this.responder = scope.get(T.Responder);
+    this.steer = scope.require(T.Steer);
     // Every enqueue — user steer/follow-up, cron fire, background settle — surfaces on the
     // event stream, so clients can render a pending queue and later match `origin.steerId`
     // on the consuming `message.appended` to know when the model actually saw it.
-    steer.setEnqueueListener((item, channel) => {
+    this.steer.setEnqueueListener((item, channel) => {
       void this.events.emit({
         type: "steer.queued",
         steerId: item.id,
@@ -280,55 +234,72 @@ export class Session implements SessionPort {
         sessionId: id,
       });
     });
-    this.injectedBackground = cfg.background;
-    this.signal = signal;
     // Env fallback (`AGENTS_LOG`) is resolved here so every entry point — direct `Session.open`,
-    // the Runner's ephemeral session, or the harness — honors it from one place.
-    this.logger = cfg.logger ?? envLogger() ?? noopLogger;
-    this.allCapabilities = cfg.capabilities ?? [];
-    this.preloadedLog = cfg.preloadedLog;
+    // the Runner's ephemeral session, or the harness — honors it from one place. The harness
+    // tier normally provides `T.Logger`; a parentless session scope has nothing above it.
+    this.logger = scope.get(T.Logger) ?? envLogger() ?? noopLogger;
+    this.allCapabilities = opts.capabilities ?? [];
+    this.preloadedLog = opts.preloadedLog;
   }
 
-  static async open(cfg: SessionConfig): Promise<Session> {
-    const events = cfg.events ?? new ListenerSink();
-    const steer = cfg.steer ?? new SteerBus();
+  /**
+   * Open a session on a session-tier scope. The opener registers what it decides (`T.Machine`,
+   * `T.Store`, `T.Events`, `T.Responder`, `T.PermissionOptions`, `T.HostSignal`, `T.SessionId`, …);
+   * `open` provides the defaults for whatever is missing, builds the session's own objects
+   * (signal, event publisher, log reader, controls), runs every capability's provisions in
+   * order, then builds the permission manager. From here on the session owns the scope.
+   */
+  static async open(scope: Scope, opts: SessionOpenOptions = {}): Promise<Session> {
+    if (scope.kind !== "session") throw new Error(`Session.open needs a session scope, got a ${scope.kind} scope`);
+    scope.provide(T.SessionId, () => newSessionId());
+    const id = scope.require(T.SessionId);
     // The session owns a cancel handle of its own, downstream of whatever the host passed in:
     // `session.abort()` stops the session without taking the host's signal away from it, and a
     // host abort still propagates. `AbortSignal.any` owns the listener lifetime for us.
     const ownController = new AbortController();
-    const signal = cfg.signal === undefined
-      ? ownController.signal
-      : AbortSignal.any([cfg.signal, ownController.signal]);
-    const id = cfg.sessionId ?? newSessionId();
-    const eventPublisher = new SessionEventPublisher(id, events, cfg.store, cfg.eventPublication ?? "immediate");
-    const machine = await resolveMachine(cfg, { sessionId: id, signal });
-    const session = new Session(cfg, id, eventPublisher, steer, signal, machine, ownController);
+    const host = scope.get(T.HostSignal);
+    const signal = host === undefined ? ownController.signal : AbortSignal.any([host, ownController.signal]);
+    scope.register(T.SessionSignal, signal);
+    scope.provide(T.Events, () => new ListenerSink());
+    scope.provide(T.Steer, () => new SteerBus());
+    // Machine: the opener's registration wins; else a workspace- or harness-level factory
+    // (resolved here because it needs the session id + signal, and `provide` is sync); else a
+    // NullMachine — a stateless session with no filesystem, where any file tool that slips
+    // through fails loudly instead of touching the host disk. The session only OPERATES the
+    // machine — disposal stays with whoever created it (`owned: false`).
+    if (!scope.hasLocal(T.Machine)) {
+      const factory = scope.get(T.SessionMachineFactory) ?? scope.get(T.WorkspaceMachineFactory) ?? scope.get(T.MachineFactory);
+      if (factory !== undefined) {
+        const machine = typeof factory === "function" ? await factory({ sessionId: id, signal }) : factory;
+        scope.register(T.Machine, machine, { owned: false });
+      }
+    }
+    scope.provide(T.Machine, () => new NullMachine());
+    scope.provide(T.EventPublisher, (s) =>
+      new SessionEventPublisher(id, s.require(T.Events), s.get(T.StoreBackend), s.get(T.SessionEventPublication) ?? s.get(T.EventPublication) ?? "immediate"),
+    );
+    const session = new Session(scope, id, signal, ownController, opts);
+    // `T.Store` is the publishing wrapper — what capabilities, the loop and the host write through.
+    if (session.store !== undefined) scope.register(T.Store, session.store, { owned: false });
+    scope.register(T.SessionControls, session.controls());
     await session.openCapabilities();
     return session;
   }
 
   private async openCapabilities(): Promise<void> {
-    // Shared restore: read the log at most once and
-    // let every log-fold capability (goal/plan/todo) reconstruct from that one read via
-    // `readSessionLog(ctx)`, then reuse it to pre-build the main conversation context — instead
-    // of each capability, plus the first run's `replayContext`, re-reading the log separately.
-    // A caller-preloaded log (SessionConfig.preloadedLog) IS that one read, done outside.
+    // Shared restore: read the log at most once and let every log-fold capability
+    // (goal/plan/todo) reconstruct from that one read via `T.SessionLog`, then reuse it to
+    // pre-build the main conversation context — instead of each capability, plus the first
+    // run's `replayContext`, re-reading the log separately. A caller-preloaded log IS that
+    // one read, done outside.
     let log: readonly AgentRecord[] | undefined = this.preloadedLog;
     this.preloadedLog = undefined;
-    const logRecords = async (): Promise<readonly AgentRecord[]> => {
+    const logRecords: SessionLogReader = async () => {
       if (log === undefined) log = await readLog(this.store);
       return log;
     };
-    const ctx: SessionContext = {
-      sessionId: this.id,
-      machine: this.machine,
-      store: this.store,
-      events: this.events,
-      signal: this.signal,
-      steer: this.steer,
-      controls: this.controls(),
-      logRecords,
-    };
+    this.scope.register(T.SessionLog, logRecords);
+    const ctx: ProvisionContext = { scope: this.scope, sessionId: this.id, signal: this.signal };
     const opened: Capability[] = [];
     const seen = new Set<string>();
     for (const cap of this.allCapabilities) {
@@ -343,23 +314,33 @@ export class Session implements SessionPort {
       }
       seen.add(cap.name);
       try {
-        if (cap.openSession) await cap.openSession(ctx);
+        for (const provision of cap.provides ?? []) {
+          const instance = await provision.create(ctx);
+          this.scope.register(
+            provision.token,
+            instance,
+            provision.dispose !== undefined ? { dispose: provision.dispose as (instance: unknown) => void | Promise<void> } : {},
+          );
+        }
       } catch (error) {
-        // per-run assembly too, since it isn't pushed onto `opened`.
+        // Fault isolation: the capability is absent for the session (its per-run assembly too,
+        // since it isn't pushed onto `opened`); a provision it did register stays until close.
         this.pendingDiagnostics.push({
           capability: cap.name,
           phase: "start",
           level: "error",
-          message: `openSession failed; capability absent for the session: ${messageOf(error)}`,
+          message: `provision failed; capability absent for the session: ${messageOf(error)}`,
         });
-        this.logger.log("error", `capability "${cap.name}" openSession failed`, { capability: cap.name, phase: "start", error: messageOf(error) });
+        this.logger.log("error", `capability "${cap.name}" provision failed`, { capability: cap.name, phase: "start", error: messageOf(error) });
         continue;
       }
       opened.push(cap);
-      if (cap.service !== undefined) this.services.set(cap.name, cap.service);
     }
     this.openedCapabilities = opened;
     await this.buildPermissionManager(opened, logRecords);
+    // A session opened without the workflow capability still needs ONE manager per session (the
+    // resume journals of every workflow run in the session must land in the same store).
+    this.scope.provide(T.Workflow, () => new WorkflowManager(this.store));
     // If a capability triggered the log read, reuse those records to seed the main live
     // context so the first run appends to it instead of replaying the log a second time.
     if (log !== undefined && this.store !== undefined && this.liveContext(DEFAULT_ADDRESS) === undefined) {
@@ -376,14 +357,14 @@ export class Session implements SessionPort {
   /**
    * Construct the session-lived PermissionManager: capability policy slots are collected from
    * the opened capabilities' static `policies` (session-tier fault isolation: a capability whose
-   * `openSession` failed contributes nothing; a per-run `start()` failure does NOT retract its
+   * provision failed contributes nothing; a per-run `start()` failure does NOT retract its
    * policies — they are pure evaluators over session-lived state). Then runtime permission
    * state is folded back from the log — `permission.set_mode` (last wins) and approve-for-session
    * grants (`permission.record_approval` with scope "session").
    */
   private async buildPermissionManager(
     opened: readonly Capability[],
-    logRecords: () => Promise<readonly AgentRecord[]>,
+    logRecords: SessionLogReader,
   ): Promise<void> {
     const overrides = new Map<string, PermissionPolicy>();
     for (const capability of opened) {
@@ -410,81 +391,67 @@ export class Session implements SessionPort {
       }
     }
 
-    this._permission = new PermissionManager({
-      ...this.permissionOptions,
-      mode: this.permissionOptions?.mode,
+    const options = this.scope.get(T.PermissionOptions);
+    const permission = new PermissionManager({
+      ...options,
+      mode: options?.mode,
       // The Runner-driven path answers approvals via interrupt/resume (or the live responder
       // in onInterrupt) — never inline through the manager, so it gets no responder here.
       responder: undefined,
-      cwd: this.permissionOptions?.cwd ?? safeCwd(this.machine),
-      pathClass: this.permissionOptions?.pathClass ?? this.machine.pathClass(),
-      machine: this.permissionOptions?.machine ?? this.machine,
+      cwd: options?.cwd ?? safeCwd(this.machine),
+      pathClass: options?.pathClass ?? this.machine.pathClass(),
+      machine: options?.machine ?? this.machine,
       policyOverrides: overrides,
       logger: this.logger,
     });
+    this.scope.register(T.Permission, permission);
 
     if (this.store === undefined) return;
     for (const record of await logRecords()) {
       if (record.type === "permission.set_mode") {
-        this._permission.setMode(record.mode as PermissionMode);
+        permission.setMode(record.mode as PermissionMode);
       } else if (
         record.type === "permission.record_approval" &&
         record.decision === "approved" &&
         record.scope === "session" &&
         record.approvalRule !== undefined
       ) {
-        this._permission.applyApproval(record.approvalRule, { decision: "approved", scope: "session" });
+        permission.applyApproval(record.approvalRule, { decision: "approved", scope: "session" });
       }
     }
   }
 
   /** The session-lived permission manager (policy chain + mode + approval memory). */
   get permission(): PermissionManager {
-    return this._permission;
+    return this.scope.require(T.Permission);
   }
 
   get capabilities(): readonly Capability[] {
     return this.openedCapabilities;
   }
 
-  service<T = unknown>(name: string): T | undefined {
-    return this.services.get(name) as T | undefined;
+  /** PROBE tier: the service, or undefined when nothing registered it (see the class doc). */
+  get<S>(tok: Token<S>): S | undefined {
+    return this.scope.get(tok);
   }
-  /** The REQUIRE tier (see the class doc): unwrap a probed service or throw the typed error. */
-  private requireCapability<T>(service: T | undefined, name: string): T {
-    if (service === undefined) throw new CapabilityMissingError(name);
-    return service;
+  /** REQUIRE tier: the service, or a `ServiceUnavailableError` naming what is missing. */
+  require<S>(tok: Token<S>): S {
+    return this.scope.require(tok);
   }
-  get goal(): GoalStore | undefined {
-    return this.services.get("goal") as GoalStore | undefined;
+  get workflow(): WorkflowManager {
+    return this.scope.require(T.Workflow);
   }
-  get workflow(): WorkflowManager | undefined {
-    return this.services.get("workflow") as WorkflowManager | undefined;
+  get compaction(): import("../capabilities/compaction/index.ts").CompactionService | undefined {
+    return this.scope.get(T.Compaction);
   }
-  get skills(): SkillsService | undefined {
-    return this.services.get("skills") as SkillsService | undefined;
-  }
-  get plugins(): PluginManager | undefined {
-    return this.services.get("plugins") as PluginManager | undefined;
-  }
-  get backgroundManager(): BackgroundManager | undefined {
-    return this.services.get("background") as BackgroundManager | undefined;
-  }
-  get plan(): PlanMode | undefined {
-    return this.services.get("plan") as PlanMode | undefined;
-  }
-  get compaction(): CompactionService | undefined {
-    return this.services.get("compaction") as CompactionService | undefined;
-  }
-  get mcp(): McpServersHandle | undefined {
-    return this.services.get("mcp") as McpServersHandle | undefined;
-  }
+  /** The spawner the Agent/Workflow tools use: the background capability's manager, else the
+   *  host-injected `T.BackgroundSpawner`. */
   get background(): BackgroundSpawner | undefined {
-    return (this.services.get("background") as BackgroundSpawner | undefined) ?? this.injectedBackground;
+    return this.scope.get(T.Background) ?? this.scope.get(T.BackgroundSpawner);
   }
 
   async listBackgroundTasks(options: BackgroundTaskListOptions = {}): Promise<readonly BackgroundTaskInfo[]> {
-    const background = this.requireCapability(this.backgroundManager, "background");
+    const background = this.require(T.Background);
     return background.list(options.activeOnly ?? false, options.limit);
   }
 
@@ -492,7 +459,7 @@ export class Session implements SessionPort {
    *  workflow is a plain `Workflow` tool call — its record is the conversation plus its journal
    *  shard — so it is not listed here (its shard stays resumable by runId). */
   async listWorkflows(): Promise<readonly WorkflowSnapshot[]> {
-    const manager = this.backgroundManager;
+    const manager = this.get(T.Background);
     if (manager === undefined) return [];
     const runs: WorkflowSnapshot[] = [];
     for (const info of manager.list(false)) {
@@ -524,7 +491,7 @@ export class Session implements SessionPort {
    *  ghosts). Foreground subagents are plain `Agent` tool calls — their record is the conversation
    *  plus their own shard — so they are not listed here (their shard stays resumable by id). */
   async listSubagents(): Promise<readonly SubagentRecord[]> {
-    const manager = this.backgroundManager;
+    const manager = this.get(T.Background);
     if (manager === undefined) return [];
     const records: SubagentRecord[] = [];
     for (const info of manager.list(false)) {
@@ -542,7 +509,7 @@ export class Session implements SessionPort {
    * (resume any with `Agent(resume="<id>", ...)`).
    */
   async reconcileSubagents(): Promise<readonly SubagentRecord[]> {
-    const manager = this.backgroundManager;
+    const manager = this.get(T.Background);
     if (manager === undefined || this.store === undefined) return [];
     const lost: SubagentRecord[] = [];
     for (const info of await manager.reconcile()) {
@@ -642,7 +609,7 @@ export class Session implements SessionPort {
 
   /** Resolve environment + AGENTS.md for the active runtime frame, cached for this Session. */
   resolveSystemPromptContext(machine: Machine): Promise<SystemPromptContext> {
-    return this.systemPromptContexts.resolve(machine, this.compaction?.revision ?? 0);
+    return this.systemPromptContexts.resolve(machine, this.get(T.Compaction)?.revision ?? 0);
   }
 
   /** A bounded view of the task's authoritative output, with explicit size/truncation metadata. */
@@ -650,7 +617,7 @@ export class Session implements SessionPort {
     taskId: string,
     options: ReadBackgroundTaskOutputOptions = {},
   ): Promise<BackgroundTaskOutputSnapshot> {
-    const background = this.requireCapability(this.backgroundManager, "background");
+    const background = this.require(T.Background);
     return background.readOutput(taskId, options.maxBytes ?? 16 * 1024);
   }
 
@@ -663,12 +630,12 @@ export class Session implements SessionPort {
     taskId: string,
     options: ReadBackgroundTaskOutputDeltaOptions,
   ): Promise<BackgroundTaskOutputDelta> {
-    const background = this.requireCapability(this.backgroundManager, "background");
+    const background = this.require(T.Background);
     return background.readOutputDelta(taskId, options.cursor, options.maxBytes);
   }
 
   async stopBackgroundTask(taskId: string, reason?: string): Promise<BackgroundTaskInfo | undefined> {
-    const background = this.requireCapability(this.backgroundManager, "background");
+    const background = this.require(T.Background);
     return background.stop(taskId, reason);
   }
 
@@ -678,13 +645,13 @@ export class Session implements SessionPort {
    * currently in its detachable window (already finished, or not a detachable tool).
    */
   detachTool(toolCallId: string): boolean {
-    const background = this.requireCapability(this.backgroundManager, "background");
+    const background = this.require(T.Background);
     return background.detach(toolCallId);
   }
 
   /** Connected MCP servers and their status. Empty when no MCP capability is open. */
   listMcpServers(): readonly McpServerView[] {
-    return this.mcp?.list() ?? [];
+    return this.get(T.Mcp)?.list() ?? [];
   }
 
   /**
@@ -693,17 +660,17 @@ export class Session implements SessionPort {
    * for the same reason `listMcpServers` degrades to empty rather than throwing.
    */
   async listMcpTools(name: string): Promise<readonly MCPTool[]> {
-    return (await this.mcp?.listTools(name)) ?? [];
+    return (await this.get(T.Mcp)?.listTools(name)) ?? [];
   }
 
   /** Force-reconnect one MCP server by name. Throws if no MCP capability is open. */
   async reconnectMcpServer(name: string): Promise<void> {
-    const mcp = this.requireCapability(this.mcp, "mcp");
+    const mcp = this.require(T.Mcp);
     await mcp.reconnect(name);
   }
 
   async createGoal(input: CreateGoalInput): Promise<GoalSnapshot> {
-    const goal = this.requireCapability(this.goal, "goal");
+    const goal = this.require(T.Goal);
     if (input.objective.trim().length === 0) throw new Error("Goal objective cannot be empty.");
     if (goal.has()) goal.update({ status: "complete" });
     let snapshot = goal.update({
@@ -718,7 +685,7 @@ export class Session implements SessionPort {
   }
 
   async getGoal(): Promise<GoalSnapshot | null> {
-    const goal = this.requireCapability(this.goal, "goal");
+    const goal = this.require(T.Goal);
     return goal.snapshot();
   }
 
@@ -731,7 +698,7 @@ export class Session implements SessionPort {
   }
 
   async cancelGoal(options: GoalStatusInput = {}): Promise<GoalSnapshot | null> {
-    const goal = this.requireCapability(this.goal, "goal");
+    const goal = this.require(T.Goal);
     const previous = goal.snapshot();
     if (previous === null) return null;
     goal.update({ status: "complete", reason: options.reason });
@@ -740,14 +707,14 @@ export class Session implements SessionPort {
   }
 
   async setGoalBudget(budget: GoalBudgetInput): Promise<GoalSnapshot | null> {
-    const goal = this.requireCapability(this.goal, "goal");
+    const goal = this.require(T.Goal);
     const snapshot = goal.setBudget(normalizeGoalBudget(budget));
     await this.emitControlEvent({ type: "goal.updated", snapshot });
     return snapshot;
   }
 
   async setPlanMode(enabled: boolean, options: PlanModeOptions = {}): Promise<PlanData> {
-    const plan = this.requireCapability(this.plan, "plan");
+    const plan = this.require(T.Plan);
     if (enabled && !plan.isActive) {
       await plan.enter(options.createFile ?? true);
     } else if (!enabled && plan.isActive) {
@@ -759,7 +726,7 @@ export class Session implements SessionPort {
   }
 
   async getPlan(): Promise<PlanData> {
-    const plan = this.requireCapability(this.plan, "plan");
+    const plan = this.require(T.Plan);
     return plan.data();
   }
 
@@ -793,22 +760,22 @@ export class Session implements SessionPort {
   }
 
   async compact(options: CompactRequestOptions = {}): Promise<PendingCompaction> {
-    const compaction = this.requireCapability(this.compaction, "compaction");
+    const compaction = this.require(T.Compaction);
     return compaction.request(options);
   }
 
   async pendingCompaction(): Promise<PendingCompaction | null> {
-    const compaction = this.requireCapability(this.compaction, "compaction");
+    const compaction = this.require(T.Compaction);
     return compaction.pending();
   }
 
   async cancelCompaction(): Promise<PendingCompaction | null> {
-    const compaction = this.requireCapability(this.compaction, "compaction");
+    const compaction = this.require(T.Compaction);
     return compaction.cancel();
   }
 
   private async updateExistingGoal(status: "active" | "blocked" | "paused", reason?: string): Promise<GoalSnapshot | null> {
-    const goal = this.requireCapability(this.goal, "goal");
+    const goal = this.require(T.Goal);
     if (goal.snapshot() === null) return null;
     const snapshot = goal.update({ status, reason });
     await this.emitControlEvent({ type: "goal.updated", snapshot });
@@ -820,30 +787,30 @@ export class Session implements SessionPort {
   }
 
   async listSkills(): Promise<readonly SkillSummary[]> {
-    const skills = this.requireCapability(this.skills, "skills");
+    const skills = this.require(T.Skills);
     return skills.listSkills();
   }
 
   async activateSkill(name: string, args?: string): Promise<SkillActivationResult>;
   async activateSkill(request: ActivateSkillRequest): Promise<SkillActivationResult>;
   async activateSkill(nameOrRequest: string | ActivateSkillRequest, args?: string): Promise<SkillActivationResult> {
-    const skills = this.requireCapability(this.skills, "skills");
+    const skills = this.require(T.Skills);
     const request = typeof nameOrRequest === "string" ? { name: nameOrRequest, ...(args !== undefined ? { args } : {}) } : nameOrRequest;
     return skills.activateSkill(request);
   }
 
   async listPlugins(): Promise<readonly PluginSummary[]> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     return plugins.summaries();
   }
 
   async getPluginInfo(id: string): Promise<PluginInfo | undefined> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     return plugins.info(id);
   }
 
   async installPlugin(source: string): Promise<PluginSummary> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     const record = await plugins.install(source);
     const summary = plugins.summaries().find((plugin) => plugin.id === record.id);
     if (summary === undefined) throw new Error(`Plugin "${record.id}" was installed but no summary was produced.`);
@@ -851,22 +818,22 @@ export class Session implements SessionPort {
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<void> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     await plugins.setEnabled(id, enabled);
   }
 
   async setPluginMcpServerEnabled(id: string, server: string, enabled: boolean): Promise<void> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     await plugins.setMcpServerEnabled(id, server, enabled);
   }
 
   async removePlugin(id: string): Promise<void> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     await plugins.remove(id);
   }
 
   async reloadPlugins(): Promise<ReloadSummary> {
-    const plugins = this.requireCapability(this.plugins, "plugins");
+    const plugins = this.require(T.Plugins);
     return plugins.reload();
   }
 
@@ -886,7 +853,7 @@ export class Session implements SessionPort {
    * rejection is pre-handled internally, so ignoring it never trips unhandledRejection).
    */
   setPermissionMode(mode: PermissionMode): Promise<void> {
-    this._permission.setMode(mode);
+    this.permission.setMode(mode);
     if (this.store === undefined) return Promise.resolve();
     const persisted = this.store.appendRecord({ type: "permission.set_mode", mode, address: DEFAULT_ADDRESS });
     persisted.catch((error) => {
@@ -901,7 +868,7 @@ export class Session implements SessionPort {
     return this.thinkingOverride;
   }
   get permissionModeSetting(): PermissionMode | undefined {
-    return this._permission.mode;
+    return this.permission.mode;
   }
 
   drainDiagnostics(): CapabilityDiagnostic[] {
@@ -924,25 +891,16 @@ export class Session implements SessionPort {
     return this.eventPublisher.flush();
   }
 
+  /**
+   * Close the session: flush telemetry and the store, then close the scope — which disposes
+   * every capability provision in reverse order (each under a deadline) and finally the
+   * session's own infrastructure. Idempotent.
+   */
   async close(): Promise<void> {
     if (!this.isOpen) return;
     this.isOpen = false;
     this.systemPromptContexts.clear();
     this.unsubscribeTracing?.();
-    for (const cap of [...this.openedCapabilities].reverse()) {
-      if (!cap.closeSession) continue;
-      try {
-        await withTimeout(Promise.resolve(cap.closeSession()), CLOSE_TIMEOUT_MS);
-      } catch (error) {
-        this.pendingDiagnostics.push({
-          capability: cap.name,
-          phase: "stop",
-          level: "warn",
-          message: `closeSession failed/timed out: ${messageOf(error)}`,
-        });
-        this.logger.log("warn", `capability "${cap.name}" closeSession failed/timed out`, { capability: cap.name, phase: "stop", error: messageOf(error) });
-      }
-    }
     this.openedCapabilities = [];
     try {
       await withTimeout(Promise.resolve(this.tracing?.forceFlush()), CLOSE_TIMEOUT_MS);
@@ -967,9 +925,15 @@ export class Session implements SessionPort {
       });
       this.logger.log("warn", "store flush failed/timed out", { capability: "store", phase: "stop", error: messageOf(error) });
     }
-    // The machine is deliberately NOT closed here: its lifetime belongs to whoever created
-    // it (see `MachineFactory`). A sandbox usually outlives any one session, so closing it
-    // on session.close would pull the workspace out from under the user's other sessions.
+    // Provisions (MCP connections, the background manager's subscription, …) go down in
+    // reverse registration order, each dispose under CLOSE_TIMEOUT_MS. The machine is NOT
+    // closed here unless this session registered it as owned: its lifetime belongs to whoever
+    // created it (see `MachineFactory`) — a sandbox usually outlives any one session, so
+    // closing it on session.close would pull the workspace out from under other sessions.
+    await this.scope.close({ disposeTimeoutMs: CLOSE_TIMEOUT_MS, onDisposeError: (name, error) => {
+      this.pendingDiagnostics.push({ capability: name, phase: "stop", level: "warn", message: `dispose failed/timed out: ${messageOf(error)}` });
+      this.logger.log("warn", `service "${name}" dispose failed/timed out`, { capability: name, phase: "stop", error: messageOf(error) });
+    } });
   }
 
   /** Public URL for a port inside the machine, or undefined when the backend can't expose one. */
@@ -1000,14 +964,6 @@ function normalizeGoalBudget(input: GoalBudgetInput): GoalBudgetInput {
 function positiveInt(name: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`Goal budget ${name} must be a positive integer.`);
   return value;
-}
-
-async function resolveMachine(cfg: SessionConfig, ctx: MachineOpenContext): Promise<Machine> {
-  // No machine configured → stateless session with no filesystem. A NullMachine
-  // answers metadata but refuses all I/O, so a stray file tool fails loudly
-  // rather than silently touching the host disk.
-  if (!cfg.machine) return new NullMachine();
-  return typeof cfg.machine === "function" ? await cfg.machine(ctx) : cfg.machine;
 }
 
 function safeCwd(machine: Machine): string {

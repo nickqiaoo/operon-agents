@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +65,7 @@ async function testReadImage(dir: string, machine: LocalMachine): Promise<void> 
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "media", model, instructions: "x", tools: [readTool] });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "inspect image");
   faux.unregister();
 
@@ -92,7 +93,7 @@ async function testTodoList(machine: LocalMachine): Promise<void> {
   ]);
   const firstModel = firstFaux.getChatModel()!;
   const firstAgent = defineAgent({ name: "todo", model: firstModel, instructions: "x" });
-  const runner = new Runner({ machine, store, capabilities: [todoCapability(todoStore)], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, capabilities: [todoCapability(todoStore)], permission: { mode: "yolo" } });
   const first = await runner.run(firstAgent, "track this");
   firstFaux.unregister();
   check("todo: update tool returns list", toolResultText(first.messages, "TodoList").includes("[in_progress] Draft patch"));
@@ -155,7 +156,7 @@ async function testAskUserQuestion(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "asker", model, instructions: "x", tools: [askUserQuestionTool] });
 
   // Not yolo: policy deliberately denies AskUserQuestion there (no human to answer).
-  const runner = new Runner({ machine, responder, permission: { mode: "workspace" } });
+  const runner = testRunner({ machine, responder, permission: { mode: "workspace" } });
   const result = await runner.run(agent, "ask");
   faux.unregister();
 
@@ -180,7 +181,7 @@ async function testUnifiedAgentTool(machine: LocalMachine): Promise<void> {
   const coder = defineAgent({ name: "coder", model, instructions: "Code.", handoffDescription: "Implementation subagent." });
   const main = defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [coder] });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   const result = await runner.run(main, "delegate");
   faux.unregister();
 

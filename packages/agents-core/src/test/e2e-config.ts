@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,7 +92,7 @@ async function testConfigDrivenRun(dir: string, machine: LocalMachine): Promise<
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool] });
 
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     permission: { mode: opts.permission.mode, rules: opts.permission.rules },
     maxStepsPerTurn: opts.loopControl.maxStepsPerTurn,

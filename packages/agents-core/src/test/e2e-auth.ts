@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -284,7 +285,7 @@ async function testRequestScopedModel(): Promise<void> {
   ]);
   replaceAuth(failingFaux, { oauth: fakeOAuth });
   const failing = failingFaux.getChatModel()!;
-  const failed = await new Runner({}).run(
+  const failed = await testRunner({}).run(
     defineAgent({ name: "a", model: failing, instructions: "x" }),
     "hi",
   );
@@ -299,7 +300,7 @@ async function testRequestScopedModel(): Promise<void> {
   workingFaux.setResponses([
     fauxAssistantMessage("hello there", { stopReason: "stop" }),
   ]);
-  const completed = await new Runner({}).run(
+  const completed = await testRunner({}).run(
     defineAgent({
       name: "b",
       model: workingFaux.getChatModel()!,
@@ -334,7 +335,7 @@ async function test401Refresh(): Promise<void> {
   }));
 
   refreshCount = 0;
-  const result = await new Runner({}).run(
+  const result = await testRunner({}).run(
     defineAgent({
       name: "c",
       model: faux.getChatModel()!,

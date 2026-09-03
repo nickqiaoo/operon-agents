@@ -1,4 +1,4 @@
-import type { CapabilityContext } from "../index.ts";
+import type { RunContext } from "../index.ts";
 import type { MCPTool } from "./types.ts";
 
 export interface MCPToolFilterStatic {
@@ -8,7 +8,7 @@ export interface MCPToolFilterStatic {
 
 export interface MCPToolFilterContext {
   readonly serverName: string;
-  readonly ctx: CapabilityContext;
+  readonly ctx: RunContext;
 }
 
 export type MCPToolFilterCallable = (context: MCPToolFilterContext, tool: MCPTool) => boolean | Promise<boolean>;

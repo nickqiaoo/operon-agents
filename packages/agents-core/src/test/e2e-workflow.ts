@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,8 +51,8 @@ async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "wf-e2e-"));
   try {
     const store = new DiskSessionStore(join(root, "s"));
-    const session = await Session.open({ store });
-    const runner = new Runner({});
+    const session = await openTestSession({ store });
+    const runner = testRunner({});
     const faux = registerFauxProvider();
     const model = faux.getChatModel()!;
     const worker = defineAgent({ name: "worker", model, instructions: "Do the task." });

@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 // Tool-initiated durable suspension (ctx.suspend / ctx.resumed):
 //  - a tool suspends mid-execution with a request + continuation state → run interrupts durably
 //  - resume delivers { kind: "input", data } back to the SAME call with its saved state
@@ -78,7 +79,7 @@ async function testSuspendResume(machine: LocalMachine): Promise<void> {
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = new Runner({ machine, store, events, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, events, permission: { mode: "yolo" } });
 
   const first = await runner.run(agent, "book me a flight");
   check("suspend: first run interrupts", first.status === "interrupted");
@@ -161,7 +162,7 @@ async function testMixedBatchSiblingNotRerun(machine: LocalMachine): Promise<voi
   const agent = defineAgent({ name: "mixed", model, instructions: "x", tools: [echoTool, makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "echo and pick");
   check("mixed: run interrupts on the suspending call", first.status === "interrupted");
   check("mixed: only the suspended call is pending", first.interruptions?.length === 1 && first.interruptions[0]!.toolName === "pick");
@@ -193,7 +194,7 @@ async function testPartialAnswerAutoRepark(machine: LocalMachine): Promise<void>
   const agent = defineAgent({ name: "partial", model, instructions: "x", tools: [makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "pick car and bike");
   check("repark: both suspensions surfaced", first.interruptions?.length === 2);
   check("repark: both ran their search phase", counters.searches === 2);
@@ -260,7 +261,7 @@ async function testMultiRoundSuspend(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "wiz", model, instructions: "x", tools: [wizardTool] });
 
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "run the wizard");
   check("rounds: round 1 pauses", first.status === "interrupted");
 
@@ -326,7 +327,7 @@ async function testSuspendMisuseAndBadState(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = new Runner({ machine, events, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, events, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -356,7 +357,7 @@ async function testAskUserQuestionDurable(machine: LocalMachine): Promise<void> 
   const store = new MemoryStore();
   // No responder anywhere → the question suspends durably instead of soft-failing.
   // manual mode: AskUserQuestion is on the default-approve list (yolo would deny it outright).
-  const runner = new Runner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
   const first = await runner.run(agent, "ask me about deploy");
   check("askuser: no responder → durable suspension", first.status === "interrupted");
   const pending = first.interruptions?.[0];
@@ -406,7 +407,7 @@ async function testAskUserReentryGuard(machine: LocalMachine): Promise<void> {
     requestApproval: async () => ({ decision: "approved" as const }),
     requestQuestion: async () => ({ answers: { "Q1?": "a" } }),
   };
-  const runner = new Runner({ machine, responder, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, responder, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
   const tr = result.messages.find((m) => m.role === "toolResult");
@@ -446,7 +447,7 @@ async function testAnswerKindValidation(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "kinds", model, instructions: "x", tools: [makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "pick a seat");
   const persisted = parseInterruptionState(await store.getState(INTERRUPTION_STATE_KEY));
 

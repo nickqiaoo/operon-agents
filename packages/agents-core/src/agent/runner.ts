@@ -5,22 +5,22 @@ import { runTurn } from "../loop/run-turn.ts";
 import { isAbortError } from "../loop/errors.ts";
 import { ConversationContext, replayContext } from "../loop/context.ts";
 import type { BatchResume, PendingApprovalInterrupt } from "../loop/types.ts";
-import type { Machine, MachineFactory } from "../tool/machine.ts";
+import type { Machine } from "../tool/machine.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
-import { PermissionManager, type PermissionManagerOptions } from "../permission/manager.ts";
+import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
-import type { Capability, CapabilityContext } from "../capabilities/capability.ts";
+import type { Capability, RunContext } from "../capabilities/capability.ts";
+import { Scope } from "../scope/scope.ts";
+import { T } from "../scope/tokens.ts";
 import { assembleCapabilities, type AssembledCapabilities } from "../capabilities/assembler.ts";
 import { computeContextBreakdown } from "./context-report.ts";
 import {
-  type EventPublicationMode,
   type EventSink,
   IterableSink,
   type RunHandle,
 } from "../events/index.ts";
 import { DEFAULT_ADDRESS, SessionBusyError, type AgentRecord, type SessionStore } from "../store/index.ts";
 import type { PromptOrigin, SessionLease, SessionLock } from "../store/index.ts";
-import type { TracingProcessor } from "../tracing/index.ts";
 import { SteerBus, steerOriginToPromptOrigin } from "../loop/steer.ts";
 import {
   INTERRUPTION_STATE_KEY,
@@ -33,7 +33,7 @@ import {
   type InterruptionState,
   type PendingRunInterrupt,
 } from "../loop/interruption.ts";
-import { abortReason, Session, type ConversationHead, type SessionConfig, type SessionPort } from "./session.ts";
+import { abortReason, Session, type ConversationHead, type SessionPort } from "./session.ts";
 import { Agent, type AgentRunContext } from "./agent.ts";
 import type { SubagentInfo, SubagentProvider } from "./profiles.ts";
 import {
@@ -60,21 +60,23 @@ import {
   tryParseOutput,
 } from "./run-support.ts";
 
+/**
+ * Engine configuration — VALUES, not lifetimes. Everything with a lifetime (machine, store,
+ * events, responder, permission options, capabilities' services) lives in a `Scope`: the
+ * harness-tier scope the Runner is constructed on, and the session-tier scope the `session`
+ * hook fills for each session the Runner opens itself.
+ */
 export interface RunnerConfig<TContext = unknown> {
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
-  readonly machine?: Machine | MachineFactory;
-  readonly store?: SessionStore;
-  readonly events?: EventSink;
-  readonly tracing?: TracingProcessor;
-  readonly responder?: Responder;
-  readonly permission?: PermissionManagerOptions;
-  readonly capabilities?: readonly Capability[];
+  /**
+   * Called once per session the Runner opens on its own (no `RunOptions.session`): register
+   * this session's objects (`T.Store`, `T.Machine`, `T.PermissionOptions`, …) on `scope` and
+   * return its capabilities. A caller-supplied session is never passed through here.
+   */
+  readonly session?: (scope: Scope, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
   readonly maxTurns?: number;
   readonly maxStepsPerTurn?: number;
   readonly maxRetriesPerStep?: number;
-  readonly steer?: SteerBus;
-  readonly background?: BackgroundSpawner;
-  readonly eventPublication?: EventPublicationMode;
   /**
    * Exclusive right to run a session, keyed by session id.
    *
@@ -263,10 +265,14 @@ export interface SubagentSpawner<TContext> {
 }
 
 export class Runner<TContext = unknown> {
+  /** The harness-tier scope every Runner-opened session hangs under. */
+  readonly scope: Scope;
   private readonly config: RunnerConfig<TContext>;
   private readonly engine: Engine<TContext>;
 
-  constructor(config: RunnerConfig<TContext> = {}) {
+  constructor(scope: Scope, config: RunnerConfig<TContext> = {}) {
+    if (scope.kind === "session") throw new Error("Runner needs a harness or workspace scope, not a session scope");
+    this.scope = scope;
     this.config = config;
     this.engine = new Engine(config);
   }
@@ -432,24 +438,17 @@ export class Runner<TContext = unknown> {
       }
       return { session: opts.session, owned: false };
     }
-    const cfg: SessionConfig = {
-      machine: this.config.machine,
-      store: this.config.store,
-      events: eventsOverride ?? this.config.events,
-      tracing: this.config.tracing,
-      responder: this.config.responder,
-      permission: this.config.permission,
-      capabilities: this.config.capabilities,
-      steer: this.config.steer,
-      background: this.config.background,
-      eventPublication: this.config.eventPublication,
-      sessionId: opts?.sessionId,
-      // Losing the lease cancels the run: a holder that can no longer renew has, by definition,
-      // been superseded, and must stop before its writes race the node that took over. Only the
-      // session this runner owns is wired up — a caller-supplied session keeps its own signal.
-      signal: mergeSignals(opts?.signal, lease?.signal),
-    };
-    const session = await Session.open(cfg);
+    const scope = this.scope.child("session");
+    if (opts?.sessionId !== undefined) scope.register(T.SessionId, opts.sessionId);
+    // Losing the lease cancels the run: a holder that can no longer renew has, by definition,
+    // been superseded, and must stop before its writes race the node that took over. Only the
+    // session this runner owns is wired up — a caller-supplied session keeps its own signal.
+    const signal = mergeSignals(opts?.signal, lease?.signal);
+    if (signal !== undefined) scope.register(T.HostSignal, signal, { owned: false });
+    // A one-shot pull stream IS the session's event bus (Invariant 4); it wins over the hook's.
+    if (eventsOverride !== undefined) scope.register(T.Events, eventsOverride, { owned: false });
+    const capabilities = (await this.config.session?.(scope, { sessionId: opts?.sessionId })) ?? [];
+    const session = await Session.open(scope, { capabilities });
     return { session, owned: true };
   }
 
@@ -726,16 +725,10 @@ export class Runner<TContext = unknown> {
     const runController = new AbortController();
     const upstream = opts?.signal ?? session.signal;
     const signal = AbortSignal.any([upstream, runController.signal]);
-    const ctx: CapabilityContext = {
+    const ctx: Omit<RunContext, "injection" | "gates"> = {
+      scope: session.scope,
       sessionId: session.id,
-      machine: session.machine,
-      store: session.store,
-      events: session.events,
       signal,
-      steer: session.steer,
-      responder: session.responder,
-      background: session.background,
-      logger: session.logger,
       // Same session controls, except `abort` is scoped to this run rather than the session.
       controls: {
         ...session.controls(),

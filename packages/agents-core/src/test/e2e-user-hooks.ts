@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,7 +59,7 @@ async function testPreToolUseBlock(dir: string, machine: LocalMachine): Promise<
 
   const hooks = [{ event: "PreToolUse" as const, matcher: "Write", command: `echo '{"block":true,"reason":"hook says no"}'` }];
   // yolo permission → only the PreToolUse hook (chain head) can block.
-  const runner = new Runner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "write a file");
   faux.unregister();
 
@@ -74,7 +75,7 @@ async function testSessionStartInjection(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const hooks = [{ event: "SessionStart" as const, command: `echo 'PROJECT_CONTEXT: handle with care'` }];
-  const runner = new Runner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -108,7 +109,7 @@ async function testStopContinueOnce(machine: LocalMachine): Promise<void> {
     { event: "SessionStart" as const, command: `echo 'ONE_BOUNDARY_REMINDER'` },
     { event: "Stop" as const, command: `echo '{"block":true}'` },
   ];
-  const runner = new Runner({ machine, events, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -135,7 +136,7 @@ async function testPostToolUseObserve(dir: string, machine: LocalMachine): Promi
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool] });
 
   const hooks = [{ event: "PostToolUse" as const, command: `cat > /dev/null; echo ran > '${marker}'` }];
-  const runner = new Runner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   await runner.run(agent, "write then observe");
   faux.unregister();
 

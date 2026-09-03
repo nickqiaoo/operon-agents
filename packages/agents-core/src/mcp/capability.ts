@@ -1,4 +1,5 @@
-import { BoundaryInjector, type Capability, type SessionContext, type InjectionContext, type InjectionResult } from "../index.ts";
+import { BoundaryInjector, type Capability, type ProvisionContext, type InjectionContext, type InjectionResult } from "../index.ts";
+import { T } from "../scope/tokens.ts";
 import type { MCPServer } from "./server.ts";
 import { hasResources } from "./server.ts";
 import { mcpToolProvider } from "./provider.ts";
@@ -41,11 +42,15 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
   const capability: Capability = {
     name: "mcp",
     toolProviders: servers.map((server) => mcpToolProvider(server)),
-    service: servers,
     ...(options.injectResources ? { injectors: [new McpResourcesInjector(() => resources)] } : {}),
-    // Connect every server in parallel, fault-isolated — session open would otherwise cost
-    // the SUM of each server's startup (matching `mcpServersCapability`, which already does).
-    openSession: async (ctx: SessionContext) => {
+    provides: [{ token: T.McpRaw, create: connectAll, dispose: closeAll }],
+  };
+
+  // Connect every server in parallel, fault-isolated — session open would otherwise cost
+  // the SUM of each server's startup (matching `mcpServersCapability`, which already does).
+  async function connectAll(ctx: ProvisionContext): Promise<readonly MCPServer[]> {
+    const events = ctx.scope.get(T.Events);
+    {
       const perServer = await Promise.all(
         servers.map(async (server): Promise<readonly CollectedResource[]> => {
           try {
@@ -53,7 +58,7 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
           } catch (error) {
             const tail = server.stderrSnapshot?.().trimEnd();
             const base = error instanceof Error ? error.message : String(error);
-            ctx.events?.emit({
+            events?.emit({
               type: "warning",
               address: "main",
               sessionId: ctx.sessionId,
@@ -67,7 +72,7 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
             const parts = [`MCP server "${server.name}" closed unexpectedly`];
             if (reason.error !== undefined) parts.push(reason.error.message);
             if (reason.stderr !== undefined && reason.stderr.length > 0) parts.push(`stderr: ${reason.stderr.trimEnd()}`);
-            ctx.events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: parts.join("\n") });
+            events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: parts.join("\n") });
           });
           if (!options.injectResources || !hasResources(server)) return [];
           try {
@@ -86,17 +91,19 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
       );
       // Flattened in `servers` order, so the injected listing doesn't reshuffle per run.
       resources = perServer.flat();
-    },
-    closeSession: async () => {
-      for (const server of [...servers].reverse()) {
-        try {
-          await server.close();
-        } catch {
-          // best-effort teardown; the assembler already guards + times out stop().
-        }
+    }
+    return servers;
+  }
+
+  async function closeAll(): Promise<void> {
+    for (const server of [...servers].reverse()) {
+      try {
+        await server.close();
+      } catch {
+        // best-effort teardown; the scope already guards dispose failures.
       }
-    },
-  };
+    }
+  }
 
   return capability;
 }

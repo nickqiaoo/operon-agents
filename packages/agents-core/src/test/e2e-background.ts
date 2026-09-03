@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import {
   defineModel,
@@ -98,7 +99,7 @@ async function testBashBackground(): Promise<void> {
 
   const bus = new SteerBus();
   const mgr = new BackgroundManager();
-  const runner = new Runner({ machine: MACHINE, steer: bus, background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine: MACHINE, steer: bus, background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -254,7 +255,7 @@ async function testForegroundHasOneShape(): Promise<void> {
     ]);
     const agent = defineAgent({ name: "a", model: faux.getChatModel()!, instructions: "x", tools: [bashTool] });
     const mgr = withBackground ? new BackgroundManager() : undefined;
-    const runner = new Runner({
+    const runner = testRunner({
       machine: MACHINE,
       permission: { mode: "yolo" },
       ...(mgr !== undefined ? { background: mgr, capabilities: [backgroundCapability(mgr)] } : {}),
@@ -546,7 +547,7 @@ async function testStorelessBackgroundAgentIsRejected(): Promise<void> {
   const worker = defineAgent({ name: "worker", model: faux.getChatModel()!, instructions: "work" });
   const parent = defineAgent({ name: "parent", model: faux.getChatModel()!, instructions: "delegate", subagents: [worker] });
   const mgr = new BackgroundManager();
-  const result = await new Runner({ background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } }).run(parent, "go");
+  const result = await testRunner({ background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } }).run(parent, "go");
   faux.unregister();
   check(
     "storeless: background Agent is rejected before a task id is issued",
@@ -747,7 +748,7 @@ async function testForegroundTruncationNamesTheLog(): Promise<void> {
   ]);
   const agent = defineAgent({ name: "a", model: faux.getChatModel()!, instructions: "x", tools: [bashTool] });
   const mgr = new BackgroundManager();
-  const runner = new Runner({
+  const runner = testRunner({
     machine: MACHINE,
     steer: new SteerBus(),
     background: mgr,
@@ -773,7 +774,7 @@ async function testForegroundTruncationNamesTheLog(): Promise<void> {
     fauxAssistantMessage("done", { stopReason: "stop" }),
   ]);
   const agent2 = defineAgent({ name: "a", model: faux2.getChatModel()!, instructions: "x", tools: [bashTool] });
-  const small = await new Runner({
+  const small = await testRunner({
     machine: MACHINE,
     steer: new SteerBus(),
     background: mgr,

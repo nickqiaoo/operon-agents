@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Root-frame spawn concurrency.
  *
@@ -62,8 +63,8 @@ function tracked(state: { live: number; peak: number }, slot: { arrive(): Promis
 }
 
 async function peakConcurrency(root: string, name: string, maxConcurrentSubagents?: number): Promise<number> {
-  const session = await Session.open({ store: new DiskSessionStore(join(root, name)) });
-  const runner = new Runner(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {});
+  const session = await openTestSession({ store: new DiskSessionStore(join(root, name)) });
+  const runner = testRunner(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {});
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const helper = defineAgent({ name: "helper", model, instructions: "Help." });
@@ -95,8 +96,8 @@ async function peakConcurrency(root: string, name: string, maxConcurrentSubagent
  * spawns a child that would need one — if nesting queued too, nobody could ever release.
  */
 async function testNestedDoesNotDeadlock(root: string): Promise<void> {
-  const session = await Session.open({ store: new DiskSessionStore(join(root, "nested")) });
-  const runner = new Runner({ maxConcurrentSubagents: 1 });
+  const session = await openTestSession({ store: new DiskSessionStore(join(root, "nested")) });
+  const runner = testRunner({ maxConcurrentSubagents: 1 });
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const grandchild = defineAgent({ name: "grandchild", model, instructions: "Deepest." });

@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +54,7 @@ async function testPlanGuard(dir: string, machine: LocalMachine): Promise<void> 
   const agent = defineAgent({ name: "planner", model, instructions: "x", tools: [writeTool] });
 
   // yolo mode: proves plan-mode-guard-deny (high in the chain) beats yolo-approve.
-  const runner = new Runner({ machine, capabilities: [planCapability()], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [planCapability()], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "investigate then write");
   faux.unregister();
 
@@ -92,7 +93,7 @@ async function testExitPlanReviewAsk(machine: LocalMachine): Promise<void> {
     },
   });
   // No responder → the review ask reifies to a durable interrupt.
-  const runner = new Runner({ machine, store, capabilities: [planCapability(planMode)], permission: { mode: "manual" } });
+  const runner = testRunner({ machine, store, capabilities: [planCapability(planMode)], permission: { mode: "manual" } });
   const result = await runner.run(agent, "exit plan mode");
   faux.unregister();
 
@@ -119,7 +120,7 @@ async function testGoalDriver(machine: LocalMachine): Promise<void> {
     if (e.type === "turn.started") turnStarts += 1;
   });
 
-  const runner = new Runner({ machine, events, capabilities: [goalCapability()], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, events, capabilities: [goalCapability()], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "achieve the goal");
   faux.unregister();
 
@@ -148,7 +149,7 @@ async function testGoalBudget(machine: LocalMachine): Promise<void> {
     if (e.type === "turn.started") turnStarts += 1;
   });
 
-  const runner = new Runner({ machine, events, capabilities: [goalCapability(store)], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, capabilities: [goalCapability(store)], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go forever");
   faux.unregister();
 

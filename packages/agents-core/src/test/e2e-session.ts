@@ -1,10 +1,13 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { existsSync } from "node:fs";
 import {
-  CapabilityMissingError,
+  ServiceUnavailableError,
+  T,
+  token,
   defineModel,
   defineAgent,
   Runner,
@@ -19,7 +22,6 @@ import {
   MemoryStore,
   type AgentEvent,
   type Capability,
-  type SessionContext,
   type MachineFactory,
   type ChatModel,
   type LlmRequest,
@@ -46,17 +48,25 @@ interface ProbeStats {
   maxConcurrentRuns: number;
 }
 
+const PROBE = token<object>("probe", "session");
+
 function probeCapability(opts: { failOpen?: boolean } = {}): { capability: Capability; stats: ProbeStats } {
   const stats: ProbeStats = { openSession: 0, closeSession: 0, start: 0, stop: 0, activeRuns: 0, maxConcurrentRuns: 0 };
   const capability: Capability = {
     name: "probe",
-    openSession: async (_ctx: SessionContext) => {
-      stats.openSession += 1;
-      if (opts.failOpen) throw new Error("probe openSession boom");
-    },
-    closeSession: async () => {
-      stats.closeSession += 1;
-    },
+    provides: [
+      {
+        token: PROBE,
+        create: async () => {
+          stats.openSession += 1;
+          if (opts.failOpen) throw new Error("probe provision boom");
+          return {};
+        },
+        dispose: async () => {
+          stats.closeSession += 1;
+        },
+      },
+    ],
     start: async () => {
       stats.start += 1;
       stats.activeRuns += 1;
@@ -127,8 +137,8 @@ async function testCrossRunSurvival(machine: LocalMachine): Promise<void> {
   const { faux, model } = fauxModel("one", "two");
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const session = await Session.open({ machine, capabilities: [capability] });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine, capabilities: [capability] });
+  const runner = testRunner({ machine });
 
   check("cross-run: openSession once at open", stats.openSession === 1 && stats.closeSession === 0);
 
@@ -149,8 +159,8 @@ async function testSingleActiveRun(machine: LocalMachine): Promise<void> {
   const { faux, model } = fauxModel("a", "b");
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const session = await Session.open({ machine, capabilities: [capability] });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine, capabilities: [capability] });
+  const runner = testRunner({ machine });
 
   const [r1, r2] = await Promise.all([
     runner.run(agent, "concurrent 1", { session }),
@@ -169,7 +179,7 @@ async function testOneShotLifecycle(machine: LocalMachine): Promise<void> {
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
   // Capabilities passed to the Runner → folded into the one-shot Session it builds.
-  const runner = new Runner({ machine, capabilities: [capability] });
+  const runner = testRunner({ machine, capabilities: [capability] });
 
   const result = await runner.run(agent, "one-shot");
   faux.unregister();
@@ -183,7 +193,7 @@ async function testTracingLifecycle(machine: LocalMachine): Promise<void> {
   // Direct Session.open wiring: the session event bus drives the tracing bridge.
   {
     const { processor, stats } = recordingTracingProcessor();
-    const session = await Session.open({ machine, tracing: processor });
+    const session = await openTestSession({ machine, tracing: processor });
     await session.events.emit({ type: "agent.started", agent: "main", address: "main", sessionId: session.id });
     await session.events.emit({ type: "agent.ended", agent: "main", address: "main", sessionId: session.id });
     await session.close();
@@ -198,7 +208,7 @@ async function testTracingLifecycle(machine: LocalMachine): Promise<void> {
     const { faux, model } = fauxModel("done");
     const { processor, stats } = recordingTracingProcessor();
     const agent = defineAgent({ name: "a", model, instructions: "x" });
-    const result = await new Runner({ machine, tracing: processor }).run(agent, "one-shot tracing");
+    const result = await testRunner({ machine, tracing: processor }).run(agent, "one-shot tracing");
     faux.unregister();
 
     check("tracing: runner one-shot run completes", result.status === "completed");
@@ -217,10 +227,10 @@ async function testSessionFaultIsolation(machine: LocalMachine): Promise<void> {
   const bus = new ListenerSink();
   bus.subscribe((e) => void events.push(e));
 
-  const session = await Session.open({ machine, events: bus, capabilities: [capability] });
+  const session = await openTestSession({ machine, events: bus, capabilities: [capability] });
   check("fault: session still opens despite a broken capability", session.capabilities.length === 0);
 
-  const runner = new Runner({ machine });
+  const runner = testRunner({ machine });
   const result = await runner.run(agent, "go", { session });
   faux.unregister();
   await session.close();
@@ -234,15 +244,15 @@ async function testSessionFaultIsolation(machine: LocalMachine): Promise<void> {
 async function testSessionHandles(machine: LocalMachine): Promise<void> {
   const goal = new GoalStore();
   const bg = new BackgroundManager();
-  const session = await Session.open({
+  const session = await openTestSession({
     machine,
     capabilities: [goalCapability(goal), backgroundCapability(bg)],
   });
 
-  check("handles: session.goal returns the GoalStore", session.goal === goal);
+  check("handles: session.get(T.Goal) returns the GoalStore", session.get(T.Goal) === goal);
   check("handles: session.background unifies the BackgroundManager", session.background === bg);
-  check("handles: generic service('goal') also resolves", session.service("goal") === goal);
-  check("handles: unknown service is undefined", session.service("nope") === undefined);
+  check("handles: session.require(T.Goal) also resolves", session.require(T.Goal) === goal);
+  check("handles: unknown service is undefined", session.get(token("nope", "session")) === undefined);
 
   await session.close();
 }
@@ -262,7 +272,7 @@ async function testMachineFactoryIsFactoryOnly(machine: LocalMachine): Promise<v
     return machine;
   };
 
-  const session = await Session.open({ machine: factory, store });
+  const session = await openTestSession({ machine: factory, store });
   check("machine-factory: opened once", open === 1);
   check("machine-factory: factory returns the Machine itself", session.machine === machine);
   check("machine-factory: open context carries no store (no machine state to persist)", !sawStoreField);
@@ -277,7 +287,7 @@ async function testMachineFactoryIsFactoryOnly(machine: LocalMachine): Promise<v
   check("machine-factory: machine still usable after session.close", machine.getcwd().length > 0);
 
   // A plain Machine is the common case and must take the same path.
-  const direct = await Session.open({ machine, store: new MemoryStore() });
+  const direct = await openTestSession({ machine, store: new MemoryStore() });
   check("machine-factory: a plain Machine passes straight through", direct.machine === machine);
   await direct.close();
 }
@@ -288,11 +298,11 @@ async function testExposedPortForwarding(machine: LocalMachine): Promise<void> {
   const withPort = Object.create(machine) as LocalMachine & { exposedPortUrl(p: number): Promise<string | undefined> };
   withPort.exposedPortUrl = async (p: number) => `https://sbx-${String(p)}.example.dev`;
 
-  const exposing = await Session.open({ machine: withPort });
+  const exposing = await openTestSession({ machine: withPort });
   check("exposed-port: forwarded to the machine", (await exposing.resolveExposedPort(3000)) === "https://sbx-3000.example.dev");
   await exposing.close();
 
-  const plain = await Session.open({ machine });
+  const plain = await openTestSession({ machine });
   check("exposed-port: undefined when the backend has no mapping", (await plain.resolveExposedPort(3000)) === undefined);
   await plain.close();
 }
@@ -317,7 +327,7 @@ async function testCloseHangIsolation(machine: LocalMachine): Promise<void> {
       },
     };
 
-    const session = await Session.open({ machine, store: new HangingFlushStore(), tracing: hangingTracing, logger });
+    const session = await openTestSession({ machine, store: new HangingFlushStore(), tracing: hangingTracing, logger });
     const t0 = Date.now();
     await session.close();
     const elapsed = Date.now() - t0;
@@ -338,9 +348,9 @@ async function testRuntimeModelAndThinking(machine: LocalMachine): Promise<void>
     const agentModel = recordingModel(model);
     const overrideModel = recordingModel(model);
     const agent = defineAgent({ name: "a", model: agentModel.model, instructions: "x" });
-    const session = await Session.open({ machine });
+    const session = await openTestSession({ machine });
     session.setModel(overrideModel.model);
-    await new Runner({ machine }).run(agent, "go", { session });
+    await testRunner({ machine }).run(agent, "go", { session });
     faux.unregister();
     await session.close();
     check("setModel: override model was used", overrideModel.lastReq() !== undefined);
@@ -351,9 +361,9 @@ async function testRuntimeModelAndThinking(machine: LocalMachine): Promise<void>
     const { faux, model } = fauxModel("ok");
     const rec = recordingModel(model);
     const agent = defineAgent({ name: "a", model: rec.model, instructions: "x" });
-    const session = await Session.open({ machine });
+    const session = await openTestSession({ machine });
     session.setThinking("high");
-    await new Runner({ machine }).run(agent, "go", { session });
+    await testRunner({ machine }).run(agent, "go", { session });
     faux.unregister();
     await session.close();
     check("setThinking: thinking reached request.params", rec.lastReq()?.params?.thinking === "high");
@@ -372,8 +382,8 @@ async function testRuntimePermissionMode(machine: LocalMachine): Promise<void> {
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "w", model, instructions: "x", tools: [writeTool] });
   // No responder → manual mode bubbles a durable interrupt instead of running the tool.
-  const session = await Session.open({ machine, permission: { mode: "manual" } });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine, permission: { mode: "manual" } });
+  const runner = testRunner({ machine });
 
   const first = await runner.run(agent, "write it", { session });
   check("setPermissionMode: manual run interrupts on the asking tool", first.status === "interrupted");
@@ -394,8 +404,8 @@ async function testSessionIdConflict(machine: LocalMachine): Promise<void> {
   faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "c", model, instructions: "x" });
-  const session = await Session.open({ machine });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine });
+  const runner = testRunner({ machine });
 
   let conflict: unknown;
   try {
@@ -416,10 +426,10 @@ async function testSessionIdConflict(machine: LocalMachine): Promise<void> {
   } catch (e) {
     missing = e;
   }
-  check("capability-missing: probe getter returns undefined", session.plan === undefined);
+  check("capability-missing: probe getter returns undefined", session.get(T.Plan) === undefined);
   check(
-    "capability-missing: require method throws CapabilityMissingError with the capability name",
-    missing instanceof CapabilityMissingError && missing.capability === "plan",
+    "capability-missing: require method throws ServiceUnavailableError with the service name",
+    missing instanceof ServiceUnavailableError && missing.serviceName === "plan",
   );
   faux.unregister();
   await session.close();

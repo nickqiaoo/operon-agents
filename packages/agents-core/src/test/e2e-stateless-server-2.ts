@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * The stateless-server contract, part 2 — what a request-per-turn backend actually hits.
  *
@@ -42,7 +43,7 @@ async function request<T>(id: string, fn: (runner: Runner, workDir: string) => P
   if (!opened) throw new Error(`no such session: ${id}`);
   try {
     return await fn(
-      new Runner({
+      testRunner({
         store: opened.store,
         machine: new LocalMachine(opened.workDir),
         permission: { mode: "yolo" },
@@ -195,7 +196,7 @@ async function aLockSerializesTheSameRace(): Promise<void> {
     const opened = await repository.open(id);
     if (!opened) throw new Error(`no such session: ${id}`);
     try {
-      return await fn(new Runner({
+      return await fn(testRunner({
         store: opened.store,
         machine: new LocalMachine(opened.workDir),
         permission: { mode: "yolo" },

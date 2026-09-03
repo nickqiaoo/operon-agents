@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 // Session-lived permission manager:
 //  - approve-for-session grants survive across runs of the same Session
 //  - grants are journaled (permission.record_approval) and folded back on cold reopen
@@ -52,8 +53,8 @@ async function testApproveForSessionAcrossRuns(machine: LocalMachine, store: Mem
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "deployer", model, instructions: "x", tools: [makeDeployTool(counter)] });
 
-  const session = await Session.open({ machine, store, permission: { mode: "manual" } });
-  const runner = new Runner({});
+  const session = await openTestSession({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({});
 
   // Run 1: manual mode, no rule, no responder → durable interrupt on deploy.
   const first = await runner.run(agent, "deploy it", { session });
@@ -89,8 +90,8 @@ async function testGrantSurvivesColdReopen(machine: LocalMachine, store: MemoryS
   const agent = defineAgent({ name: "deployer", model, instructions: "x", tools: [makeDeployTool(counter)] });
 
   // A brand-new Session over the same store: the grant folds back from the journal.
-  const reopened = await Session.open({ machine, store, permission: { mode: "manual" } });
-  const runner = new Runner({});
+  const reopened = await openTestSession({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({});
   const result = await runner.run(agent, "deploy once more", { session: reopened });
   faux.unregister();
   check("cold-reopen: grant folded from log, no ask", result.status === "completed");
@@ -99,7 +100,7 @@ async function testGrantSurvivesColdReopen(machine: LocalMachine, store: MemoryS
 
 async function testStepLevelModeChange(machine: LocalMachine, store: MemoryStore): Promise<void> {
   const counter = { runs: 0 };
-  const session = await Session.open({ machine, store, permission: { mode: "manual" } });
+  const session = await openTestSession({ machine, store, permission: { mode: "manual" } });
 
   const switchTool = defineTool({
     name: "switch_yolo",
@@ -125,7 +126,7 @@ async function testStepLevelModeChange(machine: LocalMachine, store: MemoryStore
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "switcher", model, instructions: "x", tools: [switchTool, makeDeployTool(counter)] });
 
-  const runner = new Runner({});
+  const runner = testRunner({});
   const result = await runner.run(agent, "switch to yolo then deploy", { session });
   faux.unregister();
 
@@ -135,7 +136,7 @@ async function testStepLevelModeChange(machine: LocalMachine, store: MemoryStore
 }
 
 async function testModeSurvivesColdReopen(machine: LocalMachine, store: MemoryStore): Promise<void> {
-  const reopened = await Session.open({ machine, store, permission: { mode: "manual" } });
+  const reopened = await openTestSession({ machine, store, permission: { mode: "manual" } });
   check("mode-reopen: journaled set_mode wins over configured mode", reopened.permission.mode === "yolo");
 }
 

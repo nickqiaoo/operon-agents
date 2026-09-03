@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 // Structured task list: TaskCreate/Update/List/Get over a dedicated per-task
 // store — disk sessions write one JSON file per task, other backends use KV state. Verifies CRUD,
 // dependencies (blocks/blockedBy), delete cascade, high-water-mark ids, both backends, and that a
@@ -103,13 +104,13 @@ async function testSessionIntegration(root: string): Promise<void> {
   const store = new TaskStore();
   {
     const store1 = new DiskSessionStore(sessionDir);
-    const session = await Session.open({ store: store1, capabilities: [taskCapability(store), backgroundCapability()] });
+    const session = await openTestSession({ store: store1, capabilities: [taskCapability(store), backgroundCapability()] });
     await runTool(taskCreateTool(store), { subject: "session-task", description: "persist across reopen" });
     await session.close();
   }
   // Reopen with a fresh store instance; openSession.load() rehydrates from disk.
   const store2State = new TaskStore();
-  const session2 = await Session.open({ store: new DiskSessionStore(sessionDir), capabilities: [taskCapability(store2State), backgroundCapability()] });
+  const session2 = await openTestSession({ store: new DiskSessionStore(sessionDir), capabilities: [taskCapability(store2State), backgroundCapability()] });
   check("Session: task list survives reopen via capability", store2State.list().length === 1 && store2State.get("1")!.subject === "session-task");
   // BackgroundList is a host/admin helper, not a model capability tool. TaskList remains.
   const names = session2.capabilities.flatMap((c) => (c.tools ?? []).map((t) => t.schema.name));

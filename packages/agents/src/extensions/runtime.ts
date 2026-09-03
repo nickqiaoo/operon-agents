@@ -3,14 +3,14 @@ import { ServiceUnavailableError, isProbeProperty } from "./services.ts";
 import type { AgentRecord, HeadlessCommand } from "operon-agents-core";
 import type {
   AssistantMessage,
-  CapabilityContext,
+  RunContext,
   CompactionGate,
   ChatModel,
   ConversationContext,
   Injector,
   LlmRequest,
   Message,
-  SessionContext,
+  ProvisionContext,
   SessionControls,
   SessionStore,
   SteerChannel,
@@ -24,7 +24,7 @@ import type {
   ToolResultContent,
   Usage,
 } from "operon-agents-core";
-import { tagToolSource } from "operon-agents-core";
+import { tagToolSource, T } from "operon-agents-core";
 import type {
   ExtensionAPI,
   ExtensionActions,
@@ -112,8 +112,9 @@ export class ExtensionRuntime {
   /** Serializes flushes so concurrent attach/detach apply strictly in submission order. */
   private flushChain: Promise<void> = Promise.resolve();
   private readonly memoryState = new Map<string, unknown>();
-  private session: SessionContext | undefined;
-  private run: CapabilityContext | undefined;
+  /** The session binding: its scope (machine, store, events, steer, log reader, controls) + id + signal. */
+  private session: ProvisionContext | undefined;
+  private run: RunContext | undefined;
   /** The conversation shard the in-flight decision point belongs to; backs `actions.record`. */
   private activeContext: ConversationContext | undefined;
   /** Snapshot of the last assembled registry, refreshed once per turn by `filterTools`. */
@@ -151,7 +152,7 @@ export class ExtensionRuntime {
   // Lifecycle
   // ==========================================================================
 
-  async open(ctx: SessionContext, reason: SessionStartReason = "open"): Promise<void> {
+  async open(ctx: ProvisionContext, reason: SessionStartReason = "open"): Promise<void> {
     this.session = ctx;
     for (const definition of this.definitions) {
       await this.setupExtension(definition);
@@ -161,7 +162,7 @@ export class ExtensionRuntime {
     }
   }
 
-  attachRun(ctx: CapabilityContext): void {
+  attachRun(ctx: RunContext): void {
     this.run = ctx;
   }
 
@@ -359,7 +360,7 @@ export class ExtensionRuntime {
    * capability timeline. Rides the `custom` record type — audit-only, ignored by reducers.
    */
   private async logChange(kind: "attached" | "detached", extensionId: string): Promise<void> {
-    const store = this.session?.store;
+    const store = this.session?.scope.get(T.Store);
     if (!store) return;
     try {
       await store.appendRecord({ type: "custom", name: `extensions.${kind}`, data: { extensionId } });
@@ -757,7 +758,7 @@ export class ExtensionRuntime {
           return () => undefined;
         }
         // `setup` runs inside `open`, so the session context is already in place.
-        const sink = this.session?.events;
+        const sink = this.session?.scope.get(T.Events);
         if (sink === undefined) return () => undefined;
         const dispose = sink.subscribe((event) => {
           try {
@@ -838,7 +839,7 @@ export class ExtensionRuntime {
           void this.warn(definition.id, `emitEvent("${name}") ignored: no open session.`);
           return;
         }
-        void session.events.emit({
+        void session.scope.get(T.Events)?.emit({
           address: "main",
           sessionId: session.sessionId,
           type: "extension",
@@ -865,9 +866,9 @@ export class ExtensionRuntime {
         return [...snapshot, ...writes];
       },
       state: {
-        get: (key) => this.stateFor(definition.id, this.session?.store).get(key),
-        set: (key, value) => this.stateFor(definition.id, this.session?.store).set(key, value),
-        delete: (key) => this.stateFor(definition.id, this.session?.store).delete(key),
+        get: (key) => this.stateFor(definition.id, this.session?.scope.get(T.Store)).get(key),
+        set: (key, value) => this.stateFor(definition.id, this.session?.scope.get(T.Store)).set(key, value),
+        delete: (key) => this.stateFor(definition.id, this.session?.scope.get(T.Store)).delete(key),
       },
       actions: this.actionsFor(definition.id),
     };
@@ -1053,7 +1054,7 @@ export class ExtensionRuntime {
    * schema untouched. `source` names the extension so a fold can attribute the message.
    */
   private enqueue(extensionId: string, content: SteerContent, channel: SteerChannel, metadata?: Readonly<Record<string, string | number | boolean>>): SteerReceipt | undefined {
-    const bus = this.run?.steer ?? this.session?.steer;
+    const bus = this.session?.scope.get(T.Steer);
     if (!bus) {
       void this.warn(extensionId, `${channel === "steering" ? "steer" : "followUp"}() ignored: no steer bus.`);
       return undefined;
@@ -1067,7 +1068,7 @@ export class ExtensionRuntime {
   }
 
   private controls(): SessionControls | undefined {
-    return this.run?.controls ?? this.session?.controls;
+    return this.run?.controls ?? this.session?.scope.get(T.SessionControls);
   }
 
   /**
@@ -1094,27 +1095,29 @@ export class ExtensionRuntime {
 
   private sessionContext(extensionId: string): ExtensionSessionContext {
     const session = this.requireSession();
+    const store = session.scope.get(T.Store);
     return {
       extensionId,
       sessionId: session.sessionId,
       signal: session.signal,
-      machine: session.machine,
-      store: session.store,
-      state: this.stateFor(extensionId, session.store),
+      machine: session.scope.require(T.Machine),
+      store,
+      state: this.stateFor(extensionId, store),
       actions: this.actionsFor(extensionId),
     };
   }
 
   private eventContext(extensionId: string, origin: StepOrigin): ExtensionEventContext {
     const session = this.requireSession();
+    const store = session.scope.get(T.Store);
     return {
       extensionId,
       sessionId: session.sessionId,
       address: origin.address ?? "main",
       signal: origin.signal,
-      machine: this.run?.machine ?? session.machine,
-      store: session.store,
-      state: this.stateFor(extensionId, session.store),
+      machine: session.scope.require(T.Machine),
+      store,
+      state: this.stateFor(extensionId, store),
       actions: this.actionsFor(extensionId),
     };
   }
@@ -1126,7 +1129,8 @@ export class ExtensionRuntime {
   private async ensureRecordSnapshot(): Promise<Map<string, ExtensionRecordEntry[]>> {
     if (this.recordSnapshot !== undefined) return this.recordSnapshot;
     const buckets = new Map<string, ExtensionRecordEntry[]>();
-    const log: readonly AgentRecord[] = this.session?.logRecords !== undefined ? await this.session.logRecords() : [];
+    const reader = this.session?.scope.get(T.SessionLog);
+    const log: readonly AgentRecord[] = reader !== undefined ? await reader() : [];
     for (const record of log) {
       if (record.type !== "custom") continue;
       const full = (record as { readonly name?: unknown }).name;
@@ -1189,7 +1193,7 @@ export class ExtensionRuntime {
     if (!session || this.reportingWarning) return;
     this.reportingWarning = true;
     try {
-      await session.events.emit({
+      await session.scope.get(T.Events)?.emit({
         type: "warning",
         message: `[extension ${extensionId}] ${message}`,
         address: "main",
@@ -1200,7 +1204,7 @@ export class ExtensionRuntime {
     }
   }
 
-  private requireSession(): SessionContext {
+  private requireSession(): ProvisionContext {
     if (!this.session) throw new Error("extension runtime is not attached to a session");
     return this.session;
   }

@@ -1,5 +1,7 @@
 import type { ToolResultMessage } from "../protocol/index.ts";
 import type { AgentRecord, SessionStore } from "../store/index.ts";
+import { T } from "../scope/tokens.ts";
+import type { ProvisionContext } from "./capability.ts";
 
 // Capability state lives in the linear session log, not in a side channel: a stateful capability
 // writes its state snapshot into the `details` of the tool result that changed it, and rebuilds
@@ -14,14 +16,12 @@ export async function readLog(store: SessionStore | undefined): Promise<AgentRec
   return records;
 }
 
-/** The session's records for a capability's `openSession`: prefers the memoized `logRecords`
- *  the session shares across capabilities (one read for goal/plan/todo + the context replay),
- *  falling back to a direct `readLog` when it is absent (e.g. a test-constructed context). */
-export function readSessionLog(ctx: {
-  readonly store?: SessionStore;
-  readonly logRecords?: () => Promise<readonly AgentRecord[]>;
-}): Promise<readonly AgentRecord[]> {
-  return ctx.logRecords !== undefined ? ctx.logRecords() : readLog(ctx.store);
+/** The session's records for a capability's provision: the memoized `T.SessionLog` reader the
+ *  session shares across capabilities (one read for goal/plan/todo + the context replay),
+ *  falling back to a direct `readLog` of `T.Store` when a test-built scope has none. */
+export function readSessionLog(ctx: ProvisionContext): Promise<readonly AgentRecord[]> {
+  const reader = ctx.scope.get(T.SessionLog);
+  return reader !== undefined ? reader() : readLog(ctx.scope.get(T.Store) ?? ctx.scope.get(T.StoreBackend));
 }
 
 /** Tool-result messages for `toolName` in the log, in append order. */

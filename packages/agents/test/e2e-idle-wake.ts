@@ -1,3 +1,4 @@
+import { T } from "operon-agents-core";
 /**
  * Idle wake: a follow-up that lands while NO turn is running still gets consumed.
  *
@@ -41,7 +42,7 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
 
-  const manager = session.core.backgroundManager!;
+  const manager = session.core.require(T.Background);
   const settle = Promise.withResolvers<{ agentStatus: string }>();
   manager.registerTask(new AgentBackgroundTask(settle.promise, "delayed helper", { agentId: "helper-1", address: "main/helper-1" }));
 

@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Coverage for `AgentConfig.modelSettings` reaching the wire, and for the precedence rule
  * between the agent profile and session-level runtime overrides.
@@ -62,8 +63,8 @@ async function captureOptions(
     ...(settings !== undefined ? { modelSettings: settings } : {}),
   });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
-  const session = await Session.open({ machine });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const session = await openTestSession({ machine });
   try {
     if (sessionThinking !== undefined) session.setThinking(sessionThinking);
     await runner.run(agent, "hello", { session });
@@ -148,7 +149,7 @@ async function testApiKeyOnTheModelSpec(machine: LocalMachine): Promise<void> {
   const model = defineModel({ descriptor, runtime: faux.runtime, apiKey: "sk-from-code" });
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   await runner.run(agent, "hello");
   faux.unregister();
 
@@ -196,7 +197,7 @@ async function testConnectionSettings(machine: LocalMachine): Promise<void> {
     modelSettings: { temperature: 0.5 },
   });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   await runner.run(agent, "hello");
   faux.unregister();
 

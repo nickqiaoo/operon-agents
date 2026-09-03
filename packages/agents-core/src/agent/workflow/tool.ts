@@ -211,7 +211,7 @@ export function buildWorkflowTool<TContext>(
           (args.script === undefined || args.script.trim().length === 0) &&
           (args.name === undefined || args.name.length === 0);
         if (resumeId !== undefined && resumeId.length > 0 && noExplicitSource) {
-          const priorJournal = (parent.session.workflow ?? fallbackWorkflowManagerFor(parent.session)).newJournal(resumeId, ctx.toolCallId);
+          const priorJournal = parent.session.workflow.newJournal(resumeId, ctx.toolCallId);
           await priorJournal.load();
           const recorded = priorJournal.recordedScript();
           if (recorded === undefined) {
@@ -252,7 +252,7 @@ export function buildWorkflowTool<TContext>(
         // store (or in-memory when the session has none). Discovery needs no writes: the
         // tool results below carry the run's lifecycle in `details`, and the `/workflows`
         // list is a fold over the conversation (snapshot.ts).
-        const wf = parent.session.workflow ?? fallbackWorkflowManagerFor(parent.session);
+        const wf = parent.session.workflow;
         const mkJournal = (id: string): WorkflowJournal => wf.newJournal(id, ctx.toolCallId);
         // Timestamps are stamped HOST-side (Date.now is banned only inside the sandbox).
         const startedAt = new Date().toISOString();
@@ -596,15 +596,3 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
-// One fallback per session (not per run): resume journals of every workflow run in the
-// session must land in the same store. Keyed by the session object's identity (the port
-// is the same Session instance across every frame of a session).
-const fallbackWorkflowManagers = new WeakMap<SessionPort, WorkflowManager>();
-function fallbackWorkflowManagerFor(session: SessionPort): WorkflowManager {
-  let manager = fallbackWorkflowManagers.get(session);
-  if (manager === undefined) {
-    manager = new WorkflowManager(session.store);
-    fallbackWorkflowManagers.set(session, manager);
-  }
-  return manager;
-}

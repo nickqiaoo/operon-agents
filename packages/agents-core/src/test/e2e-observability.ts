@@ -1,3 +1,5 @@
+import { testRunner, openTestSession } from "./faux.ts";
+import { token } from "../index.ts";
 import {
   LocalMachine,
   ListenerSink,
@@ -110,13 +112,11 @@ async function main(): Promise<void> {
   const wiringLogger: Logger = { log: (level, message) => captured.push(`${level}:${message}`) };
   const boom: Capability = {
     name: "boom",
-    openSession: async () => {
-      throw new Error("kapow");
-    },
+    provides: [{ token: token("boom", "session"), create: async () => { throw new Error("kapow"); } }],
   };
-  const session = await Session.open({ machine: new LocalMachine(process.cwd()), events: new ListenerSink(), logger: wiringLogger, capabilities: [boom] });
+  const session = await openTestSession({ machine: new LocalMachine(process.cwd()), events: new ListenerSink(), logger: wiringLogger, capabilities: [boom] });
   await session.close();
-  check("Session routes capability openSession failure to the logger", captured.some((l) => l.startsWith("error:") && l.includes("boom")));
+  check("Session routes capability provision failure to the logger", captured.some((l) => l.startsWith("error:") && l.includes("boom")));
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

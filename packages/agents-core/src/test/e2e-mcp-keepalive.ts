@@ -2,8 +2,8 @@ import {
   LocalMachine,
   ListenerSink,
   SteerBus,
-  type SessionContext,
 } from "../index.ts";
+import { openCapability } from "./faux.ts";
 import {
   mcpServersCapability,
   type McpServersHandle,
@@ -92,7 +92,7 @@ async function main(): Promise<void> {
   events.subscribe((e) => {
     if (e.type === "warning") warnings.push(e.message);
   });
-  const sessionCtx: SessionContext = { sessionId: "s", machine, events, signal: new AbortController().signal, steer: new SteerBus() };
+  const wiring = { machine, events, steer: new SteerBus() };
 
   const built: PingTransport[] = [];
   const factory = (name: string): MCPTransport => {
@@ -111,9 +111,7 @@ async function main(): Promise<void> {
     reconnectPolicy: { maxRetries: 1, initialDelayMs: 100, maxDelayMs: 100, factor: 2 },
     timer,
   });
-  const handle = cap.service as McpServersHandle;
-
-  await cap.openSession?.(sessionCtx);
+  const handle = (await openCapability(cap, wiring)).service as McpServersHandle;
   check("heartbeat: connected server schedules the first ping", handle.list()[0]?.status === "connected" && pending.length === 1 && pending[0]!.ms === 50);
 
   const firstDelay = fire();

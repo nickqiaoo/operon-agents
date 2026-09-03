@@ -1,5 +1,6 @@
 import { readSessionLog } from "../capability-state.ts";
 import type { Capability } from "../capability.ts";
+import { T } from "../../scope/tokens.ts";
 import { TodoListInjector } from "./injector.ts";
 import { TodoStore } from "./todo-store.ts";
 import { todoListTool } from "./tools.ts";
@@ -13,12 +14,17 @@ export function todoCapability(store: TodoStore = new TodoStore()): Capability {
   return {
     name: "todo",
     tools: [todoListTool(store)],
-    service: store,
     injectors: [new TodoListInjector(store)],
-    // Rebuild the list from the session log (the latest TodoList result), not a KV side
-    // channel — so resume restores it and a fork reconstructs the list at the fork point.
-    openSession: async (ctx) => {
-      store.reconstruct(await readSessionLog(ctx));
-    },
+    provides: [
+      {
+        token: T.Todo,
+        // Rebuild the list from the session log (the latest TodoList result), not a KV side
+        // channel — so resume restores it and a fork reconstructs the list at the fork point.
+        create: async (ctx) => {
+          store.reconstruct(await readSessionLog(ctx));
+          return store;
+        },
+      },
+    ],
   };
 }

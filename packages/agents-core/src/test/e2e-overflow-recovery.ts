@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,7 +75,7 @@ async function testOverflowCompactRetry(dir: string, machine: LocalMachine): Pro
 
   // A window far above what the reads produce: the PROACTIVE thresholds must never fire, so a
   // compaction can only come from the reactive overflow-recovery path under test.
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     store,
     events,
@@ -112,7 +113,7 @@ async function testUnclaimedOverflowDegrades(machine: LocalMachine): Promise<voi
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "bare", model, instructions: "x" });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 

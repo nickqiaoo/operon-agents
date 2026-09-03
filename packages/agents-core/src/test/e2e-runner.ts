@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,7 +56,7 @@ async function testHandoff(machine: LocalMachine): Promise<void> {
   const billing = defineAgent({ name: "billing", model, instructions: "Handle billing." });
   const triage = defineAgent({ name: "triage", model, instructions: "Route requests.", handoffs: [handoff(billing)] });
 
-  const runner = new Runner({ machine });
+  const runner = testRunner({ machine });
   const result = await runner.run(triage, "I want a refund");
   faux.unregister();
 
@@ -94,7 +95,7 @@ async function testHandoffInputType(machine: LocalMachine): Promise<void> {
   check("handoff inputType: tool schema exposes custom fields", !!params.properties && "orderId" in params.properties && "priority" in params.properties);
 
   const triage = defineAgent({ name: "triage", model, instructions: "Route requests.", handoffs: [edge] });
-  const runner = new Runner({ machine });
+  const runner = testRunner({ machine });
   const result = await runner.run(triage, "I want a refund for order A-123");
   faux.unregister();
 
@@ -134,8 +135,8 @@ async function testDurableHandoffContinuation(dir: string, machine: LocalMachine
 
   const storeDir = join(dir, "durable-handoff-session");
   const store = new DiskSessionStore(storeDir);
-  const runner = new Runner({ machine });
-  const firstSession = await Session.open({ machine, store });
+  const runner = testRunner({ machine });
+  const firstSession = await openTestSession({ machine, store });
   const first = await runner.run(triage, "refund please", { session: firstSession });
   const billingAddress = first.activeAddress;
   const second = await runner.run(triage, "still there?", { session: firstSession });
@@ -143,7 +144,7 @@ async function testDurableHandoffContinuation(dir: string, machine: LocalMachine
 
   // Reopen over the same durable store: no in-memory active-head cache survives this boundary.
   const reopenedStore = new DiskSessionStore(storeDir);
-  const reopened = await Session.open({ machine, store: reopenedStore });
+  const reopened = await openTestSession({ machine, store: reopenedStore });
   const third = await runner.run(triage, "return me to triage", { session: reopened });
   const triageAddress = third.activeAddress;
   const fourth = await runner.run(triage, "who owns this now?", { session: reopened });
@@ -183,12 +184,12 @@ async function testHandoffInterruptionResume(dir: string, machine: LocalMachine)
   const billing = defineAgent({ name: "billing", model, instructions: "BILLING", tools: [writeTool] });
   const triage = defineAgent({ name: "triage", model, instructions: "TRIAGE", handoffs: [handoff(billing)] });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
 
   const first = await runner.run(triage, "handoff then write");
   const persisted = parseInterruptionState(await store.getState(INTERRUPTION_STATE_KEY));
   const callId = first.interruptions?.[0]?.toolCallId ?? "";
-  const resumedRunner = new Runner({ machine, store, permission: { mode: "manual" } });
+  const resumedRunner = testRunner({ machine, store, permission: { mode: "manual" } });
   const resumed = await resumedRunner.resume(triage, { interruption: persisted, answers: { [callId]: { kind: "approval", decision: "approved" } } });
   faux.unregister();
 
@@ -224,13 +225,13 @@ async function testHandoffResumeIgnoresDecoy(dir: string, machine: LocalMachine)
 
   const storeDir = join(dir, "decoy-handoff-session");
   const store = new DiskSessionStore(storeDir);
-  const runner = new Runner({ machine });
-  const firstSession = await Session.open({ machine, store });
+  const runner = testRunner({ machine });
+  const firstSession = await openTestSession({ machine, store });
   const first = await runner.run(triage, "refund please", { session: firstSession });
   await firstSession.close();
 
   // Cold reopen: the head is re-derived from the durable handoff chain, edge by edge.
-  const reopened = await Session.open({ machine, store: new DiskSessionStore(storeDir) });
+  const reopened = await openTestSession({ machine, store: new DiskSessionStore(storeDir) });
   const second = await runner.run(triage, "still there?", { session: reopened });
   await reopened.close();
   faux.unregister();
@@ -246,7 +247,7 @@ async function testAmbiguousEdgesRejected(machine: LocalMachine): Promise<void> 
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
-  const runner = new Runner({ machine });
+  const runner = testRunner({ machine });
 
   const workerA = defineAgent({ name: "worker", model, instructions: "A" });
   const workerB = defineAgent({ name: "worker", model, instructions: "B" });
@@ -321,7 +322,7 @@ async function testInputGuardrail(machine: LocalMachine): Promise<void> {
   const blocked: AgentEvent[] = [];
   events.subscribe((e: AgentEvent) => { if (e.type === "guardrail.blocked") blocked.push(e); });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, events, store });
+  const runner = testRunner({ machine, events, store });
   let err: unknown;
   try {
     await runner.run(agent, "please foo the bar");
@@ -364,7 +365,7 @@ async function testOutputGuardrail(machine: LocalMachine): Promise<void> {
   const blocked: AgentEvent[] = [];
   events.subscribe((e: AgentEvent) => { if (e.type === "guardrail.blocked") blocked.push(e); });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, events, store });
+  const runner = testRunner({ machine, events, store });
   let err: unknown;
   try {
     await runner.run(agent, "tell me a secret");
@@ -422,7 +423,7 @@ async function testStreamingOutputGuardrail(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((event) => void seen.push(event));
-  const runner = new Runner({ machine, events, store });
+  const runner = testRunner({ machine, events, store });
 
   let error: unknown;
   try {
@@ -469,7 +470,7 @@ async function testStreamingOutputGuardrailPass(machine: LocalMachine): Promise<
   events.subscribe((event) => {
     if (event.type === "message.appended" && event.message.role === "assistant") appended.push(event.message);
   });
-  const runner = new Runner({ machine, events });
+  const runner = testRunner({ machine, events });
   const result = await runner.run(agent, "safe stream");
   faux.unregister();
 
@@ -493,7 +494,7 @@ async function testToolGuardrail(dir: string, machine: LocalMachine): Promise<vo
   // yolo mode so permission approves; the tool guardrail is what must block.
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool], guardrails: { toolInput: [blockWrites] } });
 
-  const runner = new Runner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "write a file");
   faux.unregister();
 
@@ -538,7 +539,7 @@ async function testAgentAsTool(machine: LocalMachine): Promise<void> {
   const addresses = new Set<string>();
   events.subscribe((e: AgentEvent) => void addresses.add(e.address));
 
-  const runner = new Runner<AgentToolContext>({ machine, events });
+  const runner = testRunner<AgentToolContext>({ machine, events });
   const result = await runner.run(main, "do research", { context: appContext });
   faux.unregister();
 
@@ -579,7 +580,7 @@ async function testSubagentInputGuardrail(machine: LocalMachine): Promise<void> 
   events.subscribe((event) => {
     if (event.type === "guardrail.blocked") blocked.push(event);
   });
-  const runner = new Runner({ machine, events, store });
+  const runner = testRunner({ machine, events, store });
   const result = await runner.run(main, "delegate this");
   faux.unregister();
 
@@ -621,7 +622,7 @@ async function testStreamingEvents(machine: LocalMachine): Promise<void> {
     if (e.type === "tool.call.delta") toolcallDeltas.push(e.argumentsPart);
   });
 
-  const runner = new Runner({ machine, events });
+  const runner = testRunner({ machine, events });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -675,7 +676,7 @@ async function testStreamRetryResetFallback(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = new Runner({ machine, events });
+  const runner = testRunner({ machine, events });
   const agent = defineAgent({ name: "retry", model, instructions: "x" });
   const result = await runner.run(agent, "go");
   faux.unregister();
@@ -715,7 +716,7 @@ async function testHitlResume(dir: string, machine: LocalMachine): Promise<void>
 
   const store = new MemoryStore();
   // manual mode + no responder → Write (no rule) falls to fallback-ask → interrupt (durable).
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     store,
     permission: { mode: "manual" },
@@ -736,7 +737,7 @@ async function testHitlResume(dir: string, machine: LocalMachine): Promise<void>
   // Simulate a cold process: a fresh capability instance would produce different hook output.
   // Replay must retain the original reminder, and HITL resume must not inject between the
   // assistant tool call and its ToolResult.
-  const resumedRunner = new Runner({
+  const resumedRunner = testRunner({
     machine,
     store,
     permission: { mode: "manual" },
@@ -834,7 +835,7 @@ async function testParallelSubagentInterruption(dir: string, machine: LocalMachi
     subagents: [child1, child2],
   });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
 
   try {
     const first = await runner.run(root, "run both children");
@@ -906,7 +907,7 @@ async function testParallelPartialApproval(dir: string, machine: LocalMachine): 
   const child2 = defineAgent({ name: "partial2", model: child2Faux.getChatModel()!, instructions: "x", tools: [writeTool] });
   const root = defineAgent({ name: "partial-root", model: rootFaux.getChatModel()!, instructions: "x", subagents: [child1, child2] });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
 
   try {
     const first = await runner.run(root, "start partial approvals");
@@ -954,7 +955,7 @@ async function testLiveApproverGating(dir: string, machine: LocalMachine): Promi
       },
       requestQuestion: async () => null,
     };
-    const runner = new Runner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: deferring });
+    const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: deferring });
     const r = await runner.run(a, "write it");
     faux.unregister();
     check("live-approver: non-live approver → durable interrupt", r.status === "interrupted");
@@ -977,7 +978,7 @@ async function testLiveApproverGating(dir: string, machine: LocalMachine): Promi
       requestApproval: async () => ({ kind: "approval", decision: "approved" }),
       requestQuestion: async () => null,
     };
-    const runner = new Runner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: approving });
+    const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: approving });
     const r = await runner.run(a, "write it");
     faux.unregister();
     check("live-approver: live approver → live completion", r.status === "completed");
@@ -1026,7 +1027,7 @@ async function testAbortDuringMultiApprovalBatch(dir: string, machine: LocalMach
     instructions: "write both files",
     tools: [writeTool],
   });
-  const runner = new Runner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder });
+  const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder });
 
   try {
     const running = runner.run(agent, "write both", { signal: controller.signal });
@@ -1060,7 +1061,7 @@ async function testMultiTurnContinuation(machine: LocalMachine): Promise<void> {
   };
   const agent = defineAgent({ name: "chat", model, instructions: "x" });
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store });
+  const runner = testRunner({ machine, store });
   await runner.run(agent, "turn one");
   await runner.run(agent, "turn two");
   faux.unregister();
@@ -1104,8 +1105,8 @@ async function testLiveContextReuse(machine: LocalMachine): Promise<void> {
   };
   const agent = defineAgent({ name: "chat", model, instructions: "x" });
   const store = new CountingStore();
-  const session = await Session.open({ machine, store });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine, store });
+  const runner = testRunner({ machine });
 
   await runner.run(agent, "t1", { session });
   const readsAfterFirstTurn = store.pathReads;
@@ -1139,8 +1140,8 @@ async function testStorelessLiveContext(machine: LocalMachine): Promise<void> {
     return stream(req, call);
   };
   const agent = defineAgent({ name: "storeless-chat", model, instructions: "x" });
-  const session = await Session.open({ machine });
-  const runner = new Runner({ machine });
+  const session = await openTestSession({ machine });
+  const runner = testRunner({ machine });
 
   await runner.run(agent, "storeless turn one", { session });
   await runner.run(agent, "storeless turn two", { session });

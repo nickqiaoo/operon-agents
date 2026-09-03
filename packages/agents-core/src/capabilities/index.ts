@@ -1,19 +1,20 @@
 export type {
   AssembledGates,
   Capability,
-  CapabilityContext,
   CapabilityDiagnostic,
   CapabilityGates,
   CompactionGate,
   CompactionGateContext,
   CompactionGateResult,
-  SessionContext,
+  Provision,
+  ProvisionContext,
+  RunContext,
   SessionControls,
   ToolFilter,
 } from "./capability.ts";
 export type { Injector, InjectionContext, InjectionResult, InjectionAppender } from "./injection.ts";
 export { BoundaryInjector, InjectionManager, systemReminder } from "./injection.ts";
-export { readLog } from "./capability-state.ts";
+export { readLog, readSessionLog } from "./capability-state.ts";
 export type { ToolProvider } from "./tool-provider.ts";
 export { staticToolProvider, tagToolSource, toolSource } from "./tool-provider.ts";
 // Extensions are a HARNESS concept and live in `operon-agents` — core deliberately knows
@@ -106,6 +107,7 @@ export type {
 
 export {
   skillsCapability,
+  loadSkillRoots,
   SkillRegistry,
   SkillNotFoundError,
   SkillCatalogInjector,

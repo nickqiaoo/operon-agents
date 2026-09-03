@@ -1,4 +1,4 @@
-import { ToolAccesses, type CapabilityContext, type Tool, type ToolPlan, type ToolResult } from "../index.ts";
+import { ToolAccesses, type RunContext, type Tool, type ToolPlan, type ToolResult } from "../index.ts";
 import type { MCPServer } from "./server.ts";
 import { applyMcpToolFilter } from "./filter.ts";
 import type { ToolProvider } from "../index.ts";
@@ -50,7 +50,7 @@ export function wrapMcpTool(server: MCPServer, def: MCPTool): Tool {
 export function mcpToolProvider(server: MCPServer): ToolProvider {
   return {
     id: `mcp:${server.name}`,
-    listTools: async (ctx: CapabilityContext): Promise<readonly Tool[]> => {
+    listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
       const raw = await server.listTools();
       const filtered = await applyMcpToolFilter(server.toolFilter, raw, { serverName: server.name, ctx });
       return filtered.map((def) => wrapMcpTool(server, def));

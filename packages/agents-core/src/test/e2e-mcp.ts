@@ -1,5 +1,7 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineModel, defineAgent, Runner, LocalMachine, type CapabilityContext, type Message } from "../index.ts";
+import { defineModel, defineAgent, Runner, LocalMachine, type RunContext, type Message } from "../index.ts";
+import { testRunContext } from "./faux.ts";
 import {
   TransportMCPServer,
   MockMCPTransport,
@@ -43,7 +45,7 @@ function makeServer(overrides: Partial<ConstructorParameters<typeof TransportMCP
   return { server, transport };
 }
 
-const minimalCtx = (machine: LocalMachine): CapabilityContext => ({ sessionId: "s", machine, signal: new AbortController().signal });
+const minimalCtx = (machine: LocalMachine): RunContext => testRunContext({ machine });
 
 function toolResult(messages: readonly Message[], name: string): { text: string; isError: boolean } {
   const m = [...messages].reverse().find((x) => x.role === "toolResult" && x.toolName === name);
@@ -133,7 +135,7 @@ async function testToolCall(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const { server, transport } = makeServer();
-  const runner = new Runner({ machine, capabilities: [mcpCapability([server])], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [mcpCapability([server])], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "use the mcp tool");
   faux.unregister();
 
@@ -153,7 +155,7 @@ async function testPermissionGlob(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const { server } = makeServer();
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     capabilities: [mcpCapability([server])],
     permission: { mode: "yolo", rules: [{ decision: "deny", scope: "user", pattern: "mcp__mock__*" }] },
@@ -172,7 +174,7 @@ async function testResourcesInjection(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const { server } = makeServer();
-  const runner = new Runner({ machine, capabilities: [mcpCapability([server], { injectResources: true })], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [mcpCapability([server], { injectResources: true })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 

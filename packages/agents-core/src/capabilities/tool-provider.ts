@@ -1,10 +1,10 @@
 import type { Tool } from "../tool/types.ts";
-import type { CapabilityContext } from "./capability.ts";
+import type { RunContext } from "./capability.ts";
 
 export interface ToolProvider {
   readonly id: string;
-  listTools(ctx: CapabilityContext): Promise<readonly Tool[]> | readonly Tool[];
-  start?(ctx: CapabilityContext): Promise<void> | void;
+  listTools(ctx: RunContext): Promise<readonly Tool[]> | readonly Tool[];
+  start?(ctx: RunContext): Promise<void> | void;
   stop?(): Promise<void> | void;
 }
 

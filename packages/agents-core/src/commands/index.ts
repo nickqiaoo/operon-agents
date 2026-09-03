@@ -64,7 +64,7 @@ export class CommandRegistry {
 }
 
 /**
- * Commands contributed at runtime — the duck protocol: any capability whose `service` object
+ * Commands contributed at runtime — the duck protocol: any service a capability provides that
  * exposes `sessionCommands(): HeadlessCommand[]` adds to the session's command set (the
  * extensions runtime uses this to surface `api.registerCommand` registrations). No names, no
  * imports: the registry stays ignorant of who contributes.
@@ -72,8 +72,10 @@ export class CommandRegistry {
 function dynamicCommands(session: Session): readonly HeadlessCommand[] {
   const out: HeadlessCommand[] = [];
   for (const capability of session.capabilities) {
-    const service = capability.service as { sessionCommands?: () => readonly HeadlessCommand[] } | undefined;
-    if (typeof service?.sessionCommands === "function") out.push(...service.sessionCommands());
+    for (const provision of capability.provides ?? []) {
+      const service = session.get(provision.token) as { sessionCommands?: () => readonly HeadlessCommand[] } | undefined;
+      if (typeof service?.sessionCommands === "function") out.push(...service.sessionCommands());
+    }
   }
   return out;
 }

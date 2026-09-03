@@ -1,3 +1,4 @@
+import { testRunner, openTestSession, openCapability } from "./faux.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,7 +97,7 @@ async function testFullCompaction(dir: string, machine: LocalMachine): Promise<v
   // the compact line, so this covers the normal path. Two big reads land between the two lines,
   // which means afterStep's compact check fires — not beforeStep's hard block.
   const compaction = compactionCapability({ maxContextTokens: 48_000 });
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     store,
     events,
@@ -122,7 +123,7 @@ async function testFullCompaction(dir: string, machine: LocalMachine): Promise<v
   const entries: AgentRecord[] = [];
   for await (const e of store.readRecords()) entries.push(e);
   check("full: compaction record appended to durable log", entries.some((e) => e.type === "context.apply_compaction"));
-  check("full: committed compaction advances prompt-context invalidation revision", (compaction.service as CompactionService).revision > 0);
+  check("full: committed compaction advances prompt-context invalidation revision", ((await openCapability(compaction)).service as CompactionService).revision > 0);
   check("full: run completes", result.status === "completed");
 }
 
@@ -145,7 +146,7 @@ async function testMicroCompaction(dir: string, machine: LocalMachine): Promise<
     maxContextTokens: 1_000_000,
     micro: { cacheMissedThresholdMs: 0, minContextUsageRatio: 0, keepRecentMessages: 1, minContentTokens: 10 },
   });
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     store,
     capabilities: [compaction],
@@ -162,7 +163,7 @@ async function testMicroCompaction(dir: string, machine: LocalMachine): Promise<
     (m) => m.role === "toolResult" && m.content.map(partText).join("").length > 100,
   ));
   check("micro: run completes", result.status === "completed");
-  check("micro: does not advance full-compaction prompt-context revision", (compaction.service as CompactionService).revision === 0);
+  check("micro: does not advance full-compaction prompt-context revision", ((await openCapability(compaction)).service as CompactionService).revision === 0);
 
   // The truncation must be JOURNALED (replaceHistory), not an in-place edit of the live
   // array: replay has to reproduce the same cleared bodies, or a resume would resurrect
@@ -195,7 +196,7 @@ async function testCompactionFailureDegrades(dir: string, machine: LocalMachine)
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "reader", model, instructions: "x", tools: [readTool] });
 
-  const runner = new Runner({
+  const runner = testRunner({
     machine,
     store: new MemoryStore(),
     events: new ListenerSink(),

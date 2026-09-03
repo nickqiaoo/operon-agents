@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Regression test for the `auto`-mode judge reading the WRONG frame's transcript under
  * concurrency. The PermissionManager is a session-level singleton; its judge context
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
     },
   };
 
-  const runner = new Runner({
+  const runner = testRunner({
     machine: new LocalMachine(dir),
     permission: { mode: "auto", autoApprover },
   });

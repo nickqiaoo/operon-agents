@@ -3,25 +3,29 @@
  * bundled in one place: disk sessions under `<homeDir>/sessions`, the local machine, a rotating
  * file log, file-backed MCP credentials, disk-discovered agent profiles, and the cron extension.
  *
- * There is deliberately no server counterpart. A hosted deployment injects its own repository,
- * machine, logger and credential store, and those choices belong to the host — a preset that
- * bundled them saved three lines while forcing one `McpOAuthService` (and therefore one
- * credential store, which has no tenant dimension) to be shared across every session in the
- * process. Servers call `createHarness` directly; see `examples/managed-agents`.
- *
- * There is still no "mode" inside the engine (Architecture Invariant 7): this file only picks
- * backends, and returns a plain `Harness` nothing downstream can distinguish.
+ * It is a PRESET: pure data in (`LocalDeploymentOptions`), the three composition hooks out.
+ * The `harness` hook registers the process-lived objects on the harness scope; the `session`
+ * hook builds each session's capability set. A hosted deployment writes its own preset the same
+ * way (see `examples/managed-agents`) — there is still no "mode" inside the engine
+ * (Architecture Invariant 7): this file only picks backends, and returns plain `HarnessOptions`
+ * nothing downstream can distinguish.
  */
 import { homedir } from "node:os";
 import { cronExtension } from "./cron/index.ts";
 import { join } from "node:path";
 import {
   type HookDef,
+  type Logger,
   type McpServerConfig,
   type PluginManager,
   DiskSessionRepository,
+  LocalMachine,
   McpOAuthService,
   RotatingFileSink,
+  SkillRegistry,
+  T,
+  createMcpServers,
+  loadSkillRoots,
   loadAgentProfiles,
   resolveGlobalLogPath,
   sinkLogger,
@@ -39,54 +43,80 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
   /**
    * App home root — sessions (`<homeDir>/sessions`), MCP creds, logs, and disk-discovered agent
    * profiles all live under it. Defaults to `~/.agents`. (`homeDir` is a local-deployment concept;
-   * the harness itself only knows `repository`.)
+   * the harness itself only knows `T.SessionRepository`.)
    */
   readonly homeDir?: string;
   /** Workspace MCP servers to expose. */
   readonly mcpServers?: Record<string, McpServerConfig>;
-  /** Installed-plugin manager, if any. */
+  /** Installed-plugin manager, if any. Loaded once here, then registered as `T.PluginManager`. */
   readonly pluginManager?: PluginManager;
   /** Shell hooks from config (`config.hooks`), projected as HookDefs. */
   readonly hooks?: readonly HookDef[];
   /** Discover agent profiles from disk (`<homeDir>/agents` + `<cwd>/.agents/agents`). Default true. */
   readonly loadDiskProfiles?: boolean;
+  /** Diagnostics logger. Defaults to a rotating file under `<homeDir>/logs`. */
+  readonly logger?: Logger;
+  /** Context budget for the default compaction capability. */
+  readonly maxContextTokens?: number;
 }
 
 /** Build `HarnessOptions` wired for a local, single-machine deployment. */
 export async function localHarnessOptions<TContext>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<HarnessOptions<TContext>> {
-  const homeDir = options.homeDir ?? join(homedir(), ".agents");
-  // MCP OAuth credentials on local disk (0600) — the local default backend (`<homeDir>/credentials/mcp`).
-  const oauthService = new McpOAuthService({ homeDir });
-  // Diagnostics roll on disk under <homeDir>/logs.
-  const logger = options.logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) }));
+  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, harness, workspace, session, extensions, ...engine } = options;
+  const homeDir = home ?? join(homedir(), ".agents");
   // Agent profiles come from disk here; the server preset supplies them externally instead.
   const extraSubagentProfiles =
     options.extraSubagentProfiles ??
-    ((options.loadDiskProfiles ?? true)
+    ((loadDiskProfiles ?? true)
       ? await loadAgentProfiles({ homeDir, cwd: options.workDir ?? process.cwd() })
       : undefined);
+  // Installed plugins are read ONCE per process, not per session: the manager is a harness-tier
+  // object, and `session.reloadPlugins()` is the explicit refresh.
+  if (pluginManager !== undefined) await pluginManager.load();
 
   return {
-    ...options,
-    // Disk sessions under <homeDir>/sessions; an injected repository still wins. The machine defaults to local.
-    repository: options.repository ?? new DiskSessionRepository(homeDir),
-    logger,
+    ...engine,
     ...(extraSubagentProfiles !== undefined ? { extraSubagentProfiles } : {}),
-    capabilities:
-      options.capabilities ??
-      (() =>
+    harness: async (scope) => {
+      // Disk sessions under <homeDir>/sessions; diagnostics roll on disk under <homeDir>/logs.
+      scope.register(T.SessionRepository, new DiskSessionRepository(homeDir));
+      scope.register(T.Logger, logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) })), { owned: false });
+      if (pluginManager !== undefined) scope.register(T.PluginManager, pluginManager, { owned: false });
+      await harness?.(scope);
+    },
+    // One per working directory, shared by its sessions: the MCP connections (workspace servers +
+    // enabled plugin servers), the skill scan, and the OAuth credential store (on local disk,
+    // 0600, under `<homeDir>/credentials/mcp`).
+    workspace: async (scope, ctx) => {
+      const oauthService = new McpOAuthService({ homeDir });
+      scope.register(T.McpOAuth, oauthService, { owned: false });
+      const configs = { ...(mcpServers ?? {}), ...(pluginManager?.mcpServerConfigs() ?? {}) };
+      if (Object.keys(configs).length > 0) {
+        const servers = createMcpServers(configs, { oauthService });
+        await servers.connect({ scope, sessionId: "", signal: new AbortController().signal });
+        scope.register(T.McpServers, servers, { dispose: () => servers.shutdown() });
+      }
+      const registry = new SkillRegistry();
+      await loadSkillRoots(new LocalMachine(ctx.workDir), registry, {
+        ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
+      });
+      scope.register(T.SkillRegistry, registry, { owned: false });
+      await workspace?.(scope, ctx);
+    },
+    session:
+      session ??
+      ((scope) =>
         defaultCapabilities({
-          ...(options.maxContextTokens !== undefined ? { maxContextTokens: options.maxContextTokens } : {}),
-          ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
-          ...(options.pluginManager !== undefined ? { pluginManager: options.pluginManager } : {}),
-          ...(options.hooks !== undefined ? { hooks: options.hooks } : {}),
-          oauthService,
+          scope,
+          ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+          ...(pluginManager !== undefined ? { pluginManager } : {}),
+          ...(hooks !== undefined ? { hooks } : {}),
         })),
     // Cron rides the extension channel now: LOCAL deployments attach it, the server profile
     // simply doesn't — Invariant 7 ("cron is local-only") is structural, not an option to pass.
-    extensions: [cronExtension(), ...(options.extensions ?? [])],
+    extensions: [cronExtension(), ...(extensions ?? [])],
   };
 }
 

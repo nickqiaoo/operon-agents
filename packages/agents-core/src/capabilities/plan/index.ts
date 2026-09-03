@@ -1,5 +1,6 @@
 import { readSessionLog } from "../capability-state.ts";
 import type { Capability } from "../capability.ts";
+import { T } from "../../scope/tokens.ts";
 import { PlanMode } from "./plan-mode.ts";
 import { enterPlanModeTool, exitPlanModeTool } from "./tools.ts";
 import {
@@ -15,7 +16,6 @@ export type { PlanData, PlanDetails } from "./plan-mode.ts";
 export function planCapability(planMode: PlanMode = new PlanMode()): Capability {
   return {
     name: "plan",
-    service: planMode,
     tools: [enterPlanModeTool(planMode), exitPlanModeTool(planMode)],
     policies: [
       planModeGuardDenyPolicy(planMode),
@@ -23,10 +23,16 @@ export function planCapability(planMode: PlanMode = new PlanMode()): Capability 
       planModeToolApprovePolicy(planMode),
     ],
     injectors: [new PlanModeInjector(planMode)],
-    openSession: async (ctx) => {
-      planMode.attachMachine(ctx.machine);
-      // Rebuild plan-mode state from the log's latest enter/exit result (resume/fork aware).
-      planMode.reconstruct(await readSessionLog(ctx));
-    },
+    provides: [
+      {
+        token: T.Plan,
+        create: async (ctx) => {
+          planMode.attachMachine(ctx.scope.require(T.Machine));
+          // Rebuild plan-mode state from the log's latest enter/exit result (resume/fork aware).
+          planMode.reconstruct(await readSessionLog(ctx));
+          return planMode;
+        },
+      },
+    ],
   };
 }

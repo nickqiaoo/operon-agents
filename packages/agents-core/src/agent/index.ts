@@ -37,7 +37,7 @@ export { composeLoopHooks } from "./compose-hooks.ts";
  *  that drive `runTurn` directly resolve precedence the same way the Runner does. */
 export { resolveModelParams } from "./run-support.ts";
 
-export { CapabilityMissingError, Session, newSessionId } from "./session.ts";
+export { Session, newSessionId } from "./session.ts";
 export type {
   BackgroundTaskListOptions,
   ReadBackgroundTaskOutputDeltaOptions,
@@ -47,7 +47,7 @@ export type {
   GoalBudgetInput,
   GoalStatusInput,
   PlanModeOptions,
-  SessionConfig,
+  SessionOpenOptions,
   SessionPort,
 } from "./session.ts";
 

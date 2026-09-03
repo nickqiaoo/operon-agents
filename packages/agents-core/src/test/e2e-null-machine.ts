@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { defineAgent, defineModel, readTool, Runner, type Message } from "../index.ts";
 
@@ -21,7 +22,7 @@ async function testStatelessRun(): Promise<void> {
   const agent = defineAgent({ name: "stateless", model, instructions: "x" });
 
   // No machine, no store, no capabilities — the canonical stateless server config.
-  const runner = new Runner({});
+  const runner = testRunner({});
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -39,7 +40,7 @@ async function testFileToolRefused(): Promise<void> {
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "leaky", model, instructions: "x", tools: [readTool] });
 
-  const runner = new Runner({ permission: { mode: "yolo" } });
+  const runner = testRunner({ permission: { mode: "yolo" } });
   const result = await runner.run(agent, "read a file");
   faux.unregister();
 

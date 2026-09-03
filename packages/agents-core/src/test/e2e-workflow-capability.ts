@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Workflow discovery test — a BACKGROUND workflow run is a task, discoverable through
  * session.listWorkflows()/getWorkflow() and the /workflows command, sourced from the durable
@@ -113,8 +114,8 @@ async function main(): Promise<void> {
     await new DiskBackgroundTaskPersistence(sessionDir).writeTask(backgroundWorkflowTask("bg-run-1"));
 
     const manager = new WorkflowManager();
-    const session = await Session.open({ store, capabilities: [workflowCapability(manager), backgroundCapability()] });
-    const runner = new Runner({});
+    const session = await openTestSession({ store, capabilities: [workflowCapability(manager), backgroundCapability()] });
+    const runner = testRunner({});
     const faux = registerFauxProvider();
     const model = faux.getChatModel()!;
     const worker = defineAgent({ name: "worker", model, instructions: "Do the task." });

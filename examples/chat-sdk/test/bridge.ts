@@ -26,6 +26,7 @@ import {
   defineAgent,
   defineModel,
   DiskSessionRepository,
+  T,
   webSearchTool,
   type WebSearchProvider,
 } from "operon-agents";
@@ -70,12 +71,12 @@ const tools = [webSearchTool(cannedSearch)];
 const repository = new DiskSessionRepository(home);
 const harness = createHarness({
   model,
-  repository,
+  harness: (scope) => scope.register(T.SessionRepository, repository),
   agent: defineAgent({ name: "analyst", model, instructions: "You are a research analyst.", tools }),
   tools,
   subagentProvider: null,
   workflowTool: false,
-  capabilities: () => [compactionCapability({ maxContextTokens: 200_000 })],
+  session: () => [compactionCapability({ maxContextTokens: 200_000 })],
   workDir: work,
   permission: { mode: "workspace" },
 });

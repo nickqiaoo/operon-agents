@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Regression suite for four durable-state bugs:
  *
@@ -134,9 +135,9 @@ async function testHeadCacheDuplicateFallback(machine: LocalMachine): Promise<vo
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning") warnings.push(event.message);
   });
-  const session = await Session.open({ machine, store, events });
+  const session = await openTestSession({ machine, store, events });
   const ctx: Ctx = { visited: [] };
-  const runner = new Runner<Ctx>({ machine });
+  const runner = testRunner<Ctx>({ machine });
 
   const first = await runner.run(main, "I need billing", { session, context: ctx });
   check("dup fallback: turn 1 hands off to the real billing agent", first.finalAgent === "billing" && ctx.visited.includes("A") && !ctx.visited.includes("B"));
@@ -170,7 +171,7 @@ async function testStaticSubagentPerInstanceShard(machine: LocalMachine): Promis
   const main = defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [researcher] });
 
   const store = new MemoryStore();
-  const runner = new Runner({ machine, store });
+  const runner = testRunner({ machine, store });
   const result = await runner.run(main, "do both tasks");
   faux.unregister();
 
@@ -307,7 +308,7 @@ async function testOutputParseError(machine: LocalMachine): Promise<void> {
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning") warnings.push(event.message);
   });
-  const runner = new Runner({ machine, events });
+  const runner = testRunner({ machine, events });
   const bad = await runner.run(agent, "one");
   const good = await runner.run(agent, "two");
   faux.unregister();
@@ -352,7 +353,7 @@ async function testProviderShadowWarning(machine: LocalMachine): Promise<void> {
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning" && event.message.includes("shadowed")) shadowWarnings.push(event.message);
   });
-  const runner = new Runner({ machine, events, subagentProvider: provider, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, events, subagentProvider: provider, permission: { mode: "yolo" } });
   const result = await runner.run(main, "go");
   faux.unregister();
 

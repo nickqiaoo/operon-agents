@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * `Session.steerTo` — the whole seam an external coordinator needs to address a running subagent
  * (addressed to whoever is coordinating, not to the engine).
@@ -26,8 +27,8 @@ function check(label: string, ok: boolean): void {
  */
 async function testSteerIsolation(root: string): Promise<void> {
   const store = new DiskSessionStore(join(root, "steer"));
-  const session = await Session.open({ store });
-  const runner = new Runner({});
+  const session = await openTestSession({ store });
+  const runner = testRunner({});
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const helper = defineAgent({ name: "helper", model, instructions: "Help." });
@@ -71,8 +72,8 @@ async function main(): Promise<void> {
       if (event.type === "agent.ended" && event.address !== undefined) ended.push(event.address);
     });
 
-    const session = await Session.open({ store, events });
-    const runner = new Runner({});
+    const session = await openTestSession({ store, events });
+    const runner = testRunner({});
     const faux = registerFauxProvider();
     const model = faux.getChatModel()!;
     const helper = defineAgent({ name: "helper", model, instructions: "Help." });

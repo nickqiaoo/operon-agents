@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Regression test for the static `agent_<name>` delegation tool (buildSubagentTool,
  * agent/subagent-tools.ts) silently reporting a failed or aborted child run as a normal
@@ -38,7 +39,7 @@ async function runWithChildStopReason(stopReason: "stop" | "error" | "aborted"):
     fauxAssistantMessage(stopReason === "stop" ? "child succeeded" : "child output before trouble", { stopReason }),
     fauxAssistantMessage("main acknowledges", { stopReason: "stop" }),
   ]);
-  const runner = new Runner({});
+  const runner = testRunner({});
   const r = await runner.run(main, "delegate", {});
   faux.unregister();
   return subagentToolResult(r.messages, "agent_flaky");

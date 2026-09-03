@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,7 +91,7 @@ async function testCatalogInjection(machine: LocalMachine, roots: readonly Skill
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = new Runner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -109,7 +110,7 @@ async function testSkillToolInline(machine: LocalMachine, roots: readonly SkillR
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = new Runner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "use the greeter");
   faux.unregister();
 
@@ -127,7 +128,7 @@ async function testUserOnlyRefused(machine: LocalMachine, roots: readonly SkillR
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = new Runner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "try the user-only skill");
   faux.unregister();
 
@@ -149,13 +150,13 @@ async function testFlowSkillSubRunner(machine: LocalMachine, roots: readonly Ski
   const flowExecutor = async (req: FlowSkillRequest): Promise<string> => {
     seenInstructions = req.instructions;
     const sub = defineAgent({ name: "summarizer", model, instructions: req.instructions });
-    const subRunner = new Runner({ machine, permission: { mode: "yolo" } });
+    const subRunner = testRunner({ machine, permission: { mode: "yolo" } });
     const res = await subRunner.run(sub, req.input, { signal: req.signal });
     return res.output;
   };
 
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const runner = new Runner({ machine, capabilities: [skillsCapability({ roots, flowExecutor })], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots, flowExecutor })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "summarize this");
   faux.unregister();
 
@@ -173,7 +174,7 @@ async function testSessionSkillService(machine: LocalMachine, roots: readonly Sk
     if (event.type === "skill.activated") activated = event;
   });
 
-  const session = await Session.open({
+  const session = await openTestSession({
     machine,
     events,
     steer,
@@ -229,7 +230,7 @@ async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promis
   check("roots: plugin provenance preserved through the merge", registry.getSkill("tracker")?.plugin?.id === "tracker-plugin");
 
   // Same thing through the capability, which is how a harness actually wires plugin roots in.
-  const session = await Session.open({
+  const session = await openTestSession({
     machine,
     events: new ListenerSink(),
     steer: new SteerBus(),
@@ -242,7 +243,7 @@ async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promis
     await session.close();
   }
 
-  const isolated = await Session.open({
+  const isolated = await openTestSession({
     machine,
     events: new ListenerSink(),
     steer: new SteerBus(),

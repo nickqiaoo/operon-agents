@@ -1,3 +1,4 @@
+import { T } from "operon-agents";
 /**
  * The event stream has a durable cursor, and the client uses it.
  *
@@ -46,7 +47,14 @@ async function main(): Promise<void> {
   const metadataStore = new MemoryManagedSessionMetadataStore();
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const broadcaster = new MemoryEventBroadcaster();
-  const harness = createHarness({ model: faux.getChatModel(), repository, machine: new LocalMachine(work), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    harness: (s) => {
+      s.register(T.SessionRepository, repository, { owned: false });
+      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+    },
+    model: faux.getChatModel(),
+    permission: { mode: "yolo" },
+  });
   const sessionWork = new MemorySessionWork({ repository });
   const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork, broadcaster });
   const service = new SessionService({ repository, work: sessionWork, metadataStore, environments, broadcaster });

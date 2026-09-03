@@ -1,3 +1,4 @@
+import { T } from "operon-agents";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,8 +60,10 @@ async function start(
 ) {
   const repository = new DiskSessionRepository(home);
   const harness = createHarness({
+    harness: (s) => {
+      s.register(T.SessionRepository, repository, { owned: false });
+    },
     model,
-    repository,
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });

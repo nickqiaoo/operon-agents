@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * The stateless-server contract — core `Runner` used WITHOUT the Harness.
  *
@@ -76,7 +77,7 @@ async function main(): Promise<void> {
     const opened = await repository.open(id);
     if (!opened) throw new Error(`no such session: ${id}`);
     try {
-      const runner = new Runner({
+      const runner = testRunner({
         store: opened.store,
         machine: new LocalMachine(opened.workDir),
         permission: { mode: "yolo" },

@@ -1,3 +1,5 @@
+import { T } from "../index.ts";
+import { testRunner, openTestSession } from "./faux.ts";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import {
@@ -35,7 +37,7 @@ function steerToolCapability(origin: SteerOrigin): Capability {
   return {
     name: "steer-tool",
     start: (ctx) => {
-      bus = ctx.steer;
+      bus = ctx.scope.get(T.Steer);
     },
     tools: [
       defineTool({
@@ -61,7 +63,7 @@ function oneShotAfterStepCapability(origin: SteerOrigin, text: string): Capabili
   return {
     name: "bg-sim",
     start: (ctx) => {
-      bus = ctx.steer;
+      bus = ctx.scope.get(T.Steer);
     },
     hooks: {
       afterStep: async () => {
@@ -83,7 +85,7 @@ async function testIdleSteer(machine: LocalMachine): Promise<void> {
 
   const bus = new SteerBus();
   const ret = bus.steer("remember: be brief", { kind: "user" }); // idle → wakes with a turn id
-  const runner = new Runner({ machine, steer: bus, permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, steer: bus, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -109,7 +111,7 @@ async function testPrequeuedUserFollowUpWaitsForNextTurn(machine: LocalMachine):
 
   const bus = new SteerBus();
   bus.followUp("after that, summarize it");
-  const runner = new Runner({ machine, events, steer: bus, permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, steer: bus, permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "do the first task");
   faux.unregister();
 
@@ -141,7 +143,7 @@ async function testMidTurnSteer(machine: LocalMachine): Promise<void> {
 
   // A user steer enqueued during a tool_use step is drained at the next step boundary — same turn.
   const cap = steerToolCapability({ kind: "user" });
-  const runner = new Runner({ machine, events, capabilities: [cap], permission: { mode: "yolo" } });
+  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "do the thing");
   faux.unregister();
 
@@ -170,7 +172,7 @@ async function testFinalStepSteerStaysInTurn(machine: LocalMachine): Promise<voi
   // The regression: a user steer that lands DURING the terminal step must be answered in the
   // same turn (runTurn re-drains before breaking), NOT bounced to a fresh turn like a follow-up.
   const cap = oneShotAfterStepCapability({ kind: "user" }, "late steer: one more thing");
-  const runner = new Runner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -196,7 +198,7 @@ async function testFollowUpDrain(machine: LocalMachine): Promise<void> {
   });
 
   const cap = oneShotAfterStepCapability({ kind: "background_done", taskId: "bg9", summary: "BG SUMMARY" }, "ignored-body");
-  const runner = new Runner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -223,7 +225,7 @@ async function testSteerIdCorrelation(machine: LocalMachine): Promise<void> {
   const cap: Capability = {
     name: "receipts",
     start: (ctx) => {
-      bus = ctx.steer;
+      bus = ctx.scope.get(T.Steer);
     },
     tools: [
       defineTool({
@@ -262,7 +264,7 @@ async function testSteerIdCorrelation(machine: LocalMachine): Promise<void> {
     }
   });
 
-  const runner = new Runner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   await runner.run(agent, "go");
   faux.unregister();
 

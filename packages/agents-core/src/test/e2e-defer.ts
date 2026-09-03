@@ -1,3 +1,4 @@
+import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Deferred tool loading — Operon activation + pi 0.81 native wire coverage.
  *
@@ -253,7 +254,7 @@ async function testFrameworkFlow(): Promise<void> {
       deferTools: true,
     });
     const store = new MemoryStore();
-    const result = await new Runner({
+    const result = await testRunner({
       store,
       capabilities: [{ name: "deferred-test", tools: [slackTool] }],
       permission: { mode: "yolo" },

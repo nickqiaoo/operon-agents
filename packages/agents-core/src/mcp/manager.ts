@@ -7,7 +7,9 @@ import type { MCPTool, MCPTransport } from "./types.ts";
 import type { MCPToolFilterStatic } from "./filter.ts";
 import type { McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { Capability, SessionContext, CapabilityContext, Tool, ToolProvider } from "../index.ts";
+import type { Capability, ProvisionContext, RunContext, Tool, ToolProvider } from "../index.ts";
+import { T } from "../scope/tokens.ts";
+import type { EventSink } from "../events/index.ts";
 import type { McpServerConfig } from "../config/schema.ts";
 
 export type McpServerStatus = "pending" | "connected" | "failed" | "disabled" | "needs-auth";
@@ -149,7 +151,7 @@ class McpServerController {
   private readonly timer: McpTimer;
   private server: TransportMCPServer | undefined;
   private authTool: Tool | undefined;
-  private ctx: SessionContext | undefined;
+  private session: { readonly events: EventSink | undefined; readonly sessionId: string } | undefined;
   private _status: McpServerStatus = "pending";
   private _error: string | undefined;
   private reconnectAttempts = 0;
@@ -185,9 +187,9 @@ class McpServerController {
     this.onStatusChange?.(this.view());
   }
 
-  async connect(ctx: SessionContext): Promise<void> {
+  async connect(ctx: ProvisionContext): Promise<void> {
     if (this.disposed) return;
-    this.ctx = ctx;
+    this.session = { events: ctx.scope.get(T.Events), sessionId: ctx.sessionId };
     if (this.config.enabled === false) {
       this.setStatus("disabled");
       return;
@@ -289,7 +291,7 @@ class McpServerController {
   toolProvider(): ToolProvider {
     return {
       id: `mcp:${this.name}`,
-      listTools: async (ctx: CapabilityContext): Promise<readonly Tool[]> => {
+      listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
         if (this._status === "needs-auth") return [this.authToolInstance()];
         if (this._status !== "connected" || this.server === undefined) return [];
         return mcpToolProvider(this.server).listTools(ctx);
@@ -404,7 +406,7 @@ class McpServerController {
 
   private emitWarning(message: string | undefined): void {
     if (message === undefined) return;
-    this.ctx?.events.emit({ type: "warning", address: "main", sessionId: this.ctx.sessionId, message });
+    this.session?.events?.emit({ type: "warning", address: "main", sessionId: this.session.sessionId, message });
   }
 }
 
@@ -423,6 +425,10 @@ export interface McpServersHandle {
   listTools(name: string): Promise<readonly MCPTool[]>;
   reconnect(name: string): Promise<void>;
   onStatusChange(listener: McpStatusListener): () => void;
+  /** One runnable-tool provider per server (what a session hands the model). */
+  toolProviders(): readonly ToolProvider[];
+  /** Connect every server in parallel, fault-isolated (a failure is a status, never a throw). */
+  connect(ctx: ProvisionContext): Promise<void>;
   shutdown(): Promise<void>;
 }
 
@@ -436,10 +442,15 @@ function keepAliveOptions(
   return { keepAlivePolicy: timeoutMs === undefined ? { intervalMs } : { intervalMs, timeoutMs } };
 }
 
-export function mcpServersCapability(
+/**
+ * The controller set behind a group of configured servers — buildable on its own so a WORKSPACE
+ * can hold one set of connections for every session under it (`T.McpServers`), or a session can
+ * own a private set (`mcpServersCapability`). Nothing connects until `handle.connect()`.
+ */
+export function createMcpServers(
   configs: Record<string, McpServerConfig>,
   options: McpServersCapabilityOptions = {},
-): Capability {
+): McpServersHandle {
   const listeners = new Set<McpStatusListener>();
   const notify: McpStatusListener = (view) => {
     for (const listener of listeners) listener(view);
@@ -471,6 +482,7 @@ export function mcpServersCapability(
     return shuttingDown;
   };
 
+  const providers = controllers.map((c) => c.toolProvider());
   const handle: McpServersHandle = {
     list: () => controllers.map((c) => c.view()),
     listTools: async (name) => (await byName.get(name)?.listTools()) ?? [],
@@ -483,17 +495,85 @@ export function mcpServersCapability(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    shutdown,
-  };
-
-  return {
-    name: "mcp",
-    toolProviders: controllers.map((c) => c.toolProvider()),
-    service: handle,
-    // Session-tier: connect all servers in parallel, fault-isolated (attempt() never throws).
-    openSession: async (ctx: SessionContext) => {
+    toolProviders: () => providers,
+    connect: async (ctx) => {
       await Promise.all(controllers.map((c) => c.connect(ctx)));
     },
-    closeSession: shutdown,
+    shutdown,
+  };
+  return handle;
+}
+
+/**
+ * Session-owned MCP servers: the controllers are built and connected for THIS session and shut
+ * down with it. For servers shared by every session of a workspace, register a
+ * `createMcpServers()` handle as `T.McpServers` on the workspace scope and use
+ * {@link mcpSessionCapability} instead.
+ */
+export function mcpServersCapability(
+  configs: Record<string, McpServerConfig>,
+  options: McpServersCapabilityOptions = {},
+): Capability {
+  const handle = createMcpServers(configs, options);
+  return {
+    name: "mcp",
+    toolProviders: [...handle.toolProviders()],
+    provides: [
+      {
+        token: T.Mcp,
+        // Session-tier: connect all servers in parallel, fault-isolated (attempt() never throws).
+        create: async (ctx) => {
+          await handle.connect(ctx);
+          return handle;
+        },
+        dispose: () => handle.shutdown(),
+      },
+    ],
+  };
+}
+
+/**
+ * The session-tier VIEW over the workspace's shared servers (`T.McpServers`): hands the model
+ * their tools, exposes the handle as `T.Mcp` (so `session.listMcpServers()` and friends work),
+ * and mirrors status changes into this session's event stream as warnings. It connects nothing
+ * and shuts nothing down — the workspace scope owns the connections.
+ */
+export function mcpSessionCapability(): Capability {
+  let unsubscribe: (() => void) | undefined;
+  return {
+    name: "mcp",
+    toolProviders: [
+      {
+        id: "mcp:workspace",
+        listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
+          const shared = ctx.scope.get(T.McpServers);
+          if (shared === undefined) return [];
+          const tools: Tool[] = [];
+          for (const provider of shared.toolProviders()) tools.push(...(await provider.listTools(ctx)));
+          return tools;
+        },
+      },
+    ],
+    provides: [
+      {
+        token: T.Mcp,
+        create: (ctx) => {
+          const shared = ctx.scope.require(T.McpServers);
+          const events = ctx.scope.get(T.Events);
+          const warn = (view: McpServerView): void => {
+            if (view.status !== "failed" || view.error === undefined) return;
+            events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: `MCP server "${view.name}" failed: ${view.error}` });
+          };
+          // Servers that failed before this session existed: tell it once at open.
+          for (const view of shared.list()) warn(view);
+          unsubscribe = shared.onStatusChange(warn);
+          return shared;
+        },
+        dispose: () => {
+          unsubscribe?.();
+          unsubscribe = undefined;
+        },
+      },
+    ],
   };
 }
