@@ -50,8 +50,8 @@ export function normalizeCronTaskInput(manager: CronManager, input: SessionCronT
 export function cronExtension(options: CronManagerOptions = {}): ExtensionDefinition {
   return {
     id: "cron",
-    async setup(api) {
-      // One manager per session: setup runs per session open, so scheduling state is
+    async session(api) {
+      // One manager per session: session() runs per session open, so scheduling state is
       // session-scoped exactly as the capability's openSession was.
       const manager = new CronManager(options);
       manager.attach({

@@ -25,7 +25,7 @@ async function main(): Promise<void> {
     permission: { mode: "yolo" },
     extensions: [{
       id: "delivery-gate",
-      setup(api) {
+      session(api) {
         api.on("model.request", async () => {
           if (!gateActive) return;
           enteredGate?.();

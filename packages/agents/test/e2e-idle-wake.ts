@@ -131,7 +131,7 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
     permission: { mode: "yolo" },
     extensions: [{
       id: "run-gate",
-      setup(api) {
+      session(api) {
         api.on("model.request", async () => {
           if (!gateActive) return;
           gateActive = false;

@@ -10,7 +10,7 @@ The organizing rule: **capability follows birth, and identity is produced by exp
 
 ## One definition, two channels
 
-peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordinary extension that happens to carry a `create` half (its process-shared `PeerNetwork`). A host takes it through whichever channel fits its deployment; nothing about the definition changes.
+peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordinary extension that happens to carry a `workspace` half (its `PeerNetwork`: one roster, mailbox and budget per working directory — or per tenant on a server). A host takes it through whichever channel fits its deployment; nothing about the definition changes.
 
 | | **Server — by value** | **Desktop — from a file** |
 |---|---|---|
@@ -19,7 +19,7 @@ peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordin
 | Shipping a change | new build, rolling restart | `harness.extensions.reload("peers")`; sessions stay open |
 | Reference | `test/e2e-peers-extension.ts` (a) | `examples/peers-extension`, `test/e2e-peers-extension.ts` (b) |
 
-Same code, same tests on both. The framework runs the `create` half **once** and registers the network as the `peers` service; the extension's `setup` runs **per session** and reaches the network only through a stable handle (`shared`). That handle is what lets the file form reload the network under live sessions — and on the server it is a plain registry lookup with nothing dynamic behind it (not replaceable, no loader, no barrier).
+Same code, same tests on both. The framework runs the `workspace` half **once per workspace** and registers that workspace's network as its `peers` service; the extension's `session` runs **per session** and reaches the network only through a stable handle (`shared`). That handle is what lets the file form reload the network under live sessions — and on the server it is a plain registry lookup with nothing dynamic behind it (not replaceable, no loader, no barrier).
 
 Which tool a session gets is decided by its **per-session param**, not by wiring: a spawned teammate carries `params.peers = { member }` and gets `Hub`; every other session gets `Team`. Capability follows birth, and a teammate never holds `Team` — it is a member.
 
@@ -59,7 +59,7 @@ The team label is `team:<creator>:<name>`. That creator segment is stamped by th
 
 A teammate's name is unique **within its team**, not across the roster: its roster id is `<team label>/<name>`, so two teams can each have a `dba`. `Team send` and `Hub send` take the short name (`Team send` adds `team` when the creator has the same name in several teams; a member sees its creator as `lead`, which is reserved). Roster rows carry the `id` for exact addressing whenever it differs from the name.
 
-The `create` half runs synchronously inside `createHarness`, so the service exists before the first session; `harness.close()` takes it down again (unregister → `close()`). The host reaches the network the same way sessions do — `harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE)` — for `list()`, `stats()`, `reconcile()`.
+The `harness` half runs synchronously inside `createHarness`, so the service exists before the first session; `harness.close()` takes it down again (unregister → `close()`). The host reaches the network the same way sessions do — `harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir })` — for `list()`, `stats()`, `reconcile()`.
 
 ### Desktop: load it from a file
 
@@ -117,7 +117,7 @@ The param persists with the session, so a `resumeSession` brings `alice` back as
 | `api.registerTool` | the `Team` tool (creators) and the `Hub` tool (members) |
 | `actions.openSession` | reach another session, reopening it if it was closed |
 | `handle.steerTo(address, …)` | hand a message to one specific frame |
-| `create` half / `ctx.shared` | the extension's `create` publishes the network; `setup` reaches it through a method-only handle that outlives any one instance — what makes `reload` and `services.replace` land without touching a session |
+| `workspace` half / `ctx.shared` | the extension's `workspace` publishes one network per workspace; `session` reaches it through a method-only handle that outlives any one instance — what makes `reload` and `services.replace` land without touching a session |
 
 ## Design notes
 
@@ -150,7 +150,7 @@ peers({
 });
 
 // On startup, once at least one session holding a peers extension is open:
-const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
+const net = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir });
 const { redelivered, dropped } = await net.reconcile();
 ```
 
@@ -184,7 +184,7 @@ peers({
   budget: { maxWakes: 200, maxTotalTokens: 5_000_000 },
 });
 
-await harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE).stats();
+await harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir }).stats();
 // → { agents: [{ agentId, messagesSent, messagesReceived, wakes, totalTokens, cost }], totals }
 ```
 

@@ -43,7 +43,7 @@ async function main(): Promise<void> {
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, repo })],
     });
-    return { harness, net: harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE) };
+    return { harness, net: harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() }) };
   };
 
   // ── The ledger clears only once the message is really in the recipient's conversation ──
@@ -69,6 +69,9 @@ async function main(): Promise<void> {
 
     // ── "Restart": a fresh process over the same directory seeds the roster from the cards alone ──
     const restarted = boot(createFilePeerRepo(dir));
+    // The network is a WORKSPACE half: it exists once a session opens the workspace. An ordinary
+    // session (no member param, no team formed) composes it without touching the roster.
+    await restarted.harness.createSession();
     // Through `list()`, the public entry point — it is what awaits seeding.
     const bobRef = (await restarted.net.list()).find((ref) => ref.name === "bob");
     check("seed: a parked teammate is back on the roster with no live event", bobRef?.status === "parked" && bobRef.kind === "session");

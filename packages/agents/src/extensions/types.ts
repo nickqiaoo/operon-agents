@@ -250,8 +250,8 @@ export interface ExtensionEventContext extends ExtensionContextBase {
   readonly address: string;
 }
 
-/** Context for session-tier events, which have no active shard. */
-export interface ExtensionSessionContext extends ExtensionContextBase {
+/** Context for session-tier events (`session.start` / `session.end`), which have no active shard. */
+export interface ExtensionSessionEventContext extends ExtensionContextBase {
   readonly address?: never;
 }
 
@@ -259,16 +259,16 @@ export interface ExtensionSessionContext extends ExtensionContextBase {
 // Lifecycle events (observe — result `void`)
 // ============================================================================
 
-/** `attach` = added to a live session via `attachExtension`, after its `setup` succeeded. */
+/** `attach` = added to a live session via `attachExtension`, after its `session` succeeded. */
 export type SessionStartReason = "open" | "resume" | "fork" | "attach";
 /** `detach` = removed from a live session via `detachExtension`; fires before teardown. */
 export type SessionEndReason = "close" | "shutdown" | "detach";
 
-export interface ExtensionSessionStartEvent extends ExtensionSessionContext {
+export interface ExtensionSessionStartEvent extends ExtensionSessionEventContext {
   readonly reason: SessionStartReason;
 }
 
-export interface ExtensionSessionEndEvent extends ExtensionSessionContext {
+export interface ExtensionSessionEndEvent extends ExtensionSessionEventContext {
   readonly reason: SessionEndReason;
 }
 
@@ -603,19 +603,19 @@ export interface ExtensionAPI {
   /**
    * This extension's own journal records, oldest first — the event-sourcing read path.
    * The open-time snapshot rides the session's single shared memoized log read (no extra
-   * traversal); records appended this session are included. Fold these in `setup` to rebuild
+   * traversal); records appended this session are included. Fold these in `session` to rebuild
    * sourced state; prefer `state` when a snapshot is all you need.
    */
   records(): Promise<readonly ExtensionRecordEntry[]>;
   /** Durable per-extension KV (SessionStore-backed) — the same facade handlers get via
-   *  `ctx.state`, available from `setup` so state can be loaded before the first run. */
+   *  `ctx.state`, available from `session` so state can be loaded before the first run. */
   readonly state: ExtensionState;
-  /** The same imperative surface handlers get via `ctx.actions`, usable from `setup`. */
+  /** The same imperative surface handlers get via `ctx.actions`, usable from `session`. */
   readonly actions: ExtensionActions;
 }
 
 /**
- * What an extension's `create` half is handed — the harness reach it needs to build a
+ * What an extension's `harness` half is handed — the harness reach it needs to build a
  * process-shared instance. Deliberately narrow: session creation (a spawn factory's one
  * requirement), a data directory (the file form's own folder; absent by value) and the handles
  * of the services it declared in `uses`. No service-registration call: the instance IS the
@@ -629,10 +629,10 @@ export interface ExtensionHostContext<
     options?: { readonly title?: string; readonly extensions?: readonly ExtensionDefinition[]; readonly params?: Record<string, unknown> } & Record<string, unknown>,
   ): Promise<{ readonly id: string }>;
   /**
-   * Handles to the services named in `uses`, by name — the same handles `setup` gets as
+   * Handles to the services named in `uses`, by name — the same handles `session` gets as
    * `ctx.services`, available to the process half too. What lets a file-loaded bundle take its
    * configuration from a host-registered service (`createHarness({ services })`) instead of
-   * baking it in: a reload re-runs `create`, so re-reading the service IS the config update.
+   * baking it in: a reload re-runs `harness`, so re-reading the service IS the config update.
    * Method calls resolve the CURRENT provider; the handles expose methods only.
    */
   readonly services: TServices;
@@ -641,7 +641,7 @@ export interface ExtensionHostContext<
   readonly dir?: string;
   /**
    * Where this extension keeps its files: a folder of its own, by id, OUTSIDE the code folder,
-   * so replacing the bundle (update) leaves it untouched. Created before `create` runs. Present
+   * so replacing the bundle (update) leaves it untouched. Created before `harness` runs. Present
    * whenever the harness has a data root — `extensionDir` implies one (`<extensionDir>/.data`);
    * by value it is opt-in (`createHarness({ extensionDataDir })`).
    */
@@ -650,17 +650,52 @@ export interface ExtensionHostContext<
 }
 
 /**
- * What `setup` receives besides the API: the handles the framework resolved for this extension
+ * What an extension's `workspace` half is handed — one call per workspace key (the working
+ * directory locally; a tenant / environment id on a server), the first time a session opens
+ * under it, or when the definition is loaded while the workspace is already open. The same
+ * reach as the `harness` half plus the workspace's identity. `dataDir` is a folder of its own
+ * PER WORKSPACE (`<extension data>/workspaces/<key>`), outside the code folder, so state keyed
+ * by workspace survives a reload and an update the way the harness half's does.
+ */
+export interface ExtensionWorkspaceContext<
+  TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
+> {
+  /** The workspace key: the working directory locally, a tenant / environment id on a server. */
+  readonly key: string;
+  readonly workDir: string;
+  /**
+   * Open a brand-new session IN THIS WORKSPACE — `workspaceKey` and `workDir` default to it, so
+   * a spawn factory's teammates are born beside the session that spawned them. Not available
+   * while the half itself is running (the workspace is still being composed; open sessions
+   * later, from `session`, a tool, or an event).
+   */
+  createSession(
+    options?: { readonly title?: string; readonly extensions?: readonly ExtensionDefinition[]; readonly params?: Record<string, unknown> } & Record<string, unknown>,
+  ): Promise<{ readonly id: string }>;
+  /** Handles to the services named in `uses`, resolved FROM this workspace: a workspace-tier
+   *  service lands on this workspace's instance, a harness-tier one on the harness's. */
+  readonly services: TServices;
+  /** This workspace's own folder for this extension's files; absent when the harness has no
+   *  data root. Created before the half runs. */
+  readonly dataDir?: string;
+  warn(message: string): void;
+}
+
+/**
+ * What `session` receives besides the API: the handles the framework resolved for this extension
  * in this session. Nothing here is looked up by name from inside the extension — every service
- * it may touch was declared on the definition (`create` for its own, `uses` for others') and
+ * it may touch was declared on the definition (`harness` / `workspace` for its own, `uses` for
+ * others') and
  * arrives resolved.
  */
-export interface ExtensionSetupContext<
+export interface ExtensionSessionContext<
   TShared = unknown,
   TParams = unknown,
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
 > {
-  /** Handle to this extension's own `create` result — `undefined` when it has no `create`. */
+  /** Handle to this extension's own shared instance — its `harness` result (one per process) or
+   *  its `workspace` result (this session's workspace's); `undefined` when it has neither. The
+   *  session half does not know, and need not know, which tier it lives at. */
   readonly shared: TShared;
   /** This session's per-session argument (`createSession({ params: { [id]: … } })`); `undefined` when none. */
   readonly params: TParams | undefined;
@@ -675,17 +710,24 @@ export interface ExtensionSetupContext<
 /**
  * An extension: a programmatic participant assembled into a session. One definition, handed to
  * the framework once — by value in `createHarness({ extensions })` or from a file in
- * `extensionDir` — and mounted into every session from then on. Three parts, the first two
- * optional:
+ * `extensionDir` — and mounted into every session from then on. Four parts, the first three
+ * optional, named for the tier each one runs at (the same three tiers as `createHarness`'s
+ * `harness` / `workspace` / `session` hooks):
  *
- * - **`create` — the process-shared half.** Runs ONCE per harness, not per session. Its return
- *   value is registered as a service under this extension's `id`; every session's `setup` then
- *   receives a stable handle to it as `ctx.shared`. There is no separate type and no separate
- *   option for an extension with a `create` — only this field.
+ * - **`harness` — the process-shared half.** Runs ONCE per harness, not per session. Its return
+ *   value is registered as a service under this extension's `id` in the harness scope; every
+ *   session's `session` then receives a stable handle to it as `ctx.shared`.
+ * - **`workspace` — the per-workspace half.** Runs once per workspace key (the working directory
+ *   locally, a tenant on a server), when the first session opens under it. Its return value is
+ *   registered under the `id` in THAT workspace's scope — one instance per workspace, disposed
+ *   when the last session under it closes — and the sessions beneath it get the handle as
+ *   `ctx.shared`. A definition carries at most ONE shared half, `harness` or `workspace`, so its
+ *   service and `ctx.shared` live at exactly one tier; the session half need not know which.
+ *   There is no separate type and no `tier` option — the tier is the name of the half.
  * - **`uses` — the services of others it consumes.** Names only; checked when the definition is
- *   registered (a consumer must come after its provider) and handed to `setup` resolved as
+ *   registered (a consumer must come after its provider) and handed to `session` resolved as
  *   `ctx.services[name]`. There is no lookup by name from inside an extension.
- * - **`setup` — the per-session half.** Runs once per session with the resolved context. A
+ * - **`session` — the per-session half.** Runs once per session with the resolved context. A
  *   session varies it with `createSession({ params: { [id]: … } })` — `ctx.params` — and opts
  *   out of it entirely with `false`.
  *
@@ -701,13 +743,15 @@ export interface ExtensionDefinition<
   readonly id: string;
   /** Per-handler invocation budget. Defaults to 30s for decision points, 1s for observers. */
   readonly timeoutMs?: number;
-  /** The process-shared half. Absent ⇒ an ordinary per-session extension. See above. */
-  create?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
-  /** Services this extension consumes, by name — other extensions' `create` results (their
-   *  `id`s) or host-registered `services`. Resolved into `ctx.services` for `setup`. */
+  /** The process-shared half: once per harness. See above. */
+  harness?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
+  /** The per-workspace half: once per workspace key. Mutually exclusive with `harness`. See above. */
+  workspace?(host: ExtensionWorkspaceContext<TServices>): TShared | Promise<TShared>;
+  /** Services this extension consumes, by name — other extensions' shared-half results (their
+   *  `id`s) or host-registered `services`. Resolved into `ctx.services` for `session`. */
   readonly uses?: readonly (keyof TServices & string)[];
-  setup(
+  session(
     api: ExtensionAPI,
-    ctx: ExtensionSetupContext<TShared, TParams, TServices>,
+    ctx: ExtensionSessionContext<TShared, TParams, TServices>,
   ): void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>;
 }

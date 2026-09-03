@@ -37,7 +37,7 @@ import type {
   ExtensionModelRequestResult,
   ProviderHeaders,
   ExtensionResultMap,
-  ExtensionSessionContext,
+  ExtensionSessionEventContext,
   ExtensionState,
   ExtensionStepEndResult,
   ExtensionStepStartResult,
@@ -88,7 +88,7 @@ export class ExtensionRuntime {
   private readonly definitions: ExtensionDefinition[];
   private readonly handlers = new Map<ExtensionEventName, RegisteredHandler[]>();
   private readonly tools = new Map<string, { readonly extensionId: string; readonly tool: Tool }>();
-  /** Stable reference: `extensionsCapability` hands this array to the assembler, and `setup`
+  /** Stable reference: `extensionsCapability` hands this array to the assembler, and `session`
    *  (which runs at openSession, before any run assembles) fills it in place. */
   private readonly injectors: Injector[] = [];
   /** Slash commands by normalized name — surfaced to the session's registry via the
@@ -100,10 +100,10 @@ export class ExtensionRuntime {
    *  memoized log read — zero extra traversal) + everything recorded this session. */
   private recordSnapshot: Map<string, ExtensionRecordEntry[]> | undefined;
   private readonly recordWrites = new Map<string, ExtensionRecordEntry[]>();
-  /** Per-extension teardown: setup's cleanup + every registration, undone in reverse. */
+  /** Per-extension teardown: session()'s cleanup + every registration, undone in reverse. */
   private readonly scopes = new Map<string, () => void | Promise<void>>();
   /** Extensions whose contributions are currently honored. An id leaves on detach (and on
-   *  setup failure), which turns every `actions`/`api` closure the extension still holds
+   *  session() failure), which turns every `actions`/`api` closure the extension still holds
    *  into a warn-and-noop — a detached extension must not keep steering the session. */
   private readonly live = new Set<string>();
   /** Changes wait here until a quiet point: mid-run requests apply at the run's stop
@@ -126,7 +126,7 @@ export class ExtensionRuntime {
   /** Harness reach. Absent when the capability is built standalone (bare Runner / tests). */
   private readonly host: ExtensionHost | undefined;
   /** This session's per-session extension arguments, by extension id. A value of `false` means
-   *  "skip this extension for this session"; any other value is passed to `setup` as `params`. */
+   *  "skip this extension for this session"; any other value is passed to `session` as `params`. */
   private readonly params: Readonly<Record<string, unknown>>;
 
   constructor(definitions: readonly ExtensionDefinition[], host?: ExtensionHost, params: Readonly<Record<string, unknown>> = {}) {
@@ -202,10 +202,10 @@ export class ExtensionRuntime {
   // ==========================================================================
 
   /**
-   * Add an extension to the live session. Resolves once its `setup` has run and its
+   * Add an extension to the live session. Resolves once its `session` has run and its
    * contributions are in place — with no run in flight that is immediately; mid-run it is
    * the current run's stop boundary, so an in-flight turn never sees its registry change.
-   * Rejects on duplicate/empty id or when `setup` throws.
+   * Rejects on duplicate/empty id or when `session` throws.
    */
   attach(definition: ExtensionDefinition): Promise<void> {
     return this.submit({ kind: "attach", definition });
@@ -279,13 +279,13 @@ export class ExtensionRuntime {
       throw new Error(`duplicate extension id "${definition.id}"`);
     }
     this.definitions.push(definition);
-    // Not open yet: `open()` will run setup with everything else.
+    // Not open yet: `open()` will run session() with everything else.
     if (!this.session) return;
     const ok = await this.setupExtension(definition);
     if (!ok) {
       const index = this.definitions.findIndex((existing) => existing.id === definition.id);
       if (index >= 0) this.definitions.splice(index, 1);
-      throw new Error(`extension "${definition.id}" setup failed`);
+      throw new Error(`extension "${definition.id}" session() failed`);
     }
     for (const registered of [...this.handlersFor("session.start")]) {
       if (registered.extensionId !== definition.id) continue;
@@ -318,19 +318,21 @@ export class ExtensionRuntime {
     if (this.session) await this.logChange("detached", id);
   }
 
-  /** Runs one extension's `setup` and files its scope. Failure ⇒ skipped, contributions undone. */
+  /** Runs one extension's `session` and files its scope. Failure ⇒ skipped, contributions undone. */
   private async setupExtension(definition: ExtensionDefinition): Promise<boolean> {
     const params = this.params[definition.id];
-    // A `create`-bearing definition reaches a session only after the harness ran its `create`
-    // and registered the result under the id. Not registered ⇒ it was handed to a session
-    // directly instead of being registered — a programming error, so it throws rather than
-    // being skipped.
-    if (definition.create !== undefined && this.host?.services?.has(definition.id) !== true) {
+    // A definition with a shared half reaches a session only after that half ran — the harness
+    // ran `harness` once, or this session's workspace ran `workspace` — and registered the result
+    // under the id where the session's scope chain finds it. Not registered ⇒ it was handed to a
+    // session directly instead of being registered — a programming error, so it throws rather
+    // than being skipped.
+    const sharedHalf = definition.harness !== undefined || definition.workspace !== undefined;
+    if (sharedHalf && this.host?.services?.has(definition.id) !== true) {
       throw new Error(
-        `extension "${definition.id}" has a create half but no service "${definition.id}" is registered — its create never ran. Register it in createHarness({ extensions }) or load it from extensionDir; a definition with create cannot be handed to a session directly`,
+        `extension "${definition.id}" has a shared half but no service "${definition.id}" is reachable from this session — its harness/workspace half never ran. Register it in createHarness({ extensions }) or load it from extensionDir; a definition with a shared half cannot be handed to a session directly`,
       );
     }
-    const shared = definition.create !== undefined ? this.serviceHandle(definition.id, definition.id) : undefined;
+    const shared = sharedHalf ? this.serviceHandle(definition.id, definition.id) : undefined;
     const registrations: Array<() => void> = [];
     this.live.add(definition.id);
     try {
@@ -341,7 +343,7 @@ export class ExtensionRuntime {
         if (this.host?.services?.has(name) !== true) throw new Error(`uses "${name}": no such service is registered`);
         services[name] = this.serviceHandle(definition.id, name);
       }
-      const teardown = await definition.setup(this.apiFor(definition, registrations), { shared, params, services });
+      const teardown = await definition.session(this.apiFor(definition, registrations), { shared, params, services });
       this.scopes.set(definition.id, async () => {
         if (teardown) await teardown();
         for (const dispose of [...registrations].reverse()) dispose();
@@ -350,7 +352,7 @@ export class ExtensionRuntime {
     } catch (error) {
       this.live.delete(definition.id);
       for (const dispose of [...registrations].reverse()) dispose();
-      await this.warn(definition.id, `setup failed; extension skipped: ${messageOf(error)}`);
+      await this.warn(definition.id, `session() failed; extension skipped: ${messageOf(error)}`);
       return false;
     }
   }
@@ -757,7 +759,7 @@ export class ExtensionRuntime {
           void this.warn(definition.id, "onEvent() ignored: extension is detached.");
           return () => undefined;
         }
-        // `setup` runs inside `open`, so the session context is already in place.
+        // `session` runs inside `open`, so the session context is already in place.
         const sink = this.session?.scope.get(T.Events);
         if (sink === undefined) return () => undefined;
         const dispose = sink.subscribe((event) => {
@@ -1093,7 +1095,7 @@ export class ExtensionRuntime {
   // Context assembly + invocation
   // ==========================================================================
 
-  private sessionContext(extensionId: string): ExtensionSessionContext {
+  private sessionContext(extensionId: string): ExtensionSessionEventContext {
     const session = this.requireSession();
     const store = session.scope.get(T.Store);
     return {

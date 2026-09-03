@@ -1,6 +1,6 @@
 /**
  * Harness over Scopes: the `harness` hook's registrations beat the defaults, a session's own
- * overrides beat the harness-level ones, extension `create` results die with the harness scope,
+ * overrides beat the harness-level ones, extension `harness` results die with the harness scope,
  * and every session scope hangs under the harness scope.
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -29,8 +29,8 @@ async function main(): Promise<void> {
     const closed: string[] = [];
     const shapes: ExtensionDefinition = {
       id: "shapes",
-      create: () => ({ render: () => "v1", close: () => closed.push("shapes") }),
-      setup: () => undefined,
+      harness: () => ({ render: () => "v1", close: () => closed.push("shapes") }),
+      session: () => undefined,
     };
 
     const harness = createHarness({
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     });
     check("harness: the hook's repository replaces the in-memory default", harness.scope.get(T.SessionRepository) === repo);
     check("harness: the hook's logger replaces the env default", harness.scope.get(T.Logger) === logger);
-    check("harness: an extension create result is registered by id in the harness scope", harness.services.has("shapes") && harness.services.handle<{ render(): string }>("shapes").render() === "v1");
+    check("harness: an extension harness() result is registered by id in the harness scope", harness.services.has("shapes") && harness.services.handle<{ render(): string }>("shapes").render() === "v1");
 
     const a = await harness.createSession();
     check("session: the harness-level machine applies when the session gives none", a.core.machine === harnessMachine);
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
     check("close: the other session is untouched", !b.core.scope.closed);
     await harness.close();
     check("close: harness.close() closes every session scope and then its own", b.core.scope.closed && harness.scope.closed);
-    check("close: the extension create result was disposed with the harness scope", closed.join(",") === "shapes");
+    check("close: the extension harness() result was disposed with the harness scope", closed.join(",") === "shapes");
     faux.unregister();
   } finally {
     rmSync(work, { recursive: true, force: true });

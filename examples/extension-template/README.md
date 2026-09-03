@@ -46,10 +46,10 @@ table changed, so the prefix is guaranteed to miss) — a one-off cost, so avoid
 
 ## Three hard rules
 
-1. **Only `import type` the framework types.** Runtime capability comes exclusively from `setup(api)`.
+1. **Only `import type` the framework types.** Runtime capability comes exclusively from `session(api)`.
 2. **Every side effect is either an `api` registration or is collected into the cleanup function
-   returned by `setup`** — anything else is not reclaimed on unload.
+   returned by `session`** — anything else is not reclaimed on unload.
 3. **Keep shared resources inside a single extension** rather than splitting them across extensions
    that depend on each other. To consume a process-level service, name it with `uses` on the
-   definition and receive it from `setup(api, { services })`. Publishers declare nothing: a definition
-   carrying `create` publishes under its own `id` as the service name.
+   definition and receive it from `session(api, { services })`. Publishers declare nothing: a definition
+   carrying `harness` or `workspace` publishes under its own `id` as the service name.

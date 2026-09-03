@@ -4,7 +4,7 @@
  * `Team`), and an ordinary delegation (`Agent`) never enters the peer world at all.
  *
  * The host wrote no factory: `peers({ teammates })` says what a "schema" teammate IS (its session
- * options) and the extension's own `create` half spawns it, tagged a member through `params`.
+ * options) and the extension's own `harness` half spawns it, tagged a member through `params`.
  */
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
 import { createHarness, type ExtensionDefinition } from "operon-agents";
@@ -19,7 +19,7 @@ const asMember = (member: PeerMemberOptions) => ({ params: { [PEERS_SERVICE]: { 
 const saw = new Map<string, string[]>();
 const spy: ExtensionDefinition = {
   id: "spy",
-  setup(api) {
+  session(api) {
     let sessionId: string | undefined;
     api.on("session.start", (event) => { sessionId = event.sessionId; });
     api.onEvent((event) => {
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       spy,
     ],
   });
-  const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
+  const net = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() });
   const rosterEntry = async (id: string) => (await net.list()).find((ref) => ref.agentId === id || ref.name === id);
 
   const helperRole = defineAgent({ name: "helper", model, instructions: "Do quick work." });

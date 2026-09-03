@@ -3,7 +3,8 @@
  * the engine. See this package's README.
  *
  * One definition, two channels. `peers(config)` is an ordinary `ExtensionDefinition` (with a
- * `create` half): the server passes it by value, a desktop loads the same thing from a bundle.
+ * `workspace` half — one network per working directory, or per tenant on a server): the server
+ * passes it by value, a desktop loads the same thing from a bundle.
  *
  * ```ts
  * const harness = createHarness({
@@ -17,9 +18,9 @@
  * ```
  *
  * There is no team object: membership is a label on the roster, and a teammate is a session the
- * extension's `create` half spawned. Capability follows birth — an ordinary session holds `Team`
+ * extension's `workspace` half spawned. Capability follows birth — an ordinary session holds `Team`
  * (form and run its own team), a spawned teammate holds only `Hub` (general peer messaging), and
- * never `Team`: it is a member, not a team-former. `setup` reaches the network only through the
+ * never `Team`: it is a member, not a team-former. `session` reaches the network only through the
  * shared handle, which is what lets a reload swap the network under live sessions.
  */
 export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, memberAgentId, LEAD_ALIAS, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";

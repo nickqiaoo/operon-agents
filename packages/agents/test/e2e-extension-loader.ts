@@ -22,7 +22,7 @@ function toolResultText(messages: readonly Message[]): string {
 const echoPluginSource = (tag: string): string => `
 export default {
   id: "echo-plugin",
-  setup(api) {
+  session(api) {
     api.registerTool({
       name: "PluginEcho",
       description: "Echo from a file plugin.",
@@ -122,13 +122,13 @@ const session = await harness.createSession();
 // ── Shapes and failure modes ──
 {
   await writePlugin(dir, "factory-plugin", { id: "factory-plugin" }, `
-export default () => ({ id: "factory-plugin", setup() {} });
+export default () => ({ id: "factory-plugin", session() {} });
 `, T1);
   const definition = await loader.load("factory-plugin");
   check("shape: a factory default export is called to get the definition", definition.id === "factory-plugin");
 
   await writePlugin(dir, "mismatch-plugin", { id: "mismatch-plugin" }, `
-export default { id: "something-else", setup() {} };
+export default { id: "something-else", session() {} };
 `, T1);
   const mismatch = await loader.load("mismatch-plugin").then(() => false, () => true);
   check("shape: manifest/code id mismatch rejects", mismatch);

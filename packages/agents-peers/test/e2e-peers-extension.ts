@@ -1,5 +1,5 @@
 /**
- * `peers(config)` is ONE `ExtensionDefinition` (with a `create` half) on TWO channels. The same
+ * `peers(config)` is ONE `ExtensionDefinition` (with a `workspace` half) on TWO channels. The same
  * scenario runs twice:
  *   (a) by value  — `createHarness({ extensions: [peers(cfg)] })`, the server form;
  *   (b) from file — a bundle in `extensionDir` whose default export IS `peers(cfg)`, the desktop
@@ -62,11 +62,11 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
   check(`${label}: the model was told without waiting`, JSON.stringify(formed.messages).includes("working on it"));
 
   // Host-side consumption goes through the very same handle the sessions use.
-  const peersHandle = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
+  const peersHandle = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() });
   const roster = await peersHandle.list();
   check(`${label}: the lead joined the roster by creating the team`, roster.some((r) => r.agentId === lead.id));
   const dba = roster.find((r) => r.name === "dba");
-  check(`${label}: the teammate is a real session the create half spawned`, dba?.kind === "session" && dba.sessionId !== undefined && dba.sessionId !== "dba");
+  check(`${label}: the teammate is a real session the workspace half spawned`, dba?.kind === "session" && dba.sessionId !== undefined && dba.sessionId !== "dba");
   const member = dba?.sessionId !== undefined ? harness.getSession(dba.sessionId) : undefined;
   const memberSaw: string[] = [];
   member?.onEvent((event) => {
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, teammates: { member: { title: "teammate" } } })],
     });
-    check("value: the create half registered the service before the first session", harness.services.has(PEERS_SERVICE));
+    check("value: the workspace half's service is declared before the first session (a consumer may `uses` it)", harness.services.has(PEERS_SERVICE));
     await exercise(harness, faux, "value");
     await harness.close();
     check("value: closing the harness took the network down with it", !harness.services.has(PEERS_SERVICE));
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensionDir: dir });
     check("file: nothing is registered before the host loads the bundle", !harness.services.has(PEERS_SERVICE));
     await harness.extensions!.load("peers");
-    check("file: loading published the peers service", harness.services.has(PEERS_SERVICE));
+    check("file: loading declared the peers service", harness.services.has(PEERS_SERVICE));
     const { lead, memberSaw } = await exercise(harness, faux, "file");
     check("file: state lives in the extension's data dir, outside the bundle folder", (await readdir(join(dir, ".data", "peers"))).length > 0);
 

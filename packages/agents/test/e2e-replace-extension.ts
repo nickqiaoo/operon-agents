@@ -1,6 +1,6 @@
 /**
  * `harness.replaceExtension` — the by-value twin of a file extension's reload, which the old
- * `reshapeService` could not express: a definition whose `create` half publishes a service
+ * `reshapeService` could not express: a definition whose `harness` half publishes a service
  * (registered NOT replaceable, the by-value default) is swapped whole — process half, service,
  * and session half — inside one barrier. Also covers what a swap must reach: sessions born
  * afterwards, and consumers holding a `uses` handle that were never gated.
@@ -29,13 +29,13 @@ interface Shape {
 
 const disposed: string[] = [];
 
-/** The provider: its `create` publishes "shapes"; its `setup` exposes it as a tool. */
+/** The provider: its `harness` publishes "shapes"; its `session` exposes it as a tool. */
 const shapes = (version: string): ExtensionDefinition<Shape> => ({
   id: "shapes",
-  create() {
+  harness() {
     return { render: () => version, close: () => { disposed.push(version); } };
   },
-  setup(api, { shared }) {
+  session(api, { shared }) {
     api.registerTool({
       name: "Shape",
       description: "Render via this extension's own shared service.",
@@ -49,7 +49,7 @@ const shapes = (version: string): ExtensionDefinition<Shape> => ({
 const consumer = (label: string): ExtensionDefinition<unknown, unknown, { shapes: Shape }> => ({
   id: "consumer",
   uses: ["shapes"],
-  setup(api, { services }) {
+  session(api, { services }) {
     api.registerTool({
       name: "Consume",
       description: "Consume the provider's service through a uses handle.",
@@ -83,13 +83,13 @@ async function main(): Promise<void> {
   check("before: the provider's own session half sees v1", (await callTool(faux, a, "Shape")).includes("shape:v1"));
   check("before: the uses consumer sees v1", (await callTool(faux, a, "Consume")).includes("old:v1"));
 
-  // The whole point: "shapes" was published by a by-value `create`, so it is NOT replaceable —
+  // The whole point: "shapes" was published by a by-value `harness`, so it is NOT replaceable —
   // `services.replace` refuses it. Replacing the extension that owns it is a different act.
   let refused = "";
   await harness.services.replace("shapes", { render: () => "v2", close: () => {} }).catch((error: unknown) => {
     refused = error instanceof Error ? error.message : String(error);
   });
-  check("guard: services.replace still refuses a by-value create service", refused.includes("not replaceable"));
+  check("guard: services.replace still refuses a by-value harness() service", refused.includes("not replaceable"));
 
   await harness.replaceExtension(shapes("v2"));
   check("replace: the session half was rebuilt — the tool renders v2", (await callTool(faux, a, "Shape")).includes("shape:v2"));
@@ -108,17 +108,17 @@ async function main(): Promise<void> {
   check("replace: several definitions swap in one call — consumer", (await callTool(faux, a, "Consume")).includes("new:v3"));
   check("replace: sessions born before the swap were swapped too", (await callTool(faux, born, "Consume")).includes("new:v3"));
 
-  // Staging runs every new `create` BEFORE the barrier, so a throwing one changes nothing.
+  // Staging runs every new `harness` BEFORE the barrier, so a throwing one changes nothing.
   let threw = "";
   await harness
-    .replaceExtension({ id: "shapes", create() { throw new Error("boom"); }, setup() {} } as ExtensionDefinition)
+    .replaceExtension({ id: "shapes", harness() { throw new Error("boom"); }, session() {} } as ExtensionDefinition)
     .catch((error: unknown) => { threw = error instanceof Error ? error.message : String(error); });
-  check("staging: a throwing create fails the replace", threw.includes("boom"));
+  check("staging: a throwing harness() fails the replace", threw.includes("boom"));
   check("staging: and nothing changed — the live version is still v3", (await callTool(faux, a, "Shape")).includes("shape:v3"));
   check("staging: the consumer still resolves through its handle", (await callTool(faux, a, "Consume")).includes("new:v3"));
 
   let unknown = "";
-  await harness.replaceExtension({ id: "nope", setup() {} }).catch((error: unknown) => {
+  await harness.replaceExtension({ id: "nope", session() {} }).catch((error: unknown) => {
     unknown = error instanceof Error ? error.message : String(error);
   });
   check("replace: an id this harness never registered by value is refused, and says where to register it", unknown.includes('"nope"') && unknown.includes("createHarness"));

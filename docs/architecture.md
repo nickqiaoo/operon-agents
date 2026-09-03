@@ -250,13 +250,16 @@ engine behavior"**. The harness is not a second engine; it is a composition root
 ```ts
 interface ExtensionDefinition<TShared, TParams, TServices> {
   id: string;                                         // durable identity (slug); state/records are scoped by it
-  create?(host): TShared;                             // process half: once per harness, the return value is the service (registered under id)
-  uses?: (keyof TServices)[];                         // whose services this consumes: validated at registration, resolved into setup
-  setup(api, { shared, params, services }): cleanup;  // session half: once per session
+  harness?(host): TShared;                             // process half: once per harness, the return value is the service (registered under id)
+  workspace?(host): TShared;                           // workspace half: once per workspace key, registered under id in THAT workspace's scope
+  uses?: (keyof TServices)[];                         // whose services this consumes: validated at registration, resolved into session
+  session(api, { shared, params, services }): cleanup;  // session half: once per session
 }
 ```
 
-There is no second type, no `tier` option and no `getService`: providing is `create`, consuming is
+There is no second type, no `tier` option and no `getService`: providing is `harness` or `workspace`
+(the tier is the NAME of the half — once per process, or once per workspace key — and a definition
+carries at most one of them, so its service and `ctx.shared` live at exactly one tier), consuming is
 `uses`, registration happens once (the `createHarness({ extensions })` array or `extensionDir`), and
 per-session variation is `createSession({ params })`. `setup` only ever sees **handles** (`ctx.shared`
 / `ctx.services`) and never holds an instance — which is the precondition for hot replacement.
@@ -307,7 +310,7 @@ The only differences between the channels are who hands the definition to the fr
 configuration comes from. **The server's stability comes from there being no mechanism at all behind
 the registry** (no replace, no loader, no barrier); **the client's liveness comes from that same
 registry wired to a loader and a barrier**. The manifest carries only what must be known *before*
-importing code (`id`/`entry`/`engine`/presentation fields); `create` and `uses` are always read from
+importing code (`id`/`entry`/`engine`/presentation fields); `harness` and `uses` are always read from
 the definition, avoiding two sources of truth.
 
 ### 5.5 Hot replacement: handles plus a barrier, one generation serving only its own
@@ -346,7 +349,7 @@ session-scoped). Three tiers, each a scope with a parent:
 
 ```
 Harness   (one per process)      T.Logger, T.SessionRepository, T.ModelRuntime, T.MachineFactory, extension create results
- └ Workspace (one per key)        T.McpServers, T.SkillRegistry, T.McpOAuth, T.WorkspaceMachineFactory
+ └ Workspace (one per key)        T.McpServers, T.SkillRegistry, T.McpOAuth, T.WorkspaceMachineFactory, extension workspace results
     └ Session (one per session)   T.Machine, T.Store, T.Events, T.Steer, T.Permission, T.Goal / T.Plan / … (provisions)
 ```
 
@@ -358,6 +361,18 @@ registrations at the right tier); and `close()` runs children first, then a scop
 reverse registration order — one teardown path for capabilities, session infrastructure, workspace
 resources and extension services. Registering a token in the wrong tier throws, which is the one
 mechanism that keeps session state from leaking across sessions.
+
+The rule for what may sit in a workspace scope: **it must hold for every session under that
+key.** Shared connections, credential stores, tenant configuration, an extension's per-workspace
+instance — yes. Anything derived from a MACHINE only if it is the workspace's machine: the local
+preset scans skills through `T.WorkspaceMachineFactory` (a remote workspace registers it in the
+`workspace` hook), publishes no shared registry when that is a per-session factory, and a session
+that brings its own machine (`createSession({ machine })`) scans through it instead of reading the
+workspace's — the catalog the model sees is always the one whose scripts its tools can reach.
+Where a workspace's MCP servers RUN is a separate axis: stdio servers are spawned by the host
+process (near the user's credentials and devices), remote ones are URLs; neither follows the
+machine, and a session on a remote machine with local connectors is the ordinary shape, not a
+special combination.
 
 Run and frame are deliberately NOT scopes: `RunState` is a snapshot the runner resolves from the
 session scope once per run, and the loop (`loop/`) never touches a scope — construction and
@@ -373,8 +388,14 @@ old sessions holding retired objects. When what a workspace is backed by changes
 restarted, a remote runtime reconnected — the host opens new sessions under a new
 `workspaceKey` (say `<workspaceId>@<generation>`): the `workspace` hook composes the new
 generation, old sessions keep the old scope alive through its reference count, and the last one
-out tears it down in reverse. `replace` stays with the harness tier, whose consumers all go
-through handles.
+out tears it down in reverse. An explicit key is part of a session's durable identity (persisted
+at create, read back on resume and inherited by a fork), so reopening never silently lands a
+tenant's session in a directory-keyed workspace; passing a key on `resumeSession` is the
+generation change. `replace` stays with the harness tier, whose consumers all go
+through handles — and, for that same reason, with extension services at EITHER tier: an
+extension's `workspace` result is consumed only through handles (`ctx.shared`, `ctx.services`,
+`harness.workspaceService`), so a reload replaces it in place in every open workspace, exactly
+as it replaces a `harness` result. What is never replaced is a token-registered engine object.
 
 ### 5.6 "The seam in core, the behavior in an extension" — the most useful third pattern
 
@@ -477,7 +498,7 @@ are not migrated — the criterion is applied only to new ones.
 | Capability composition fixed per slot | Short-circuit, chaining and OR are different problems | Behavior is independent of registration order | A new slot means changing core |
 | Gates are a named table, not a bus | The table is the complete list of vetoable things | Visible and auditable | Needs redesigning once it outgrows a hand |
 | Every extension hook wears a guardrail | A wide surface must be safe, so the contract must be weak | A bad extension cannot drag down a run; live attach/detach | Extensions cannot carry vetoing logic |
-| One `ExtensionDefinition` with `create`/`uses`/`setup` | Server and client must not have "two versions" | One body of code delivered to both ends | The session half can only use services through handles |
+| One `ExtensionDefinition` with `harness`/`uses`/`session` | Server and client must not have "two versions" | One body of code delivered to both ends | The session half can only use services through handles |
 | Core accepts values only; file loading is a shell | Closures capture host state, so trust travels with construction | No jiti/vm/cache generations; "capability is decided at birth" holds | A third-party ecosystem would need an additional trust layer (deferred until there are submissions) |
 | No two generations coexist; rendezvous at a barrier | All three problems of coexistence are artifacts of coexistence | Consistency guaranteed by mechanism, not discipline | Replacing a shape may pause for minutes; on timeout the change fails and is retried |
 | A flat service model with no topology | The dependency graph has depth 1 | Upgradable incrementally, not reversible | No support for cross-author service chains (not yet needed) |

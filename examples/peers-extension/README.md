@@ -1,8 +1,9 @@
-# Peers Extension Template (with a `create` half)
+# Peers Extension Template (with a `workspace` half)
 
-The standard starting point for a file extension that carries **process-level shared state** — the
-shared-state counterpart to [`extension-template`](../extension-template). This whole directory is a
-single `peers(config)` call: it returns an ordinary `ExtensionDefinition` with a `create` half, the
+The standard starting point for a file extension that carries **shared state** — one instance per
+workspace here (a `workspace` half; a `harness` half is the once-per-process twin) — the shared-state
+counterpart to [`extension-template`](../extension-template). This whole directory is a
+single `peers(config)` call: it returns an ordinary `ExtensionDefinition` with a `workspace` half, the
 very same definition a server passes to `createHarness({ extensions: [peers(config)] })`.
 
 ## The artifact
@@ -13,7 +14,7 @@ After `pnpm build` (a single esbuild bundle, zero install), `dist/` is the compl
 dist/
   manifest.json   # { id, version, engine, entry, name, description } — identity, compatibility gate,
                   # presentation. Whether it shares process-level state is decided by the presence of a
-                  # create half on the definition, not by the manifest.
+                  # workspace (or harness) half on the definition, not by the manifest.
   index.js        # A single esbuild bundle with operon-agents-peers rolled in.
 ```
 
@@ -34,11 +35,11 @@ in a `reload`.
 
 ```ts
 const harness = createHarness({ model, extensionDir: "~/.myapp/extensions" });
-await harness.extensions.load("peers");      // loading is the approval: create runs and publishes the "peers" service
+await harness.extensions.load("peers");      // loading is the approval; each workspace runs the half on first use
 const lead = await harness.createSession();  // an ordinary session gets Team; teammates spawned by Team get Hub (no Team)
 // after editing the file: await harness.extensions.reload("peers") — rendezvous at the barrier, swap the
 // implementation without reopening sessions
 ```
 
 For the full mechanism see `packages/agents-peers/README.md`; for the standard way to write an
-extension with a `create` half see `packages/agents/docs/extensions.md`.
+extension with a shared half see `packages/agents/docs/extensions.md`.

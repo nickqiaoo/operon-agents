@@ -35,7 +35,7 @@ interface ShapeService {
 const consumer = (label: string): ExtensionDefinition<unknown, unknown, { shape: ShapeService }> => ({
   id: "consumer",
   uses: ["shape"],
-  setup(api, { services }) {
+  session(api, { services }) {
     const svc = services.shape;
     api.registerTool(tool({
       name: "Shape",

@@ -29,7 +29,7 @@ async function main(): Promise<void> {
     extensions: [
       {
         id: "observer",
-        setup(api) {
+        session(api) {
           api.onEvent((event) => seen.push(event));
           // A listener that throws must not disrupt the run.
           api.onEvent(() => {

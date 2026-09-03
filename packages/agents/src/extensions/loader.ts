@@ -62,7 +62,7 @@ export function compareVersions(a: string, b: string): number {
 /**
  * What must be known about an extension BEFORE its code is imported — find it (`id`), import
  * it (`entry`, gated by `engine`), show it (`version`, `name`, `description`) — and nothing more. What the
- * extension provides (`create`) and consumes (`uses`) lives on the definition it exports, the
+ * extension provides (`harness`) and consumes (`uses`) lives on the definition it exports, the
  * same on both channels. Only `id` is validated; unknown fields pass through untouched, so a
  * manifest written for a newer loader still loads here.
  */
@@ -217,7 +217,7 @@ export class ExtensionLoader {
 
   /** The definitions currently held. On the standalone-loader path these reach sessions through
    *  `attachExtension`/`reloadInto`; a harness built with `extensionDir` registers them itself
-   *  (`harness.extensions.load`), which is the path that also runs `create` halves. */
+   *  (`harness.extensions.load`), which is the path that also runs `harness` halves. */
   definitions(): ExtensionDefinition[] {
     return [...this.loaded.values()];
   }
@@ -302,10 +302,10 @@ export class ExtensionLoader {
     }
     let candidate = moduleExports.default;
     // A factory default export lets a extension construct per-load state; called with nothing —
-    // everything a extension may use arrives later through its setup(ctx).
+    // everything a extension may use arrives later through its session(ctx).
     if (typeof candidate === "function") candidate = (candidate as () => unknown)();
     if (!isExtensionDefinition(candidate)) {
-      throw new Error(`extension "${scanned.manifest.id}" default export is not an extension definition ({ id, setup })`);
+      throw new Error(`extension "${scanned.manifest.id}" default export is not an extension definition ({ id, session })`);
     }
     if (candidate.id !== scanned.manifest.id) {
       throw new Error(`extension id mismatch: manifest says "${scanned.manifest.id}", code says "${candidate.id}"`);
@@ -342,7 +342,7 @@ function isExtensionDefinition(value: unknown): value is ExtensionDefinition {
   return (
     typeof value === "object" && value !== null
     && typeof (value as { id?: unknown }).id === "string"
-    && typeof (value as { setup?: unknown }).setup === "function"
+    && typeof (value as { session?: unknown }).session === "function"
   );
 }
 

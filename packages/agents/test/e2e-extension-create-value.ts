@@ -1,8 +1,8 @@
 /**
- * `create`-bearing extensions BY VALUE — `createHarness({ extensions: [def] })`, the server-side
- * twin of a file bundle in `extensionDir`. The SAME `ExtensionDefinition` (with a `create` half)
- * a bundle would default-export: `create` runs once at construction and its result registers as a
- * service under the id; `setup` runs per session with a handle to it plus this session's `params`.
+ * `harness`-bearing extensions BY VALUE — `createHarness({ extensions: [def] })`, the server-side
+ * twin of a file bundle in `extensionDir`. The SAME `ExtensionDefinition` (with a `harness` half)
+ * a bundle would default-export: `harness` runs once at construction and its result registers as a
+ * service under the id; `session` runs per session with a handle to it plus this session's `params`.
  * No loader, no approval, no reload — only the channel differs. Also covers per-session `params`
  * and the `false`-skip.
  */
@@ -34,7 +34,7 @@ const disposed: string[] = [];
 const consumer: ExtensionDefinition<unknown, unknown, { shapes: Shape }> = {
   id: "consumer",
   uses: ["shapes"],
-  setup(api, { services }) {
+  session(api, { services }) {
     api.registerTool({
       name: "Consume",
       description: "Consume the shared shape service.",
@@ -50,10 +50,10 @@ interface Shape { render(): string; close(): void; }
  *  a per-session suffix, and `false` (handled by the framework) skips the extension entirely. */
 const shapes = (version: string): ExtensionDefinition<Shape, { suffix?: string }> => ({
   id: "shapes",
-  create() {
+  harness() {
     return { render: () => version, close: () => { disposed.push(version); } };
   },
-  setup(api, { shared, params }) {
+  session(api, { shared, params }) {
     api.registerTool({
       name: "Shape",
       description: "Render via the shared shape service.",
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
 
-  // ── Sync create: registered before createHarness returns; params reach setup ──
+  // ── Sync create: registered before createHarness returns; params reach session() ──
   {
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [shapes("v1"), consumer] });
     check("sync: the service is registered the moment createHarness returns", harness.services.has("shapes"));
@@ -79,14 +79,14 @@ async function main(): Promise<void> {
     const plain = await harness.createSession();
     check("session: born with the extension's per-session half", plain.attachedExtensionIds().includes("shapes"));
     faux.setResponses([fauxAssistantMessage(fauxToolCall("Shape", {}), { stopReason: "toolUse" }), fauxAssistantMessage("ok", { stopReason: "stop" })]);
-    check("session: setup reaches the service, no params", toolResultText((await plain.prompt("x")).messages).includes("half:v1"));
+    check("session: session() reaches the service, no params", toolResultText((await plain.prompt("x")).messages).includes("half:v1"));
     faux.setResponses([fauxAssistantMessage(fauxToolCall("Consume", {}), { stopReason: "toolUse" }), fauxAssistantMessage("ok", { stopReason: "stop" })]);
     check("uses: a consumer receives the provider's service resolved", toolResultText((await plain.prompt("x")).messages).includes("consumed:v1"));
 
-    // params: routed to this session's setup as the third argument.
+    // params: routed to this session's session() as the third argument.
     const tagged = await harness.createSession({ params: { shapes: { suffix: "-A" } } });
     faux.setResponses([fauxAssistantMessage(fauxToolCall("Shape", {}), { stopReason: "toolUse" }), fauxAssistantMessage("ok", { stopReason: "stop" })]);
-    check("params: this session's params reached its setup", toolResultText((await tagged.prompt("x")).messages).includes("half:v1-A"));
+    check("params: this session's params reached its session()", toolResultText((await tagged.prompt("x")).messages).includes("half:v1-A"));
 
     // params false: the extension is skipped for this session.
     const off = await harness.createSession({ params: { shapes: false } });
@@ -105,27 +105,27 @@ async function main(): Promise<void> {
     check("close: the service was unregistered and its instance disposed (close())", !harness.services.has("shapes") && disposed.includes("v1"));
   }
 
-  // ── Async create: sessions wait for it; order is preserved ──
+  // ── Async harness(): sessions wait for it; order is preserved ──
   {
     const order: string[] = [];
     const slow: ExtensionDefinition = {
       id: "slow",
-      async create() {
+      async harness() {
         await new Promise((resolve) => setTimeout(resolve, 30));
         order.push("slow");
         return { ping: () => "pong" };
       },
-      setup() {},
+      session() {},
     };
     const after: ExtensionDefinition = {
       id: "after",
-      create() { order.push("after"); return { ok: () => true }; },
-      setup() {},
+      harness() { order.push("after"); return { ok: () => true }; },
+      session() {},
     };
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [slow, after] });
-    check("async: nothing from an async create is visible synchronously", !harness.services.has("slow") && !harness.services.has("after"));
+    check("async: nothing from an async harness() is visible synchronously", !harness.services.has("slow") && !harness.services.has("after"));
     await harness.createSession();
-    check("async: a session waits until every create has run", harness.services.has("slow") && harness.services.has("after"));
+    check("async: a session waits until every harness() has run", harness.services.has("slow") && harness.services.has("after"));
     check("async: creates run in the order given, even across an async one", order.join(",") === "slow,after");
     await harness.close();
   }
@@ -133,12 +133,12 @@ async function main(): Promise<void> {
   // ── dataDir: by value, a data root is opt-in ──
   {
     let seen: string | undefined;
-    const keeper: ExtensionDefinition = { id: "keeper", create(host) { seen = host.dataDir; return {}; }, setup() {} };
+    const keeper: ExtensionDefinition = { id: "keeper", harness(host) { seen = host.dataDir; return {}; }, session() {} };
     const root = await mkdtemp(join(tmpdir(), "ext-data-"));
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensionDataDir: root, extensions: [keeper] });
-    check("dataDir: by value, host.dataDir is <extensionDataDir>/<id>, created before create runs", seen === join(root, "keeper") && existsSync(join(root, "keeper")));
+    check("dataDir: by value, host.dataDir is <extensionDataDir>/<id>, created before harness() runs", seen === join(root, "keeper") && existsSync(join(root, "keeper")));
     await harness.close();
-    const bare = createHarness({ model, permission: { mode: "yolo" }, extensions: [{ id: "bare", create(host) { seen = host.dataDir; return {}; }, setup() {} }] });
+    const bare = createHarness({ model, permission: { mode: "yolo" }, extensions: [{ id: "bare", harness(host) { seen = host.dataDir; return {}; }, session() {} }] });
     check("dataDir: without a data root it is undefined", seen === undefined);
     await bare.close();
   }
@@ -158,26 +158,26 @@ async function main(): Promise<void> {
   {
     const broken: ExtensionDefinition = {
       id: "broken",
-      async create() { throw new Error("boom"); },
-      setup() {},
+      async harness() { throw new Error("boom"); },
+      session() {},
     };
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [broken] });
     let failed = "";
     await harness.createSession().catch((error) => { failed = String(error); });
-    check("failure: the create error surfaces where a session is opened", failed.includes("boom"));
-    check("failure: a throwing create published nothing", !harness.services.has("broken"));
+    check("failure: the harness() error surfaces where a session is opened", failed.includes("boom"));
+    check("failure: a throwing harness() published nothing", !harness.services.has("broken"));
     await harness.close();
   }
   {
     let captured = "";
     const eager: ExtensionDefinition = {
       id: "eager",
-      async create(host) { await host.createSession().catch((error) => { captured = String(error); }); return {}; },
-      setup() {},
+      async harness(host) { await host.createSession().catch((error) => { captured = String(error); }); return {}; },
+      session() {},
     };
     const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [eager] });
     await harness.createSession();
-    check("failure: opening a session from inside create() is refused, not deadlocked", captured.includes("inside create()"));
+    check("failure: opening a session from inside harness() is refused, not deadlocked", captured.includes("inside create()"));
     await harness.close();
   }
 

@@ -9,8 +9,78 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] — 2026-09-04
+
+The composition story finished: everything with a lifetime now lives in a scope, and there are
+three of them — harness, workspace, session. Extensions get the same three tiers, which is what
+lets a per-workspace extension (peers) exist at all. Breaking for hosts that compose a harness
+by hand and for extension authors.
+
 ### Changed
 
+- **BREAKING — one `Scope` tree replaces hand-wired assembly** (`operon-agents-core`,
+  `operon-agents`). Every object with a lifetime is registered in a `Scope` under a typed,
+  tier-declaring token (`T.Machine`, `T.Goal`, `T.McpServers`, …). Lookups walk up the chain, a
+  child registration overrides its parent's, `provide` is a default a prior `register` beats, and
+  `close()` tears children down first and entries in reverse — one teardown path for capabilities,
+  session infrastructure, workspace resources and extension services. `createHarness` takes three
+  composition hooks — `harness` / `workspace` / `session` — in place of `machine`, `repository`,
+  `logger`, `modelRuntime`, `capabilities` and `maxContextTokens`; `harness.scope` is public. A
+  capability declares `provides: Provision[]` (`{ token, create(ctx), dispose }`) instead of
+  `service` + `openSession` / `closeSession`, and `Session.open(scope, …)` replaces the
+  string-keyed service map, its eleven getters and `CapabilityMissingError` with
+  `session.get(T.X)` / `require(T.X)`. Hosts that passed `capabilities` move to `session`, which
+  is handed the session's scope and returns the same capability list.
+- **BREAKING — the workspace tier: one scope per working directory** (`operon-agents`). Sessions
+  sharing a key (`dir::<workDir>` by default, `private::<id>` for an isolated one, or an explicit
+  `createSession({ workspaceKey })`) share a scope that is ref-counted and closed with its last
+  session. The local preset puts the things that were per-session and shouldn't be there: MCP
+  connections, the skill scan, and the MCP OAuth credential store — one set per directory instead
+  of one per conversation. An explicit `workspaceKey` is persisted with the session, so resume and
+  fork land back in the same workspace (resuming with a NEW key is a generation change, never an
+  in-place replace); derived keys are not persisted.
+- **BREAKING — scope tiers are a compile error, not just a runtime one** (`operon-agents-core`).
+  `Token<T, K>` carries its tier as a literal type and `Scope<K>` its own, so `register` /
+  `provide` / `replace` / `unregister` only accept a token declared for that tier, and
+  `child<C extends Below<K>>` narrows (harness → workspace | session, workspace → session).
+  `ProvisionContext` / `RunContext` carry `Scope<"session">`; `McpServersHandle.connect` takes an
+  `McpConnectContext` (`{ scope, sessionId }`) rather than a `ProvisionContext`, because a
+  workspace connects its servers before any session exists.
+- **BREAKING — an extension's halves are named for the tier they run at, and there is a new
+  `workspace` half** (`operon-agents`). `create` → `harness`, `setup` → `session`, and
+  `ExtensionSetupContext` → `ExtensionSessionContext` (the session-tier EVENT context that used
+  to hold that name is now `ExtensionSessionEventContext`). The new `workspace(host)` half runs
+  once per workspace key — when the first session opens under it, or immediately in every open
+  workspace when the definition is loaded — and its result is registered under the extension's
+  `id` in THAT workspace's scope, so each working directory gets its own instance, disposed with
+  the last session under it. A definition carries at most one shared half, `harness` or
+  `workspace` (there is no `tier` option — the tier is the name of the half), so `ctx.shared` and
+  the extension's service live at exactly one tier and the session half need not know which.
+  `ExtensionWorkspaceContext` gives the half the workspace's `key` / `workDir`, a `createSession`
+  that defaults INTO this workspace, its `uses` handles resolved from it, and a per-workspace
+  `dataDir` (`<extension data>/workspaces/<key>`). A reload re-runs the half in every open
+  workspace.
+- **BREAKING — `harness.services.handle` refuses a workspace-tier name** (`operon-agents`). The
+  by-name registry now tracks which names a `workspace` half publishes (`declareWorkspace`), and
+  those are reached with `harness.workspaceService<T>(name, { workDir } | { workspaceKey })` — a
+  lazy handle that resolves on call and reports `missing` for a workspace that is not open —
+  plus `harness.openWorkspaces()` to enumerate them. `has(name)` still answers for both tiers;
+  `handle(name)` throws for a workspace-tier name instead of silently resolving nothing. A
+  session's `uses` / `ctx.services` handles resolve from the session scope upward, so a consumer
+  reaches either tier unchanged.
+- **BREAKING — peers is a per-workspace network** (`operon-agents-peers`). `peers()` is now a
+  `workspace` half: every working directory gets its own roster, mailbox and budget, and a
+  teammate spawned by a lead is born in the lead's workspace. The budget therefore counts per
+  workspace, not per process. `PeerOptions.repo` takes a factory given each workspace's host
+  (the file form builds its repo in that workspace's `dataDir`); passing a repo INSTANCE still
+  works and makes every workspace share one roster, which is now a deliberate choice rather than
+  the only shape. Hosts reach a network with `harness.workspaceService(PEERS_SERVICE, { workDir })`.
+- **Skills follow the workspace's execution machine, not the host's disk** (`operon-agents`).
+  The `workspace` hook runs BEFORE the skill scan, so a host can register `T.WorkspaceMachineFactory`
+  (or its own `T.SkillRegistry`) and have the catalog scanned through the machine whose Bash the
+  model will actually use. A machine FACTORY (one machine per session) publishes no shared
+  registry — each session scans through its own `T.Machine` — and a session opened with
+  `createSession({ machine })` ignores the workspace's registry for the same reason.
 - **MCP: `createSession({ mcpServers })` is honoured, layered over the workspace's**
   (`operon-agents-core`, `operon-agents`). The option was carried to the capability factory and
   then dropped: the default factory viewed the workspace's shared connections and ignored the
@@ -22,6 +92,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SHADOWS the workspace server of that name for this session (`list`, `listTools`, `reconnect` and
   the model's `mcp__<name>__<tool>` tools all resolve to the session's); the workspace connection
   underneath keeps running for every other session.
+- **`SessionPort` hands out workflow journals, not the `WorkflowManager`**
+  (`operon-agents-core`). The kernel's Workflow tool only ever called `newJournal`; the port now
+  exposes `newWorkflowJournal(runId, parentToolCallId)` and the manager class stays behind
+  `session.workflow`, off the kernel's interface.
+
+## [0.1.0-alpha.3] — 2026-09-02
+
+### Changed
 
 - **Peers: teammate names are unique per team, not per roster** (`operon-agents-peers`). A
   teammate's roster id is now `<team label>/<name>` (`AgentRef.name` / `PeerCard.name` carry
@@ -83,4 +161,6 @@ First public release from the open-source repository, with the CI and publish wo
 
 Initial npm placeholder release.
 
+[0.1.0-alpha.4]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.4
+[0.1.0-alpha.3]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.2

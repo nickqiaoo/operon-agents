@@ -102,9 +102,11 @@ import {
   noopLogger,
 } from "operon-agents-core";
 import { HT } from "./tokens.ts";
+import { createHash } from "node:crypto";
+import { ServiceUnavailableError, isProbeProperty } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
+import { assertOneSharedHalf, extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ExtensionWorkspaceContext, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
 import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult } from "operon-agents-core";
 
 export type ApprovalHandler = (
@@ -123,6 +125,8 @@ export type DeliveryMode = "auto" | "steer" | "follow_up";
 const DEFAULT_REPLACE_TIMEOUT_MS = 30_000;
 /** Session-store key holding the per-session extension params map (see `createSession({ params })`). */
 const EXTENSION_PARAMS_STATE_KEY = "extensions:params";
+/** Session state slot for an explicit `workspaceKey` — durable workspace identity (see `OpenSessionOptionsBase.workspaceKey`). */
+const WORKSPACE_KEY_STATE_KEY = "workspace:key";
 
 export interface DeliveryOptions {
   readonly source: string;
@@ -168,6 +172,13 @@ export interface DefaultCapabilitiesOptions {
    * ones. Without it (or without those registrations) everything is built per session.
    */
   readonly scope?: Scope<"session">;
+  /**
+   * The session brought its own machine (`createSession({ machine })`). The workspace's shared
+   * `T.SkillRegistry` was scanned through the WORKSPACE's machine and does not describe this
+   * one, so the skill scan runs per session through `T.Machine` instead — the catalog follows
+   * the filesystem the session's tools actually operate. Default false.
+   */
+  readonly ownMachine?: boolean;
   /** Context window budget used to size compaction. Defaults to 200_000. */
   readonly maxContextTokens?: number;
   /** Workspace MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
@@ -214,7 +225,8 @@ export interface DefaultCapabilitiesOptions {
  */
 export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
   const manager = options.pluginManager ?? options.scope?.get(T.PluginManager);
-  const sharedSkills = options.scope?.get(T.SkillRegistry);
+  // A session on its own machine ignores the workspace's registry: it was scanned elsewhere.
+  const sharedSkills = options.ownMachine === true ? undefined : options.scope?.get(T.SkillRegistry);
   const sharedMcp = options.scope?.has(T.McpServers) === true;
   const oauthService = options.oauthService ?? options.scope?.get(T.McpOAuth);
   // Shared registry so the plugin session-start injector can render a skill the skills capability
@@ -306,7 +318,7 @@ export interface HarnessOptions<TContext = unknown> {
    * extensions register providers at runtime; without it those actions throw), `T.MachineFactory`
    * (a shared `Machine` or a per-session factory; sessions default to a `LocalMachine` at their
    * own `workDir`), `T.PluginManager`, `T.Tracing`. Runs before the by-value extensions'
-   * `create` halves, so they can consume what it registers.
+   * `harness` halves, so they can consume what it registers.
    */
   readonly harness?: (scope: Scope<"harness">) => void | Promise<void>;
   /**
@@ -370,15 +382,15 @@ export interface HarnessOptions<TContext = unknown> {
    * Opt-in to FILE extensions, both tiers, from this directory (one folder per extension).
    * The single explicit switch: without it no file-extension machinery exists ("default
    * closed"); with it, `harness.extensions` loads/reloads/unloads them — each load being the
-   * manual approval. Extensions with a `create` half publish process-level services and may
+   * manual approval. Extensions with a `harness` half publish process-level services and may
    * embed a session half; see docs/architecture.md §5.4-5.5. (Unrelated to
    * `pluginManager`, the Codex-compatible skill/MCP plugin system.)
    */
   readonly extensionDir?: string;
   /**
-   * Root of the per-extension data folders handed to `create` halves as `host.dataDir`
+   * Root of the per-extension data folders handed to `harness` halves as `host.dataDir`
    * (`<root>/<id>`). Defaults to `<extensionDir>/.data` when `extensionDir` is set; by value
-   * only, set it to give `create` halves a place for their files (absent ⇒ `dataDir` is
+   * only, set it to give `harness` halves a place for their files (absent ⇒ `dataDir` is
    * `undefined`). Kept outside the code folders so an update never touches state.
    */
   readonly extensionDataDir?: string;
@@ -414,13 +426,13 @@ export interface HarnessOptions<TContext = unknown> {
   readonly workflowTool?: boolean;
   /**
    * Programmatic runtime extensions, registered once here — the by-value twin of `extensionDir`.
-   * Every definition's `setup` runs in every session; a session varies that with
+   * Every definition's `session` runs in every session; a session varies that with
    * `createSession({ params })` (a value configures, `false` skips). A definition with a
-   * `create` half has it run here, once, and the result registered as a service under its `id`
+   * `harness` half has it run here, once, and the result registered as a service under its `id`
    * before any session opens; `harness.close()` unregisters (and disposes) those services.
    * Each definition's `uses` is checked at this point, in order — a consumer comes after its
-   * provider (or after `services`). Synchronous `create`s finish before `createHarness`
-   * returns; an async one makes sessions wait for it, so `create` must not open a session of
+   * provider (or after `services`). Synchronous `harness`s finish before `createHarness`
+   * returns; an async one makes sessions wait for it, so `harness` must not open a session of
    * its own. Intentionally independent from Codex-compatible plugins (`pluginManager`): those
    * are skills/MCP/hooks metadata, extensions are trusted host code.
    */
@@ -447,6 +459,9 @@ export interface SessionCapabilityContext {
   readonly workDir: string;
   /** Session-scoped MCP servers, as given to createSession / resumeSession / forkSession. */
   readonly mcpServers?: Record<string, McpServerConfig>;
+  /** The session brought its own machine (`{ machine }` on this open): workspace-shared objects
+   *  derived from the workspace's machine (the skill scan) do not apply to it. */
+  readonly ownMachine: boolean;
 }
 
 /** What the `workspace` hook is told about the workspace scope it is composing. */
@@ -484,8 +499,8 @@ interface OpenSessionOptionsBase<TContext = unknown> {
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**
    * Per-session argument for each registered extension, by extension id — handed to that
-   * extension's `setup(api, ctx)` as `ctx.params`. A value of `false` skips the extension for
-   * this session entirely (its `setup` never runs). Persisted with the session, so a
+   * extension's `session(api, ctx)` as `ctx.params`. A value of `false` skips the extension for
+   * this session entirely (its `session` never runs). Persisted with the session, so a
    * `resumeSession` or a reload re-applies the same params without the caller repeating them.
    * This is the per-session knob: definitions themselves are registered once, on the harness.
    */
@@ -508,19 +523,23 @@ interface OpenSessionOptionsBase<TContext = unknown> {
    * first), so it is ignored when `agent` is given.
    */
   readonly maxStepsPerTurn?: number;
+  /**
+   * Which workspace scope this session lives under (see `HarnessOptions.workspace`). Defaults
+   * to the working directory; a server passes its tenant / environment id. An explicit key is
+   * part of the session's DURABLE identity: persisted at create, read back on every later open,
+   * so a resume or fork lands in the same workspace without the caller repeating it (a tenant
+   * must never fall back to a directory key on reopen). Passing one on `resumeSession` /
+   * `forkSession` overrides the stored key — which is how a workspace changes generation (its
+   * runtime restarted or reconnected): new opens get `<workspace>@<generation>`, sessions still
+   * on the old key keep the old scope until the last of them closes — workspace entries are
+   * never `replace`d in place.
+   */
+  readonly workspaceKey?: string;
 }
 
 export interface CreateSessionOptions<TContext = unknown> extends OpenSessionOptionsBase<TContext> {
   readonly id?: string;
   readonly workDir?: string;
-  /**
-   * Which workspace scope this session lives under (see `HarnessOptions.workspace`). Defaults
-   * to the working directory; a server passes its tenant / environment id. A key is also how a
-   * workspace changes generation (its runtime restarted or reconnected): new sessions get
-   * `<workspace>@<generation>`, old ones keep the old scope until the last of them closes —
-   * workspace entries are never `replace`d in place.
-   */
-  readonly workspaceKey?: string;
   /** Partition this session under an owner — see {@link CreateSessionInput.ownerKey}. */
   readonly ownerKey?: string;
   readonly title?: string;
@@ -1175,7 +1194,7 @@ export class HarnessSession<TContext = unknown> {
    * at the run's stop boundary when one is in flight — its tools appear at the next run's
    * assembly. The change is journaled; it does NOT survive `resumeSession` (re-attach, or
    * register it in `createHarness({ extensions })`, which every open re-evaluates). A definition
-   * with a `create` half is accepted only once registered — its service must already exist.
+   * with a `harness` half is accepted only once registered — its service must already exist.
    */
   attachExtension(definition: ExtensionDefinition): Promise<void> {
     return this.extensionRuntime().attach(definition);
@@ -1314,7 +1333,7 @@ export class Harness<TContext = unknown> {
   /** The harness-tier scope: every process-lived object, and the parent of every workspace scope. */
   readonly scope: Scope<"harness">;
   /** Workspace scopes by key, reference-counted by the sessions open under them. */
-  private readonly workspaces = new Map<string, { readonly scope: Scope<"workspace">; readonly ready: Promise<void>; refs: number }>();
+  private readonly workspaces = new Map<string, WorkspaceEntry>();
   /** Process-level extension services by name (a facade over `scope`). The host replaces
    *  providers here (`services.replace`); sessions only ever see handles (`ctx.shared`, `ctx.services`). */
   readonly services: ServiceRegistry;
@@ -1324,7 +1343,7 @@ export class Harness<TContext = unknown> {
   /** File-extension manager (both tiers) — present only when the host opted in with
    *  `extensionDir`. NOT the Codex-compatible skill/MCP plugin system (`pluginManager`). */
   readonly extensions: HarnessExtensionManager | undefined;
-  /** Service ids published by by-value `create` halves, in creation order — unregistered (and
+  /** Service ids published by by-value `harness` halves, in creation order — unregistered (and
    *  disposed) by `close()`, newest first. */
   private readonly createdServices: string[] = [];
   /** The by-value definitions this harness currently mounts into newborn sessions, in
@@ -1335,9 +1354,9 @@ export class Harness<TContext = unknown> {
   private readonly valueDefs = new Map<string, ExtensionDefinition>();
   /** Root of extensions' data folders (`host.dataDir` = `<root>/<id>`); absent ⇒ none handed out. */
   private readonly dataRoot: string | undefined;
-  /** Settles once every by-value `create` half has published its service; sessions open after it. */
+  /** Settles once every by-value `harness` half has published its service; sessions open after it. */
   private readonly sharedReady: Promise<void>;
-  /** The extension whose `create` is running right now — its `createSession` must refuse. */
+  /** The extension whose `harness` is running right now — its `createSession` must refuse. */
   private runningCreate: string | undefined;
 
   constructor(options: HarnessOptions<TContext>) {
@@ -1373,6 +1392,12 @@ export class Harness<TContext = unknown> {
           dataDir: this.dataRoot ?? join(options.extensionDir, ".data"),
           bridge: {
             services: this.services,
+            workspaces: {
+              stage: (definition) => this.stageWorkspaceHalf(definition),
+              swap: (definition, staged) => this.swapWorkspaceHalf(definition, staged),
+              unregister: (id) => this.unregisterWorkspaceHalf(id),
+              discard: (id, staged) => this.discardStagedWorkspaces(id, staged),
+            },
             createSession: (sessionOptions) => this.createSession(sessionOptions as CreateSessionOptions<TContext>),
             sessions: () => [...this.activeSessions.values()],
             withBarrier: (extensionIds, timeoutMs, fn) => this.withBarrier(extensionIds, timeoutMs, fn),
@@ -1393,7 +1418,7 @@ export class Harness<TContext = unknown> {
       if (this.valueDefs.has(definition.id)) throw new Error(`duplicate by-value extension id "${definition.id}" in createHarness({ extensions })`);
       this.valueDefs.set(definition.id, definition);
     }
-    // The host's process-tier registrations come first (extension `create` halves may consume
+    // The host's process-tier registrations come first (extension `harness` halves may consume
     // them); a synchronous hook keeps the whole chain synchronous, so a synchronous extension's
     // service exists the moment `createHarness` returns.
     const composed = options.harness?.(this.scope);
@@ -1411,13 +1436,13 @@ export class Harness<TContext = unknown> {
   }
 
   /**
-   * Run one by-value definition's `create` half against a staging host: the service is COLLECTED,
-   * not registered, so a throwing `create` publishes nothing. Stays synchronous when `create` is
+   * Run one by-value definition's `harness` half against a staging host: the service is COLLECTED,
+   * not registered, so a throwing `harness` publishes nothing. Stays synchronous when `harness` is
    * — what lets a synchronous extension's service exist the moment `createHarness` returns.
    * Shared by construction and `replaceExtension`.
    */
   private stageValue(definition: ExtensionDefinition): StagedDefinition | Promise<StagedDefinition> {
-    // The data folder exists before `create` runs (synchronously: `create` may be too).
+    // The data folder exists before `harness` runs (synchronously: `harness` may be too).
     const dataDir = this.dataRoot !== undefined ? join(this.dataRoot, definition.id) : undefined;
     if (dataDir !== undefined) mkdirSync(dataDir, { recursive: true });
     this.runningCreate = definition.id;
@@ -1452,22 +1477,26 @@ export class Harness<TContext = unknown> {
 
   /**
    * Register the by-value definitions, in order: check each one's `uses` against the registry
-   * (a consumer must come after its provider), then run its `create` half if it has one and
+   * (a consumer must come after its provider), then run its `harness` half if it has one and
    * register the result as a service under the extension's `id`. Stays synchronous as long as
-   * every `create` is — so `createHarness` returns with a synchronous extension's service
-   * already registered; the first async `create` turns the rest of the sequence into a promise
+   * every `harness` is — so `createHarness` returns with a synchronous extension's service
+   * already registered; the first async `harness` turns the rest of the sequence into a promise
    * chain that `openFromStore` awaits. Staging (`stageDefinition`) collects before registering,
-   * so a throwing `create` publishes nothing.
+   * so a throwing `harness` publishes nothing.
    */
   private registerDefinitions(extensions: readonly ExtensionDefinition[] | undefined): Promise<void> {
     if (extensions === undefined) return Promise.resolve();
     const run = (definition: ExtensionDefinition): void | Promise<void> => {
+      assertOneSharedHalf(definition);
       for (const name of definition.uses ?? []) {
         if (!this.services.has(name)) {
           throw new Error(`extension "${definition.id}" uses service "${name}", which is not registered — list its provider earlier in createHarness({ extensions }) (or register it in services)`);
         }
       }
-      if (definition.create === undefined) return;
+      // A workspace half runs lazily, when a workspace is first composed; declaring the name
+      // now is what lets a later definition `uses` it.
+      if (definition.workspace !== undefined) this.services.declareWorkspace(definition.id);
+      if (definition.harness === undefined) return;
       const staged = this.stageValue(definition);
       const publish = (result: StagedDefinition): void => {
         if (result.service !== undefined) {
@@ -1594,7 +1623,7 @@ export class Harness<TContext = unknown> {
 
   /**
    * Close every open session, then the harness scope — which disposes everything registered
-   * there in reverse order: by-value `create` halves die with the harness that ran them (each
+   * there in reverse order: by-value `harness` halves die with the harness that ran them (each
    * drained, then its dispose hook — default the instance's close()), then the host's own
    * registrations, then the defaults.
    */
@@ -1609,7 +1638,7 @@ export class Harness<TContext = unknown> {
    * Replace by-value extensions with new versions, as one coordinated act — the by-value twin of
    * `harness.extensions.reload()` (docs/architecture.md §5.5). Every session holding
    * one of them rendezvous at its run boundary (in-flight runs finish untouched — nothing is
-   * aborted); in that global quiet moment the old halves detach, each `create` half re-runs and
+   * aborted); in that global quiet moment the old halves detach, each `harness` half re-runs and
    * its service is swapped, and the new halves attach; then everyone resumes. Sessions born from
    * the quiet moment on are born with the new definitions. On rendezvous timeout NOTHING changes:
    * the barrier lifts, `BarrierTimeout` names the stuck sessions, and the caller retries later
@@ -1621,7 +1650,7 @@ export class Harness<TContext = unknown> {
    *
    * `services` swaps HOST-registered services (`createHarness({ services })`) in the same quiet
    * moment, for when the shape that changed is the host's rather than an extension's. Those obey
-   * their `replaceable` flag; an extension's own `create` service swaps unconditionally, since
+   * their `replaceable` flag; an extension's own `harness` service swaps unconditionally, since
    * its owner is being replaced along with it.
    *
    * Implementation-only swaps need none of this — `harness.services.replace` (layer 1) lands on
@@ -1648,14 +1677,18 @@ export class Harness<TContext = unknown> {
         );
       }
     }
-    // A `create` half still publishing would race the swap.
+    // A `harness` half still publishing would race the swap.
     await this.sharedReady;
-    // Every new `create` runs BEFORE the barrier: staging COLLECTS, so one that throws leaves the
+    // Every new `harness` runs BEFORE the barrier: staging COLLECTS, so one that throws leaves the
     // world completely untouched (no session detached, no service swapped) — the same discipline
     // construction and the file manager use. Whatever a failed act staged is disposed below.
     const staged = new Map<string, StagedDefinition>();
+    const stagedWorkspaces = new Map<string, Map<string, unknown>>();
+    const hadWorkspace = new Set(definitions.filter((definition) => this.valueDefs.get(definition.id)?.workspace !== undefined).map((definition) => definition.id));
     for (const definition of definitions) {
-      if (definition.create !== undefined) staged.set(definition.id, await this.stageValue(definition));
+      assertOneSharedHalf(definition);
+      if (definition.harness !== undefined) staged.set(definition.id, await this.stageValue(definition));
+      if (definition.workspace !== undefined) stagedWorkspaces.set(definition.id, await this.stageWorkspaceHalf(definition));
     }
     const published = new Set<string>();
     const ids = definitions.map((definition) => definition.id);
@@ -1678,6 +1711,13 @@ export class Harness<TContext = unknown> {
         }
         for (const definition of definitions) {
           await this.publishValueService(definition, staged.get(definition.id), options.drainTimeoutMs);
+          if (definition.workspace !== undefined) {
+            this.services.declareWorkspace(definition.id);
+            await this.swapWorkspaceHalf(definition, stagedWorkspaces.get(definition.id));
+          } else if (hadWorkspace.has(definition.id)) {
+            await this.swapWorkspaceHalf(definition, undefined);
+            this.services.undeclareWorkspace(definition.id);
+          }
           published.add(definition.id);
         }
         // New halves in: their `session.start` runs against the new shape. The pending queue
@@ -1689,16 +1729,19 @@ export class Harness<TContext = unknown> {
       });
     } catch (error) {
       // Rendezvous timed out, or a step failed: nothing staged was published, so dispose it —
-      // a `create` that opened a pool must not leak it because the barrier never converged.
+      // a `harness` that opened a pool must not leak it because the barrier never converged.
       for (const [id, entry] of staged) {
         if (!published.has(id) && entry.service !== undefined) await this.disposeStaged(id, entry.service.instance);
+      }
+      for (const [id, instances] of stagedWorkspaces) {
+        if (!published.has(id)) await this.discardStagedWorkspaces(id, instances);
       }
       throw error;
     }
   }
 
   /**
-   * The service half of one replaced extension: publish what its `create` staged. `replace`
+   * The service half of one replaced extension: publish what its `harness` staged. `replace`
    * rather than unregister + register, so consumers this barrier never gated — other extensions
    * holding a `uses` handle — see no gap; `force` because the owner is being replaced along with
    * it (see `ServiceRegistry.replace`).
@@ -1720,20 +1763,20 @@ export class Harness<TContext = unknown> {
       }
       return;
     }
-    // The new version dropped its `create` half: its service goes away with it.
+    // The new version dropped its `harness` half: its service goes away with it.
     if (previous >= 0) {
       await this.services.unregister(id, drain);
       this.createdServices.splice(previous, 1);
     }
   }
 
-  /** Dispose a `create` result that was staged but never published (default rule: its `close()`). */
+  /** Dispose a `harness` result that was staged but never published (default rule: its `close()`). */
   private async disposeStaged(id: string, instance: unknown): Promise<void> {
     try {
       const close = (instance as { close?: unknown } | null | undefined)?.close;
       if (typeof close === "function") await (close as () => void | Promise<void>).call(instance);
     } catch (error) {
-      console.warn(`[extensions] extension "${id}": disposing the unpublished create result failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`[extensions] extension "${id}": disposing the unpublished harness() result failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1779,14 +1822,14 @@ export class Harness<TContext = unknown> {
     params: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly Capability[]> {
     const base = this.options.session !== undefined ? await this.options.session(scope, ctx) : defaultCapabilities();
-    // Every definition registered on this harness: by value (`extensions`, create halves
-    // included — their per-session `setup` is mounted here like any other), then from files.
+    // Every definition registered on this harness: by value (`extensions`, harness halves
+    // included — their per-session `session` is mounted here like any other), then from files.
     const extensions = [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
     // Put extension transforms first. Shell PreToolUse remains in the staged permission policy,
     // so it evaluates the final rewritten args before normal authorization.
     // Installed even when empty: the runtime must exist for `attachExtension` to have
     // somewhere to land on sessions born without extensions.
-    return [extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId), params }), ...base];
+    return [extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId, scope), params }), ...base];
   }
 
   /**
@@ -1797,7 +1840,7 @@ export class Harness<TContext = unknown> {
    * `isIdle`/`waitForIdle` resolve the HarnessSession lazily — at capability-build time the
    * session object does not exist yet (this runs while it is being constructed).
    */
-  private extensionHost(sessionId: string): ExtensionHost {
+  private extensionHost(sessionId: string, scope: Scope<"session">): ExtensionHost {
     const self = this;
     const runtime = this.scope.get(T.ModelRuntime);
     return {
@@ -1814,7 +1857,12 @@ export class Harness<TContext = unknown> {
         if (!runtime) throw new Error("unregisterProvider() requires the harness to be built with a `modelRuntime`");
         runtime.models.deleteProvider(id);
       },
-      services: self.services,
+      // Resolved FROM the session's scope: a workspace-tier service lands on this session's
+      // workspace's instance, a harness-tier one on the harness's — the extension never asks which.
+      services: {
+        has: (name) => self.services.hasFrom(scope, name),
+        handle: <T = unknown>(name: string): T => self.services.handleFrom<T>(scope, name),
+      },
       isIdle: () => self.activeSessions.get(sessionId)?.status.state !== "running",
       waitForIdle: async () => {
         const session = self.activeSessions.get(sessionId);
@@ -1831,18 +1879,26 @@ export class Harness<TContext = unknown> {
     store: SessionStore,
     opts: OpenSessionOptionsBase<TContext>,
   ): Promise<HarnessSession<TContext>> {
-    // A session's `setup` reaches a create half through its service, so none opens before the
-    // create halves have registered them.
+    // A session's `session` reaches a harness half through its service, so none opens before the
+    // harness halves have registered them.
     await this.sharedReady;
     // Per-session extension params: given at create, persisted, and read back on every later
     // open (resume, fork) so a session keeps them without the caller repeating them.
     let params = opts.params;
     if (params !== undefined) await store.putState(EXTENSION_PARAMS_STATE_KEY, params);
     else params = ((await store.getState(EXTENSION_PARAMS_STATE_KEY)) as Record<string, unknown> | null) ?? undefined;
+    // The workspace key: an EXPLICIT one is durable identity — persisted with the session (like
+    // params) and read back on resume / fork, so a tenant session never falls back to a
+    // directory key on reopen; passing one on a later open overrides the stored key (a
+    // generation change). Absent both, the key is derived from this open: a session that
+    // brings its own machine INSTANCE gets a private workspace, everything else the directory's.
+    let workspaceKey = opts.workspaceKey;
+    if (workspaceKey !== undefined) await store.putState(WORKSPACE_KEY_STATE_KEY, workspaceKey);
+    else workspaceKey = ((await store.getState(WORKSPACE_KEY_STATE_KEY)) as string | null) ?? undefined;
+    workspaceKey ??= opts.machine !== undefined && typeof opts.machine !== "function" ? `private::${id}` : dirWorkspaceKey(workDir);
     // The workspace scope (one per key, shared) and under it the session scope: what the harness
     // decides for this session goes in here; Session.open provides the defaults for the rest,
     // and from then on the session owns the scope.
-    const workspaceKey = (opts as CreateSessionOptions<TContext>).workspaceKey ?? (opts.machine !== undefined && typeof opts.machine !== "function" ? `private::${id}` : `dir::${workDir}`);
     const workspace = await this.acquireWorkspace(workspaceKey, workDir);
     let scope: Scope<"session">;
     try {
@@ -1885,6 +1941,7 @@ export class Harness<TContext = unknown> {
       {
         sessionId: id,
         workDir,
+        ownMachine: opts.machine !== undefined,
         ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
       },
       params,
@@ -1922,17 +1979,22 @@ export class Harness<TContext = unknown> {
     return session;
   }
 
-  /** The workspace scope for `key`, composed on first use (`options.workspace`), ref-counted. */
+  /**
+   * The workspace scope for `key`, composed on first use — the host's `workspace` hook, then
+   * every registered extension's `workspace` half — and ref-counted by the sessions under it.
+   */
   private async acquireWorkspace(key: string, workDir: string): Promise<Scope<"workspace">> {
     let entry = this.workspaces.get(key);
     if (entry === undefined) {
       const scope = this.scope.child("workspace");
-      const compose = async (): Promise<void> => {
+      const created: WorkspaceEntry = { key, workDir, scope, refs: 0, chain: Promise.resolve(), ready: Promise.resolve() };
+      created.ready = (async (): Promise<void> => {
         await this.sharedReady;
         await this.options.workspace?.(scope, { key, workDir });
-      };
-      entry = { scope, ready: compose(), refs: 0 };
-      this.workspaces.set(key, entry);
+        await this.inWorkspace(created, () => this.composeWorkspaceHalves(created, this.allDefinitions()));
+      })();
+      this.workspaces.set(key, created);
+      entry = created;
     }
     entry.refs += 1;
     try {
@@ -1954,9 +2016,199 @@ export class Harness<TContext = unknown> {
     await entry.scope.close();
   }
 
+  /**
+   * A handle to a workspace-tier extension service in ONE workspace — how a host reaches a
+   * `workspace` half's instance (`harness.services.handle` only answers for the harness tier).
+   * Like every handle it resolves at CALL time: safe to take before the workspace exists, and a
+   * call while no session has that workspace open throws `ServiceUnavailableError("missing")`.
+   * Methods only, as everywhere.
+   */
+  workspaceService<T = unknown>(name: string, where: { readonly workspaceKey: string } | { readonly workDir: string }): T {
+    const key = "workspaceKey" in where ? where.workspaceKey : dirWorkspaceKey(where.workDir);
+    const self = this;
+    const current = (): Record<string, unknown> | undefined => {
+      const entry = self.workspaces.get(key);
+      if (entry === undefined || entry.scope.closed) return undefined;
+      return self.services.handleFrom<Record<string, unknown>>(entry.scope, name);
+    };
+    return new Proxy(Object.create(null) as object, {
+      get(_target, prop) {
+        if (isProbeProperty(prop)) return undefined;
+        return (...args: unknown[]) => {
+          const inner = current();
+          if (inner === undefined) throw new ServiceUnavailableError(name, "missing");
+          const fn = inner[prop as string];
+          if (typeof fn !== "function") {
+            throw new TypeError(`service "${name}": "${String(prop)}" is not a method — replaceable services expose methods only`);
+          }
+          return (fn as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+      has(_target, prop) {
+        const inner = current();
+        return inner !== undefined && Reflect.has(inner as object, prop);
+      },
+    }) as T;
+  }
+
+  /** The workspaces currently open (some session holds each one), oldest first. */
+  openWorkspaces(): readonly WorkspaceContext[] {
+    return [...this.workspaces.values()].filter((entry) => !entry.scope.closed).map((entry) => ({ key: entry.key, workDir: entry.workDir }));
+  }
+
+  /** Every definition this harness mounts, by value then from files — the set a workspace composes. */
+  private allDefinitions(): ExtensionDefinition[] {
+    return [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
+  }
+
+  /** Serialize work on one workspace's extension registrations: composition at open, a load
+   *  landing in an open workspace, and a reload's swap never interleave on the same scope. */
+  private inWorkspace<R>(entry: WorkspaceEntry, fn: () => Promise<R>): Promise<R> {
+    const next = entry.chain.then(fn, fn);
+    entry.chain = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  /** Workspaces whose composition settled (a failed one is being torn down by its opener). */
+  private async liveWorkspaces(): Promise<WorkspaceEntry[]> {
+    const live: WorkspaceEntry[] = [];
+    for (const entry of [...this.workspaces.values()]) {
+      const ok = await entry.ready.then(() => true, () => false);
+      if (ok && !entry.scope.closed) live.push(entry);
+    }
+    return live;
+  }
+
+  /** Run every `workspace` half this workspace lacks and register the results. Idempotent. */
+  private async composeWorkspaceHalves(entry: WorkspaceEntry, definitions: readonly ExtensionDefinition[]): Promise<void> {
+    for (const definition of definitions) {
+      if (definition.workspace === undefined || this.services.hasLocalIn(entry.scope, definition.id)) continue;
+      const instance = await this.runWorkspaceHalf(definition, entry);
+      this.services.registerIn(entry.scope, definition.id, instance, { replaceable: !this.valueDefs.has(definition.id) });
+    }
+  }
+
+  /**
+   * Run one definition's `workspace` half against one workspace and return the instance —
+   * nothing registered (staging). The context mirrors the harness half's, bound to the
+   * workspace: `uses` handles resolve from ITS scope, `createSession` lands sessions in it, and
+   * `dataDir` is its own folder under the extension's data root.
+   */
+  private async runWorkspaceHalf(definition: ExtensionDefinition, entry: WorkspaceEntry): Promise<unknown> {
+    const half = definition.workspace;
+    if (half === undefined) throw new Error(`extension "${definition.id}" has no workspace half`);
+    const dataDir = this.dataRoot !== undefined ? join(this.dataRoot, definition.id, "workspaces", workspaceSlug(entry.key)) : undefined;
+    if (dataDir !== undefined) mkdirSync(dataDir, { recursive: true });
+    let composing = true;
+    const host: ExtensionWorkspaceContext = {
+      key: entry.key,
+      workDir: entry.workDir,
+      services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, this.services.handleFrom(entry.scope, name)]))),
+      ...(dataDir !== undefined ? { dataDir } : {}),
+      createSession: (sessionOptions) => {
+        if (composing) {
+          return Promise.reject(
+            new Error(`extension "${definition.id}": createSession is not available inside workspace() — the workspace is still being composed; open sessions later, from session(), a tool, or an event`),
+          );
+        }
+        return this.createSession({ workDir: entry.workDir, workspaceKey: entry.key, ...(sessionOptions ?? {}) } as CreateSessionOptions<TContext>);
+      },
+      warn: (message) => console.warn(`[extension ${definition.id}] ${message}`),
+    };
+    try {
+      return await half(host);
+    } finally {
+      composing = false;
+    }
+  }
+
+  /** Stage a `workspace` half in every live workspace: key → instance, nothing registered. A
+   *  throwing half disposes what was staged before it and rethrows. */
+  private async stageWorkspaceHalf(definition: ExtensionDefinition): Promise<Map<string, unknown>> {
+    const staged = new Map<string, unknown>();
+    try {
+      for (const entry of await this.liveWorkspaces()) staged.set(entry.key, await this.runWorkspaceHalf(definition, entry));
+    } catch (error) {
+      await this.discardStagedWorkspaces(definition.id, staged);
+      throw error;
+    }
+    return staged;
+  }
+
+  /**
+   * Publish a workspace half into every live workspace (the quiet moment of a reload / replace,
+   * or a first load landing in workspaces already open): its staged instance replaces the one
+   * registered (`force`: the owner is being replaced along with it) or registers where there is
+   * none; a workspace born after staging composes fresh. `staged === undefined` means the new
+   * version has no workspace half: every instance is unregistered. Staged instances for
+   * workspaces closed meanwhile are disposed.
+   */
+  private async swapWorkspaceHalf(definition: ExtensionDefinition, staged: Map<string, unknown> | undefined): Promise<void> {
+    const id = definition.id;
+    const seen = new Set<string>();
+    for (const entry of await this.liveWorkspaces()) {
+      seen.add(entry.key);
+      await this.inWorkspace(entry, async () => {
+        if (entry.scope.closed) return;
+        const has = this.services.hasLocalIn(entry.scope, id);
+        if (staged === undefined) {
+          if (has) await this.services.unregisterIn(entry.scope, id);
+          return;
+        }
+        const instance = staged.has(entry.key) ? staged.get(entry.key) : await this.runWorkspaceHalf(definition, entry);
+        if (has) await this.services.replaceIn(entry.scope, id, instance, { force: true });
+        else this.services.registerIn(entry.scope, id, instance, { replaceable: !this.valueDefs.has(id) });
+      });
+    }
+    if (staged !== undefined) {
+      const orphans = new Map([...staged].filter(([key]) => !seen.has(key)));
+      if (orphans.size > 0) await this.discardStagedWorkspaces(id, orphans);
+    }
+  }
+
+  /** Remove a workspace half's instance from every live workspace (unload). */
+  private async unregisterWorkspaceHalf(id: string): Promise<void> {
+    for (const entry of await this.liveWorkspaces()) {
+      await this.inWorkspace(entry, async () => {
+        if (!entry.scope.closed && this.services.hasLocalIn(entry.scope, id)) await this.services.unregisterIn(entry.scope, id);
+      });
+    }
+  }
+
+  /** Dispose staged-but-unpublished workspace instances (default rule: their `close()`). */
+  private async discardStagedWorkspaces(id: string, staged: Map<string, unknown>): Promise<void> {
+    for (const instance of staged.values()) await this.disposeStaged(id, instance);
+  }
+
   private contextFor(options: { readonly context?: TContext }): TContext | undefined {
     return hasOwnContext(options) ? options.context : this.options.context;
   }
+}
+
+/** One workspace scope and what the harness tracks about it. */
+interface WorkspaceEntry {
+  readonly key: string;
+  readonly workDir: string;
+  readonly scope: Scope<"workspace">;
+  /** Composition: the host's `workspace` hook, then the extensions' `workspace` halves. */
+  ready: Promise<void>;
+  /** Sessions open under it; the last one out closes the scope. */
+  refs: number;
+  /** Serializes extension registrations on this scope (see `inWorkspace`). */
+  chain: Promise<void>;
+}
+
+/** The default workspace key for a working directory (`createSession` without `workspaceKey`). */
+function dirWorkspaceKey(workDir: string): string {
+  return `dir::${workDir}`;
+}
+
+/** A filesystem-safe folder name for a workspace key: readable prefix + a short hash, so two keys
+ *  that sanitize alike never share a folder. */
+function workspaceSlug(key: string): string {
+  const readable = key.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 10);
+  return readable.length > 0 ? `${readable}-${hash}` : hash;
 }
 
 /**

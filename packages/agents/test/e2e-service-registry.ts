@@ -195,7 +195,7 @@ async function ctxIntegration(): Promise<void> {
   await session.attachExtension({
     id: "uses-service",
     uses: ["greeter"],
-    setup(api, { services }) {
+    session(api, { services }) {
       const svc = services.greeter as Greeter;
       stashed = svc;
       api.registerTool(tool({

@@ -6,9 +6,9 @@ import { HT } from "../tokens.ts";
 export { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionLoader, createExtensionLoader } from "./loader.ts";
 export { ServiceRegistry, ServiceUnavailableError, deadServiceHandle } from "./services.ts";
-export { HarnessExtensionManager, stageDefinition } from "./manager.ts";
+export { HarnessExtensionManager, stageDefinition, assertOneSharedHalf } from "./manager.ts";
 export type { ExtensionHostBridge, StagingOptions, HeldSession, StagedDefinition } from "./manager.ts";
-export type { ServiceOptions, ServiceUnavailableReason } from "./services.ts";
+export type { ServiceOptions, ServiceTier, ServiceUnavailableReason } from "./services.ts";
 export type { ExtensionManifest, ExtensionFileState, ExtensionFileStatus, ExtensionAttachTarget } from "./loader.ts";
 export type {
   ExtensionActions,
@@ -19,6 +19,7 @@ export type {
   ExtensionSteerOptions,
   ExtensionDefinition,
   ExtensionHostContext,
+  ExtensionWorkspaceContext,
   ExtensionEventContext,
   ExtensionEventMap,
   ExtensionEventName,
@@ -33,7 +34,7 @@ export type {
   ExtensionRunStartEvent,
   ExtensionRunStartResult,
   ExtensionSessionContext,
-  ExtensionSetupContext,
+  ExtensionSessionEventContext,
   ExtensionSessionEndEvent,
   ExtensionSessionStartEvent,
   ExtensionState,
@@ -89,7 +90,7 @@ export function extensionsCapability(
     toolProviders: [{ id: "extensions", listTools: () => runtime.listTools() }],
     toolFilters: [runtime.filterTools],
     gates: { compaction: runtime.compactionGate },
-    // Stable array reference — `setup` (the provision's `create`) fills it before any run assembles.
+    // Stable array reference — `session` (the provision's `harness`) fills it before any run assembles.
     injectors: runtime.listInjectors(),
     hooks: {
       beforeRun: async (ctx) => runtime.beforeRun(ctx, ctx.input),

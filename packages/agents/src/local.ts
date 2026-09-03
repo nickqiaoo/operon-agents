@@ -98,18 +98,31 @@ export async function localHarnessOptions<TContext>(
         await servers.connect({ scope, sessionId: "" });
         scope.register(T.McpServers, servers, { dispose: () => servers.shutdown() });
       }
-      const registry = new SkillRegistry();
-      await loadSkillRoots(new LocalMachine(ctx.workDir), registry, {
-        ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
-      });
-      scope.register(T.SkillRegistry, registry, { owned: false });
+      // The host's hook runs BEFORE the skill scan so it can say what machine this workspace
+      // executes on (`T.WorkspaceMachineFactory`) — or register its own `T.SkillRegistry`.
       await workspace?.(scope, ctx);
+      // Skills follow the workspace's EXECUTION machine, not the host's disk: the catalog the
+      // model sees must be the one whose scripts its Bash can reach. A remote workspace
+      // registers its machine above and the scan runs through it. A machine FACTORY (one
+      // machine per session) has no single filesystem to scan — no shared registry then; each
+      // session scans through its own `T.Machine` (`defaultCapabilities` without `T.SkillRegistry`).
+      if (!scope.hasLocal(T.SkillRegistry)) {
+        const workspaceMachine = scope.get(T.WorkspaceMachineFactory) ?? new LocalMachine(ctx.workDir);
+        if (typeof workspaceMachine !== "function") {
+          const registry = new SkillRegistry();
+          await loadSkillRoots(workspaceMachine, registry, {
+            ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
+          });
+          scope.register(T.SkillRegistry, registry, { owned: false });
+        }
+      }
     },
     session:
       session ??
       ((scope, ctx) =>
         defaultCapabilities({
           scope,
+          ownMachine: ctx.ownMachine,
           // `createSession({ mcpServers })` — layered over the workspace's shared connections.
           ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
           ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),

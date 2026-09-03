@@ -1,8 +1,8 @@
 /**
- * `create`-bearing extensions loaded from FILES (design: docs/architecture.md §5.4-5.5): a
- * bundle whose default export has a `create` half constructs a process-level shared object; the
- * manager runs `create` once, registers the result as a service under the extension's `id`, and
- * hands the SAME definition to every session (its `setup` is the per-session half). Loading is
+ * `harness`-bearing extensions loaded from FILES (design: docs/architecture.md §5.4-5.5): a
+ * bundle whose default export has a `harness` half constructs a process-level shared object; the
+ * manager runs `harness` once, registers the result as a service under the extension's `id`, and
+ * hands the SAME definition to every session (its `session` is the per-session half). Loading is
  * the approval; reloading is one coordinated act (barrier → swap the half → replace the service).
  */
 import { existsSync } from "node:fs";
@@ -26,15 +26,15 @@ function toolResultText(messages: readonly Message[]): string {
     .join("\n");
 }
 
-// One definition, both halves: `create` returns the shared object (registered under the id
-// "shapes"); `setup` is the per-session half, reaching it through the `shared` handle.
+// One definition, both halves: `harness` returns the shared object (registered under the id
+// "shapes"); `session` is the per-session half, reaching it through the `shared` handle.
 const sharedSource = (version: string): string => `
 export default {
   id: "shapes",
-  create(host) {
+  harness(host) {
     return { render: () => "${version}", dataDir: () => host.dataDir, close: () => {} };
   },
-  setup(api, { shared }) {
+  session(api, { shared }) {
     api.registerTool({
       name: "Shape",
       description: "Render via the shared shape service.",
@@ -51,7 +51,7 @@ const consumerSource = `
 export default {
   id: "uses-shape",
   uses: ["shapes"],
-  setup(api, { services }) {
+  session(api, { services }) {
     const svc = services.shapes;
     api.registerTool({
       name: "Consume",
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   check("uses: the failed load left no approval behind", (await manager.list()).find((p) => p.id === "uses-shape")?.state === "new");
 
   await manager.load("shapes");
-  check("create: loading ran create() and published the service under the id", harness.services.has("shapes"));
+  check("create: loading ran harness() and published the service under the id", harness.services.has("shapes"));
   const dataDir = harness.services.handle<{ dataDir(): string | undefined }>("shapes").dataDir();
   check("create: host.dataDir is a per-extension folder outside the bundle, created up front", dataDir === join(dir, ".data", "shapes") && existsSync(dataDir));
   check("list: the data root is not listed as an extension", !(await manager.list()).some((p) => p.id === ".data"));

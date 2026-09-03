@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     extensions: [peers({ visibility: sharedLabelVisibility, limits: { maxOutboundPerTurn: 2 } })],
   });
   // The host reaches the network the same way sessions do: through its handle.
-  const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
+  const net = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() });
 
   const alice = await harness.createSession(asMember({ name: "alice", team: "team:host:alpha", type: "lead", description: "Coordinates the work" }));
   const bob = await harness.createSession(asMember({ name: "bob", team: "team:host:alpha", type: "dba", description: "Postgres schema and query tuning" }));

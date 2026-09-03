@@ -81,7 +81,7 @@ async function coreSurface(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "surface-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({
         name: "ExtensionEcho",
         description: "Echo a value.",
@@ -176,7 +176,7 @@ async function interventions(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "intervention-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({
         name: "Guarded",
         description: "Should never run.",
@@ -225,7 +225,7 @@ async function runTierHooks(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "run-tier-extension",
-    setup(api) {
+    session(api) {
       api.on("run.start", ({ input, agent }) => ({
         input: [...input, { role: "user", content: [{ type: "text", text: `REWRITTEN_FOR_${agent}` }], timestamp: Date.now() }],
       }));
@@ -259,7 +259,7 @@ async function runTierHooks(): Promise<void> {
   const model2 = faux2.getChatModel()!;
   const terminating: ExtensionDefinition = {
     id: "terminate-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({ name: "Stopper", description: "x", parameters: z.object({}), execute: () => "ran" }));
       api.on("tool.call", () => ({ block: true, reason: "halted", terminate: true }));
     },
@@ -291,7 +291,7 @@ async function toolGating(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "gating-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({ name: "Gated", description: "x", parameters: z.object({}), execute: () => "GATED_RAN" }));
       api.on("run.settled", ({ actions }) => {
         allToolsSeen = actions.getAllTools();
@@ -342,7 +342,7 @@ async function abortControl(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "abort-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({ name: "Trigger", description: "x", parameters: z.object({}), execute: () => "ran" }));
       api.on("tool.result", ({ actions }) => {
         if (aborts === 0) {
@@ -406,7 +406,7 @@ async function collision(): Promise<void> {
   const agent = defineAgent({ name: "collision", model, instructions: "x", tools: [ownTool] });
   const extension: ExtensionDefinition = {
     id: "collision-extension",
-    setup(api) {
+    session(api) {
       api.registerTool(tool({ name: "Collision", description: "extension-owned", parameters: z.object({}), execute: () => "extension-tool" }));
     },
   };
@@ -442,7 +442,7 @@ async function hostReach(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "host-extension",
-    setup(api) {
+    session(api) {
       api.on("run.settled", async ({ actions }) => {
         idleDuringRun = actions.isIdle();
         const forked = await actions.fork({ title: "forked-by-extension" });
@@ -502,7 +502,7 @@ async function providerHooks(): Promise<void> {
 
   const first: ExtensionDefinition = {
     id: "provider-ext-a",
-    setup(api) {
+    session(api) {
       api.on("provider.headers", ({ headers }) => {
         headersSeen = headers;
         return { headers: { ...headers, "x-trace": "a" } };
@@ -513,7 +513,7 @@ async function providerHooks(): Promise<void> {
   };
   const second: ExtensionDefinition = {
     id: "provider-ext-b",
-    setup(api) {
+    session(api) {
       // Chains on top of A's rewrite, both for headers and payload.
       api.on("provider.headers", ({ headers }) => ({ headers: { ...headers, "x-trace-b": "b" } }));
       api.on("provider.payload", ({ payload }) => ({ payload: { ...(payload as object), b: 2 } }));
@@ -582,7 +582,7 @@ async function providerHooks(): Promise<void> {
     machine: new LocalMachine(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([{ id: "noop-ext", setup: () => undefined }]), bareProbe],
+    capabilities: [extensionsCapability([{ id: "noop-ext", session: () => undefined }]), bareProbe],
   }).run(defineAgent({ name: "bare-test", model: faux2.getChatModel()!, instructions: "x" }), "go");
 
   const bareOptions = bareRequest?.providerOptions;
@@ -608,7 +608,7 @@ async function handledInput(): Promise<void> {
 
   const extension: ExtensionDefinition = {
     id: "cache-extension",
-    setup(api) {
+    session(api) {
       api.on("run.start", ({ input }) => {
         const text = textOf(input, "user");
         return text.includes("status") ? { handled: { output: "cached: all good" } } : undefined;
@@ -677,7 +677,7 @@ async function compactionGate(): Promise<void> {
   let seen: { reason: string; compactCount: number } | undefined;
   const vetoing: ExtensionDefinition = {
     id: "veto-extension",
-    setup(api) {
+    session(api) {
       api.on("compaction.before", ({ reason, compactCount }) => {
         seen = { reason, compactCount };
         return { cancel: true };
@@ -692,7 +692,7 @@ async function compactionGate(): Promise<void> {
 
   const replacing: ExtensionDefinition = {
     id: "replace-extension",
-    setup(api) {
+    session(api) {
       api.on("compaction.before", () => ({ replacement: { summary: "SUMMARY_FROM_EXTENSION", count: 1 } }));
     },
   };

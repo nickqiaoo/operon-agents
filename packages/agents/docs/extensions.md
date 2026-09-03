@@ -8,7 +8,7 @@ import { createHarness, type ExtensionDefinition } from "operon-agents";
 
 const logging: ExtensionDefinition = {
   id: "my-extension",
-  setup(api) {
+  session(api) {
     api.on("tool.call", ({ toolName, args }) => {
       if (toolName === "Bash" && String((args as { command?: string }).command).includes("rm -rf")) {
         return { block: true, reason: "refused by policy", terminate: true };
@@ -170,7 +170,7 @@ Timeouts: decision points get 30s, observers 1s. Override per extension with `ti
 
 ## Actions
 
-`ctx.actions` (also available as `api.actions` during `setup`) is the imperative surface.
+`ctx.actions` (also available as `api.actions` during `session`) is the imperative surface.
 
 ### Conversation
 
@@ -261,21 +261,21 @@ api.on("session.start", async ({ state }) => {
 
 ## Lifecycle
 
-`setup(api)` runs once when the session opens. Return a teardown function (or a promise of one)
+`session(api)` runs once when the session opens. Return a teardown function (or a promise of one)
 to release long-lived resources:
 
 ```ts
 const ext: ExtensionDefinition = {
   id: "with-cleanup",
-  setup(api) {
+  session(api) {
     const timer = setInterval(poll, 60_000);
     return () => clearInterval(timer);
   },
 };
 ```
 
-A `setup` that throws is isolated: that extension is skipped with a `warning`, everything else
-loads. On teardown, handlers, tools, and injectors registered during `setup` are disposed
+A `session` that throws is isolated: that extension is skipped with a `warning`, everything else
+loads. On teardown, handlers, tools, and injectors registered during `session` are disposed
 automatically.
 
 Extensions are registered once, on the harness; a session varies them with `params`:
@@ -285,7 +285,19 @@ createHarness({ model, extensions: [a, b] });                 // every session, 
 harness.createSession({ params: { a: { level: 2 }, b: false } }); // a configured, b skipped — this session
 ```
 
-`params` reaches `setup` as `ctx.params` (`setup(api, ctx)`) and persists with the session. A
-definition with a `create` half has it run once here, its result registered as a service under
-its `id` and handed to every `setup` as `ctx.shared`; another extension consumes that service by
-naming it in `uses` and receiving it as `ctx.services[name]`.
+`params` reaches `session` as `ctx.params` (`session(api, ctx)`) and persists with the session.
+
+The three halves are named for the tier they run at — the same tiers as `createHarness`'s
+`harness` / `workspace` / `session` hooks:
+
+| Half | Runs | Its result |
+|---|---|---|
+| `harness(host)` | once per process | the service under `id`, in the harness scope |
+| `workspace(host)` | once per workspace key (working directory / tenant), when its first session opens | the service under `id`, in THAT workspace's scope — disposed when its last session closes |
+| `session(api, ctx)` | once per session | teardown |
+
+A definition carries at most one of `harness` / `workspace`; whichever it has, every `session`
+under it gets a handle to the instance as `ctx.shared`, and another extension consumes it by
+naming it in `uses` and receiving it as `ctx.services[name]` — resolved from the consuming
+session's own scope, so a workspace-tier service lands on that session's workspace's instance.
+The host reaches a workspace's instance with `harness.workspaceService(id, { workDir })`.

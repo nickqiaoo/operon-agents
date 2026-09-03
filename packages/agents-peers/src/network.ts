@@ -25,7 +25,7 @@
  * This does not belong in core; see the README for the reasoning and for how
  * this shape was reached.
  */
-import type { ExtensionAPI, ExtensionActions, ExtensionDefinition, ExtensionHostContext } from "operon-agents";
+import type { ExtensionAPI, ExtensionActions, ExtensionDefinition, ExtensionWorkspaceContext } from "operon-agents";
 import type { AgentEvent, SteerOrigin } from "operon-agents-core";
 import {
   CardSyncedDirectory,
@@ -713,12 +713,13 @@ export type PeerNetworkHandle = Pick<
   | "reconcile"
 >;
 
-/** The extension id, and so the service name its `create` half's network is registered under.
- *  A session's `setup` reaches the network as `ctx.shared`; the host reaches it with
- *  `harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE)`. */
+/** The extension id, and so the service name its `workspace` half's network is registered under
+ *  — in each workspace's scope, one network per working directory (per tenant on a server). A
+ *  session's `session` reaches its workspace's network as `ctx.shared`; the host reaches one with
+ *  `harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir })`. */
 export const PEERS_SERVICE = "peers";
 
-/** Mount the creator side (the `Team` tool) onto a session — what `peers().setup` does for an
+/** Mount the creator side (the `Team` tool) onto a session — what `peers().session` does for an
  *  ordinary session. */
 export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerExtensionOptions = {}): void {
   let sessionId: string | undefined;
@@ -732,7 +733,7 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
   api.onEvent((event) => {
     // Re-arm on every event: through a handle this lands on the CURRENT instance, so a
     // replacement network regains a route back into the harness without any session redoing
-    // setup. Idempotent and cheap on the live instance.
+    // session(). Idempotent and cheap on the live instance.
     network.attachActions(api.actions);
     network.observe(event, sessionId);
   });
@@ -740,7 +741,7 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
 }
 
 /** Mount the member side (the `Hub` tool + identity registration) onto a session — what
- *  `peers().setup` does for a teammate. */
+ *  `peers().session` does for a teammate. */
 export function mountHub(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerMemberOptions): void {
   const selfId = memberAgentId(options.team, options.name);
   network.attachActions(api.actions);
@@ -789,11 +790,13 @@ export interface PeerParams {
 
 export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "repo"> {
   /**
-   * Where peer state lives: a repo, or a factory given the `create` host — the file form builds
-   * its file repo in `host.dataDir` (outside the bundle, so an update keeps roster and mailbox).
-   * Absent → in-memory (wiped by a reload).
+   * Where peer state lives: a factory given each workspace's host — the file form builds a file
+   * repo in `host.dataDir`, the workspace's own folder (outside the bundle, so an update keeps
+   * roster and mailbox) — or one repo instance, which every workspace then SHARES (a host's
+   * deliberate choice: one roster across working directories). Absent → in-memory per
+   * workspace (wiped by a reload).
    */
-  readonly repo?: PeerRepo | ((host: ExtensionHostContext) => PeerRepo);
+  readonly repo?: PeerRepo | ((host: ExtensionWorkspaceContext) => PeerRepo);
   /**
    * Teammate types the model may create with `Team spawn`, each as the session options a
    * teammate of that type is born with (a constant, or computed from the spawn request). The
@@ -810,10 +813,13 @@ export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "rep
 /**
  * The peers extension — ONE definition, both halves:
  *
- * - `create` (the process-shared half) runs once per harness and returns the shared
- *   `PeerNetwork`, which the framework registers as the `peers` service. Its spawn factory
- *   creates each teammate through `host.createSession`, tagging it `params: { peers: { member } }`.
- * - `setup` (the per-session half) runs on every session: a teammate (has `params.member`) gets
+ * - `workspace` (the per-workspace half) runs once per workspace key — the working directory
+ *   locally, a tenant on a server — and returns that workspace's `PeerNetwork`, which the
+ *   framework registers as its `peers` service: one roster, mailbox and budget per workspace,
+ *   disposed when its last session closes. Its spawn factory creates each teammate through
+ *   `host.createSession`, which lands it in the SAME workspace as the lead, tagged
+ *   `params: { peers: { member } }`.
+ * - `session` (the per-session half) runs on every session: a teammate (has `params.member`) gets
  *   the member `Hub`; every other session gets the creator `Team`. It reaches the network only
  *   through the `shared` handle, so a reload swaps the network under live sessions.
  *
@@ -824,7 +830,7 @@ export function peers(options: PeerOptions): ExtensionDefinition<PeerNetworkHand
   const { teammates, team = {}, repo, ...networkOptions } = options;
   return {
     id: PEERS_SERVICE,
-    create(host: ExtensionHostContext) {
+    workspace(host: ExtensionWorkspaceContext) {
       const resolvedRepo = typeof repo === "function" ? repo(host) : repo;
       const spawnable =
         teammates === undefined
@@ -845,7 +851,7 @@ export function peers(options: PeerOptions): ExtensionDefinition<PeerNetworkHand
         ...(spawnable !== undefined ? { spawnable } : {}),
       });
     },
-    setup(api, { shared: network, params }) {
+    session(api, { shared: network, params }) {
       if (params?.member !== undefined) mountHub(network, api, params.member);
       else mountTeam(network, api, team);
     },

@@ -33,7 +33,7 @@ async function main(): Promise<void> {
     permission: { mode: "yolo" },
     extensions: [{
       id: "projection-gate",
-      setup(api) {
+      session(api) {
         api.on("model.request", async () => {
           if (!gateActive) return;
           enteredGate?.();

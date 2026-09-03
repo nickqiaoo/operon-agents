@@ -37,7 +37,7 @@ async function attachLifecycle(): Promise<void> {
   let stashedActions: ExtensionActions | undefined;
   const extension: ExtensionDefinition = {
     id: "hot-ext",
-    setup(api) {
+    session(api) {
       stashedActions = api.actions;
       api.registerTool(tool({
         name: "AttachedEcho",
@@ -99,7 +99,7 @@ async function midRunDeferred(): Promise<void> {
     permission: { mode: "yolo" },
     extensions: [{
       id: "gate",
-      setup(api) {
+      session(api) {
         api.on("model.request", async () => {
           if (!gateActive) return;
           enteredGate?.();
@@ -117,7 +117,7 @@ async function midRunDeferred(): Promise<void> {
   let setupRan = false;
   const attaching = session.attachExtension({
     id: "late-ext",
-    setup(api) {
+    session(api) {
       setupRan = true;
       api.registerTool(tool({
         name: "LateTool",
@@ -128,13 +128,13 @@ async function midRunDeferred(): Promise<void> {
     },
   });
   await new Promise((resolve) => setTimeout(resolve, 25));
-  check("mid-run: setup does not run while the run is in flight", !setupRan);
+  check("mid-run: session() does not run while the run is in flight", !setupRan);
 
   gateActive = false;
   releaseGate?.();
   await running;
   await attaching;
-  check("mid-run: setup ran at the run's stop boundary", setupRan);
+  check("mid-run: session() ran at the run's stop boundary", setupRan);
 
   const next = await session.prompt("use it");
   check("mid-run: the late tool serves the next run", toolResultText(next.messages).includes("late-result"));
@@ -143,7 +143,7 @@ async function midRunDeferred(): Promise<void> {
   faux.unregister();
 }
 
-/** Rejections: bad ids, duplicates, unknown detach, setup failure — and failure frees the id. */
+/** Rejections: bad ids, duplicates, unknown detach, session() failure — and failure frees the id. */
 async function errorPaths(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
@@ -154,19 +154,19 @@ async function errorPaths(): Promise<void> {
 
   const rejected = async (p: Promise<unknown>): Promise<boolean> => p.then(() => false, () => true);
 
-  check("errors: empty id rejects", await rejected(session.attachExtension({ id: "  ", setup: () => undefined })));
+  check("errors: empty id rejects", await rejected(session.attachExtension({ id: "  ", session: () => undefined })));
 
-  await session.attachExtension({ id: "dup", setup: () => undefined });
-  check("errors: duplicate id rejects", await rejected(session.attachExtension({ id: "dup", setup: () => undefined })));
+  await session.attachExtension({ id: "dup", session: () => undefined });
+  check("errors: duplicate id rejects", await rejected(session.attachExtension({ id: "dup", session: () => undefined })));
   check("errors: unknown detach rejects", await rejected(session.detachExtension("never-attached")));
 
-  check("errors: throwing setup rejects the attach", await rejected(session.attachExtension({
+  check("errors: throwing session() rejects the attach", await rejected(session.attachExtension({
     id: "flaky",
-    setup: () => { throw new Error("boom"); },
+    session: () => { throw new Error("boom"); },
   })));
-  check("errors: failed setup warns into the event stream", events.some((e) => e.type === "warning" && e.message.includes("[extension flaky]")));
+  check("errors: failed session() warns into the event stream", events.some((e) => e.type === "warning" && e.message.includes("[extension flaky]")));
   let secondTryRan = false;
-  await session.attachExtension({ id: "flaky", setup: () => { secondTryRan = true; } });
+  await session.attachExtension({ id: "flaky", session: () => { secondTryRan = true; } });
   check("errors: a failed attach frees its id for retry", secondTryRan);
 
   await harness.close();
@@ -189,7 +189,7 @@ async function registryStability(): Promise<void> {
     permission: { mode: "yolo" },
     extensions: [{
       id: "stability-probe",
-      setup(api) {
+      session(api) {
         api.registerTool(tool({ name: "ZTool", description: "z", parameters: z.object({}), execute: () => "z" }));
         api.registerTool(tool({ name: "ATool", description: "a", parameters: z.object({}), execute: () => "a" }));
         api.on("model.request", ({ request }) => {
