@@ -15,6 +15,7 @@ import type {
 } from "../capabilities/background/index.ts";
 import type { GoalSnapshot } from "../capabilities/goal/index.ts";
 import { WorkflowManager } from "./workflow/manager.ts";
+import type { WorkflowJournal } from "./workflow/journal.ts";
 import type { WorkflowSnapshot, WorkflowSnapshotStatus } from "./workflow/snapshot.ts";
 import type { ContextBreakdown } from "./context-report.ts";
 import type { PlanData } from "../capabilities/plan/index.ts";
@@ -134,8 +135,10 @@ export interface SessionPort {
   readonly thinkingSetting: ThinkingLevel | undefined;
   /** Compaction service view: reserved headroom plus full-compaction invalidation revision. */
   readonly compaction: { readonly reservedContextTokens: number; readonly revision: number } | undefined;
-  /** Always present: the workflow capability's manager, or the session's in-memory fallback. */
-  readonly workflow: WorkflowManager;
+  /** A resume journal for one workflow run, bound to this session's store (the workflow
+   *  capability's manager, or the session's in-memory fallback) — all the kernel's `Workflow`
+   *  tool needs; the manager itself stays behind `session.workflow`. */
+  newWorkflowJournal(runId: string, parentToolCallId?: string): WorkflowJournal;
   resolveSystemPromptContext(machine: Machine): Promise<SystemPromptContext>;
   recordContextBreakdown(breakdown: ContextBreakdown): void;
   flushEvents(): Promise<void>;
@@ -438,8 +441,12 @@ export class Session implements SessionPort {
   require<S>(tok: Token<S>): S {
     return this.scope.require(tok);
   }
+  /** The workflow manager: the capability's, or the in-memory fallback `open` provides. */
   get workflow(): WorkflowManager {
     return this.scope.require(T.Workflow);
+  }
+  newWorkflowJournal(runId: string, parentToolCallId?: string): WorkflowJournal {
+    return this.workflow.newJournal(runId, parentToolCallId);
   }
   get compaction(): import("../capabilities/compaction/index.ts").CompactionService | undefined {
     return this.scope.get(T.Compaction);

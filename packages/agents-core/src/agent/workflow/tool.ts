@@ -26,7 +26,6 @@ import {
   parseWorkflow,
   WorkflowJournal,
   journalAddress,
-  WorkflowManager,
   workflowPrompt,
   makeStructuredOutputTool,
   cloneAgentWithTool,
@@ -211,7 +210,7 @@ export function buildWorkflowTool<TContext>(
           (args.script === undefined || args.script.trim().length === 0) &&
           (args.name === undefined || args.name.length === 0);
         if (resumeId !== undefined && resumeId.length > 0 && noExplicitSource) {
-          const priorJournal = parent.session.workflow.newJournal(resumeId, ctx.toolCallId);
+          const priorJournal = parent.session.newWorkflowJournal(resumeId, ctx.toolCallId);
           await priorJournal.load();
           const recorded = priorJournal.recordedScript();
           if (recorded === undefined) {
@@ -247,13 +246,12 @@ export function buildWorkflowTool<TContext>(
         // script. Goes through the Machine → on a server it lands in the sandbox, never the
         // host disk. Best-effort: a persist failure never fails the run (path is left undefined).
         const persistedScriptPath = await persistRunScript(ctx.machine, meta.name, runId, script);
-        // Resume journals go through the workflow capability (session.workflow); with no
-        // capability attached, a per-session fallback manager binds them to the session's
-        // store (or in-memory when the session has none). Discovery needs no writes: the
-        // tool results below carry the run's lifecycle in `details`, and the `/workflows`
-        // list is a fold over the conversation (snapshot.ts).
-        const wf = parent.session.workflow;
-        const mkJournal = (id: string): WorkflowJournal => wf.newJournal(id, ctx.toolCallId);
+        // Resume journals come from the session port: the workflow capability's manager, or
+        // the in-memory fallback Session.open provides when no capability is attached — either
+        // way bound to the session's store. Discovery needs no writes: the tool results below
+        // carry the run's lifecycle in `details`, and the `/workflows` list is a fold over the
+        // conversation (snapshot.ts).
+        const mkJournal = (id: string): WorkflowJournal => parent.session.newWorkflowJournal(id, ctx.toolCallId);
         // Timestamps are stamped HOST-side (Date.now is banned only inside the sandbox).
         const startedAt = new Date().toISOString();
         const runDetails = (status: WorkflowRunDetails["status"], endedAt?: string, outputTokens?: number): WorkflowRunDetails => ({
