@@ -31,3 +31,4 @@ export * as mcp from "operon-agents-core/mcp";
 export * as protocol from "operon-agents-core/protocol";
 export * as tools from "operon-agents-core/tools";
 export * as tracing from "operon-agents-core/tracing";
+export * as telemetry from "./telemetry.ts";

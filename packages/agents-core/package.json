@@ -55,6 +55,10 @@
       "types": "./dist/tracing/index.d.ts",
       "import": "./dist/tracing/index.js"
     },
+    "./telemetry": {
+      "types": "./dist/telemetry/index.d.ts",
+      "import": "./dist/telemetry/index.js"
+    },
     "./ui": {
       "types": "./dist/ui/index.d.ts",
       "import": "./dist/ui/index.js"
@@ -70,7 +74,7 @@
     "clean": "rm -rf dist *.tsbuildinfo",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "for f in src/test/e2e*.ts; do echo \"\\n▶ $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "test": "for f in src/test/e2e*.ts; do echo \"\\n\u25b6 $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
     "evals": "node --experimental-strip-types --no-warnings evals/run.ts",
     "evals:selftest": "node --experimental-strip-types --no-warnings evals/selftest.ts",
     "prepack": "pnpm build"

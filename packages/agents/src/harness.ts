@@ -15,6 +15,7 @@ import {
   type AgentEvent,
   type AgentRecord,
   type EventPublicationMode,
+  type TelemetryService,
   type AgentEventListener,
   type AgentInput,
   readLog,
@@ -350,6 +351,12 @@ export interface HarnessOptions<TContext = unknown> {
   /** Event durability policy. Defaults to `immediate` for low-latency local applications.
    *  Managed servers override each opened session to `committed`. */
   readonly eventPublication?: EventPublicationMode;
+  /**
+   * Product telemetry (docs/telemetry.md). Process-lifetime: create ONE service, attach the
+   * appenders once, pass the same instance to every harness. Absent = nothing is counted.
+   * The harness never shuts it down; the product does, before exit.
+   */
+  readonly telemetry?: TelemetryService;
   /**
    * Extra subagent profiles merged into the builtin `coder`/`explore`/`plan` fleet. The SOURCE is
    * the composition root's concern — disk (`loadAgentProfiles`) locally, external on a server —
@@ -1367,6 +1374,7 @@ export class Harness<TContext = unknown> {
     this.scope.provide(T.Logger, () => envLogger() ?? noopLogger);
     this.scope.provide(T.SessionRepository, () => new MemorySessionRepository());
     if (options.eventPublication !== undefined) this.scope.register(T.EventPublication, options.eventPublication);
+    if (options.telemetry !== undefined) this.scope.register(T.Telemetry, options.telemetry, { owned: false });
     const agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
     this.toolPalette = Object.fromEntries(agentTools.map((tool) => [tool.schema.name, tool]));
     // The Agent/Workflow tools only appear when the run has subagents to spawn. Default the fleet
@@ -1930,6 +1938,8 @@ export class Harness<TContext = unknown> {
     // Attach still happens BEFORE Session.open: no events flow yet, so the seed cannot
     // race the subscription, and anything capabilities emit during open is already folded.
     let preloadedLog = await readLog(store);
+    // A fresh session has an empty log; anything else is a reopen. Telemetry is the only reader.
+    const resumed = preloadedLog.length > 0;
     const projection = await SessionProjection.attach({ id, store, events }, preloadedLog);
     const interrupted = await store.getState(INTERRUPTION_STATE_KEY) !== null;
     if (!interrupted) {
@@ -1946,7 +1956,7 @@ export class Harness<TContext = unknown> {
       },
       params,
     );
-    const core = await Session.open(scope, { capabilities, preloadedLog });
+    const core = await Session.open(scope, { capabilities, preloadedLog, resumed });
     const agent =
       opts.agent ??
       this.options.agent ??

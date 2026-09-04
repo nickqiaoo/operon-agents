@@ -58,6 +58,10 @@
       "types": "./dist/tracing.d.ts",
       "import": "./dist/tracing.js"
     },
+    "./telemetry": {
+      "types": "./dist/telemetry.d.ts",
+      "import": "./dist/telemetry.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -74,6 +78,7 @@
   },
   "dependencies": {
     "operon-agents-core": "workspace:*",
+    "posthog-node": "^5.51.6",
     "zod": "^4.4.3"
   },
   "devDependencies": {

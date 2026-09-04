@@ -18,6 +18,7 @@ import type { Machine, MachineFactory } from "../tool/machine.ts";
 import type { EventPublicationMode, EventSink } from "../events/index.ts";
 import type { SessionEventPublisher } from "../events/publisher.ts";
 import type { TracingProcessor } from "../tracing/processor.ts";
+import type { TelemetryService } from "../telemetry/service.ts";
 import type { McpServersHandle } from "../mcp/manager.ts";
 import type { SkillRegistry } from "../capabilities/skills/registry.ts";
 import type { McpOAuthService } from "../mcp/oauth/service.ts";
@@ -51,6 +52,8 @@ export const T = Object.freeze({
   MachineFactory: token<Machine | MachineFactory, "harness">("machine-factory", "harness"),
   EventPublication: token<EventPublicationMode, "harness">("event-publication", "harness"),
   Tracing: token<TracingProcessor, "harness">("tracing", "harness"),
+  /** Product telemetry (docs/telemetry.md). Absent = nothing is counted. */
+  Telemetry: token<TelemetryService, "harness">("telemetry", "harness"),
 
   // ── workspace tier: one per working directory (or tenant / environment on a server) ─────
   McpServers: token<McpServersHandle, "workspace">("mcp", "workspace"),

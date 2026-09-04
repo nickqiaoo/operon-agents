@@ -26,6 +26,7 @@ import { type EventSink, joinAddress, ListenerSink, SessionEventPublisher } from
 import { type Logger, envLogger, noopLogger } from "../logging/index.ts";
 import { type AgentRecord, DEFAULT_ADDRESS, type SessionStore } from "../store/index.ts";
 import { eventSinkTracingBridge, type TracingProcessor } from "../tracing/index.ts";
+import { subscribeTelemetryProjection } from "../telemetry/projection.ts";
 import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
 import type { McpServerView, MCPTool } from "../mcp/index.ts";
@@ -75,6 +76,8 @@ export interface SessionOpenOptions {
    * Must be the complete log (all addresses, append order) as `readRecords()` returns it.
    */
   readonly preloadedLog?: readonly AgentRecord[];
+  /** Reopened from a store (vs created fresh). Only telemetry cares; the stream cannot tell. */
+  readonly resumed?: boolean;
 }
 
 /** The current owner and root conversation shard for the next user prompt. */
@@ -178,6 +181,7 @@ export class Session implements SessionPort {
   readonly logger: Logger;
   private readonly tracing?: TracingProcessor;
   private readonly unsubscribeTracing?: () => void;
+  private readonly unsubscribeTelemetry?: () => void;
 
   private readonly allCapabilities: readonly Capability[];
   // Runtime prompt data is live-Session state, not Agent state: machine identity + cwd isolate
@@ -221,6 +225,13 @@ export class Session implements SessionPort {
     this.events = this.eventPublisher;
     this.tracing = scope.get(T.Tracing);
     this.unsubscribeTracing = this.tracing === undefined ? undefined : eventSinkTracingBridge(this.events, this.tracing);
+    // Product telemetry rides the same stream. One subscription per session; the projection
+    // tells sub-agents apart by address. `resumed` is the one fact the stream cannot tell.
+    const telemetry = scope.get(T.Telemetry);
+    this.unsubscribeTelemetry =
+      telemetry === undefined
+        ? undefined
+        : subscribeTelemetryProjection(this.events, telemetry.withContext({ session_id: id }), { resumed: opts.resumed === true });
     this.responder = scope.get(T.Responder);
     this.steer = scope.require(T.Steer);
     // Every enqueue — user steer/follow-up, cron fire, background settle — surfaces on the
@@ -908,6 +919,7 @@ export class Session implements SessionPort {
     this.isOpen = false;
     this.systemPromptContexts.clear();
     this.unsubscribeTracing?.();
+    this.unsubscribeTelemetry?.();
     this.openedCapabilities = [];
     try {
       await withTimeout(Promise.resolve(this.tracing?.forceFlush()), CLOSE_TIMEOUT_MS);
