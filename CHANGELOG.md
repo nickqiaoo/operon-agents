@@ -7,7 +7,42 @@ released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-alpha.5] — 2026-09-05
+
+### Added
+
+- **Tracing carries the conversation, not just its shape** (`operon-agents-core`). A processor
+  (or the bridge) can opt into a content mode — `"delta"` or `"full"` — and every span then holds
+  what a debugger needs to replay a run: the system prompt, tool list and model params as the
+  model received them (new live-only `model.request` event, emitted after every hook), the
+  request messages (`delta` = what the model had not yet answered, `full` = the whole context),
+  the model's output parts, tool call arguments and results, user prompts as instant `message`
+  spans, and retries / resets as span events. Turn spans record how they ended, tool spans carry
+  the tool's own error text, generation usage now includes cache and cost. The root span of a run
+  is named after its first user prompt. `OTelTracingProcessor` maps content to the GenAI semantic
+  conventions (`gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages`,
+  `gen_ai.tool.call.arguments` / `.result`) as JSON, capped by `contentMaxChars` (32 000), images
+  reduced to their size, with opt-in `redact`. Default stays `"none"`: existing processors see the
+  same metadata-only spans as before.
+- A trace now waits for a background sub-agent that outlives its run (`agent.ended` of the root
+  while a nested agent is still running) instead of dropping the agent's later spans.
+- **Product telemetry as an opt-in capability** (`operon-agents-core`, `operon-agents`). A typed
+  event registry (`FRAMEWORK_TELEMETRY_EVENTS`: session / turn / tool / sub-agent / compaction /
+  guardrail / skill / steer / error counts) where every property carries a description and an
+  extra or missing property at a `track()` call site is a compile error; a `TelemetryService`
+  with environmental context (`withContext`) and product registries (`withRegistry`); a built-in
+  projection from the session's `AgentEvent` stream, subscribed by the core `Session` when
+  `HarnessOptions.telemetry` (or `T.Telemetry`) is set; outbound redaction (secrets, emails, URLs,
+  absolute paths); and `PostHogAppender`, which either owns a `posthog-node` client
+  (`{ apiKey, host, getDistinctId }`) or wraps a product's own sink (`{ client }`). Without an
+  appender nothing is sent; the framework never mints an identity and never picks an endpoint.
+  New subpath `operon-agents/telemetry`.
+
+### Changed
+
+- `BackgroundOutput` with `block=true` now returns as soon as the turn is cancelled instead of
+  holding a waiter past it, and refuses to block on a task that is waiting for the user (a pending
+  question) — the tool text tells the model to end the turn and rely on the completion notice.
 
 ## [0.1.0-alpha.4] — 2026-09-04
 
@@ -161,6 +196,7 @@ First public release from the open-source repository, with the CI and publish wo
 
 Initial npm placeholder release.
 
+[0.1.0-alpha.5]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/nickqiaoo/operon-agents/releases/tag/v0.1.0-alpha.2

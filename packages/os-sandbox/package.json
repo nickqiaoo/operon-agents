@@ -1,6 +1,6 @@
 {
   "name": "operon-os-sandbox",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "description": "OS-level command sandboxing for the LocalMachine: every Machine.run is wrapped in the platform sandbox (macOS Seatbelt / Linux bubblewrap, via @anthropic-ai/sandbox-runtime) with workspace-scoped write access, domain-allowlist networking, and sandbox-denial annotation on stderr. Unsupported platforms and missing dependencies degrade to a plain LocalMachine.",
   "type": "module",
   "engines": {
