@@ -438,6 +438,9 @@ export class SessionProjection {
         // step boundary.
         break;
       case "turn.step.retrying":
+      // Live-only observer signal (tracing): the transcript it describes is already folded
+      // from `message.appended`.
+      case "model.request":
         break;
       case "turn.step.reset": {
         const turn = state.turn;

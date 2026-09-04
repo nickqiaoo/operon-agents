@@ -3,6 +3,24 @@ import type { Span, SpanRecord, Trace, TraceRecord } from "./spans.ts";
 
 export type TraceOrSpan = Trace | Span;
 
+/**
+ * How much conversation CONTENT the bridge attaches to spans, on top of names / timings / usage.
+ *
+ * - `"none"` (default): metadata only — the span tree, model ids, token counts, tool names,
+ *   error flags. Safe to ship anywhere.
+ * - `"delta"`: plus the system prompt, tool list, model params, the request messages the model
+ *   had not yet answered (everything after the previous assistant message: the new user prompt
+ *   on step 1, the tool results on later steps), the model's output parts, tool call args and
+ *   results, and user-message spans. Enough to replay a conversation in a trace viewer without
+ *   repeating the whole context on every step.
+ * - `"full"`: like `delta`, but every generation carries the ENTIRE request context. Trace size
+ *   grows with steps × context length; for local debugging of prompt assembly only.
+ *
+ * Content is attached by REFERENCE on `SpanData`; it is the exporter's job to serialize and cap
+ * it (`OTelTracingProcessor` does, `contentMaxChars`).
+ */
+export type TracingContentMode = "none" | "delta" | "full";
+
 export interface TracingProcessor {
   onTraceStart(trace: Trace): void | Promise<void>;
   onTraceEnd(trace: Trace): void | Promise<void>;
@@ -10,6 +28,8 @@ export interface TracingProcessor {
   onSpanEnd(span: Span): void | Promise<void>;
   forceFlush(): Promise<void>;
   shutdown(): Promise<void>;
+  /** Read by `eventSinkTracingBridge` when the caller passes no explicit mode. Absent = `"none"`. */
+  readonly content?: TracingContentMode;
 }
 
 export interface TracingExporter {
@@ -39,6 +59,8 @@ export interface BatchTracingProcessorOptions {
   readonly maxBatchSize?: number;
   readonly scheduleDelayMs?: number;
   readonly redact?: boolean | RedactOptions;
+  /** Content mode the bridge should use for this processor (see `TracingContentMode`). */
+  readonly content?: TracingContentMode;
 }
 
 export class BatchTracingProcessor implements TracingProcessor {
@@ -47,6 +69,7 @@ export class BatchTracingProcessor implements TracingProcessor {
   private readonly maxBatchSize: number;
   private readonly scheduleDelayMs: number;
   private readonly redactOptions: RedactOptions | undefined;
+  readonly content: TracingContentMode;
   private buffer: TraceOrSpan[] = [];
   private timer: ReturnType<typeof setInterval> | undefined;
   private droppedCount = 0;
@@ -57,6 +80,7 @@ export class BatchTracingProcessor implements TracingProcessor {
     this.maxBatchSize = options.maxBatchSize ?? 100;
     this.scheduleDelayMs = options.scheduleDelayMs ?? 5000;
     this.redactOptions = options.redact === false ? undefined : typeof options.redact === "object" ? options.redact : {};
+    this.content = options.content ?? "none";
     if (this.scheduleDelayMs > 0) {
       this.timer = setInterval(() => void this.forceFlush().catch(() => {}), this.scheduleDelayMs);
       this.timer.unref?.();

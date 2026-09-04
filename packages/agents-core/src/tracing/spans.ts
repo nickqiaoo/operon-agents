@@ -1,20 +1,84 @@
+import type { ImageContent, Message, TextContent, ThinkingContent, ToolCall } from "../protocol/index.ts";
+import type { ModelSettings } from "../llm/model.ts";
+import type { ToolResult } from "../tool/types.ts";
+
 export interface GenerationUsage {
   readonly input_tokens?: number;
   readonly output_tokens?: number;
   readonly total_tokens?: number;
+  readonly cache_read_tokens?: number;
+  readonly cache_write_tokens?: number;
+  readonly reasoning_tokens?: number;
+  readonly cost_usd?: number;
 }
 
+/** Which request messages a generation span carries (see `TracingContentMode`). */
+export type GenerationInputMode = "delta" | "full";
+
+/**
+ * The content parts a generation produced. Same shape as `AssistantMessage.content` — text,
+ * thinking and tool calls, in model order.
+ */
+export type GenerationOutputPart = TextContent | ThinkingContent | ToolCall;
+
+/**
+ * Span payloads. The `type` discriminates; everything else is what the exporter needs to name,
+ * measure and (with content enabled) replay the span. Content fields (`system`, `input`,
+ * `output`, `args`, `result`, `content`) hold RAW references — the bridge attaches them only
+ * when the processor opts in via `content`, and exporters serialize/cap them on the way out.
+ */
 export type SpanData =
-  | { readonly type: "agent"; readonly name: string; readonly handoffs?: readonly string[]; readonly tools?: readonly string[] }
-  | { readonly type: "turn"; readonly turnId: string }
+  | {
+      readonly type: "agent";
+      readonly name: string;
+      readonly handoffs?: readonly string[];
+      readonly tools?: readonly string[];
+      /** First user prompt of the run, trimmed to a line — names the root span in a trace list (content only). */
+      readonly prompt?: string;
+    }
+  | {
+      readonly type: "turn";
+      readonly turnId: string;
+      /** From `turn.ended`. */
+      readonly reason?: string;
+      readonly error?: string;
+    }
   | {
       readonly type: "generation";
       readonly model?: string;
       readonly responseId?: string;
       readonly stopReason?: string;
       readonly usage?: GenerationUsage;
+      // ── content (only with `content` enabled) ──
+      /** System prompt as the model received it (after every hook). */
+      readonly system?: string;
+      /** Tool names offered on this request. */
+      readonly toolNames?: readonly string[];
+      readonly params?: ModelSettings;
+      /** Request messages: everything since the previous assistant message (`delta`) or the whole context (`full`). */
+      readonly input?: readonly Message[];
+      readonly inputMode?: GenerationInputMode;
+      /** What the model produced this step. */
+      readonly output?: readonly GenerationOutputPart[];
     }
-  | { readonly type: "tool"; readonly name: string; readonly toolCallId: string; readonly isError?: boolean }
+  | {
+      readonly type: "tool";
+      readonly name: string;
+      readonly toolCallId: string;
+      readonly isError?: boolean;
+      // ── content ──
+      readonly args?: unknown;
+      readonly result?: ToolResult;
+    }
+  /** A non-model message entering the transcript (user prompt, injection, cron…). Instant span. */
+  | {
+      readonly type: "message";
+      readonly role: "user";
+      /** `PromptOrigin.kind` when the event carried one. */
+      readonly origin?: string;
+      // ── content ──
+      readonly content?: string | readonly (TextContent | ImageContent)[];
+    }
   | { readonly type: "handoff"; readonly from?: string; readonly to?: string }
   | { readonly type: "compaction"; readonly trigger?: string; readonly tokensBefore?: number; readonly tokensAfter?: number; readonly compactedCount?: number }
   | { readonly type: "custom"; readonly name: string; readonly data?: Record<string, unknown> };
@@ -23,6 +87,13 @@ export type SpanType = SpanData["type"];
 
 export interface SpanError {
   readonly message: string;
+  readonly data?: Record<string, unknown>;
+}
+
+/** A point-in-time annotation on a span (a retry, a reset) — OTel span events, Jaeger "logs". */
+export interface SpanEvent {
+  readonly name: string;
+  readonly timestamp: number;
   readonly data?: Record<string, unknown>;
 }
 
@@ -35,6 +106,7 @@ export interface SpanRecord {
   readonly ended_at: number | null;
   readonly span_data: SpanData;
   readonly error: SpanError | null;
+  readonly events?: readonly SpanEvent[];
 }
 
 export interface TraceRecord {
@@ -65,6 +137,7 @@ export class Span<T extends SpanData = SpanData> {
   endedAt: number | null = null;
   error: SpanError | null = null;
   data: T;
+  events: SpanEvent[] = [];
 
   constructor(args: { traceId: string; spanId: string; parentId: string | null; data: T }) {
     this.traceId = args.traceId;
@@ -77,6 +150,10 @@ export class Span<T extends SpanData = SpanData> {
     return this.data.type;
   }
 
+  addEvent(name: string, timestamp: number, data?: Record<string, unknown>): void {
+    this.events.push(data === undefined ? { name, timestamp } : { name, timestamp, data });
+  }
+
   toJSON(): SpanRecord {
     return {
       object: "trace.span",
@@ -87,6 +164,7 @@ export class Span<T extends SpanData = SpanData> {
       ended_at: this.endedAt,
       span_data: this.data,
       error: this.error,
+      ...(this.events.length > 0 ? { events: this.events } : {}),
     };
   }
 }

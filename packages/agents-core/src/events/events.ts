@@ -3,6 +3,7 @@ import type { Message, TextContent, ThinkingContent, Usage } from "../protocol/i
 import type { PromptOrigin } from "../store/origin.ts";
 import type { ToolInputRequest, ToolResult, ToolUpdate } from "../tool/types.ts";
 import type { PendingRunInterrupt } from "../loop/interruption.ts";
+import type { ModelSettings } from "../llm/model.ts";
 import type { SkillActivationTrigger } from "../capabilities/skills/service.ts";
 import type { SkillSource } from "../capabilities/skills/types.ts";
 
@@ -127,6 +128,23 @@ export type AgentEventBody =
       readonly reason?: string;
     }
   | { readonly type: "turn.step.interrupted"; readonly turnId: string; readonly step: number; readonly reason: string; readonly message?: string }
+  // ── Model request (live-only) ──
+  // The request handed to the model for one step, AFTER every hook (`beforeStep`,
+  // `beforeModelRequest`) has had its say — what the provider actually receives, system prompt
+  // included. Nothing else on the stream carries the system prompt: it is an agent property, not
+  // a history record. Live-only on purpose: the messages are already journaled and the prompt is
+  // re-derivable from the agent; this exists for observers (tracing) that want the request as the
+  // model saw it. `messages` is a snapshot — the live context array keeps growing after emit.
+  | {
+      readonly type: "model.request";
+      readonly turnId: string;
+      readonly step: number;
+      readonly stepId: string;
+      readonly system?: string;
+      readonly messages: readonly Message[];
+      readonly toolNames: readonly string[];
+      readonly params?: ModelSettings;
+    }
   // ── Content: completed parts are recorded; deltas are live-only. The upstream streaming
   // AssistantMessageEvent (@earendil-works/pi-ai) is decomposed into these at the emit site
   // (run-turn). ──
@@ -311,7 +329,8 @@ export type LiveOnlyEvent = Extract<
       | "thinking.delta"
       | "tool.call.delta"
       | "tool.progress"
-      | "turn.step.retrying";
+      | "turn.step.retrying"
+      | "model.request";
   }
 >;
 
@@ -340,6 +359,7 @@ export const VOLATILE_EVENT_TYPES = [
   "tool.call.delta",
   "tool.progress",
   "turn.step.retrying",
+  "model.request",
 ] as const satisfies readonly LiveOnlyEvent["type"][];
 
 const volatileEventTypeSet: ReadonlySet<string> = new Set(VOLATILE_EVENT_TYPES);

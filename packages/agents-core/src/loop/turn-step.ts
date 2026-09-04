@@ -136,6 +136,19 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
   });
   const call: CallOptions = { signal: outputGuardrail?.signal ?? signal };
   deps.dispatchEvent?.({ type: "turn.step.started", turnId, step: currentStep, stepId });
+  // The final request, after both hooks — the only place the system prompt reaches the stream.
+  // `messages` is snapshotted: `request.messages` may alias the live context array, which this
+  // very step appends to below.
+  deps.dispatchEvent?.({
+    type: "model.request",
+    turnId,
+    step: currentStep,
+    stepId,
+    ...(request.system !== undefined ? { system: request.system } : {}),
+    messages: [...request.messages],
+    toolNames: (request.tools ?? []).map((tool) => tool.name),
+    ...(request.params !== undefined ? { params: request.params } : {}),
+  });
 
   let message!: AssistantMessage;
   let stopReason!: StepStopReason;
