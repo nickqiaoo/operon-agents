@@ -178,7 +178,7 @@ export function buildWorkflowTool<TContext>(
     args: z.unknown().optional().describe("Value exposed to the script as the global `args` (pass real JSON, not a stringified value)."),
     resumeFromRunId: z.string().optional().describe("Resume a prior run; unchanged agent() calls return cached results instantly."),
     tokenBudget: z.number().optional().describe("Output-token target for the run; enables budget.remaining()-guarded loops in the script."),
-    run_in_background: z.boolean().optional().describe("Run detached and return a task_id immediately (recommended for long workflows). Poll progress + result with BackgroundOutput. Requires a BackgroundManager."),
+    run_in_background: z.boolean().optional().describe("Run detached and return a task_id immediately (recommended for long workflows). A completion notice arrives on its own; BackgroundOutput(task_id, block=false) reads progress or the result meanwhile. Requires a BackgroundManager."),
   });
 
   return defineTool({

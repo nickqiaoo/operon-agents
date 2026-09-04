@@ -942,15 +942,25 @@ export class BackgroundManager implements BackgroundSpawner {
     return results.filter((info): info is BackgroundTaskInfo => info !== undefined);
   }
 
-  async wait(taskId: string, timeoutMs = 30_000): Promise<BackgroundTaskInfo | undefined> {
+  /**
+   * Settle when the task reaches a terminal status, the timeout elapses, or `signal` aborts —
+   * whichever comes first. Returns the task's status either way; the caller compares it against
+   * the terminal set to tell "it finished" from "I stopped waiting".
+   *
+   * `signal` matters because the timeout can be up to an hour: without it a blocking waiter
+   * outlives the turn that started it, and the loop's post-abort grace window has to shoot the
+   * tool down with a synthetic error instead of letting it return cleanly.
+   */
+  async wait(taskId: string, timeoutMs = 30_000, signal?: AbortSignal): Promise<BackgroundTaskInfo | undefined> {
     const entry = this.tasks.get(taskId);
     if (!entry) return undefined;
-    if (TERMINAL_STATUSES.has(entry.status)) {
+    if (TERMINAL_STATUSES.has(entry.status) || signal?.aborted === true) {
       return this.toInfo(entry);
     }
 
     let terminalWaiter: (() => void) | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
       await Promise.race([
         new Promise<void>((resolve) => {
@@ -960,9 +970,15 @@ export class BackgroundManager implements BackgroundSpawner {
         new Promise<void>((resolve) => {
           timeout = setTimeout(resolve, timeoutMs);
         }),
+        new Promise<void>((resolve) => {
+          if (signal === undefined) return; // never settles — leaves the race to the other two
+          onAbort = resolve;
+          signal.addEventListener("abort", onAbort, { once: true });
+        }),
       ]);
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
       if (terminalWaiter !== undefined) {
         const index = entry.waiters.indexOf(terminalWaiter);
         if (index !== -1) entry.waiters.splice(index, 1);

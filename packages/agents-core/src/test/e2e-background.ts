@@ -46,9 +46,10 @@ function toolResultTexts(messages: readonly Message[]): string {
     .join("\n");
 }
 
-async function runTool(tool: ReturnType<typeof backgroundListTool>, args: unknown): Promise<ToolResult> {
-  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine: MACHINE });
-  return plan.run({ turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine: MACHINE });
+async function runTool(tool: ReturnType<typeof backgroundListTool>, args: unknown, signal?: AbortSignal): Promise<ToolResult> {
+  const sig = signal ?? new AbortController().signal;
+  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
+  return plan.run({ turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
 }
 
 let MACHINE: LocalMachine;
@@ -811,6 +812,47 @@ async function testSettleCannotImpersonateTheUser(): Promise<void> {
   check("settle notice: and denies it is approval", text.includes("not approval"));
 }
 
+/**
+ * `block=true` is the one path in this tool that can hold a turn for an hour, so it has two
+ * ways to hang: waiting on an abandoned turn, and waiting on a question only the user can
+ * answer (which they cannot do while the turn is held open). Both must settle promptly.
+ */
+async function testBlockingReadIsInterruptible(): Promise<void> {
+  const textOf = (r: ToolResult): string => r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+  const mgr = new BackgroundManager();
+
+  // `block: true` here means the task starts and then never settles — exactly the shape that
+  // makes a blocking read dangerous. Abort mid-wait: the tool must return rather than ride the
+  // timeout out. Without the signal threaded into `wait`, this sits for the full hour and the
+  // loop's grace window has to kill it with a synthetic error.
+  const slowId = mgr.registerTask(
+    scriptedTask({ idPrefix: "never-settles", kind: "process", description: "long job", block: true }),
+  );
+  const ac = new AbortController();
+  const startedAt = Date.now();
+  setTimeout(() => ac.abort(), 50);
+  const aborted = await runTool(backgroundOutputTool(mgr), { task_id: slowId, block: true, timeout: 3600 }, ac.signal);
+  const abortedIn = Date.now() - startedAt;
+  check("block=true returns promptly when the turn is aborted", abortedIn < 5_000);
+  check("aborted block still reports the task's real status", textOf(aborted).includes("status: running"));
+
+  // A pending question: refused outright, because waiting for it can only ever time out.
+  const qId = mgr.registerTask(
+    new QuestionBackgroundTask(() => new Promise(() => {}), "unanswered question", { questionCount: 1 }),
+  );
+  const refusedAt = Date.now();
+  const refused = await runTool(backgroundOutputTool(mgr), { task_id: qId, block: true, timeout: 3600 });
+  check("block=true on a pending question is refused, not waited out", Date.now() - refusedAt < 5_000);
+  check("the refusal is an error result", refused.isError === true);
+  check("the refusal says to end the turn instead", textOf(refused).includes("End your turn instead"));
+
+  // block=false is untouched by any of it.
+  const peek = await runTool(backgroundOutputTool(mgr), { task_id: qId, block: false });
+  check("block=false still reads a pending question without erroring", peek.isError !== true);
+
+  await mgr.stopAll("test done");
+}
+
 async function main(): Promise<void> {
   MACHINE = new LocalMachine(process.cwd());
   await testBashBackground();
@@ -828,6 +870,7 @@ async function main(): Promise<void> {
   await testDurableOutputRefsAndOrderedPersistence();
   await testStorelessBackgroundAgentIsRejected();
   await testBackgroundBashWithoutDurableLogIsRejected();
+  await testBlockingReadIsInterruptible();
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

@@ -7,7 +7,7 @@
 export function workflowPrompt(availableAgents: readonly string[]): string {
   const agentList =
     availableAgents.length > 0 ? availableAgents.join(", ") : "(none configured)";
-  return `Execute a workflow script that orchestrates multiple subagents deterministically. By default it runs to completion and returns the final value; pass run_in_background:true (recommended for long workflows) to get a task_id immediately and poll progress/result with BackgroundOutput. Live progress is reported either way. Pass tokenBudget to cap the run and enable budget.remaining()-guarded loops.
+  return `Execute a workflow script that orchestrates multiple subagents deterministically. By default it runs to completion and returns the final value; pass run_in_background:true (recommended for long workflows) to get a task_id immediately; a completion notice arrives on its own, and BackgroundOutput(task_id, block=false) reads progress/result meanwhile. Live progress is reported either way. Pass tokenBudget to cap the run and enable budget.remaining()-guarded loops.
 
 A workflow structures work across many agents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before committing), or to take on scale one context can't hold (migrations, audits, broad sweeps). The script is where you encode that structure: what fans out, what verifies, what synthesizes.
 
