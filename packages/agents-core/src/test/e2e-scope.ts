@@ -134,6 +134,93 @@ async function testDisposeTimeout(): Promise<void> {
   check("dispose: a hanging dispose is abandoned at the deadline", Date.now() - started < 1000 && errors.some((e) => e.startsWith("scope-test-slow:") && e.includes("timed out")));
 }
 
+async function testCloseLifecycle(): Promise<void> {
+  // ── Every close() call returns the SAME promise ──
+  {
+    const scope = new Scope("session");
+    const first = scope.close();
+    const second = scope.close();
+    check("lifecycle: concurrent close() calls return the identical promise", first === second);
+    await first;
+    check("lifecycle: a later close() still returns that same promise", scope.close() === first);
+    check("lifecycle: state ends at closed", scope.state === "closed");
+  }
+
+  // ── A parent closing while a child is mid-close WAITS for the child ──
+  {
+    const ParentThing = token<{ close(): void }>("scope-test-lc-parent", "harness");
+    const ChildThing = token<{ close(): Promise<void> }>("scope-test-lc-child", "session");
+    const order: string[] = [];
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => {
+      releaseChild = resolve;
+    });
+    const harness = new Scope("harness");
+    harness.register(ParentThing, { close: () => order.push("parent") });
+    const session = harness.child("session");
+    session.register(ChildThing, {
+      close: async () => {
+        order.push("child:start");
+        await childGate;
+        order.push("child:end");
+      },
+    });
+    const childClose = session.close();
+    await Promise.resolve();
+    check("lifecycle: the child reports closing while its disposer runs", session.state === "closing");
+    const parentClose = harness.close();
+    // Let the parent's close get as far as it can without the child releasing.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check("lifecycle: the parent has NOT disposed its own entries while the child is still closing", !order.includes("parent"));
+    check("lifecycle: the parent reports closing meanwhile", harness.state === "closing");
+    releaseChild();
+    await Promise.all([childClose, parentClose]);
+    check("lifecycle: teardown order is child:start,child:end,parent", order.join(",") === "child:start,child:end,parent");
+    check("lifecycle: both report closed afterwards", harness.state === "closed" && session.state === "closed");
+  }
+
+  // ── No lazy default materializes once closing ──
+  {
+    const Eager = token<{ close(): void }>("scope-test-lc-eager", "session");
+    const Lazy = token<{ ping(): string; close(): void }>("scope-test-lc-lazy", "session");
+    let lazyCreated = 0;
+    let lazyDisposed = 0;
+    let seenDuringDispose: unknown = "unset";
+    const session = new Scope("session");
+    session.provide(Lazy, () => {
+      lazyCreated += 1;
+      return { ping: () => "pong", close: () => void (lazyDisposed += 1) };
+    });
+    session.register(Eager, {
+      close: () => {
+        // A disposer touching a never-materialized default during teardown.
+        seenDuringDispose = session.get(Lazy);
+      },
+    });
+    await session.close();
+    check("lifecycle: a disposer reading an unmaterialized default gets undefined", seenDuringDispose === undefined);
+    check("lifecycle: the default was never created behind the teardown's back", lazyCreated === 0 && lazyDisposed === 0);
+    check("lifecycle: after close, get() of that default is still undefined (no orphan)", session.get(Lazy) === undefined);
+  }
+
+  // ── Materialized-before-close defaults are still reachable by disposers (and disposed) ──
+  {
+    const Eager = token<{ close(): void }>("scope-test-lc-eager2", "session");
+    const Lazy = token<{ ping(): string; close(): void }>("scope-test-lc-lazy2", "session");
+    let lazyDisposed = 0;
+    let seen: unknown;
+    const session = new Scope("session");
+    session.provide(Lazy, () => ({ ping: () => "pong", close: () => void (lazyDisposed += 1) }));
+    // The discipline: a dependency a disposer needs is established BEFORE the dependent
+    // registers, so reverse-order teardown reaches the dependent first.
+    session.get(Lazy);
+    session.register(Eager, { close: () => { seen = session.get(Lazy)?.ping(); } });
+    await session.close();
+    check("lifecycle: a default materialized before its dependent registered stays readable for that disposer", seen === "pong");
+    check("lifecycle: ...and is disposed exactly once", lazyDisposed === 1);
+  }
+}
+
 function testTokenDeclarations(): void {
   const a = token<number>("scope-test-decl", "session");
   const b = token<number>("scope-test-decl", "session");
@@ -156,6 +243,7 @@ async function main(): Promise<void> {
   await testHandleAcrossParentReplace();
   await testCloseOrder();
   await testDisposeTimeout();
+  await testCloseLifecycle();
   testTokenDeclarations();
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

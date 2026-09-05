@@ -100,6 +100,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+export type ScopeState = "open" | "closing" | "closed";
+
 export class Scope<K extends ScopeKind = ScopeKind> {
   readonly kind: K;
   readonly parent: Scope | undefined;
@@ -112,7 +114,10 @@ export class Scope<K extends ScopeKind = ScopeKind> {
   private readonly ops = new Map<string, Promise<unknown>>();
   private readonly children = new Set<Scope>();
   private readonly warn: (message: string) => void;
-  private _closed = false;
+  /** open → closing (the one `close()` in flight) → closed. Never goes back. */
+  private _state: ScopeState = "open";
+  /** The one close in flight (or finished): every `close()` call returns THIS promise. */
+  private closing: Promise<void> | undefined;
 
   constructor(kind: K, parent?: Scope, options: { readonly warn?: (message: string) => void } = {}) {
     this.kind = kind;
@@ -121,8 +126,13 @@ export class Scope<K extends ScopeKind = ScopeKind> {
     parent?.children.add(this);
   }
 
+  /** Not open: closing or closed. `register`/`provide`/`child` throw from here on. */
   get closed(): boolean {
-    return this._closed;
+    return this._state !== "open";
+  }
+
+  get state(): ScopeState {
+    return this._state;
   }
 
   /** Open a nested scope. Tiers only go down: harness → workspace | session, workspace → session. */
@@ -287,25 +297,40 @@ export class Scope<K extends ScopeKind = ScopeKind> {
 
   /**
    * Tear the scope down: children first (newest first), then this scope's entries in reverse
-   * registration order. Idempotent. Afterwards `register`/`provide`/`child` throw; `get` still
-   * reads the parent chain. Parents are never touched.
+   * registration order. Every call — concurrent or later — returns the SAME promise, so a parent
+   * closing while a child's close is still in flight waits for that close instead of skipping it
+   * and pulling its own resources out from under the child's disposers. Entering `closing` stops
+   * pending defaults from materializing (a disposer asking for one gets "missing"), so nothing
+   * new can appear behind the teardown's back. Afterwards `register`/`provide`/`child` throw;
+   * `get` still reads the parent chain. Parents are never touched.
    */
-  async close(options: CloseOptions = {}): Promise<void> {
-    if (this._closed) return;
-    this._closed = true;
-    for (const child of [...this.children].reverse()) await child.close(options);
-    this.children.clear();
-    for (const name of [...this.order].reverse()) {
-      await this.unregister({ name, scope: this.kind } as Token<unknown, K>, options);
-    }
+  close(options: CloseOptions = {}): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    this._state = "closing";
     this.providers.clear();
-    this.parent?.children.delete(this);
+    this.closing = this.runClose(options);
+    return this.closing;
+  }
+
+  private async runClose(options: CloseOptions): Promise<void> {
+    try {
+      for (const child of [...this.children].reverse()) await child.close(options);
+      this.children.clear();
+      for (const name of [...this.order].reverse()) {
+        await this.unregister({ name, scope: this.kind } as Token<unknown, K>, options);
+      }
+    } finally {
+      this._state = "closed";
+      this.parent?.children.delete(this);
+    }
   }
 
   private lookup(name: string): ServiceEntry | undefined {
     const local = this.table.get(name);
     if (local !== undefined) return local;
-    const provider = this.providers.get(name);
+    // Once closing, no default materializes: a disposer that first touches a lazy service
+    // during teardown must not create an instance the teardown snapshot will never dispose.
+    const provider = this._state === "open" ? this.providers.get(name) : undefined;
     if (provider !== undefined) {
       this.providers.delete(name);
       const entry = entryOf(provider.create(this as never), provider.options);
@@ -408,7 +433,7 @@ export class Scope<K extends ScopeKind = ScopeKind> {
   }
 
   private assertOpen(): void {
-    if (this._closed) throw new Error(`${this.kind} scope is closed`);
+    if (this._state !== "open") throw new Error(`${this.kind} scope is ${this._state}`);
   }
 
   private assertTier(tok: Token<unknown, ScopeKind>): void {
