@@ -285,9 +285,12 @@ export class Runner<TContext = unknown> {
     return this.withLease(opts, async (lease) => {
       const { session, owned } = await this.acquireSession(opts, undefined, lease);
       try {
-        return await session.withRunLock(() =>
-          this.execute(agent, input, opts, session),
-        );
+        return await session.withRunLock(() => {
+          // Cancelled while queued behind another run: leave without touching the session —
+          // no reconcile, no context replay, no `agent.started` on the log.
+          opts?.signal?.throwIfAborted();
+          return this.execute(agent, input, opts, session);
+        });
       } finally {
         if (owned) await session.close();
       }
@@ -327,9 +330,12 @@ export class Runner<TContext = unknown> {
       const { session, owned } = await this.acquireSession(opts, pull, lease);
       const unsub = owned ? undefined : session.events.subscribe((ev) => void pull.emit(ev));
       try {
-        return await session.withRunLock(() =>
-          this.execute(agent, input, opts, session),
-        );
+        return await session.withRunLock(() => {
+          // Cancelled while queued behind another run: leave without touching the session —
+          // no reconcile, no context replay, no `agent.started` on the log.
+          opts?.signal?.throwIfAborted();
+          return this.execute(agent, input, opts, session);
+        });
       } finally {
         unsub?.();
         pull.close();
@@ -374,6 +380,7 @@ export class Runner<TContext = unknown> {
       await session.reconcileSubagents();
       try {
         return await session.withRunLock(async () => {
+          baseOpts?.signal?.throwIfAborted();
           const store = session.store;
           if (!store) throw new Error("Cannot resume an interrupted run without a durable session store.");
           const currentRaw = await store.getState(INTERRUPTION_STATE_KEY);

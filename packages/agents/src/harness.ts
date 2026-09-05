@@ -608,15 +608,18 @@ export class HarnessSession<TContext = unknown> {
   private readonly responder: MutableResponder;
   private readonly onClosed: (id: string) => void | Promise<void>;
   private runContext: TContext | undefined;
-  private currentRun: AbortController | undefined;
   /** Barrier gate (docs/architecture.md §5.5): while set, no NEW run starts on this
    *  session — prompt/resume park at it, promptStream starts lazily behind it. The in-flight
    *  run is never touched. */
   private runGate: { readonly released: Promise<void>; release(): void } | undefined;
-  /** Resolves when the latest run settles — the "arrived at the boundary" signal a barrier
-   *  coordinator awaits. Undefined while idle. */
-  private runSettled: Promise<void> | undefined;
-  private readonly runSettles = new Map<AbortController, () => void>();
+  /**
+   * Every run this facade has begun and not yet seen settle, by its controller. More than one
+   * entry means runs are queued behind the core's run lock (`prompt` while a turn is in flight):
+   * "busy" is this set being non-empty, `cancel()` aborts ALL of them, and the barrier's
+   * quiescence is ALL of them settling — tracking only the last-begun run would abort the
+   * queued one and leave the running one untouched.
+   */
+  private readonly runs = new Map<AbortController, { readonly settled: Promise<void>; resolve(): void }>();
   private lastRunInterrupted = false;
   private closed = false;
   private deliveryCounter = 0;
@@ -662,7 +665,7 @@ export class HarnessSession<TContext = unknown> {
    * Start a turn to consume queued follow-ups, once the current synchronous work is done.
    *
    * Deferred to a microtask for two reasons: several enqueues in one stack fold into a single
-   * wake, and a settle that lands in a finishing run's own stack sees `currentRun` already
+   * wake, and a settle that lands in a finishing run's own stack sees its run already
    * cleared. Re-checked at fire time because either can change in between — and re-checked
    * again after every run, since the queue may have filled during one whose drain had passed.
    */
@@ -677,7 +680,7 @@ export class HarnessSession<TContext = unknown> {
       if (this.runGate !== undefined) return;
       // A run in flight drains at its own turn boundary; an interrupted one must be resumed,
       // not talked over.
-      if (this.currentRun !== undefined) return;
+      if (this.hasActiveRuns()) return;
       // Either channel counts. A "steering" item is an interruption of work in flight, but with
       // nothing in flight there is nothing to interrupt — it is simply the next input, and the
       // turn picks it up at the top of its first step (`runTurn`'s drain runs before the model
@@ -702,7 +705,7 @@ export class HarnessSession<TContext = unknown> {
     return {
       state: this.closed
         ? "closed"
-        : this.currentRun !== undefined
+        : this.hasActiveRuns()
           ? "running"
           : this.lastRunInterrupted
             ? "interrupted"
@@ -728,16 +731,26 @@ export class HarnessSession<TContext = unknown> {
   // ── Run driving (the methods core Session does not have) ──
 
   private beginRun(controller: AbortController): void {
-    this.currentRun = controller;
-    this.runSettled = new Promise<void>((resolve) => {
-      this.runSettles.set(controller, resolve);
+    let resolve!: () => void;
+    const settled = new Promise<void>((r) => {
+      resolve = r;
     });
+    this.runs.set(controller, { settled, resolve });
   }
 
   private endRun(controller: AbortController): void {
-    if (this.currentRun === controller) this.currentRun = undefined;
-    this.runSettles.get(controller)?.();
-    this.runSettles.delete(controller);
+    this.runs.get(controller)?.resolve();
+    this.runs.delete(controller);
+  }
+
+  /** A run is in flight or queued behind the core's run lock. */
+  private hasActiveRuns(): boolean {
+    return this.runs.size > 0;
+  }
+
+  /** Settles when every run begun so far has settled (trivially, when idle). */
+  private allRunsSettled(): Promise<void> {
+    return Promise.all([...this.runs.values()].map((run) => run.settled)).then(() => undefined);
   }
 
   /**
@@ -755,7 +768,7 @@ export class HarnessSession<TContext = unknown> {
     });
     const gate = { released, release: releaseGate };
     this.runGate = gate;
-    const quiescent = this.currentRun !== undefined ? (this.runSettled ?? Promise.resolve()) : Promise.resolve();
+    const quiescent = this.allRunsSettled();
     return {
       quiescent,
       release: () => {
@@ -797,7 +810,7 @@ export class HarnessSession<TContext = unknown> {
     } finally {
       this.endRun(controller);
       // A follow-up can land after this run's last drain but before it settles — that enqueue
-      // saw `currentRun` set and stood down, so the run itself has to look once on the way out.
+      // saw an active run and stood down, so the run itself has to look once on the way out.
       this.scheduleIdleWake();
     }
   }
@@ -810,7 +823,7 @@ export class HarnessSession<TContext = unknown> {
   steerTo(address: string, content: string, origin: SteerOrigin): boolean {
     if (this.closed || this.lastRunInterrupted) return false;
     // A run in flight drains its own queues, so handing the message to the frame is enough.
-    if (this.currentRun !== undefined) return this.core.steerTo(address, content, origin);
+    if (this.hasActiveRuns()) return this.core.steerTo(address, content, origin);
     // Idle: only the root frame can be woken. A subagent whose frame has ended is not a teammate
     // waiting for mail — it is a finished delegation, and only the parent that delegated it can
     // decide to continue it (`Agent(resume=...)`). Its store, capabilities, permissions and
@@ -840,7 +853,7 @@ export class HarnessSession<TContext = unknown> {
    */
   async deliver(input: string, options: DeliveryOptions): Promise<DeliveryReceipt> {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
-    if (this.lastRunInterrupted && this.currentRun === undefined) {
+    if (this.lastRunInterrupted && !this.hasActiveRuns()) {
       throw new Error(`session "${this.id}" is interrupted; resume it before delivering new work`);
     }
     if (!options.source.trim()) throw new Error("delivery source must not be empty");
@@ -908,7 +921,7 @@ export class HarnessSession<TContext = unknown> {
       ? origin.channel ?? "steering"
       : origin.kind === "user_follow_up" ? "follow_up" : "steering";
 
-    if (this.currentRun !== undefined) {
+    if (this.hasActiveRuns()) {
       const receipt = this.core.steer.steer(input, origin);
       return {
         deliveryId,
@@ -963,10 +976,11 @@ export class HarnessSession<TContext = unknown> {
    * copy see a "stale interruption state" error; re-fetching the persisted state clears it.
    */
   async resume(answers: Record<string, ApprovalResponse | InterruptAnswer>): Promise<RunResult> {
+    if (this.closed) throw new Error(`session "${this.id}" is closed`);
     // Barrier gate first (a coordinator holding the barrier should not be resumed against —
     // the call parks here until release rather than failing).
     while (this.runGate !== undefined) await this.runGate.released;
-    if (this.currentRun !== undefined) throw new Error(`session "${this.id}" already has an active run`);
+    if (this.hasActiveRuns()) throw new Error(`session "${this.id}" already has an active run`);
     const controller = new AbortController();
     // Set this BEFORE the first await (past the gate). A host returning 202 from resume can
     // immediately observe `running`, and a concurrent delivery joins this resumed turn instead
@@ -1005,6 +1019,7 @@ export class HarnessSession<TContext = unknown> {
 
   /** Streaming variant: iterate events, await `.completed` for the result. */
   promptStream(input: AgentInput): RunHandle<RunResult> {
+    if (this.closed) throw new Error(`session "${this.id}" is closed`);
     const controller = new AbortController();
     // Ungated: start synchronously, byte-identical to the pre-barrier behavior. Gated: the
     // handle returns immediately but the underlying run starts only after release (lazy start —
@@ -1088,13 +1103,13 @@ export class HarnessSession<TContext = unknown> {
    * active run — use `prompt` instead in that case.
    */
   followUp(input: string): string | null {
-    if (this.currentRun === undefined) return null;
+    if (!this.hasActiveRuns()) return null;
     return this.core.steer.followUp(input).steerId;
   }
 
-  /** Abort the current run. */
+  /** Abort every run this session has accepted: the one in flight AND any queued behind it. */
   cancel(): void {
-    this.currentRun?.abort();
+    for (const controller of [...this.runs.keys()]) controller.abort();
   }
 
   /** Subscribe to this session's event stream. Returns an unsubscribe fn. */
