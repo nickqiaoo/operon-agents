@@ -457,9 +457,16 @@ export class Runner<TContext = unknown> {
     if (signal !== undefined) scope.register(T.HostSignal, signal, { owned: false });
     // A one-shot pull stream IS the session's event bus (Invariant 4); it wins over the hook's.
     if (eventsOverride !== undefined) scope.register(T.Events, eventsOverride, { owned: false });
-    const capabilities = (await this.config.session?.(scope, { sessionId: opts?.sessionId })) ?? [];
-    const session = await Session.open(scope, { capabilities });
-    return { session, owned: true };
+    try {
+      const capabilities = (await this.config.session?.(scope, { sessionId: opts?.sessionId })) ?? [];
+      const session = await Session.open(scope, { capabilities });
+      return { session, owned: true };
+    } catch (error) {
+      // The scope is ours: a hook or open that fails must not leave it (and whatever it already
+      // registered — a provision, an MCP connection) hanging off the runner's scope.
+      await scope.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   /** Resolve the durable conversation owner by following committed handoffs from `main`. */

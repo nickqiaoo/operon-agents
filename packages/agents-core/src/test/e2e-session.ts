@@ -435,10 +435,36 @@ async function testSessionIdConflict(machine: LocalMachine): Promise<void> {
   await session.close();
 }
 
+/** A runner-owned session whose hook or open fails must not leave its scope (and what the hook
+ *  already registered) hanging off the runner's scope. */
+async function testOwnedScopeClosedOnOpenFailure(): Promise<void> {
+  const { faux, model } = fauxModel("never");
+  const Probe = token<{ close(): void }>("session-e2e-open-fail-probe", "session");
+  let disposed = 0;
+  let hookScope: { readonly state: string } | undefined;
+  const harnessScope = new (await import("../index.ts")).Scope("harness");
+  const runner = new Runner(harnessScope, {
+    session: (scope) => {
+      hookScope = scope;
+      scope.register(Probe, { close: () => void (disposed += 1) });
+      throw new Error("session hook boom");
+    },
+  });
+  const agent = defineAgent({ name: "a", model, instructions: "x" });
+  let error: unknown;
+  await runner.run(agent, "hi").catch((e) => { error = e; });
+  check("owned open failure: the run rejects with the hook's error", error instanceof Error && error.message === "session hook boom");
+  check("owned open failure: the runner closed the scope it created", hookScope?.state === "closed");
+  check("owned open failure: what the hook registered was disposed", disposed === 1);
+  faux.unregister();
+  await harnessScope.close();
+}
+
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-session-e2e-"));
   const machine = new LocalMachine(dir);
   try {
+    await testOwnedScopeClosedOnOpenFailure();
     await testCrossRunSurvival(machine);
     await testSingleActiveRun(machine);
     await testOneShotLifecycle(machine);
