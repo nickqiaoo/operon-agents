@@ -6,3 +6,4 @@
  * No stability guarantees — prefer the main `operon-agents` surface.
  */
 export * from "operon-agents-core/internal";
+export { setHarnessCloseTimeoutsForTest } from "./harness.ts";

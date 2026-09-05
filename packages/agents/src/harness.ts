@@ -120,6 +120,14 @@ export type QuestionHandler = (
 ) => Promise<QuestionResult> | QuestionResult;
 
 export type HarnessSessionState = "idle" | "running" | "interrupted" | "closed";
+
+/** How long `HarnessSession.close()` waits for aborted runs to settle before continuing teardown. */
+let CLOSE_RUN_WAIT_MS = 5_000;
+
+/** Test-only (exported via `operon-agents/internal`): shrink the run-settle deadline. */
+export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number }): void {
+  if (ms.runSettle !== undefined) CLOSE_RUN_WAIT_MS = ms.runSettle;
+}
 export type DeliveryMode = "auto" | "steer" | "follow_up";
 
 /** Rendezvous budget for `replaceExtension` when the caller names none. */
@@ -621,7 +629,16 @@ export class HarnessSession<TContext = unknown> {
    */
   private readonly runs = new Map<AbortController, { readonly settled: Promise<void>; resolve(): void }>();
   private lastRunInterrupted = false;
-  private closed = false;
+  /** open → closing (runs being drained, resources going down) → closed. Never goes back. */
+  private lifecycle: "open" | "closing" | "closed" = "open";
+  /** The one close in flight (or finished): every `close()` call returns THIS promise. */
+  private closing: Promise<void> | undefined;
+  /** Resolves the moment close() begins — what wakes a caller parked at the barrier gate so it
+   *  can fail with the closed error instead of hanging on a gate nobody will release. */
+  private notifyClosing!: () => void;
+  private readonly closingNotified = new Promise<void>((resolve) => {
+    this.notifyClosing = resolve;
+  });
   private deliveryCounter = 0;
   /** A wake is already scheduled on the microtask queue; more enqueues fold into it. */
   private wakeScheduled = false;
@@ -689,6 +706,23 @@ export class HarnessSession<TContext = unknown> {
       // No input: the queue IS the prompt for this turn.
       void this.runPrompt([]).catch(() => undefined);
     });
+  }
+
+  /** Not open: closing or closed. Every run entry point refuses from here on. */
+  private get closed(): boolean {
+    return this.lifecycle !== "open";
+  }
+
+  /**
+   * Park at the barrier gate until released — or until this session starts closing, in which
+   * case fail with the closed error rather than wait on a gate no coordinator will release.
+   * Re-checked in a loop: a new hold can land between a release and this task resuming.
+   */
+  private async parkAtGate(): Promise<void> {
+    while (this.runGate !== undefined) {
+      await Promise.race([this.runGate.released, this.closingNotified]);
+      if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    }
   }
 
   /** Run options every run on this session carries — currently the session's turn cap. */
@@ -787,9 +821,9 @@ export class HarnessSession<TContext = unknown> {
 
   private async runPrompt(input: AgentInput, inputOrigin?: PromptOrigin): Promise<RunResult> {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
-    // Barrier gate: park (never fail) until released. A loop, not an if — a new hold can land
-    // between the release and this task resuming.
-    while (this.runGate !== undefined) await this.runGate.released;
+    // Barrier gate: park until released (a hold is "wait", not "fail") — unless the session
+    // closes meanwhile, which is the one thing that turns the wait into a failure.
+    await this.parkAtGate();
     const controller = new AbortController();
     this.beginRun(controller);
     try {
@@ -978,8 +1012,8 @@ export class HarnessSession<TContext = unknown> {
   async resume(answers: Record<string, ApprovalResponse | InterruptAnswer>): Promise<RunResult> {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
     // Barrier gate first (a coordinator holding the barrier should not be resumed against —
-    // the call parks here until release rather than failing).
-    while (this.runGate !== undefined) await this.runGate.released;
+    // the call parks here until release rather than failing; closing meanwhile does fail it).
+    await this.parkAtGate();
     if (this.hasActiveRuns()) throw new Error(`session "${this.id}" already has an active run`);
     const controller = new AbortController();
     // Set this BEFORE the first await (past the gate). A host returning 202 from resume can
@@ -1028,7 +1062,7 @@ export class HarnessSession<TContext = unknown> {
     if (!gated) this.beginRun(controller);
     const start = (async () => {
       if (gated) {
-        while (this.runGate !== undefined) await this.runGate.released;
+        await this.parkAtGate();
         this.beginRun(controller);
       }
       return this.runner.runStream(this.agent, input, {
@@ -1333,14 +1367,49 @@ export class HarnessSession<TContext = unknown> {
     return this.core.reconnectMcpServer(...args);
   }
 
-  /** Close the session and release its resources. */
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.cancel();
-    this.projection.detach();
-    await this.core.close();
-    await this.onClosed(this.id);
+  /**
+   * Close the session and release its resources. Order: stop accepting runs, abort the ones
+   * accepted (in flight and queued) and wait for them to settle — their tools' finally blocks,
+   * their journal writes — then detach the projection and take the core down. Every call
+   * returns the SAME promise, so nobody returns while the teardown is still running.
+   *
+   * The wait for runs is bounded (`CLOSE_RUN_WAIT_MS`, 5s): a run that ignores its abort signal
+   * is logged and left behind, and the teardown continues — the deadline caps the wait for
+   * runs, not the whole close (flushes and disposes carry their own deadlines).
+   */
+  close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    this.lifecycle = "closing";
+    this.notifyClosing();
+    this.closing = this.runClose();
+    return this.closing;
+  }
+
+  private async runClose(): Promise<void> {
+    try {
+      const settled = this.allRunsSettled();
+      this.cancel();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        settled.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), CLOSE_RUN_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) {
+        this.core.logger.log("warn", "session close: runs still settling after the deadline; continuing teardown", {
+          sessionId: this.id,
+          runs: this.runs.size,
+          deadlineMs: CLOSE_RUN_WAIT_MS,
+        });
+      }
+      this.projection.detach();
+      await this.core.close();
+      await this.onClosed(this.id);
+    } finally {
+      this.lifecycle = "closed";
+    }
   }
 }
 

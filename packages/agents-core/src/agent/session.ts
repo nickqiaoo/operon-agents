@@ -206,6 +206,8 @@ export class Session implements SessionPort {
   private thinkingOverride?: ThinkingLevel;
   private openedCapabilities: readonly Capability[] = [];
   private isOpen = false;
+  /** The one close in flight (or finished): every `close()` call returns THIS promise. */
+  private closing: Promise<void> | undefined;
   private runChain: Promise<void> = Promise.resolve();
   private readonly pendingDiagnostics: CapabilityDiagnostic[] = [];
   // Most-recent per-turn context-window breakdown, stamped by the Runner at each turn boundary.
@@ -912,10 +914,16 @@ export class Session implements SessionPort {
   /**
    * Close the session: flush telemetry and the store, then close the scope — which disposes
    * every capability provision in reverse order (each under a deadline) and finally the
-   * session's own infrastructure. Idempotent.
+   * session's own infrastructure. Every call returns the SAME promise, so a second caller
+   * (or the facade above) waits for the teardown instead of returning while it is still running.
    */
-  async close(): Promise<void> {
-    if (!this.isOpen) return;
+  close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    this.closing = this.isOpen ? this.runClose() : Promise.resolve();
+    return this.closing;
+  }
+
+  private async runClose(): Promise<void> {
     this.isOpen = false;
     this.systemPromptContexts.clear();
     this.unsubscribeTracing?.();
