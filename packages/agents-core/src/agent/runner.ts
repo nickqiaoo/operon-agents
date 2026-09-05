@@ -328,12 +328,15 @@ export class Runner<TContext = unknown> {
       // One-shot pull sessions emit straight to `pull` (the bus IS the iterable). For a
       // shared session, subscribe `pull` to its bus so we never replace the channel (Invariant 4).
       const { session, owned } = await this.acquireSession(opts, pull, lease);
-      const unsub = owned ? undefined : session.events.subscribe((ev) => void pull.emit(ev));
+      let unsub: (() => void) | undefined;
       try {
         return await session.withRunLock(() => {
           // Cancelled while queued behind another run: leave without touching the session —
           // no reconcile, no context replay, no `agent.started` on the log.
           opts?.signal?.throwIfAborted();
+          // Subscribe only now, holding the lock: subscribing while queued would hand this
+          // stream the tail of the run ahead of it (its inputs and answers) before its own.
+          if (!owned) unsub = session.events.subscribe((ev) => void pull.emit(ev));
           return this.execute(agent, input, opts, session);
         });
       } finally {
