@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineAgent, token } from "operon-agents-core";
+import { defineAgent, T, token, type Logger } from "operon-agents-core";
 import { createHarness, defaultCapabilities, tool } from "../src/index.ts";
 import { setHarnessCloseTimeoutsForTest } from "../src/internal.ts";
 
@@ -433,7 +433,57 @@ async function concurrentStreamsStayApart(): Promise<void> {
   faux.unregister();
 }
 
+const WsHang = token<{ close(): Promise<void> }>("lifecycle-test-ws-hang", "workspace");
+
+async function scopeDisposeHasADeadline(): Promise<void> {
+  const faux = registerFauxProvider();
+  const warnings: string[] = [];
+  const logger: Logger = { log: (level, message) => { if (level === "warn") warnings.push(message); } };
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    harness: (scope) => { scope.register(T.Logger, logger, { owned: false }); },
+    // A workspace service whose close never settles — a hung MCP shutdown, say.
+    workspace: (scope) => { scope.register(WsHang, { close: () => new Promise<void>(() => undefined) }); },
+  });
+  const session = await harness.createSession();
+  setHarnessCloseTimeoutsForTest({ scopeDispose: 80 });
+  try {
+    const startedAt = Date.now();
+    await session.close(); // last session out → workspace scope closes → the hung dispose
+    const elapsed = Date.now() - startedAt;
+    check("dispose deadline: closing the last session returns despite a hung workspace dispose", elapsed >= 70 && elapsed < 2_000);
+    check("dispose deadline: the hung dispose is logged as a warning", warnings.some((w) => w.includes("lifecycle-test-ws-hang") && /timed out/.test(w)));
+    const t2 = Date.now();
+    await harness.close();
+    check("dispose deadline: harness.close() returns promptly too", Date.now() - t2 < 2_000);
+  } finally {
+    setHarnessCloseTimeoutsForTest({ scopeDispose: 5_000 });
+  }
+  faux.unregister();
+}
+
+async function closingHarnessRefusesOpens(): Promise<void> {
+  const faux = registerFauxProvider();
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const session = await harness.createSession();
+  const id = session.id;
+  const closing = harness.close();
+  check("harness close: every close() call returns the identical promise", harness.close() === closing);
+  const outcomes = await Promise.all([
+    harness.createSession().then(() => "opened", (error: Error) => error.message),
+    harness.resumeSession(id).then(() => "opened", (error: Error) => error.message),
+    harness.forkSession(id).then(() => "opened", (error: Error) => error.message),
+  ]);
+  check("harness close: createSession/resumeSession/forkSession during close are refused", outcomes.every((o) => /harness is closed/.test(o)));
+  await closing;
+  check("harness close: no session survives", harness.getSession(id) === undefined);
+  faux.unregister();
+}
+
 async function main(): Promise<void> {
+  await scopeDisposeHasADeadline();
+  await closingHarnessRefusesOpens();
   await cancelRightAfterPrompt();
   await createRacesResume();
   await streamSettlesQueuedInput();

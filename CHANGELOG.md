@@ -49,6 +49,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Runner.runStream` subscribes to the session's events only once it holds the run lock
   (`operon-agents-core`): a stream queued behind another run no longer replays that run's prompt
   and answer before its own.
+- Scopes the harness tears down itself — a workspace whose last session left, a failed open's
+  session scope, the harness scope on `harness.close()` — now dispose each service under a 5s
+  deadline and log the stragglers, like the core session already did; one hung MCP shutdown no
+  longer hangs `session.close()` / `harness.close()`. `harness.close()` returns the same promise
+  on every call and refuses new `createSession` / `resumeSession` / `forkSession` while closing.
+- `Runner` closes the session scope it created when the `session` hook or `Session.open` fails
+  (`operon-agents-core`); it used to stay attached to the runner's scope with whatever the hook
+  had registered.
 - The workspace skill scan follows the harness default machine (`T.MachineFactory`) with the same
   precedence `Session.open` resolves; it used to fall back to the host's disk, so a harness whose
   sessions execute remotely handed the model the local catalog.

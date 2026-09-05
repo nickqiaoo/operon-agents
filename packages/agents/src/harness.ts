@@ -98,6 +98,7 @@ import {
   type SubagentProvider,
   DEFAULT_ADDRESS,
   Scope,
+  type CloseOptions,
   T,
   envLogger,
   noopLogger,
@@ -121,15 +122,17 @@ export type QuestionHandler = (
 
 export type HarnessSessionState = "idle" | "running" | "interrupted" | "closed";
 
-/** Dispose deadline for a session scope torn down by a failed open (mirrors the core's close deadline). */
-const OPEN_ROLLBACK_DISPOSE_TIMEOUT_MS = 5_000;
-
 /** How long `HarnessSession.close()` waits for aborted runs to settle before continuing teardown. */
 let CLOSE_RUN_WAIT_MS = 5_000;
+/** Per-service dispose deadline when the harness tears a scope down itself — a workspace whose
+ *  last session left, a session scope a failed open rolls back, the harness scope on close.
+ *  Mirrors the core session's own close deadline: one hung MCP shutdown must not hang close(). */
+let SCOPE_DISPOSE_TIMEOUT_MS = 5_000;
 
-/** Test-only (exported via `operon-agents/internal`): shrink the run-settle deadline. */
-export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number }): void {
+/** Test-only (exported via `operon-agents/internal`): shrink the close deadlines. */
+export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number; scopeDispose?: number }): void {
   if (ms.runSettle !== undefined) CLOSE_RUN_WAIT_MS = ms.runSettle;
+  if (ms.scopeDispose !== undefined) SCOPE_DISPOSE_TIMEOUT_MS = ms.scopeDispose;
 }
 export type DeliveryMode = "auto" | "steer" | "follow_up";
 
@@ -1430,6 +1433,8 @@ export class Harness<TContext = unknown> {
   /** Opens in flight by session id (`resumeSession`): concurrent callers share ONE open — the
    *  whole of it, reconcile and failure cleanup included — instead of each building an instance. */
   private readonly opening = new Map<string, Promise<HarnessSession<TContext>>>();
+  /** The one close in flight (or finished): every `close()` call returns THIS promise. */
+  private closing: Promise<void> | undefined;
 
   /** The harness-tier scope: every process-lived object, and the parent of every workspace scope. */
   readonly scope: Scope<"harness">;
@@ -1648,6 +1653,7 @@ export class Harness<TContext = unknown> {
   }
 
   async createSession(opts: CreateSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
+    this.assertAcceptingSessions();
     const workDir = opts.workDir ?? this.options.workDir ?? process.cwd();
     const handle = await (await this.repository()).create({ id: opts.id, workDir, ownerKey: opts.ownerKey, title: opts.title });
     return this.trackOpen(handle.id, () => this.openFromStore(handle.id, handle.workDir, handle.store, opts));
@@ -1674,6 +1680,8 @@ export class Harness<TContext = unknown> {
    * instance that is closing is not handed out: the reopen waits for its close to finish first.
    */
   resumeSession(id: string, opts: ResumeSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
+    // Not async (the in-flight/active fast paths return existing promises), so refuse by rejecting.
+    if (this.closing !== undefined) return Promise.reject(new Error("harness is closed"));
     const inflight = this.opening.get(id);
     if (inflight !== undefined) {
       return hasOwnContext(opts)
@@ -1712,6 +1720,7 @@ export class Harness<TContext = unknown> {
     sourceId: string,
     opts: ForkSessionOptions<TContext> = {},
   ): Promise<HarnessSession<TContext>> {
+    this.assertAcceptingSessions();
     const handle = await (await this.repository()).fork(sourceId, {
       ...(opts.id !== undefined ? { id: opts.id } : {}),
       ...(opts.ownerKey !== undefined ? { ownerKey: opts.ownerKey } : {}),
@@ -1783,14 +1792,26 @@ export class Harness<TContext = unknown> {
    * drained, then its dispose hook — default the instance's close()), then the host's own
    * registrations, then the defaults.
    */
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    this.closing = this.runClose();
+    return this.closing;
+  }
+
+  private async runClose(): Promise<void> {
     // Opens in flight finish (or fail) first: closing the scope tree under a half-built session
-    // would tear its scope out from under `Session.open`.
+    // would tear its scope out from under `Session.open`. New opens are refused from here on
+    // (`assertAcceptingSessions`), so the set only shrinks.
     await Promise.allSettled([...this.opening.values()]);
     for (const session of [...this.activeSessions.values()]) await session.close();
     await this.sharedReady.catch(() => undefined);
     this.createdServices.length = 0;
-    await this.scope.close();
+    await this.scope.close(this.scopeCloseOptions());
+  }
+
+  /** Every path that opens a session starts here: a closing harness opens nothing new. */
+  private assertAcceptingSessions(): void {
+    if (this.closing !== undefined) throw new Error("harness is closed");
   }
 
   /**
@@ -2176,7 +2197,7 @@ export class Harness<TContext = unknown> {
     await attempt("detach projection", () => built.projection?.detach());
     // The core owns the scope once it opened; before that the scope is ours to close.
     if (built.core !== undefined) await attempt("close core", () => built.core!.close());
-    else if (built.scope !== undefined) await attempt("close scope", () => built.scope!.close({ disposeTimeoutMs: OPEN_ROLLBACK_DISPOSE_TIMEOUT_MS }));
+    else if (built.scope !== undefined) await attempt("close scope", () => built.scope!.close(this.scopeCloseOptions(id)));
     await attempt("release workspace", () => this.releaseWorkspace(workspaceKey));
   }
 
@@ -2214,7 +2235,22 @@ export class Harness<TContext = unknown> {
     entry.refs -= 1;
     if (entry.refs > 0) return;
     this.workspaces.delete(key);
-    await entry.scope.close();
+    await entry.scope.close(this.scopeCloseOptions(undefined, key));
+  }
+
+  /** Close options for a scope the harness tears down itself: per-service deadline, failures logged. */
+  private scopeCloseOptions(sessionId?: string, workspaceKey?: string): CloseOptions {
+    return {
+      disposeTimeoutMs: SCOPE_DISPOSE_TIMEOUT_MS,
+      onDisposeError: (name, error) => {
+        this.scope.get(T.Logger)?.log("warn", `service "${name}" dispose failed/timed out`, {
+          service: name,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(workspaceKey !== undefined ? { workspaceKey } : {}),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    };
   }
 
   /**
