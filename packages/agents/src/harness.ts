@@ -121,6 +121,9 @@ export type QuestionHandler = (
 
 export type HarnessSessionState = "idle" | "running" | "interrupted" | "closed";
 
+/** Dispose deadline for a session scope torn down by a failed open (mirrors the core's close deadline). */
+const OPEN_ROLLBACK_DISPOSE_TIMEOUT_MS = 5_000;
+
 /** How long `HarnessSession.close()` waits for aborted runs to settle before continuing teardown. */
 let CLOSE_RUN_WAIT_MS = 5_000;
 
@@ -1420,6 +1423,9 @@ export class Harness<TContext = unknown> {
   /** Concrete tools the default profile's tool NAMES resolve against (keyed by schema name). */
   private readonly toolPalette: Readonly<Record<string, Tool>>;
   private readonly activeSessions = new Map<string, HarnessSession<TContext>>();
+  /** Opens in flight by session id (`resumeSession`): concurrent callers share ONE open — the
+   *  whole of it, reconcile and failure cleanup included — instead of each building an instance. */
+  private readonly opening = new Map<string, Promise<HarnessSession<TContext>>>();
 
   /** The harness-tier scope: every process-lived object, and the parent of every workspace scope. */
   readonly scope: Scope<"harness">;
@@ -1643,18 +1649,46 @@ export class Harness<TContext = unknown> {
     return this.openFromStore(handle.id, handle.workDir, handle.store, opts);
   }
 
-  async resumeSession(id: string, opts: ResumeSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
-    const existing = this.activeSessions.get(id);
-    if (existing) {
-      if (hasOwnContext(opts)) existing.setContext(opts.context);
-      return existing;
+  /**
+   * The open session with this id, or reopen it from the store. Concurrent calls for one id share
+   * a single open (`opening`): the second caller waits for the first's — reconcile included — and
+   * receives the same instance, never a second one that a close would then unregister. An
+   * instance that is closing is not handed out: the reopen waits for its close to finish first.
+   */
+  resumeSession(id: string, opts: ResumeSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
+    const inflight = this.opening.get(id);
+    if (inflight !== undefined) {
+      return hasOwnContext(opts)
+        ? inflight.then((session) => {
+            session.setContext(opts.context);
+            return session;
+          })
+        : inflight;
     }
-    const handle = await (await this.repository()).open(id);
-    if (handle === undefined) throw new SessionRepositoryNotFoundError(id);
-    const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
-    // Reopening: orphaned background subagents (running from a dead process) → lost.
-    await session.reconcileSubagents();
-    return session;
+    const existing = this.activeSessions.get(id);
+    if (existing !== undefined && existing.status.state !== "closed") {
+      if (hasOwnContext(opts)) existing.setContext(opts.context);
+      return Promise.resolve(existing);
+    }
+    const open = (async (): Promise<HarnessSession<TContext>> => {
+      // `existing` here is one that is closing: wait for that close (its registration and
+      // workspace hold go with it) rather than open a twin beside it.
+      if (existing !== undefined) await existing.close();
+      const handle = await (await this.repository()).open(id);
+      if (handle === undefined) throw new SessionRepositoryNotFoundError(id);
+      const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
+      // Reopening: orphaned background subagents (running from a dead process) → lost. A failure
+      // here is an open failure: the session is torn down, not left registered and unreturned.
+      try {
+        await session.reconcileSubagents();
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
+      return session;
+    })().finally(() => this.opening.delete(id));
+    this.opening.set(id, open);
+    return open;
   }
 
   /** Fork an existing session into a new one (copies its log + state) and open it. */
@@ -1669,7 +1703,12 @@ export class Harness<TContext = unknown> {
     });
     const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
     // A fork copies the subagent ledger; its background "running" rows have no live task → lost.
-    await session.reconcileSubagents();
+    try {
+      await session.reconcileSubagents();
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     return session;
   }
 
@@ -1690,8 +1729,15 @@ export class Harness<TContext = unknown> {
     return (await this.repository()).get(id);
   }
 
-  /** Close one open session by id (no-op if it isn't open). */
+  /** Close one open session by id (no-op if it isn't open). An open in flight for this id is
+   *  waited for and then closed, so a close/delete never races a half-built session. */
   async closeSession(id: string): Promise<void> {
+    const inflight = this.opening.get(id);
+    if (inflight !== undefined) {
+      const session = await inflight.catch(() => undefined);
+      await session?.close();
+      return;
+    }
     await this.activeSessions.get(id)?.close();
   }
 
@@ -1720,6 +1766,9 @@ export class Harness<TContext = unknown> {
    * registrations, then the defaults.
    */
   async close(): Promise<void> {
+    // Opens in flight finish (or fail) first: closing the scope tree under a half-built session
+    // would tear its scope out from under `Session.open`.
+    await Promise.allSettled([...this.opening.values()]);
     for (const session of [...this.activeSessions.values()]) await session.close();
     await this.sharedReady.catch(() => undefined);
     this.createdServices.length = 0;
@@ -1991,86 +2040,126 @@ export class Harness<TContext = unknown> {
     // The workspace scope (one per key, shared) and under it the session scope: what the harness
     // decides for this session goes in here; Session.open provides the defaults for the rest,
     // and from then on the session owns the scope.
+    // From here the open is a transaction: the session is registered as active only once every
+    // step has succeeded, and any failure tears down exactly what was built — projection, the
+    // session scope (via the core when it got that far), the workspace hold — before rethrowing.
+    // Half-open leftovers are what kept a workspace alive after its last real session closed.
     const workspace = await this.acquireWorkspace(workspaceKey, workDir);
-    let scope: Scope<"session">;
+    let scope: Scope<"session"> | undefined;
+    let projection: SessionProjection | undefined;
+    let core: Session | undefined;
     try {
       scope = workspace.child("session");
+      scope.register(T.SessionId, id);
+      scope.register(T.StoreBackend, store, { owned: false }); // the repository owns the store's lifetime
+      const events = new ListenerSink();
+      scope.register(T.Events, events);
+      const responder = new MutableResponder();
+      scope.register(T.Responder, responder);
+      // Machine: this call's override → the harness-level factory (resolved by Session.open) →
+      // a LocalMachine at the session's own workDir. The session only OPERATES a caller-supplied
+      // machine; the default one is its own.
+      if (opts.machine !== undefined) {
+        if (typeof opts.machine === "function") scope.register(T.SessionMachineFactory, opts.machine);
+        else scope.register(T.Machine, opts.machine, { owned: false });
+      } else if (!workspace.has(T.WorkspaceMachineFactory) && !this.scope.has(T.MachineFactory)) {
+        scope.provide(T.Machine, () => new LocalMachine(workDir));
+      }
+      scope.register(T.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
+      if (opts.eventPublication !== undefined) scope.register(T.SessionEventPublication, opts.eventPublication);
+      // ONE open-time log read, shared: the projection seeds from it, and Session.open
+      // receives it as `preloadedLog` so its capability restore + context pre-build fold the
+      // same records — same IO, and the same `Message` objects (no second parsed copy).
+      // Attach still happens BEFORE Session.open: no events flow yet, so the seed cannot
+      // race the subscription, and anything capabilities emit during open is already folded.
+      let preloadedLog = await readLog(store);
+      // A fresh session has an empty log; anything else is a reopen. Telemetry is the only reader.
+      const resumed = preloadedLog.length > 0;
+      projection = await SessionProjection.attach({ id, store, events }, preloadedLog);
+      const interrupted = await store.getState(INTERRUPTION_STATE_KEY) !== null;
+      if (!interrupted) {
+        const recoveryRecords = await closeOrphanedProjectionFrames(id, store, projection);
+        if (recoveryRecords.length > 0) preloadedLog = [...preloadedLog, ...recoveryRecords];
+      }
+      const capabilities = await this.resolveCapabilities(
+        scope,
+        {
+          sessionId: id,
+          workDir,
+          ownMachine: opts.machine !== undefined,
+          ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
+        },
+        params,
+      );
+      core = await Session.open(scope, { capabilities, preloadedLog, resumed });
+      const agent =
+        opts.agent ??
+        this.options.agent ??
+        (await this.buildDefaultAgent(opts.appendSystemPrompt, opts.maxStepsPerTurn));
+      const session = new HarnessSession<TContext>({
+        core,
+        // The two caps land in different places: maxStepsPerTurn is an Agent property
+        // (the Runner reads the agent's value first), maxTurns is a per-run option.
+        agent,
+        runner: this.runner,
+        events,
+        responder,
+        projection,
+        workDir,
+        context: this.contextFor(opts),
+        ...(opts.maxTurns ?? this.options.maxTurns) !== undefined
+          ? { maxTurns: opts.maxTurns ?? this.options.maxTurns }
+          : {},
+        interrupted,
+        onClosed: async (sid) => {
+          // Only THIS instance's registration goes — a later open under the same id (a resume
+          // that waited for this close) must keep its own. The workspace hold is this
+          // instance's regardless and is always returned.
+          if (this.activeSessions.get(sid) === session) this.activeSessions.delete(sid);
+          await this.releaseWorkspace(workspaceKey);
+        },
+      });
+      this.activeSessions.set(id, session);
+      // Born gated: a session appearing while a reshape barrier holds (createSession,
+      // resumeSession and openSession all land here) must not start runs mid-swap. Its
+      // quiescent is trivially settled — it has no run — so it never delays the rendezvous.
+      if (this.activeBarrier !== undefined) this.activeBarrier.holds.set(id, session.holdAtBoundary());
+      return session;
     } catch (error) {
-      await this.releaseWorkspace(workspaceKey);
+      await this.rollbackOpen(id, workspaceKey, { projection, core, scope }, error);
       throw error;
     }
-    scope.register(T.SessionId, id);
-    scope.register(T.StoreBackend, store, { owned: false }); // the repository owns the store's lifetime
-    const events = new ListenerSink();
-    scope.register(T.Events, events);
-    const responder = new MutableResponder();
-    scope.register(T.Responder, responder);
-    // Machine: this call's override → the harness-level factory (resolved by Session.open) →
-    // a LocalMachine at the session's own workDir. The session only OPERATES a caller-supplied
-    // machine; the default one is its own.
-    if (opts.machine !== undefined) {
-      if (typeof opts.machine === "function") scope.register(T.SessionMachineFactory, opts.machine);
-      else scope.register(T.Machine, opts.machine, { owned: false });
-    } else if (!workspace.has(T.WorkspaceMachineFactory) && !this.scope.has(T.MachineFactory)) {
-      scope.provide(T.Machine, () => new LocalMachine(workDir));
-    }
-    scope.register(T.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
-    if (opts.eventPublication !== undefined) scope.register(T.SessionEventPublication, opts.eventPublication);
-    // ONE open-time log read, shared: the projection seeds from it, and Session.open
-    // receives it as `preloadedLog` so its capability restore + context pre-build fold the
-    // same records — same IO, and the same `Message` objects (no second parsed copy).
-    // Attach still happens BEFORE Session.open: no events flow yet, so the seed cannot
-    // race the subscription, and anything capabilities emit during open is already folded.
-    let preloadedLog = await readLog(store);
-    // A fresh session has an empty log; anything else is a reopen. Telemetry is the only reader.
-    const resumed = preloadedLog.length > 0;
-    const projection = await SessionProjection.attach({ id, store, events }, preloadedLog);
-    const interrupted = await store.getState(INTERRUPTION_STATE_KEY) !== null;
-    if (!interrupted) {
-      const recoveryRecords = await closeOrphanedProjectionFrames(id, store, projection);
-      if (recoveryRecords.length > 0) preloadedLog = [...preloadedLog, ...recoveryRecords];
-    }
-    const capabilities = await this.resolveCapabilities(
-      scope,
-      {
-        sessionId: id,
-        workDir,
-        ownMachine: opts.machine !== undefined,
-        ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
-      },
-      params,
-    );
-    const core = await Session.open(scope, { capabilities, preloadedLog, resumed });
-    const agent =
-      opts.agent ??
-      this.options.agent ??
-      (await this.buildDefaultAgent(opts.appendSystemPrompt, opts.maxStepsPerTurn));
-    const session = new HarnessSession<TContext>({
-      core,
-      // The two caps land in different places: maxStepsPerTurn is an Agent property
-      // (the Runner reads the agent's value first), maxTurns is a per-run option.
-      agent,
-      runner: this.runner,
-      events,
-      responder,
-      projection,
-      workDir,
-      context: this.contextFor(opts),
-      ...(opts.maxTurns ?? this.options.maxTurns) !== undefined
-        ? { maxTurns: opts.maxTurns ?? this.options.maxTurns }
-        : {},
-      interrupted,
-      onClosed: async (sid) => {
-        this.activeSessions.delete(sid);
-        await this.releaseWorkspace(workspaceKey);
-      },
-    });
-    this.activeSessions.set(id, session);
-    // Born gated: a session appearing while a reshape barrier holds (createSession,
-    // resumeSession and openSession all land here) must not start runs mid-swap. Its
-    // quiescent is trivially settled — it has no run — so it never delays the rendezvous.
-    if (this.activeBarrier !== undefined) this.activeBarrier.holds.set(id, session.holdAtBoundary());
-    return session;
+  }
+
+  /**
+   * Undo a failed `openFromStore`, newest artifact first. Every step runs even if an earlier one
+   * throws (a cleanup failure is logged, never allowed to mask the open's own error), and the
+   * workspace hold this open took is always returned.
+   */
+  private async rollbackOpen(
+    id: string,
+    workspaceKey: string,
+    built: { readonly projection?: SessionProjection; readonly core?: Session; readonly scope?: Scope<"session"> },
+    cause: unknown,
+  ): Promise<void> {
+    const logger = this.scope.get(T.Logger);
+    const attempt = async (step: string, run: () => void | Promise<void>): Promise<void> => {
+      try {
+        await run();
+      } catch (error) {
+        logger?.log("warn", `session open rollback: ${step} failed`, {
+          sessionId: id,
+          step,
+          error: error instanceof Error ? error.message : String(error),
+          cause: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    };
+    await attempt("detach projection", () => built.projection?.detach());
+    // The core owns the scope once it opened; before that the scope is ours to close.
+    if (built.core !== undefined) await attempt("close core", () => built.core!.close());
+    else if (built.scope !== undefined) await attempt("close scope", () => built.scope!.close({ disposeTimeoutMs: OPEN_ROLLBACK_DISPOSE_TIMEOUT_MS }));
+    await attempt("release workspace", () => this.releaseWorkspace(workspaceKey));
   }
 
   /**

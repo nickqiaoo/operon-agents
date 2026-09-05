@@ -5,8 +5,8 @@
  */
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineAgent } from "operon-agents-core";
-import { createHarness, tool } from "../src/index.ts";
+import { defineAgent, token } from "operon-agents-core";
+import { createHarness, defaultCapabilities, tool } from "../src/index.ts";
 import { setHarnessCloseTimeoutsForTest } from "../src/internal.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -223,7 +223,110 @@ async function idleCloseIsQuiet(): Promise<void> {
   faux.unregister();
 }
 
+const WsProbe = token<{ close(): void }>("lifecycle-test-ws-probe", "workspace");
+
+async function openFailureRollsBack(): Promise<void> {
+  const faux = registerFauxProvider();
+  let wsDisposed = 0;
+  let failNext = true;
+  let failedScope: { readonly state: string } | undefined;
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    workspace: (scope) => { scope.register(WsProbe, { close: () => void (wsDisposed += 1) }); },
+    session: (scope) => {
+      if (failNext) {
+        failNext = false;
+        failedScope = scope;
+        throw new Error("session hook boom");
+      }
+      return defaultCapabilities({ scope });
+    },
+  });
+  let error: unknown;
+  await harness.createSession({ id: "rollback-1" }).catch((e) => { error = e; });
+  check("rollback: the open rejects with the hook's own error", error instanceof Error && error.message === "session hook boom");
+  check("rollback: no active session was registered", harness.getSession("rollback-1") === undefined);
+  check("rollback: the half-built session scope is closed", failedScope?.state === "closed");
+  check("rollback: the workspace hold was returned — as its only holder, the failed open closed the workspace", wsDisposed === 1);
+  const ok = await harness.createSession();
+  check("rollback: a later open composes a fresh workspace and succeeds", ok.status.state === "idle");
+  await ok.close();
+  check("rollback: closing that session closes its workspace too (no leaked hold anywhere)", wsDisposed === 2);
+  await harness.close();
+  faux.unregister();
+}
+
+async function concurrentResumeSharesOneOpen(): Promise<void> {
+  const faux = registerFauxProvider();
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const created = await harness.createSession();
+  const id = created.id;
+  await created.close();
+  const [a, b] = await Promise.all([harness.resumeSession(id), harness.resumeSession(id)]);
+  check("concurrent resume: both callers receive the same instance", a === b);
+  check("concurrent resume: that instance is the registered one", harness.getSession(id) === a);
+  await a.close();
+  check("concurrent resume: closing it unregisters it", harness.getSession(id) === undefined);
+
+  // Resume while the previous instance is closing: wait for the close, then open a fresh one.
+  const again = await harness.resumeSession(id);
+  let closeSettled = false;
+  const closing = again.close().then(() => { closeSettled = true; });
+  const reopenedP = harness.resumeSession(id);
+  let sawCloseFirst = false;
+  const reopened = await reopenedP.then((session) => { sawCloseFirst = closeSettled; return session; });
+  await closing;
+  check("resume during close: a fresh instance is returned, not the closing one", reopened !== again);
+  check("resume during close: the reopen waited for the old close to finish", sawCloseFirst);
+  check("resume during close: the fresh instance is the registered one", harness.getSession(id) === reopened);
+  await again.close(); // a repeat close of the OLD instance must not touch the new registration
+  check("resume during close: re-closing the old instance leaves the new registration alone", harness.getSession(id) === reopened);
+  await reopened.close();
+  check("resume during close: closing the new instance unregisters it", harness.getSession(id) === undefined);
+  await harness.close();
+  faux.unregister();
+}
+
+async function harnessCloseDuringOpen(): Promise<void> {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  const faux = registerFauxProvider();
+  let releaseHook!: () => void;
+  const hookGate = new Promise<void>((resolve) => { releaseHook = resolve; });
+  let slow = false;
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    session: async (scope) => {
+      if (slow) await hookGate;
+      return defaultCapabilities({ scope });
+    },
+  });
+  const created = await harness.createSession();
+  const id = created.id;
+  await created.close();
+  slow = true;
+  const reopening = harness.resumeSession(id);
+  await sleep(20);
+  const closing = harness.close();
+  check("harness close during open: close() waits for the in-flight open", await pendingAfter(closing, 40));
+  releaseHook();
+  const outcome = await reopening.then((session) => ({ ok: true, state: session.status.state }), (error: Error) => ({ ok: false, message: error.message }));
+  await closing;
+  check("harness close during open: the open completed (its scope was not closed under it)", outcome.ok);
+  check("harness close during open: the reopened session ends up closed by the harness", outcome.ok && harness.getSession(id) === undefined);
+  await sleep(20);
+  process.off("unhandledRejection", onUnhandled);
+  check("harness close during open: no unhandled rejection", unhandled.length === 0);
+  faux.unregister();
+}
+
 async function main(): Promise<void> {
+  await openFailureRollsBack();
+  await concurrentResumeSharesOneOpen();
+  await harnessCloseDuringOpen();
   await cancelCoversQueuedRuns();
   await closedChecksOnEveryEntry();
   await closeWaitsForRuns();
