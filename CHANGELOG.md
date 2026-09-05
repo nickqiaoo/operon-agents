@@ -38,6 +38,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failure cleanup included) instead of building two instances of which only one was registered,
   waits for a closing instance rather than opening a twin beside it, and a close unregisters only
   its own instance. `closeSession` / `harness.close()` wait for in-flight opens first.
+- `prompt()` / `resume()` register their run synchronously again when no barrier gate is held, so
+  a `cancel()` or `close()` on the very next line finds it (an unconditional await had opened a
+  gap in which the run was invisible and went on to call the model). `createSession` and
+  `forkSession` register their in-flight open like `resumeSession` does, so a resume for an id
+  being created joins that open instead of building a second instance over the same store.
+- `promptStream()` now schedules the idle wake on settling, like `prompt()`: input queued as the
+  run ended (a background notification at `agent.ended`) starts its follow-up turn instead of
+  sitting queued until the next prompt.
+- `Runner.runStream` subscribes to the session's events only once it holds the run lock
+  (`operon-agents-core`): a stream queued behind another run no longer replays that run's prompt
+  and answer before its own.
 - The workspace skill scan follows the harness default machine (`T.MachineFactory`) with the same
   precedence `Session.open` resolves; it used to fall back to the host's disk, so a harness whose
   sessions execute remotely handed the model the local catalog.

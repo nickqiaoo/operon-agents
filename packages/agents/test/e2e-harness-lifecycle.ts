@@ -323,7 +323,121 @@ async function harnessCloseDuringOpen(): Promise<void> {
   faux.unregister();
 }
 
+async function cancelRightAfterPrompt(): Promise<void> {
+  const faux = registerFauxProvider();
+  const model = faux.getChatModel()!;
+  const harness = createHarness({ model, permission: { mode: "yolo" } });
+  const session = await harness.createSession();
+  let started = 0;
+  session.onEvent((event) => { if (event.type === "agent.started") started += 1; });
+  faux.setResponses([fauxAssistantMessage("should not run", { stopReason: "stop" }), fauxAssistantMessage("should not run", { stopReason: "stop" })]);
+
+  const cancelled = session.prompt("cancel me at once");
+  check("prompt+cancel: the run is registered synchronously by prompt()", session.status.state === "running");
+  session.cancel();
+  let cancelledError: unknown;
+  await cancelled.catch((error) => { cancelledError = error; });
+  check("prompt+cancel: the run is rejected as aborted", cancelledError instanceof Error && cancelledError.name === "AbortError");
+  check("prompt+cancel: the model was never called (no agent.started)", started === 0);
+
+  const closedRun = session.prompt("close me at once");
+  const closing = session.close();
+  let closedError: unknown;
+  await closedRun.catch((error) => { closedError = error; });
+  await closing;
+  check("prompt+close: the run is rejected as aborted", closedError instanceof Error && closedError.name === "AbortError");
+  check("prompt+close: the model was never called", started === 0);
+  await harness.close();
+  faux.unregister();
+}
+
+async function createRacesResume(): Promise<void> {
+  const faux = registerFauxProvider();
+  let releaseHook!: () => void;
+  const hookGate = new Promise<void>((resolve) => { releaseHook = resolve; });
+  let slow = true;
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    session: async (scope) => {
+      if (slow) { slow = false; await hookGate; }
+      return defaultCapabilities({ scope });
+    },
+  });
+  const creating = harness.createSession({ id: "race-create" });
+  await sleep(20);
+  const resuming = harness.resumeSession("race-create");
+  check("create vs resume: the resume waits for the in-flight create", await pendingAfter(resuming, 40));
+  releaseHook();
+  const [created, resumed] = await Promise.all([creating, resuming]);
+  check("create vs resume: both receive the same instance (one store, one run lock)", created === resumed);
+  check("create vs resume: it is the registered one", harness.getSession("race-create") === created);
+  await harness.close();
+  faux.unregister();
+}
+
+async function streamSettlesQueuedInput(): Promise<void> {
+  const faux = registerFauxProvider();
+  const model = faux.getChatModel()!;
+  const harness = createHarness({ model, permission: { mode: "yolo" } });
+  const session = await harness.createSession();
+  let started = 0;
+  session.onEvent((event) => {
+    if (event.type === "agent.started") started += 1;
+    // A background notification landing exactly as the run ends: after its last drain.
+    if (event.type === "agent.ended" && started === 1) {
+      session.steerTo("main", "late notification", { kind: "external", source: "bg", deliveryId: "bg_1", channel: "follow_up" });
+    }
+  });
+  faux.setResponses([fauxAssistantMessage("streamed", { stopReason: "stop" }), fauxAssistantMessage("woke", { stopReason: "stop" })]);
+  const handle = session.promptStream("stream me");
+  for await (const _event of handle) { /* drain */ }
+  await handle.completed;
+  await sleep(60);
+  check("stream idle-wake: the input queued at agent.ended started a follow-up turn", started === 2);
+  check("stream idle-wake: nothing is left queued", session.status.hasQueuedMessages === false && session.status.state === "idle");
+  await harness.close();
+  faux.unregister();
+}
+
+async function concurrentStreamsStayApart(): Promise<void> {
+  const faux = registerFauxProvider();
+  const model = faux.getChatModel()!;
+  const harness = createHarness({ model, permission: { mode: "yolo" } });
+  const session = await harness.createSession();
+  faux.setResponses([fauxAssistantMessage("answer one", { stopReason: "stop" }), fauxAssistantMessage("answer two", { stopReason: "stop" })]);
+  const first = session.promptStream("prompt one");
+  const second = session.promptStream("prompt two");
+  // Only the journal-shaped events count: `model.request` legitimately carries the whole
+  // conversation (the first run IS the second run's history), so it is excluded.
+  const appended = async (handle: AsyncIterable<{ type: string }>): Promise<string[]> => {
+    const out: string[] = [];
+    for await (const event of handle) {
+      if (event.type === "message.appended" || event.type === "agent.started" || event.type === "turn.started") out.push(JSON.stringify(event));
+    }
+    return out;
+  };
+  const [firstEvents, secondEvents] = await Promise.all([appended(first), appended(second)]);
+  await Promise.all([first.completed, second.completed]);
+  const firstText = firstEvents.join("\n");
+  const secondText = secondEvents.join("\n");
+  check("concurrent streams: the first stream carries its own prompt and answer", firstText.includes("prompt one") && firstText.includes("answer one"));
+  check("concurrent streams: the first stream carries nothing of the second run", !firstText.includes("prompt two") && !firstText.includes("answer two"));
+  check("concurrent streams: the second stream carries its own prompt and answer", secondText.includes("prompt two") && secondText.includes("answer two"));
+  check("concurrent streams: the second stream does NOT replay the first run's prompt or answer", !secondText.includes("prompt one") && !secondText.includes("answer one"));
+  check("concurrent streams: each stream sees exactly one agent.started", firstEvents.filter((e) => e.includes('"agent.started"')).length === 1 && secondEvents.filter((e) => e.includes('"agent.started"')).length === 1);
+  if (secondText.includes("prompt one") || secondText.includes("answer one")) {
+    console.log("  offending:", secondEvents.filter((e) => e.includes("prompt one") || e.includes("answer one")).map((e) => e.slice(0, 160)));
+  }
+  await harness.close();
+  faux.unregister();
+}
+
 async function main(): Promise<void> {
+  await cancelRightAfterPrompt();
+  await createRacesResume();
+  await streamSettlesQueuedInput();
+  await concurrentStreamsStayApart();
   await openFailureRollsBack();
   await concurrentResumeSharesOneOpen();
   await harnessCloseDuringOpen();

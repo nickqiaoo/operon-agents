@@ -825,8 +825,9 @@ export class HarnessSession<TContext = unknown> {
   private async runPrompt(input: AgentInput, inputOrigin?: PromptOrigin): Promise<RunResult> {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
     // Barrier gate: park until released (a hold is "wait", not "fail") — unless the session
-    // closes meanwhile, which is the one thing that turns the wait into a failure.
-    await this.parkAtGate();
+    // closes meanwhile, which is the one thing that turns the wait into a failure. Ungated, the
+    // run is registered SYNCHRONOUSLY: a cancel() or close() on the next line must find it.
+    if (this.runGate !== undefined) await this.parkAtGate();
     const controller = new AbortController();
     this.beginRun(controller);
     try {
@@ -1016,7 +1017,7 @@ export class HarnessSession<TContext = unknown> {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
     // Barrier gate first (a coordinator holding the barrier should not be resumed against —
     // the call parks here until release rather than failing; closing meanwhile does fail it).
-    await this.parkAtGate();
+    if (this.runGate !== undefined) await this.parkAtGate();
     if (this.hasActiveRuns()) throw new Error(`session "${this.id}" already has an active run`);
     const controller = new AbortController();
     // Set this BEFORE the first await (past the gate). A host returning 202 from resume can
@@ -1090,6 +1091,9 @@ export class HarnessSession<TContext = unknown> {
       })
       .finally(() => {
         this.endRun(controller);
+        // Same as runPrompt's exit: input queued after this run's last drain (a background
+        // notification landing at agent.ended) needs a wake, or it sits until the next prompt.
+        this.scheduleIdleWake();
       });
     // Guard the floating promise so iterate-only callers don't trip an unhandled rejection
     // (mirrors runStream's own internal guard); awaiters still receive a real rejection.
@@ -1646,7 +1650,21 @@ export class Harness<TContext = unknown> {
   async createSession(opts: CreateSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
     const workDir = opts.workDir ?? this.options.workDir ?? process.cwd();
     const handle = await (await this.repository()).create({ id: opts.id, workDir, ownerKey: opts.ownerKey, title: opts.title });
-    return this.openFromStore(handle.id, handle.workDir, handle.store, opts);
+    return this.trackOpen(handle.id, () => this.openFromStore(handle.id, handle.workDir, handle.store, opts));
+  }
+
+  /**
+   * Register an open in flight under its id for as long as it runs. Every path that builds a
+   * session goes through here — create, resume, fork — so a `resumeSession` for an id that is
+   * being created joins that open instead of building a twin over the same store, and
+   * `closeSession` / `harness.close()` wait for it instead of closing its scope under it.
+   */
+  private trackOpen(id: string, open: () => Promise<HarnessSession<TContext>>): Promise<HarnessSession<TContext>> {
+    const promise: Promise<HarnessSession<TContext>> = open().finally(() => {
+      if (this.opening.get(id) === promise) this.opening.delete(id);
+    });
+    this.opening.set(id, promise);
+    return promise;
   }
 
   /**
@@ -1670,7 +1688,7 @@ export class Harness<TContext = unknown> {
       if (hasOwnContext(opts)) existing.setContext(opts.context);
       return Promise.resolve(existing);
     }
-    const open = (async (): Promise<HarnessSession<TContext>> => {
+    return this.trackOpen(id, async (): Promise<HarnessSession<TContext>> => {
       // `existing` here is one that is closing: wait for that close (its registration and
       // workspace hold go with it) rather than open a twin beside it.
       if (existing !== undefined) await existing.close();
@@ -1686,9 +1704,7 @@ export class Harness<TContext = unknown> {
         throw error;
       }
       return session;
-    })().finally(() => this.opening.delete(id));
-    this.opening.set(id, open);
-    return open;
+    });
   }
 
   /** Fork an existing session into a new one (copies its log + state) and open it. */
@@ -1701,15 +1717,17 @@ export class Harness<TContext = unknown> {
       ...(opts.ownerKey !== undefined ? { ownerKey: opts.ownerKey } : {}),
       ...(opts.title !== undefined ? { title: opts.title } : {}),
     });
-    const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
-    // A fork copies the subagent ledger; its background "running" rows have no live task → lost.
-    try {
-      await session.reconcileSubagents();
-    } catch (error) {
-      await session.close();
-      throw error;
-    }
-    return session;
+    return this.trackOpen(handle.id, async () => {
+      const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
+      // A fork copies the subagent ledger; its background "running" rows have no live task → lost.
+      try {
+        await session.reconcileSubagents();
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
+      return session;
+    });
   }
 
   /** The currently-open session with this id, or undefined (does not reopen — use resumeSession). */
