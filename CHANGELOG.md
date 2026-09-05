@@ -7,6 +7,41 @@ released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Closing a session now waits for its runs to wind down** (`operon-agents`, `operon-agents-core`).
+  `HarnessSession.close()` is a state machine (open → closing → closed): it stops accepting runs,
+  aborts every accepted run — the one in flight *and* any queued behind the run lock — and waits
+  for them to settle, up to 5 seconds, before detaching the projection and closing the core.
+  The deadline bounds the wait for runs only; the flushes and disposes that follow keep their own
+  deadlines, and a run that ignores its abort is logged and left behind, not stopped. A tool's
+  `finally` or a run's last journal write no longer races the capability disposers. Every
+  `close()` call — `HarnessSession`, core `Session` and `Scope` alike — returns the same promise,
+  so a second caller waits for the teardown instead of returning while it is still running.
+- `Scope.close()` no longer lets a parent skip a child whose close is still in flight (which
+  disposed the parent's entries under the child's disposers), and once closing it stops
+  materializing lazy defaults: a disposer touching a never-instantiated service gets "missing"
+  instead of creating an orphan the teardown never disposes. New `scope.state`.
+- `cancel()` aborted only the last-begun run: with a second `prompt()` queued behind the run lock
+  that was the queued one, and the running one carried on. It now aborts all of them, and a run
+  cancelled while queued bails on acquiring the lock — before reconcile, context replay or
+  `agent.started`. `resume()` and `promptStream()` gained the closed check `prompt()` had; a
+  caller parked at the reshape barrier's gate fails with the closed error when the session
+  closes instead of hanging on a gate nobody will release.
+- **Opening a session is a transaction** (`operon-agents`). A failure anywhere after the workspace
+  is acquired — log read, `session` hook, `Session.open`, agent build — tears down what was built
+  (projection, session scope, workspace hold; every step attempted, cleanup failures logged, the
+  original error rethrown). A half-open leftover used to keep a workspace alive after its last real
+  session closed. `resumeSession` for one id now shares a single in-flight open (reconcile and
+  failure cleanup included) instead of building two instances of which only one was registered,
+  waits for a closing instance rather than opening a twin beside it, and a close unregisters only
+  its own instance. `closeSession` / `harness.close()` wait for in-flight opens first.
+- The workspace skill scan follows the harness default machine (`T.MachineFactory`) with the same
+  precedence `Session.open` resolves; it used to fall back to the host's disk, so a harness whose
+  sessions execute remotely handed the model the local catalog.
+
 ## [0.1.0-alpha.5] — 2026-09-05
 
 ### Added
