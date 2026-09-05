@@ -81,6 +81,49 @@ async function main(): Promise<void> {
       await harness.close();
     }
 
+    // ── The HARNESS default machine (`T.MachineFactory`): the workspace scan must follow it too ──
+    {
+      const harness = await createLocalHarness({
+        ...base,
+        harness: (scope) => {
+          scope.register(T.MachineFactory, new LocalMachine(remote), { owned: false });
+        },
+      });
+      const session = await harness.createSession();
+      check("harness default (machine instance): the workspace scan ran through the harness's machine, not the host's disk", names(session).join(",") === "remote-skill");
+      check("harness default (machine instance): it IS the shared registry", session.core.scope.parent?.hasLocal(T.SkillRegistry) === true);
+      await harness.close();
+    }
+    {
+      const harness = await createLocalHarness({
+        ...base,
+        harness: (scope) => {
+          scope.register(T.MachineFactory, () => new LocalMachine(remote), { owned: false });
+        },
+      });
+      const session = await harness.createSession();
+      check("harness default (machine factory): no shared registry", session.core.scope.parent?.hasLocal(T.SkillRegistry) === false);
+      check("harness default (machine factory): each session scans through the machine the factory gave it", names(session).join(",") === "remote-skill");
+      await harness.close();
+    }
+    {
+      // Precedence: a workspace's own machine beats the harness default, same as in Session.open.
+      const third = join(root, "third");
+      skillDir(third, "third-skill");
+      const harness = await createLocalHarness({
+        ...base,
+        harness: (scope) => {
+          scope.register(T.MachineFactory, new LocalMachine(remote), { owned: false });
+        },
+        workspace: (scope) => {
+          scope.register(T.WorkspaceMachineFactory, new LocalMachine(third), { owned: false });
+        },
+      });
+      const session = await harness.createSession();
+      check("precedence: the workspace's machine wins over the harness default", names(session).join(",") === "third-skill");
+      await harness.close();
+    }
+
     faux.unregister();
   } finally {
     rmSync(root, { recursive: true, force: true });

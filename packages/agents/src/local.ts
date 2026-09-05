@@ -103,11 +103,13 @@ export async function localHarnessOptions<TContext>(
       await workspace?.(scope, ctx);
       // Skills follow the workspace's EXECUTION machine, not the host's disk: the catalog the
       // model sees must be the one whose scripts its Bash can reach. A remote workspace
-      // registers its machine above and the scan runs through it. A machine FACTORY (one
+      // registers its machine above and the scan runs through it; absent that, the harness's
+      // default (`T.MachineFactory`, read through the parent chain) is what sessions here will
+      // execute on — the same precedence `Session.open` resolves. A machine FACTORY (one
       // machine per session) has no single filesystem to scan — no shared registry then; each
       // session scans through its own `T.Machine` (`defaultCapabilities` without `T.SkillRegistry`).
       if (!scope.hasLocal(T.SkillRegistry)) {
-        const workspaceMachine = scope.get(T.WorkspaceMachineFactory) ?? new LocalMachine(ctx.workDir);
+        const workspaceMachine = scope.get(T.WorkspaceMachineFactory) ?? scope.get(T.MachineFactory) ?? new LocalMachine(ctx.workDir);
         if (typeof workspaceMachine !== "function") {
           const registry = new SkillRegistry();
           await loadSkillRoots(workspaceMachine, registry, {
