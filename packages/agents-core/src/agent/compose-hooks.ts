@@ -24,7 +24,7 @@ export function buildRunHooks<TContext>(
   active: Agent<TContext>,
   state: RunState<TContext>,
   context: ConversationContext,
-  tools: readonly Tool[],
+  tools: readonly Tool[] | (() => readonly Tool[]),
 ): LoopHooks {
   const ctx = runCtxFor(state);
   const parts: Array<Partial<LoopHooks> | undefined> = [...state.capabilities.loopHookParts];
@@ -49,12 +49,12 @@ export function buildRunHooks<TContext>(
 function buildAuthorizer<TContext>(
   state: RunState<TContext>,
   context: ConversationContext,
-  tools: readonly Tool[],
+  tools: readonly Tool[] | (() => readonly Tool[]),
 ): LoopHooks["authorizeToolExecution"] {
   // The `auto`-mode judge needs THIS frame's live transcript + tool registry (the authorize
   // ctx carries neither). Bind them per turn as closure state — the manager is a session
   // singleton shared by concurrent frames, so they must never be stored on it.
-  const base = state.permission.authorizerFor({ getTranscript: () => context.messages, getTools: () => tools });
+  const base = state.permission.authorizerFor({ getTranscript: () => context.messages, getTools: typeof tools === "function" ? tools : () => tools });
   const answers = state.answers;
   if (!answers) return base;
   return async (ctx) => {

@@ -515,7 +515,7 @@ export class SessionProjection {
         foldReplace(state, event.messages, event.origins);
         break;
       case "history.compacted":
-        foldCompaction(state, event.cutoff, event.summary, event.summaryTimestamp);
+        foldCompaction(state, event.cutoff, event.summary, event.summaryTimestamp, event.loadedTools);
         break;
       case "steer.queued":
         state.pendingSteers.push({

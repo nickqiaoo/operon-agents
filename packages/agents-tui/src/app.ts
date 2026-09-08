@@ -767,6 +767,7 @@ function originLabel(origin: PromptOrigin | undefined): string {
   if (origin.kind === "external") return origin.actor ?? origin.source;
   if (origin.kind === "injection") return "System";
   if (origin.kind === "compaction_summary") return "Summary";
+  if (origin.kind === "tool_catalog_delta") return "Tools";
   return `Handoff ${origin.fromAddress}`;
 }
 

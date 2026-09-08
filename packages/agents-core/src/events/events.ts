@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message, TextContent, ThinkingContent, Usage } from "../protocol/index.ts";
-import type { PromptOrigin } from "../store/origin.ts";
+import type { LoadedToolSchema, PromptOrigin } from "../store/origin.ts";
 import type { ToolInputRequest, ToolResult, ToolUpdate } from "../tool/types.ts";
 import type { PendingRunInterrupt } from "../loop/interruption.ts";
 import type { ModelSettings } from "../llm/model.ts";
@@ -176,6 +176,8 @@ export type AgentEventBody =
       readonly summary: string;
       /** Pinned so live and replay build a byte-identical summary message. */
       readonly summaryTimestamp?: number;
+      /** See `CompactionSummaryOrigin.loadedTools`. */
+      readonly loadedTools?: readonly LoadedToolSchema[];
     }
   // A message entered the SteerBus queue (any producer: user steer/follow-up RPC, cron fire,
   // background settle). `steerId` matches the producer's `SteerReceipt` and reappears as

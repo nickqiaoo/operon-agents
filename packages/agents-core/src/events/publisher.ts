@@ -209,6 +209,7 @@ function projectableEventBody(record: AgentRecord): AgentEventBody | undefined {
         cutoff: record.cutoff,
         summary: record.summary,
         summaryTimestamp: record.summaryTimestamp,
+        ...(record.loadedTools !== undefined ? { loadedTools: record.loadedTools } : {}),
       };
     case "usage.record":
       return record.total === undefined ? undefined : { type: "usage.updated", usage: record.total };

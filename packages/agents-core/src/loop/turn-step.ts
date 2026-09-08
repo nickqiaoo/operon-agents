@@ -14,7 +14,7 @@ import { APIContextOverflowError, isContextOverflowMessage } from "../llm/errors
 import type { LoopEventDispatcher } from "./events.ts";
 import type { HandoffSignal, LoopHooks, OutputGuardrailMonitorFactory, PendingInterrupt, StepStopReason } from "./types.ts";
 import type { ToolCallSuspension } from "./interruption.ts";
-import { activeDeferredTools } from "../tool/search/activation.ts";
+import { describeUnknownTool, prepareToolCatalog, type ToolCatalogSnapshot } from "../tool/search/catalog.ts";
 
 export interface RecordUsageResult {
   readonly stopTurn?: boolean;
@@ -43,6 +43,9 @@ export interface ExecuteStepDeps {
   /** Complete execution registry; projected after beforeStep (which may compact). */
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
+  readonly deferEnabled?: boolean;
+  readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
+  readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   readonly hooks?: LoopHooks;
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
   readonly currentStep: number;
@@ -90,12 +93,13 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
   // Compaction runs in beforeStep. Recompute afterwards so full compaction
   // unloads removed load points immediately, while a SearchTool result from the
   // preceding step activates its schemas for this request.
-  const activeTools = activeDeferredTools(
-    deps.tools,
-    deps.deferredToolNames,
-    messages,
-  );
-  const toolSchemas = activeTools.map((tool) => tool.schema);
+  const snapshot = deps.refreshTools ? await deps.refreshTools() : deps;
+  signal.throwIfAborted();
+  const prepared = prepareToolCatalog(deps.context, snapshot);
+  for (const warning of prepared.warnings) deps.logger?.log("warn", warning);
+  const activeTools = prepared.tools;
+  deps.onToolsPrepared?.(activeTools);
+  const toolSchemas = prepared.schemas;
   const toolMap = new Map<string, Tool>(
     activeTools.map((tool) => [tool.schema.name, tool]),
   );
@@ -103,6 +107,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
     system,
     messages,
     tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+    ...(prepared.deferEnabled ? { deferredTools: true } : {}),
     ...(deps.params ? { params: deps.params } : {}),
     // Per conversation line, not per session: each address carries its own prefix, so keying
     // them apart is what actually helps the cache. Seeded here rather than merged, so an
@@ -251,7 +256,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, machine: deps.machine, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, machine: deps.machine, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger },
       message,
     );
 

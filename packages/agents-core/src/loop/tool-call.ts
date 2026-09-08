@@ -36,6 +36,8 @@ export interface ToolCallStepContext {
   readonly model: ChatModel;
   readonly machine: Machine;
   readonly tools: ReadonlyMap<string, Tool>;
+  /** Explains a call to a name absent from `tools` (e.g. an unloaded deferred tool). */
+  readonly describeUnknownTool?: (name: string) => string | undefined;
   readonly hooks?: LoopHooks;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel, forwarded into the tool run context (AskUserQuestion). */
@@ -215,7 +217,10 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
     if (prep && "updatedArgs" in prep && prep.updatedArgs !== undefined) args = prep.updatedArgs;
   }
 
-  if (!tool) return { kind: "result", call, result: errorResult(`unknown tool: ${call.name}`) };
+  if (!tool) {
+    const reason = step.describeUnknownTool?.(call.name) ?? `unknown tool: ${call.name}`;
+    return { kind: "result", call, result: errorResult(reason) };
+  }
 
   // Phase 1 — resolve to a plan (a throw becomes an error result).
   let plan: ToolPlan;

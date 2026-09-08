@@ -47,7 +47,7 @@ import { assertGraphUnambiguous, duplicateAgentNames, findAgentByName, findAgent
 import { performHandoff } from "./handoff-executor.ts";
 import { pauseRun } from "./pause.ts";
 import { buildRunTools } from "./toolset.ts";
-import { activeDeferredTools } from "../tool/search/activation.ts";
+import { prepareToolCatalog } from "../tool/search/catalog.ts";
 import {
   emitRunEvent,
   finalText,
@@ -873,12 +873,10 @@ class Engine<TContext> {
           this.run(agent, childContext, childState, childResume),
         model,
       );
-      const hooks = buildRunHooks(current, state, context, toolset.tools);
-      const visibleTools = activeDeferredTools(
-        toolset.tools,
-        toolset.deferredToolNames,
-        context.messages,
-      );
+      let permissionTools = toolset.tools;
+      const hooks = buildRunHooks(current, state, context, () => permissionTools);
+      // The same projection the first step will send (announcements are that step's job).
+      const visibleTools = prepareToolCatalog(context, toolset, { announce: false }).schemas.map((schema) => ({ schema }));
 
       // Stamp a context-window breakdown snapshot from exactly what this turn will send, so
       // `session.getContextBreakdown()` (and the app-server RPC) can report where tokens go.
@@ -916,6 +914,14 @@ class Engine<TContext> {
           context,
           tools: toolset.tools,
           deferredToolNames: toolset.deferredToolNames,
+          deferEnabled: toolset.deferEnabled,
+          onToolsPrepared: (tools) => { permissionTools = tools; },
+          refreshTools: () => buildRunTools(
+            current,
+            state,
+            (agent, childContext, childState, childResume) => this.run(agent, childContext, childState, childResume),
+            model,
+          ),
           hooks,
           params: resolveModelParams(current.modelSettings, state.session.thinkingSetting),
           createOutputGuardrailMonitor: outputGuardrails.length > 0

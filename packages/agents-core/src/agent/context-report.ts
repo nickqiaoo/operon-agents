@@ -56,7 +56,7 @@ export interface ContextBreakdown {
 export interface ComputeContextBreakdownInput {
   readonly model: ChatModel;
   readonly system: string | undefined;
-  readonly tools: readonly Tool[];
+  readonly tools: readonly Pick<Tool, "schema">[];
   readonly messages: readonly Message[];
   /** Per-injector token estimates captured while injecting at the turn boundary. */
   readonly injectionTokens: ReadonlyMap<string, number>;

@@ -11,7 +11,7 @@ import { addUsage, emptyUsage } from "./usage.ts";
 import { isAbortError, MaxStepsExceededError } from "./errors.ts";
 import { APIContextOverflowError } from "../llm/errors.ts";
 import { executeStep, type RecordUsageResult, type StepResult } from "./turn-step.ts";
-import { activeDeferredTools } from "../tool/search/activation.ts";
+import { describeUnknownTool, prepareToolCatalog, type ToolCatalogSnapshot } from "../tool/search/catalog.ts";
 import type { ConversationContext } from "./context.ts";
 import { runCalls } from "./tool-call.ts";
 import type { LoopEventDispatcher } from "./events.ts";
@@ -46,6 +46,10 @@ export interface RunTurnInput {
   readonly tools?: readonly Tool[];
   /** Capability tools hidden until transcript load/use evidence activates them. */
   readonly deferredToolNames?: ReadonlySet<string>;
+  readonly deferEnabled?: boolean;
+  /** Snapshot after beforeStep, so a connection completed during a turn is seen next step. */
+  readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
+  readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   readonly hooks?: LoopHooks;
   /** Per-step optimistic output guardrail adapter supplied by the active agent layer. */
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
@@ -97,11 +101,10 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   try {
     // HITL resume — re-run the interrupted batch with pre-loaded answers first.
     if (input.resumeFrom) {
-      const resumeTools = activeDeferredTools(
-        toolList,
-        deferredToolNames,
-        input.context.messages,
-      );
+      const resumeSnapshot = input.refreshTools ? await input.refreshTools() : { tools: toolList, deferredToolNames, deferEnabled: input.deferEnabled };
+      const resumePrepared = prepareToolCatalog(input.context, resumeSnapshot, { announce: false });
+      const resumeTools = resumePrepared.tools;
+      input.onToolsPrepared?.(resumeTools);
       const resumeToolMap = new Map<string, Tool>(
         resumeTools.map((tool) => [tool.schema.name, tool]),
       );
@@ -110,7 +113,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, machine: input.machine, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, machine: input.machine, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -163,6 +166,9 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           params: input.params,
           tools: toolList,
           deferredToolNames,
+          deferEnabled: input.deferEnabled,
+          refreshTools: input.refreshTools,
+          onToolsPrepared: input.onToolsPrepared,
           hooks: input.hooks,
           createOutputGuardrailMonitor: input.createOutputGuardrailMonitor,
           currentStep: steps,

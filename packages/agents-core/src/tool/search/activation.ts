@@ -9,6 +9,10 @@ import type { Tool } from "../types.ts";
  * - a surviving assistant tool call keeps an already-used tool immediate.
  * - full compaction unloads evidence removed with the compacted prefix.
  * - micro compaction keeps these fields while replacing only result content.
+ *
+ * `prepareToolCatalog` (catalog.ts) does not use this projection: it activates a catalog tool
+ * only from recorded definitions (a SearchTool load point or a snapshot-carrying call), so a
+ * guessed call to a never-loaded name is not evidence. This stays as the origin-free view.
  */
 export function activeDeferredTools(
   tools: readonly Tool[],

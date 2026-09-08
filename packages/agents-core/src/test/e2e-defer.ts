@@ -101,10 +101,10 @@ async function testSearchToolResult(): Promise<void> {
   const search = buildSearchTool(CATALOG);
   check("builtin: named SearchTool", search.schema.name === SEARCH_TOOL_NAME);
   check(
-    "builtin: description announces deferred names",
-    search.schema.description.includes("<available-deferred-tools>") &&
-      search.schema.description.includes("mcp__slack__send_message") &&
-      search.schema.description.includes("NotebookEdit"),
+    "builtin: description stays fixed as catalogs change",
+    search.schema.description === buildSearchTool([]).schema.description &&
+      !search.schema.description.includes("mcp__slack__send_message") &&
+      !search.schema.description.includes("NotebookEdit"),
   );
 
   const plan = await search.resolve(

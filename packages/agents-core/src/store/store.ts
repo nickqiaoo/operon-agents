@@ -1,5 +1,5 @@
 import type { ImageContent, Message, TextContent, Usage } from "../protocol/index.ts";
-import type { ExternalPromptOrigin, PromptOrigin, UserPromptOrigin } from "./origin.ts";
+import type { CompactionSummaryOrigin, ExternalPromptOrigin, LoadedToolSchema, PromptOrigin, UserPromptOrigin } from "./origin.ts";
 
 /** Who an accepted input (`inbox.received`) is from — see that record's doc. */
 export type InboxOrigin =
@@ -53,6 +53,8 @@ export type AgentRecordBody =
       readonly compactedCount: number;
       readonly tokensBefore: number;
       readonly tokensAfter: number;
+      /** See `CompactionSummaryOrigin.loadedTools`; folded onto the summary's origin. */
+      readonly loadedTools?: readonly LoadedToolSchema[];
     }
   // ── Inbox (accepted, not yet processed) ──
   // An externally delivered input, journaled the moment it is ACCEPTED — before any capability
@@ -309,10 +311,22 @@ export function foldReplace(
 }
 
 /** Drop the first `cutoff` messages and prepend the summary in their place. */
-export function foldCompaction(state: HistoryFold, cutoff: number, summary: string, summaryTimestamp?: number): void {
+export function foldCompaction(
+  state: HistoryFold,
+  cutoff: number,
+  summary: string,
+  summaryTimestamp?: number,
+  loadedTools?: readonly LoadedToolSchema[],
+): void {
   const clamped = Math.min(cutoff, state.messages.length);
   state.messages.splice(0, clamped, summaryMessage(summary, summaryTimestamp));
-  state.origins.splice(0, clamped, { kind: "compaction_summary" });
+  state.origins.splice(0, clamped, compactionSummaryOrigin(loadedTools));
+}
+
+export function compactionSummaryOrigin(loadedTools?: readonly LoadedToolSchema[]): CompactionSummaryOrigin {
+  return loadedTools !== undefined && loadedTools.length > 0
+    ? { kind: "compaction_summary", loadedTools: [...loadedTools] }
+    : { kind: "compaction_summary" };
 }
 
 export function reduceHistory(records: readonly AgentRecord[]): ReducedHistory {
@@ -330,7 +344,7 @@ export function reduceHistory(records: readonly AgentRecord[]): ReducedHistory {
         foldReplace(state, record.messages, record.origins);
         break;
       case "context.apply_compaction":
-        foldCompaction(state, record.cutoff, record.summary, record.summaryTimestamp);
+        foldCompaction(state, record.cutoff, record.summary, record.summaryTimestamp, record.loadedTools);
         break;
       // Audit / bookkeeping — not reduced into history.
       // `inbox.received` is the accepted input, not the seen input: what the model saw is

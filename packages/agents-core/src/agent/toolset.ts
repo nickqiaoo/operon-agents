@@ -28,6 +28,7 @@ export type RunAgentFn<TContext> = SubagentSpawner<TContext>["run"];
 export interface RunToolset {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
+  readonly deferEnabled: boolean;
 }
 
 export async function buildRunTools<TContext>(
@@ -61,7 +62,7 @@ export async function buildRunTools<TContext>(
     });
     return false;
   });
-  const deferEnabled = active.deferTools === true && capTools.length > 0 && model.supportsDeferredTools;
+  const deferEnabled = active.deferTools !== false && model.supportsDeferredTools;
   const deferredToolNames = new Set(deferEnabled ? capTools.map((tool) => tool.schema.name) : []);
   const tools: Tool[] = [...active.tools, ...capTools];
   if (deferEnabled) tools.push(buildSearchTool(capTools.map((t) => t.schema)));
@@ -70,7 +71,7 @@ export async function buildRunTools<TContext>(
   // (e.g. profile-loaded agents). The unified "Agent" tool spawns/resumes by type.
   const providerAgents = state.subagentProvider !== undefined ? [...(await state.subagentProvider.list())] : [];
   if (active.subagents.length === 0 && providerAgents.length === 0) {
-    return finish(state, tools, deferredToolNames);
+    return finish(state, tools, deferredToolNames, deferEnabled);
   }
   // One spawner (the engine seam) shared by every subagent-spawning tool: the static
   // `agent_<name>` tools, the unified `Agent` tool, and `Workflow`.
@@ -84,7 +85,7 @@ export async function buildRunTools<TContext>(
   if (state.workflowTool !== false && !tools.some((tool) => tool.schema.name === "Workflow")) {
     tools.push(buildWorkflowTool(spawner, state));
   }
-  return finish(state, tools, deferredToolNames);
+  return finish(state, tools, deferredToolNames, deferEnabled);
 }
 
 /**
@@ -96,13 +97,16 @@ function finish<TContext>(
   state: RunState<TContext>,
   tools: readonly Tool[],
   deferredToolNames: ReadonlySet<string>,
+  deferEnabled: boolean,
 ): RunToolset {
   const filtered = state.capabilities.applyToolFilters(tools);
-  if (filtered === tools) return { tools, deferredToolNames };
+  const enabled = deferEnabled && filtered.some((tool) => tool.schema.name === "SearchTool");
+  if (filtered === tools) return { tools, deferredToolNames, deferEnabled: enabled };
   const surviving = new Set(filtered.map((tool) => tool.schema.name));
   return {
     tools: filtered,
-    deferredToolNames: new Set([...deferredToolNames].filter((name) => surviving.has(name))),
+    deferredToolNames: new Set(enabled ? [...deferredToolNames].filter((name) => surviving.has(name)) : []),
+    deferEnabled: enabled,
   };
 }
 

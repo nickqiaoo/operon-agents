@@ -74,6 +74,7 @@ export function historyChangeEmitter(events: EventSink, sessionId: string): Hist
           cutoff: record.cutoff,
           summary: record.summary,
           summaryTimestamp: record.summaryTimestamp,
+          ...(record.loadedTools !== undefined ? { loadedTools: record.loadedTools } : {}),
           address,
           sessionId,
         });

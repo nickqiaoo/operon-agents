@@ -7,6 +7,29 @@ released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Deferred tool loading is on by default and keeps the cached prompt prefix stable while the
+  MCP catalog changes** (`operon-agents-core`). Capability/MCP tools are offered through
+  `SearchTool` on every model that supports native deferred tools (`deferTools: false` opts
+  out); the tool's description no longer lists the catalog, and the tool is present from the
+  first request even before any server connects. A server connecting, disconnecting, reconnecting
+  or changing a tool's definition mid-conversation is announced in a system reminder appended at
+  the tail of the history (journaled with a `tool_catalog_delta` origin) instead of rewriting the
+  request's tool definitions; a definition already loaded stays declared for the tool references
+  in history after its server leaves (wire-only, not executable) and a changed definition arrives
+  under a versioned name. On Anthropic, a placeholder `defer_loading` tool keeps the API's
+  deferred-tool mode on before the first search, so the first connection does not flip the prompt.
+  Full compaction drops the load points it removes (the model is re-told what to search) except
+  for definitions the kept tail still calls, which ride on the compaction summary's origin
+  (`loadedTools`, also in the `context.apply_compaction` record and `history.compacted` event);
+  micro compaction keeps load points as is, and both survive durable replay. Calling a deferred tool that is not
+  loaded now returns guidance to load it with `SearchTool` (with the input schema for reference)
+  instead of `unknown tool`. The catalog is refreshed before every model request, so a server
+  that connects during a turn is visible at the next step.
+
 ## [0.1.0-alpha.6] — 2026-09-05
 
 ### Fixed

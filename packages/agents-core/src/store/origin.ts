@@ -1,3 +1,5 @@
+import type { ToolSchema } from "../protocol/tool-schema.ts";
+
 /**
  * `PromptOrigin` — a structured tag on a journaled message record saying WHERE the message
  * came from. It is the persistence-layer replacement for parsing intent back out of rendered
@@ -81,8 +83,25 @@ export interface CronMissedOrigin {
   readonly steerId?: string;
 }
 
+export interface LoadedToolSchema {
+  readonly sourceName: string;
+  readonly schema: ToolSchema;
+}
+
 export interface CompactionSummaryOrigin {
   readonly kind: "compaction_summary";
+  /** Deferred-tool definitions the compacted prefix had loaded and the kept tail still calls.
+   *  Recorded once per compaction so a surviving call stays declared and executable after its
+   *  load point is gone (the counterpart of Claude Code's pre-compact discovered-tool list;
+   *  definitions travel with it because nothing else durable holds them). */
+  readonly loadedTools?: readonly LoadedToolSchema[];
+}
+
+/** A catalog announcement actually present in this conversation's model-visible history. */
+export interface ToolCatalogDeltaOrigin {
+  readonly kind: "tool_catalog_delta";
+  readonly added: readonly { readonly name: string; readonly sourceName: string; readonly fingerprint: string }[];
+  readonly removed: readonly string[];
 }
 
 /** A message copied into a fresh conversation shard when ownership is handed to another agent. */
@@ -114,6 +133,7 @@ export type PromptOrigin =
   | CronJobOrigin
   | CronMissedOrigin
   | CompactionSummaryOrigin
+  | ToolCatalogDeltaOrigin
   | HandoffSeedOrigin
   | ExternalPromptOrigin;
 

@@ -12,6 +12,7 @@ import {
   type ModelRuntime,
 } from "./runtime.ts";
 import { classifyError } from "./errors.ts";
+import { withAnthropicDeferredMode } from "./deferred-tools.ts";
 import type { CallOptions, LlmRequest, RetryHint } from "./model.ts";
 
 /** A finished attempt: either resolved (terminal already pushed to the out stream) or a
@@ -147,7 +148,7 @@ export class ChatModel {
       first = await this.runtime.models.completeSimple(
         this.piModel,
         ctx,
-        toOptions(req, call, this.requestDefaults),
+        this.options(req, call),
       );
     } catch (error) {
       first = this.errorMessage(messageOf(error));
@@ -160,11 +161,18 @@ export class ChatModel {
       return await this.runtime.models.completeSimple(
         this.piModel,
         ctx,
-        toOptions(req, call, this.requestDefaults),
+        this.options(req, call),
       );
     } catch (error) {
       return this.errorMessage(messageOf(error));
     }
+  }
+
+  private options(req: LlmRequest, call?: CallOptions): ModelsSimpleStreamOptions {
+    const options = toOptions(req, call, this.requestDefaults);
+    return req.deferredTools && this.api === "anthropic-messages" && this.supportsDeferredTools
+      ? withAnthropicDeferredMode(options)
+      : options;
   }
 
   private async streamWithAuthRetry(
@@ -209,7 +217,7 @@ export class ChatModel {
       for await (const event of this.runtime.models.streamSimple(
         this.piModel,
         ctx,
-        toOptions(req, call, this.requestDefaults),
+        this.options(req, call),
       )) {
         if (event.type === "done" || event.type === "error") {
           terminal = event;

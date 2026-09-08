@@ -38,6 +38,8 @@ export interface LlmRequest {
   readonly system?: string;
   readonly messages: readonly Message[];
   readonly tools?: readonly ToolSchema[];
+  /** Keep native deferred loading active even before the first successful search. */
+  readonly deferredTools?: boolean;
   readonly params?: ModelSettings;
   readonly providerOptions?: Readonly<Record<string, unknown>>;
 }

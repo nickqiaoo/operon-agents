@@ -31,29 +31,28 @@ const SearchInput = z.object({
 
 const DESCRIPTION = `Fetches full schema definitions for deferred tools so they can be called.
 
-Deferred tools appear by name in <available-deferred-tools> messages. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool matches your query against the deferred tool list and loads the matched tools' full definitions, after which they are callable exactly like the tools defined at the top of the prompt.
+Deferred tools appear by name in <system-reminder> messages in the conversation. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool matches your query against the deferred tool list and loads the matched tools' full definitions, after which they are callable exactly like the tools defined at the top of the prompt.
 
 Query forms:
 - "select:Read,Edit,Grep" — fetch these exact tools by name
 - "notebook jupyter" — keyword search, up to max_results best matches
 - "+slack send" — require "slack" in the name, rank by remaining terms`;
 
-/** Build the SearchTool over a snapshot of this turn's deferred catalog. The
- *  deferred names are listed in the description so the model knows what it can
- *  load. Names are sorted so the description stays byte-stable across turns
- *  (cacheable) while the deferred set is unchanged. (P1 moves this to
- *  diff-based `<available-deferred-tools>` announcements in history.) */
-export function buildSearchTool(deferred: readonly ToolSchema[]): Tool {
-  const names = deferred.map((s) => s.name).sort((a, b) => a.localeCompare(b));
-  const description = `${DESCRIPTION}\n\n<available-deferred-tools>\n${names.join("\n")}\n</available-deferred-tools>`;
+/** The description is constant; catalog changes are journaled as messages instead. */
+export function buildSearchTool(
+  deferred: readonly ToolSchema[],
+  sourceNames: ReadonlyMap<string, string> = new Map(),
+): Tool {
+  // Neither later catalog mutations nor tool execution may rewrite a recorded definition.
+  const catalog = structuredClone(deferred);
   return tool({
     name: SEARCH_TOOL_NAME,
-    description,
+    description: DESCRIPTION,
     parameters: SearchInput,
     approvalRule: SEARCH_TOOL_NAME,
     accesses: ToolAccesses.none(),
     execute: (args) => {
-      const { matches } = runSearchQuery(args.query, deferred, args.max_results ?? 5);
+      const { matches } = runSearchQuery(args.query, catalog, args.max_results ?? 5);
       return {
         content: [
           {
@@ -62,6 +61,12 @@ export function buildSearchTool(deferred: readonly ToolSchema[]): Tool {
           },
         ],
         addedToolNames: matches,
+        details: {
+          deferredToolSchemas: matches.map((name) => ({
+            sourceName: sourceNames.get(name) ?? name,
+            schema: catalog.find((schema) => schema.name === name)!,
+          })),
+        },
       };
     },
   });

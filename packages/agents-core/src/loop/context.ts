@@ -3,11 +3,13 @@ import type { PromptOrigin } from "../store/origin.ts";
 import {
   type AgentRecord,
   type AgentRecordBody,
+  compactionSummaryOrigin,
   DEFAULT_ADDRESS,
   reduceHistory,
   type SessionStore,
   summaryMessage,
 } from "../store/store.ts";
+import { loadedToolsForCompaction } from "../tool/search/loaded.ts";
 
 export { summaryMessage } from "../store/store.ts";
 
@@ -90,9 +92,12 @@ export class ConversationContext {
 
   applyCompaction(c: CompactionApply): void {
     // Every model-visible message is journaled, so replay drops the same prefix count as live.
+    // Deferred-tool definitions the removed prefix loaded for calls the tail keeps ride on the
+    // summary's origin (see `CompactionSummaryOrigin.loadedTools`), computed before the splice.
+    const loadedTools = loadedToolsForCompaction(this, c.compactedCount);
     const summary = summaryMessage(c.summary);
     this._history.splice(0, c.compactedCount, summary);
-    this.origins.set(summary, { kind: "compaction_summary" });
+    this.origins.set(summary, compactionSummaryOrigin(loadedTools));
     this.journal({
       type: "context.apply_compaction",
       summary: c.summary,
@@ -102,6 +107,7 @@ export class ConversationContext {
       compactedCount: c.compactedCount,
       tokensBefore: c.tokensBefore,
       tokensAfter: c.tokensAfter,
+      ...(loadedTools.length > 0 ? { loadedTools } : {}),
     });
   }
 

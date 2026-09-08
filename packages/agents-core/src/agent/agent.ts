@@ -42,10 +42,11 @@ export interface AgentConfig<TContext = unknown> {
   readonly outputType?: unknown;
   readonly maxStepsPerTurn?: number;
   /**
-   * Opt into deferred tool loading: capability/MCP tools are discovered on
-   * demand through SearchTool, then pi materializes their definitions from
-   * `ToolResultMessage.addedToolNames`. A no-op for models whose compat data
-   * does not advertise native deferred-tool support. Off by default.
+   * Capability/MCP tools are discovered on demand through SearchTool; only loaded ones are
+   * sent to the model, so the catalog can change mid-conversation without touching the
+   * request prefix. On models with native deferred-tool support (Anthropic tool_reference,
+   * Kimi, OpenAI tool search) pi also keeps a loaded definition out of the prefix. Default:
+   * on for those models, off elsewhere. `false` loads capability tools up front.
    */
   readonly deferTools?: boolean;
 }
