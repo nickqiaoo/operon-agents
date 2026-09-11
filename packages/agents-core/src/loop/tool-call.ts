@@ -1,6 +1,7 @@
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "../protocol/index.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import type { Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
+import type { NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
+import type { ApprovalResponse } from "../permission/types.ts";
 import type { Machine } from "../tool/machine.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
@@ -49,6 +50,12 @@ export interface ToolCallStepContext {
   readonly logger?: Logger;
   /** Present when re-running a previously interrupted batch (HITL resume). */
   readonly resume?: BatchResume;
+  /**
+   * The run's approval answers by tool call id — the table the authorize hook consults. Shared
+   * with the runner (the same object), so a nested call handed an answer can add it here and
+   * be authorized through the ordinary audited path.
+   */
+  readonly answers?: Record<string, ApprovalResponse>;
 }
 
 export interface ToolBatchResult {
@@ -283,6 +290,7 @@ async function runAndFinalize(
         machine: step.machine,
         ...(step.address !== undefined ? { address: step.address } : {}),
         background: step.background,
+        dispatch: createNestedDispatcher(step, call),
         responder: step.responder,
         ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
         ...(detachSignal !== undefined ? { detachSignal } : {}),
@@ -337,6 +345,94 @@ async function runAndFinalize(
     ? { tool: call.name, toolCallId: call.id, isError: result.isError === true }
     : { tool: call.name, toolCallId: call.id, isError: result.isError === true, result: result.content });
   return { kind: "result", result };
+}
+
+/**
+ * The `ToolRunContext.dispatch` a running tool receives: run other tools as NESTED calls of
+ * `parent`, through the very pipeline a model-issued call takes (`prepareCall` →
+ * `runAndFinalize`), so a program the model wrote cannot reach a tool without the permissions
+ * and hooks a direct call would face. Nested calls of one parent are scheduled against each
+ * other by resource conflict — the batch's own rule — and their events carry `parentToolCallId`.
+ *
+ * What a nested call cannot do is pause the turn. An approval with no live approver, or a tool
+ * that suspends for input, comes back as an error result instead of interrupting: the batch that
+ * owns the turn is already running, and re-running a program to resume it would repeat its side
+ * effects. The parent's `signal` is the nested call's signal, so aborting the parent aborts
+ * everything under it.
+ */
+function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): NestedToolDispatcher {
+  // A nested call is never a resume: `step.resume` belongs to the interrupted batch, not to
+  // calls made from inside it.
+  const nestedStep: ToolCallStepContext = { ...step, resume: undefined };
+  const scheduler = new ToolScheduler<CallOutcome>();
+  let sequence = 0;
+  return {
+    schemas: [...step.tools.values()].map((tool) => tool.schema),
+    async call(name, args, options) {
+      sequence += 1;
+      const call: ToolCall = {
+        type: "toolCall",
+        id: `${parent.id}:code:${String(sequence)}`,
+        name,
+        arguments: (args ?? {}) as Record<string, unknown>,
+      };
+      if (step.signal.aborted) return errorResult(`nested call to ${name} not dispatched: the run was aborted`);
+      // An answer the caller obtained for this very call (it paused, the user answered, the
+      // program re-ran): file it where a resumed batch's answers live, so the authorize hook
+      // records and applies it like any other.
+      if (options?.approval !== undefined && step.answers !== undefined) step.answers[call.id] = options.approval;
+      const prepared = await prepareCall(nestedStep, call);
+      if (prepared.kind === "interrupt" || prepared.kind === "repark") {
+        const pending = prepared.pending;
+        return {
+          ...errorResult(
+            `${name} requires the user's approval, which cannot be requested from inside a nested call. Call the tool directly.`,
+          ),
+          ...(pending.kind === "approval"
+            ? {
+                interrupt: {
+                  toolCallId: call.id,
+                  toolName: name,
+                  approvalRule: pending.approvalRule,
+                  ...(pending.policyName !== undefined ? { policyName: pending.policyName } : {}),
+                  ...(pending.display !== undefined ? { display: pending.display } : {}),
+                },
+              }
+            : {}),
+        };
+      }
+      step.dispatchEvent?.({
+        type: "tool.call.started",
+        toolCallId: call.id,
+        toolName: name,
+        args: prepared.kind === "run" ? prepared.args : call.arguments,
+        parentToolCallId: parent.id,
+      });
+      let result: ToolResult;
+      if (prepared.kind === "result") {
+        result = prepared.result;
+      } else {
+        const outcome = await scheduler.add({
+          accesses: prepared.plan.accesses ?? ToolAccesses.all(),
+          start: async () => ({ result: runAndFinalize(nestedStep, prepared) }),
+        });
+        result = outcome.kind === "result"
+          ? outcome.result
+          : errorResult(
+              `${name} suspended for the user's input, which cannot be answered from inside a nested call. Call the tool directly.`,
+            );
+      }
+      step.dispatchEvent?.({
+        type: "tool.result",
+        toolCallId: call.id,
+        toolName: name,
+        result: { content: result.content, isError: result.isError, details: result.details },
+        isError: result.isError ?? false,
+        parentToolCallId: parent.id,
+      });
+      return result;
+    },
+  };
 }
 
 function planOf(p: PreparedCall | undefined): ToolPlan | undefined {

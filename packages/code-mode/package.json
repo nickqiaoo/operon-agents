@@ -1,0 +1,49 @@
+{
+  "name": "operon-code-mode",
+  "version": "0.1.0-alpha.2",
+  "description": "Code Mode for operon-agents: the model writes a TypeScript program that calls its tools, run in a confined QuickJS (WebAssembly) runtime.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickqiaoo/operon-agents.git",
+    "directory": "packages/code-mode"
+  },
+  "homepage": "https://github.com/nickqiaoo/operon-agents/tree/main/packages/code-mode#readme",
+  "bugs": {
+    "url": "https://github.com/nickqiaoo/operon-agents/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "pnpm --filter operon-agents build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "for f in test/e2e*.ts; do echo \"\\n\u25b6 $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
+    "prepack": "pnpm build",
+    "evals": "node --experimental-strip-types --no-warnings evals/run.ts",
+    "evals:selftest": "node --experimental-strip-types --no-warnings evals/selftest.ts"
+  },
+  "dependencies": {
+    "@jitl/quickjs-ng-wasmfile-release-sync": "0.32.0",
+    "operon-agents": "workspace:*",
+    "operon-agents-core": "workspace:*",
+    "quickjs-emscripten-core": "0.32.0",
+    "zod": "^4.0.0"
+  }
+}

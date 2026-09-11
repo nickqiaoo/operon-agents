@@ -103,11 +103,23 @@ export class AssistantMessageComponent implements Component {
 
 export type ToolCallStatus = "running" | "done" | "error" | "suspended";
 
+interface NestedCall {
+  readonly id: string;
+  readonly name: string;
+  readonly args: unknown;
+  status: ToolCallStatus;
+}
+
+/** How many of a program's nested calls the card shows; older ones scroll off the top. */
+const NESTED_CALLS_SHOWN = 6;
+
 export class ToolCallComponent implements Component {
   private status: ToolCallStatus = "running";
   private progress = "";
   private output = "";
   private detachable = false;
+  /** Calls this tool made through the engine (a Code Mode program's `tools.X()`), in order. */
+  private readonly nested: NestedCall[] = [];
 
   constructor(
     readonly id: string,
@@ -122,6 +134,15 @@ export class ToolCallComponent implements Component {
 
   setDetachable(): void {
     this.detachable = true;
+  }
+
+  addNested(id: string, name: string, args: unknown): void {
+    this.nested.push({ id, name, args, status: "running" });
+  }
+
+  completeNested(id: string, isError: boolean): void {
+    const call = this.nested.find((entry) => entry.id === id);
+    if (call !== undefined) call.status = isError ? "error" : "done";
   }
 
   suspend(): void {
@@ -153,6 +174,14 @@ export class ToolCallComponent implements Component {
     }
     if (this.detachable && this.status === "running") {
       lines.push(truncateToWidth(`  ${style.muted("detachable · /background " + this.id)}`, width));
+    }
+    if (this.nested.length > 0) {
+      const hidden = Math.max(0, this.nested.length - NESTED_CALLS_SHOWN);
+      if (hidden > 0) lines.push(truncateToWidth(`  ${style.muted(`… ${String(hidden)} earlier call${hidden === 1 ? "" : "s"}`)}`, width));
+      for (const call of this.nested.slice(-NESTED_CALLS_SHOWN)) {
+        const mark = call.status === "running" ? style.warning("●") : call.status === "done" ? style.success("✓") : style.error("✗");
+        lines.push(truncateToWidth(`  ${style.muted("↳")} ${mark} ${call.name} ${style.muted(jsonPreview(call.args))}`, width));
+      }
     }
     if (this.output.length > 0 && (this.status === "error" || this.output.length <= 240)) {
       const output = this.output.split("\n").slice(0, 4);

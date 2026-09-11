@@ -1,3 +1,4 @@
+import type { ApprovalResponse } from "../permission/types.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { CallOptions, LlmRequest } from "../llm/model.ts";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "../protocol/index.ts";
@@ -54,6 +55,8 @@ export interface ExecuteStepDeps {
   /** Unified loop event sink — model stream, tool results, retries, dropped partials. */
   readonly dispatchEvent?: LoopEventDispatcher;
   readonly logger?: Logger;
+  /** The run's approval answers by tool call id; see `ToolCallStepContext.answers`. */
+  readonly answers?: Record<string, ApprovalResponse>;
 }
 
 export interface StepResult {
@@ -256,7 +259,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, machine: deps.machine, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, machine: deps.machine, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
       message,
     );
 

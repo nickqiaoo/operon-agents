@@ -13,7 +13,7 @@
     "test": "pnpm -r test",
     "evals": "pnpm --filter operon-agents-core evals",
     "evals:selftest": "pnpm --filter operon-agents-core evals:selftest",
-    "pack:all": "pnpm --filter operon-agents-core --filter operon-agents --filter operon-agents-peers --filter operon-sandbox --filter operon-os-sandbox --filter operon-managed-agents exec pnpm pack --out ../../dist-tarballs/%s-%v.tgz"
+    "pack:all": "pnpm --filter operon-agents-core --filter operon-agents --filter operon-agents-peers --filter operon-sandbox --filter operon-os-sandbox --filter operon-managed-agents --filter operon-code-mode exec pnpm pack --out ../../dist-tarballs/%s-%v.tgz"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

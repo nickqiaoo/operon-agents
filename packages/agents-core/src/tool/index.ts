@@ -66,7 +66,7 @@ export { writeTool } from "./builtin/write.ts";
 export { editTool } from "./builtin/edit.ts";
 export { readTool } from "./builtin/read.ts";
 export { globTool } from "./builtin/glob.ts";
-export { bashTool } from "./builtin/bash.ts";
+export { bashTool, prepareBackgroundLog } from "./builtin/bash.ts";
 export { grepTool } from "./builtin/grep.ts";
 export { askUserQuestionTool } from "./builtin/ask-user-question.ts";
 export type {

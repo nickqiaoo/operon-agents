@@ -192,14 +192,18 @@ export type AgentEventBody =
       readonly message: Message;
     }
   // ── Tool lifecycle ──
-  | { readonly type: "tool.call.started"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown }
+  // `parentToolCallId` marks a NESTED call: one a running tool made through
+  // `ToolRunContext.dispatch` (a Code Mode program calling `tools.Read(...)`). It has no
+  // `tool_use` block of its own in any message, so it never replays from history; the parent
+  // call's result is where a durable summary belongs.
+  | { readonly type: "tool.call.started"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly parentToolCallId?: string }
   | { readonly type: "tool.call.delta"; readonly turnId: string; readonly toolCallId: string; readonly toolName?: string; readonly argumentsPart: string }
-  | { readonly type: "tool.progress"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly update: ToolUpdate }
+  | { readonly type: "tool.progress"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly update: ToolUpdate; readonly parentToolCallId?: string }
   // A running tool call has entered its detachable window: the UI may offer "move to background",
   // which fires `session.detachTool(toolCallId)`. Emitted once when the call becomes detachable;
   // its later `tool.result` (carrying `details.movedToBackground` + `taskId` if detached) ends it.
   | { readonly type: "tool.detachable"; readonly toolCallId: string; readonly toolName: string }
-  | { readonly type: "tool.result"; readonly toolCallId: string; readonly toolName: string; readonly result: ToolResult; readonly isError: boolean }
+  | { readonly type: "tool.result"; readonly toolCallId: string; readonly toolName: string; readonly result: ToolResult; readonly isError: boolean; readonly parentToolCallId?: string }
   // A running tool call suspended instead of producing a result: it asked for caller input
   // (`request` present) or a foreground sub-agent under it paused. Pairs with the earlier
   // `tool.call.started`; the call re-runs (and eventually emits `tool.result`) after resume.
@@ -329,12 +333,34 @@ export type LiveOnlyEvent = Extract<
   }
 >;
 
-/** Lifecycle bodies persisted separately because they affect Projection state but are not
- *  already encoded in a context/workflow/audit record. */
+/**
+ * Lifecycle bodies persisted separately because they affect Projection state but are not
+ * already encoded in a context/workflow/audit record.
+ *
+ * ADMISSION TEST — this is the one record class defined by what a CONSUMER needs rather
+ * than by a domain fact, so it has no natural boundary and will accrete unless the bar is
+ * explicit. A lifecycle event earns a record only if, after a crash and reopen, its absence
+ * would leave state WRONG or lose completed work. "A client would like to display it" is
+ * not sufficient: losing detail on replay is the accepted cost of not journaling it.
+ *
+ * Applying the test to what is here:
+ * - `agent.*` / `turn.started` / `turn.ended`: turn and agent boundaries cannot be recovered
+ *   from the message sequence, and `turn.ended` carries the failure reason.
+ * - `tool.detachable` / `tool.suspended` / `turn.paused`: mid-flight tool state that never
+ *   reaches a message (history holds only settled results). Losing it strands live work.
+ * - `steer.queued`: derivable in principle by joining `inbox.received` against the
+ *   `deliveryId` of later history, but the join is the kind of reconstruction this test
+ *   exists to avoid paying for at every read.
+ *
+ * `turn.step.started` was removed by this test: `step` is the count of assistant messages
+ * within the turn and `stepId` is literally `${turnId}.${step}` (see loop/turn-step.ts), so
+ * the record duplicated derivable data — and journaling it grew the log linearly in steps.
+ * It remains a live event; only its record is gone.
+ */
 export type PersistedLifecycleEvent = Extract<
   LifecycleEvent,
   | { readonly type: "agent.started" | "agent.ended" }
-  | { readonly type: "turn.started" | "turn.ended" | "turn.step.started" | "turn.paused" }
+  | { readonly type: "turn.started" | "turn.ended" | "turn.paused" }
   | { readonly type: "steer.queued" }
   | { readonly type: "tool.detachable" | "tool.suspended" }
 >;

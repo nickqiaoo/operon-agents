@@ -717,6 +717,7 @@ export class BackgroundManager implements BackgroundSpawner {
       (task.kind === "process" && kind === "file") ||
       (task.kind === "agent" && kind === "conversation") ||
       (task.kind === "workflow" && kind === "workflow-run") ||
+      (task.kind === "code" && kind === "file") ||
       (task.kind === "question" && kind === undefined);
     if (!valid) {
       throw new Error(`Background ${task.kind} tasks require their canonical durable output location.`);

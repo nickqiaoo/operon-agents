@@ -885,6 +885,9 @@ class Engine<TContext> {
         model,
       );
       let permissionTools = toolset.tools;
+      // The approval table is shared between the authorize hook and the tool-call layer (a
+      // nested call may add to it mid-batch), so it must exist before either captures it.
+      state.answers ??= {};
       const hooks = buildRunHooks(current, state, context, () => permissionTools);
       // The same projection the first step will send (announcements are that step's job).
       const visibleTools = prepareToolCatalog(context, toolset, { announce: false }).schemas.map((schema) => ({ schema }));
@@ -934,6 +937,7 @@ class Engine<TContext> {
             model,
           ),
           hooks,
+          answers: state.answers,
           params: resolveModelParams(current.modelSettings, state.session.thinkingSetting),
           createOutputGuardrailMonitor: outputGuardrails.length > 0
             ? (options) => createOutputGuardrailMonitor(outputGuardrails, current, runCtxFor(state), options)

@@ -53,7 +53,7 @@ export function isPersistedTaskTerminal(status: BackgroundTaskStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
-const TASK_KINDS: ReadonlySet<string> = new Set(["process", "agent", "question", "workflow"]);
+const TASK_KINDS: ReadonlySet<string> = new Set(["process", "agent", "question", "workflow", "code"]);
 const STATUSES: ReadonlySet<string> = new Set([
   "running",
   "completed",
@@ -80,6 +80,7 @@ export function isValidPersistedTask(value: unknown): value is PersistedTask {
   if (o["endedAt"] !== null && typeof o["endedAt"] !== "number") return false;
   if (!isValidOutputRef(o["outputRef"])) return false;
   if (o["kind"] === "process" && (o["outputRef"] as TaskOutputRef | undefined)?.kind !== "file") return false;
+  if (o["kind"] === "code" && (o["outputRef"] as TaskOutputRef | undefined)?.kind !== "file") return false;
   if (o["kind"] === "agent" && (o["outputRef"] as TaskOutputRef | undefined)?.kind !== "conversation") return false;
   if (o["kind"] === "workflow" && (o["outputRef"] as TaskOutputRef | undefined)?.kind !== "workflow-run") return false;
   if (o["kind"] === "question" && o["outputRef"] !== undefined) return false;

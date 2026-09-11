@@ -79,7 +79,8 @@ jobs:
                        operon-agents-peers:agents-peers \
                        operon-managed-agents:managed-agents \
                        operon-sandbox:sandbox \
-                       operon-os-sandbox:os-sandbox; do
+                       operon-os-sandbox:os-sandbox \
+                       operon-code-mode:code-mode; do
             pkg="${entry%%:*}"
             dir="${entry##*:}"
             version=$(node -p "require('./packages/$dir/package.json').version")

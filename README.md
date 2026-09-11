@@ -53,7 +53,8 @@ npm install operon-agents
 
 The other packages are optional and installed only if you need them: `operon-sandbox` (E2B or
 Cloudflare sandboxes), `operon-os-sandbox` (OS-level sandboxing of local commands),
-`operon-managed-agents` (server and client), `operon-agents-peers` (agent-to-agent messaging).
+`operon-managed-agents` (server and client), `operon-agents-peers` (agent-to-agent messaging),
+`operon-code-mode` (the model writes a program that calls its tools).
 `operon-agents-core` comes in as a dependency — depend on it directly only when you are assembling
 a host yourself.
 
@@ -126,6 +127,7 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start
 | `operon-agents-core` | The kernel: turn/step/tool-call loop, interruption and resume, permissions, event and store contracts. |
 | `operon-managed-agents` | Managed server and TypeScript client — a stateless API surface plus workers that claim sessions from a Postgres work table. |
 | `operon-agents-peers` | Peer discovery and messaging between agents, built entirely on the engine's public seams. |
+| `operon-code-mode` | Code Mode: the model writes a TypeScript program that calls its tools, run in a confined QuickJS (WebAssembly) runtime; every call goes through the engine's tool pipeline. |
 | `operon-sandbox` | Host-side sandbox lifecycle (E2B, Cloudflare), handing the framework a vendor-driven `Machine`. |
 | `operon-os-sandbox` | OS-level command sandboxing for the local machine, degrading to a plain local machine where unsupported. |
 

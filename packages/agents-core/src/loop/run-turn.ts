@@ -1,3 +1,4 @@
+import type { ApprovalResponse } from "../permission/types.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/index.ts";
 import type { PromptOrigin } from "../store/origin.ts";
@@ -64,6 +65,8 @@ export interface RunTurnInput {
    *  by the re-run batch (suspended-call continuation and auto re-park). */
   readonly resume?: BatchResume;
   readonly drainSteering?: () => readonly SteeredInput[];
+  /** The run's approval answers by tool call id; see `ToolCallStepContext.answers`. */
+  readonly answers?: Record<string, ApprovalResponse>;
 }
 
 /** A steered message plus its structured origin, mapped by the caller (which owns the SteerBus). */
@@ -113,7 +116,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, machine: input.machine, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, machine: input.machine, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -176,6 +179,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           dispatchEvent: input.dispatchEvent,
           logger: input.logger,
           recordUsage,
+          answers: input.answers,
         });
       } catch (error) {
         // An abort wins over recovery — the outer catch maps it to "aborted" as before.
