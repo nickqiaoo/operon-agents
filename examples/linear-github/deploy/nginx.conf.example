@@ -1,0 +1,49 @@
+# The bot's TLS entry, as its own file: the reverse proxy in front of it also serves
+# other things, and this drops in beside them without touching their config.
+#
+# On the host, install it where that proxy's http block includes from, then reload.
+# Adjust the hostname; the certificate is whatever that host already uses.
+#
+# The bot answers /api/webhooks/linear, /api/webhooks/github,
+# /api/linear/install/callback (multi-tenant OAuth) and /healthz.
+
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name operon-agent.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+    server_name operon-agent.example.com;
+
+    # Behind Cloudflare in Full (strict), this is the Origin CA certificate.
+    ssl_certificate     /etc/openresty/certs/origin.pem;
+    ssl_certificate_key /etc/openresty/certs/origin.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # A Linear prompt carries the issue and its comments; a GitHub review comment
+    # carries its diff hunk. Neither is large.
+    client_max_body_size 5m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # The adapters verify a signature over the raw body, so it has to arrive
+        # whole and unmodified. Buffering the request is what guarantees that.
+        proxy_request_buffering on;
+        # A webhook is acknowledged in milliseconds; the turn runs after the ack.
+        proxy_read_timeout    60s;
+        proxy_connect_timeout 5s;
+    }
+}

@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+# Stale incremental state makes tsc skip emitting into the dist we just excluded.
+**/*.tsbuildinfo
+**/.agent-home
+**/workspace
+**/.env
+**/.env.local
+.git
+dist-tarballs

@@ -1,0 +1,39 @@
+{
+  "name": "operon-example-linear-github",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "server": "node --env-file-if-exists=.env --import tsx server/main.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/main.ts",
+    "test": "node --env-file-if-exists=.env --import tsx test/bridge.ts && SANDBOX=e2b-fake node --env-file-if-exists=.env --import tsx test/bridge.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@chat-adapter/github": "4.40.0",
+    "@chat-adapter/linear": "4.40.0",
+    "@chat-adapter/state-memory": "4.40.0",
+    "@hono/node-server": "^1",
+    "@langfuse/otel": "^5.11.1",
+    "@linear/sdk": "^76",
+    "@octokit/auth-app": "^8",
+    "@octokit/rest": "^22",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
+    "chat": "4.40.0",
+    "e2b": "^2.31",
+    "hono": "^4",
+    "operon-agents": "workspace:*",
+    "operon-managed-agents": "workspace:*",
+    "operon-sandbox": "workspace:*",
+    "tsx": "^4",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.1"
+  }
+}

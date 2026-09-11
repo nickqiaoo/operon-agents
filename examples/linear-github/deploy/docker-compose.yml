@@ -1,0 +1,43 @@
+# Two processes, as in the README's "Run" -- the engineer server never leaves the compose
+# network; the bot is published on loopback for the reverse proxy already on this host.
+#
+#   docker compose --env-file ../.env up -d
+services:
+  engineer:
+    # The image is built elsewhere and loaded onto this host: compiling the workspace
+    # needs more memory than the server has. See README "Build off the server".
+    image: operon-linear-github
+    command: ["node", "--import", "tsx", "server/main.ts"]
+    restart: unless-stopped
+    env_file: [../.env]
+    environment:
+      # An API key is required here: the bot reaches this container over the compose
+      # network, and the server only leaves loopback once it can authenticate callers.
+      MANAGED_HOST: 0.0.0.0
+      MANAGED_PORT: "8088"
+      # The host is small and shared with other services; keep node's heap under the limit.
+      NODE_OPTIONS: --max-old-space-size=192
+    mem_limit: 256m
+    volumes:
+      - agent-home:/app/examples/linear-github/.agent-home
+      - workspace:/app/examples/linear-github/workspace
+    expose: ["8088"]
+
+  bot:
+    image: operon-linear-github
+    depends_on: [engineer]
+    command: ["node", "--import", "tsx", "src/main.ts"]
+    restart: unless-stopped
+    env_file: [../.env]
+    environment:
+      OPERON_MANAGED_URL: http://engineer:8088/v1
+      PORT: "3000"
+      HOST: 0.0.0.0
+      NODE_OPTIONS: --max-old-space-size=112
+    mem_limit: 224m
+    # Loopback only: the host's nginx terminates TLS and proxies to it.
+    ports: ["127.0.0.1:3000:3000"]
+
+volumes:
+  agent-home:
+  workspace:
