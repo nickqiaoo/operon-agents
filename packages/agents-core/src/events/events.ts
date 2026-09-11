@@ -191,13 +191,6 @@ export type AgentEventBody =
       readonly origin: PromptOrigin;
       readonly message: Message;
     }
-  | {
-      readonly type: "delivery.accepted";
-      readonly deliveryId: string;
-      /** What relayed the input, for an `external` delivery. Absent when it is the user's own words. */
-      readonly source?: string;
-      readonly channel: "turn" | "steering" | "follow_up";
-    }
   // ── Tool lifecycle ──
   | { readonly type: "tool.call.started"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown }
   | { readonly type: "tool.call.delta"; readonly turnId: string; readonly toolCallId: string; readonly toolName?: string; readonly argumentsPart: string }

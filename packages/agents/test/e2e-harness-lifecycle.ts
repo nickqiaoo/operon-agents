@@ -386,7 +386,7 @@ async function streamSettlesQueuedInput(): Promise<void> {
     if (event.type === "agent.started") started += 1;
     // A background notification landing exactly as the run ends: after its last drain.
     if (event.type === "agent.ended" && started === 1) {
-      session.steerTo("main", "late notification", { kind: "external", source: "bg", deliveryId: "bg_1", channel: "follow_up" });
+      session.steerTo("main", "late notification", { kind: "external", source: "bg", channel: "follow_up" }, { id: "bg_1" });
     }
   });
   faux.setResponses([fauxAssistantMessage("streamed", { stopReason: "stop" }), fauxAssistantMessage("woke", { stopReason: "stop" })]);

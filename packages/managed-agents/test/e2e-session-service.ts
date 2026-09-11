@@ -57,6 +57,23 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
+/** The shape of a `steer.queued` lifecycle record as read raw off the disk. */
+interface StoredSteer {
+  readonly type: string;
+  readonly event?: {
+    readonly type?: string;
+    readonly steerId?: string;
+    readonly origin?: { readonly kind?: string; readonly actor?: string };
+    readonly message?: { readonly content?: unknown };
+  };
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => (part as { text?: string }).text ?? "").join("");
+}
+
 async function main(): Promise<void> {
   // ── create: registers a session, starts nothing ───────────────────────────────
   const created = await service.create({ agent: "default", environment: "default", title: "first" });
@@ -84,25 +101,27 @@ async function main(): Promise<void> {
 
   // ── appendEvent: durable acceptance ───────────────────────────────────────────
   const receipt = await service.appendEvent(created.id, { input: "do the thing", origin: "external", actor: "peer-a" });
-  check("append: receipt is queued", receipt.status === "queued" && receipt.deliveryId.startsWith("delivery_"));
+  check("append: receipt names the steer", receipt.channel === "steering" && receipt.steerId.startsWith("steer_"));
   check("append: the session is in line for a worker after the write", (await woken()) === created.id);
 
   // Read it back through a completely independent handle — proving it is on disk, not in memory.
   const independent = await new DiskSessionRepository(root).open(created.id);
   const page = await independent!.store.readRecordPage({ limit: 50 });
   await independent!.store.close?.();
-  const inbox = page.data
-    .map((entry) => entry.record as { type: string; input?: string; origin?: { kind?: string; actor?: string } })
-    .filter((record) => record.type === "inbox.received");
-  check("append: input is durable", inbox.length === 1 && inbox[0]!.input === "do the thing");
-  check("append: provenance is durable", inbox[0]!.origin?.kind === "external" && inbox[0]!.origin.actor === "peer-a");
+  // The record is the framework's own `steer.queued` — what a session's bus journals for a
+  // local steer — so nothing here is a managed-only vocabulary.
+  const queued = page.data
+    .map((entry) => entry.record as StoredSteer)
+    .filter((record) => record.type === "event.lifecycle" && record.event?.type === "steer.queued");
+  check("append: input is durable", queued.length === 1 && textOf(queued[0]!.event?.message?.content).includes("do the thing"));
+  check("append: provenance is durable", queued[0]!.event?.origin?.kind === "external" && queued[0]!.event.origin.actor === "peer-a");
 
   // ── listEvents: acceptance is visible to a reconnecting client ────────────────
   const events = await service.listEvents(created.id, { limit: 50 });
-  const accepted = events.data.find((event) => event.type === "delivery.accepted");
+  const accepted = events.data.find((event) => event.type === "steer.queued");
   check(
     "events: acceptance is replayable, even though no run consumed it",
-    accepted?.type === "delivery.accepted" && accepted.deliveryId === receipt.deliveryId,
+    accepted?.type === "steer.queued" && accepted.steerId === receipt.steerId,
   );
 
   // ── watchEvents: follows the log from a cursor ────────────────────────────────
@@ -117,22 +136,22 @@ async function main(): Promise<void> {
   await new Promise((r) => setTimeout(r, 30));
   await service.appendEvent(created.id, { input: "second" });
   await watching;
-  check("watch: streams accepted inputs as they land", seen.length === 2 && seen.every((t) => t === "delivery.accepted"));
+  check("watch: streams accepted inputs as they land", seen.length === 2 && seen.every((t) => t === "steer.queued"));
 
   // ── appendEvent: whose words ──────────────────────────────────────────────────
   // The caller is this session's user unless it says it is relaying: the default journals the
-  // caller's own words as `user`, anchored on the delivery like any other.
+  // caller's own words as `user`, under the steer id the receipt names.
   const own = await service.appendEvent(created.id, { input: "and this is me" });
   const ownHandle = await new DiskSessionRepository(root).open(created.id);
   const ownPage = await ownHandle!.store.readRecordPage({ limit: 50 });
   await ownHandle!.store.close?.();
   const ownRecord = ownPage.data
-    .map((entry) => entry.record as { type: string; origin?: { kind?: string; deliveryId?: string } })
-    .filter((record) => record.type === "inbox.received")
+    .map((entry) => entry.record as StoredSteer)
+    .filter((record) => record.type === "event.lifecycle" && record.event?.type === "steer.queued")
     .at(-1);
   check(
-    "append: the caller's own words are journaled as user, anchored on the delivery",
-    ownRecord?.origin?.kind === "user" && ownRecord.origin.deliveryId === own.deliveryId,
+    "append: the caller's own words are journaled as user, under the receipt's steer id",
+    ownRecord?.event?.origin?.kind === "user" && ownRecord.event.steerId === own.steerId,
   );
   // Relay attributes without the declaration would let a caller dress their own words up as
   // someone else's, or the reverse; they are refused, not guessed at.

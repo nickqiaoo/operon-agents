@@ -53,3 +53,9 @@ const harness = await createLocalHarness({
 context); `contentMaxChars` caps each attribute; `redact: true` masks tokens, emails and keys
 before export when the collector is not on the same machine.
 
+A run that pauses for an answer (`turn.paused`) ends its trace at the pause — the turn with
+reason `paused`, the suspended tool calls marked, not failed — and the run that continues it is
+the next trace of the same session. Spans are exported when they end, so a wait that may last
+days is never an open span. `examples/linear-github/server/langfuse.ts` shows the same
+processor exporting to Langfuse.
+

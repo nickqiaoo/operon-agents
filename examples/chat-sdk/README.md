@@ -53,13 +53,13 @@ HTTP surface as the page drives it -- and needs no keys.
 useChat POST /api/chat ─► Chat SDK web adapter ─► bot.onDirectMessage ─► runTurn
                                                                             │
    events.list(limit 1, desc) ──► events.stream({ after })  ◄───────────────┤  1. open the stream past the history
-   messages.create({ mode: "follow_up" }) ──► deliveryId    ◄───────────────┤  2. send
+   messages.create({ mode: "follow_up" }) ──► steerId       ◄───────────────┤  2. send
                                                                             │
-   turn.started / message.appended(origin.deliveryId)  ── anchor ───────────┤  3. find OUR turn (older leftovers are skipped)
+   turn.started / message.appended(origin.steerId)     ── anchor ───────────┤  3. find OUR turn (older leftovers are skipped)
    assistant.delta ─────────────────────────── streamed bubble ─────────────┤
    message.appended(assistant) ─────────────── authoritative text ──────────┤
    tool.call.started / tool.result ─────────── activity feed + kept trace ──┤
-   turn.ended(completed) + interruptions() ─── done, or "stuck on approval" ┘
+   turn.ended(completed) / turn.paused ─────── done, or "stuck on approval" ┘
 ```
 
 The live bridge and the replay (`historyOf`) apply the same rules -- same text joining, same
@@ -75,7 +75,7 @@ the engine's own reducer, so compaction is handled the way a reopened session ha
 | Send | `events.send({ events: [user.message] })` | `messages.create({ input, mode: "follow_up" })` |
 | Stream | live only, `event_deltas[]` opt-in for previews | replays history then follows live; deltas always on; resumable with `after` |
 | Turn events | `agent.message`, `agent.tool_use`, `session.status_idle` | `message.appended`, `tool.call.started`, `turn.ended` |
-| Approval dead end | `stop_reason: requires_action` | `interruptions()` non-empty after `turn.ended` / 409 on send |
+| Approval dead end | `stop_reason: requires_action` | `turn.paused` (no `turn.ended` follows) / 409 on send |
 | Rename | `sessions.update({ title })` | `sessions.update({ title })` (added for this example: `PATCH /v1/sessions/{id}`) |
 
 ## What the model is told

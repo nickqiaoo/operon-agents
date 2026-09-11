@@ -17,23 +17,19 @@ import type { ToolSchema } from "../protocol/tool-schema.ts";
 
 export interface UserPromptOrigin {
   readonly kind: "user";
-  /** Present when the message arrived via the SteerBus: the enqueue-time correlation id. */
-  readonly steerId?: string;
   /**
-   * Present when the message came through a durable inbox (`inbox.received`): the delivery it
-   * arrived as. Still the user's OWN words — handed over by whoever holds the session's control
-   * surface (a managed API caller), exactly as app-server's stdio is the user of a local
-   * session. Contrast `external`, which relays another party's words.
+   * Present when the message arrived via the SteerBus: the id of its `steer.queued` record.
+   * Still the user's OWN words — typed mid-turn, or handed over by whoever holds the session's
+   * control surface (an app-server client, a managed API caller). Contrast `external`, which
+   * relays another party's words.
    */
-  readonly deliveryId?: string;
+  readonly steerId?: string;
 }
 
 export interface UserFollowUpPromptOrigin {
   readonly kind: "user_follow_up";
-  /** Present when the message arrived via the SteerBus: the enqueue-time correlation id. */
+  /** See `UserPromptOrigin.steerId`. */
   readonly steerId?: string;
-  /** See `UserPromptOrigin.deliveryId`. */
-  readonly deliveryId?: string;
 }
 
 export interface InjectionOrigin {
@@ -113,14 +109,14 @@ export interface HandoffSeedOrigin {
 
 export type ExternalOriginMetadataValue = string | number | boolean | null;
 
-/** A prompt delivered by another agent/application through the host delivery API. */
+/** Another party's words, relayed onto the session by whoever holds its control surface (a
+ *  peer network, a webhook bridge, a managed API caller declaring `origin: "external"`). */
 export interface ExternalPromptOrigin {
   readonly kind: "external";
   readonly source: string;
-  readonly deliveryId: string;
   readonly actor?: string;
   readonly metadata?: Readonly<Record<string, ExternalOriginMetadataValue>>;
-  /** Present when the message was queued through the SteerBus. */
+  /** The id of its `steer.queued` record — every external message arrives through the SteerBus. */
   readonly steerId?: string;
 }
 

@@ -41,8 +41,9 @@ import { budgetExceeded, UsageDiff, type PeerBudget, type PeerFleetStats, type P
 import { buildTeamTool } from "./team-tool.ts";
 import { buildMemberTool } from "./member-tool.ts";
 
-/** Marks a peer message on the wire and in the recipient's journal. `deliveryId` is the reconcile
- *  anchor — a restart matches it against the recipient's log to tell delivered from lost. */
+/** Marks a peer message on the wire and in the recipient's journal. The message id is handed to
+ *  the bus as the steer id, so `origin.steerId` on the recipient's `message.appended` is the
+ *  reconcile anchor — a restart matches it against the ledger to tell delivered from lost. */
 export const PEER_SOURCE = "peer";
 
 /** What routing reports back. `send` never blocks, so this describes DELIVERY, not a reply. */
@@ -320,9 +321,10 @@ export class PeerNetwork {
       // AND its ledger entry. Waiting for this event is what makes the write-ahead real.
       const origin = event.origin;
       if (origin?.kind !== "external" || origin.source !== PEER_SOURCE) return;
-      const woken = this.wokenBy.delete(origin.deliveryId);
+      if (origin.steerId === undefined) return;
+      const woken = this.wokenBy.delete(origin.steerId);
       void this.statistics.add(key, { messagesReceived: 1, wakes: woken ? 1 : 0 }).catch(() => undefined);
-      void this.mailbox.settle(key, origin.deliveryId).catch(() => undefined);
+      void this.mailbox.settle(key, origin.steerId).catch(() => undefined);
       return;
     }
     if (event.type === "usage.updated") {
@@ -607,7 +609,6 @@ export class PeerNetwork {
     const origin: SteerOrigin = {
       kind: "external",
       source: PEER_SOURCE,
-      deliveryId: messageId,
       actor: sender === undefined ? message.from : displayNameFor(sender, to),
       // follow_up by default: peers interject between turns, they do not interrupt work in flight.
       channel: interrupt ? "steering" : "follow_up",
@@ -625,7 +626,8 @@ export class PeerNetwork {
       // NOTE: no `settle` on success. The ledger entry is cleared when the recipient's
       // `message.appended` shows the message actually entered its conversation (see `observe`) —
       // delivery here only means it reached an in-memory queue.
-      if (!handle.steerTo(to.address, content, origin)) {
+      // The ledger's message id doubles as the steer id, so the journal names the same thing.
+      if (handle.steerTo(to.address, content, origin, { id: messageId }) === undefined) {
         // The session is open but no frame is running at that address. For a member session that
         // cannot happen (its root frame revives on open); it happens for a subagent CREATOR whose
         // delegation finished — continuing it is its parent's call, not a message.

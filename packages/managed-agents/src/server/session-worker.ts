@@ -1,5 +1,5 @@
 /**
- * The execution half: moves a session's inbox into its conversation, and runs it.
+ * The execution half: puts a session's accepted messages back on its bus, and runs it.
  *
  * A worker is not part of the API surface and does not look for work on its own terms. It
  * claims from the work table (`SessionWork`) — one row per session that has been appended to
@@ -303,14 +303,12 @@ export class SessionWorker<TContext = unknown> {
   }
 
   /**
-   * Hand inbox items to the session in log order, advancing the cursor as soon as each one is
-   * in the conversation.
+   * Put inbox items back on the session's bus in log order, advancing the cursor as soon as
+   * each one is in the conversation.
    *
-   * "In the conversation" is the `message.appended` that names the item's delivery — for a
-   * steer, that is some step boundary of the running turn, which is why the cursor cannot
-   * simply move on dispatch. For an input that STARTED a turn, the turn settling counts too:
-   * a guardrail can refuse the input without ever journaling a message, and the input is no
-   * less dealt with for it.
+   * "In the conversation" is the `message.appended` whose `origin.steerId` names the item — for
+   * a steer into a running turn, that is some step boundary of that turn, which is why the
+   * cursor cannot simply move on requeue. A resume is done when the run it continued settles.
    *
    * While a turn runs, the inbox is re-read on every wake — a nudge from this process, or a
    * heartbeat that came back `woken` — so a message steers the turn and a cancel stops it,
@@ -327,14 +325,11 @@ export class SessionWorker<TContext = unknown> {
     const consumed = new Set<string>();
     const unsubscribe = session.onEvent((event: AgentEvent) => {
       if (event.type !== "message.appended") return;
-      const origin = event.origin;
-      // A delivery is in the conversation when a message carries its id — on whichever origin
-      // the delivery was filed under. A locally steered `user` message has no deliveryId.
-      const deliveryId = origin?.kind === "external" || origin?.kind === "user" || origin?.kind === "user_follow_up"
-        ? origin.deliveryId
-        : undefined;
-      if (deliveryId === undefined) return;
-      consumed.add(deliveryId);
+      // A message is in the conversation when its journal record carries the steer it came in
+      // as — whatever kind of origin it was filed under.
+      const steerId = event.origin !== undefined && "steerId" in event.origin ? event.origin.steerId : undefined;
+      if (steerId === undefined) return;
+      consumed.add(steerId);
       // Persist the cursor now, not when the turn ends: a holder that dies in between must not
       // leave an input that IS in the conversation looking like one that is not.
       wake.raise();
@@ -342,10 +337,10 @@ export class SessionWorker<TContext = unknown> {
 
     try {
       let cursor = await readInboxCursor(store);
-      // Dispatched, not yet in the conversation, in log order. The cursor advances across the
+      // Requeued, not yet in the conversation, in log order. The cursor advances across the
       // contiguous consumed prefix, so an item can never be skipped by a later one landing first.
       const outstanding: InboxItem[] = [];
-      let completion: Promise<unknown> | undefined;
+      let resuming: Promise<unknown> | undefined;
 
       const advance = async (): Promise<void> => {
         let moved = false;
@@ -361,9 +356,9 @@ export class SessionWorker<TContext = unknown> {
         wake.take();
         const items = [...await readInbox(store, cursor, new Set(outstanding.map((item) => item.sequence)))];
 
-        // A cancel discards everything that precedes it: the turn in flight, inputs dispatched
-        // to it but not yet taken, and inputs in this batch that never got dispatched. "Stop"
-        // means stop, not "stop, then carry on with what was queued".
+        // A cancel discards everything that precedes it: the turn in flight, inputs requeued
+        // but not yet taken, and inputs in this batch that never got requeued. "Stop" means
+        // stop, not "stop, then carry on with what was queued".
         const lastCancel = findLastIndex(items, (item) => item.kind === "control" && item.command.kind === "cancel");
         if (lastCancel !== -1) {
           for (const item of outstanding) consumed.add(inboxItemId(item));
@@ -371,10 +366,8 @@ export class SessionWorker<TContext = unknown> {
             outstanding.push(item);
             consumed.add(inboxItemId(item));
           }
-          if (completion !== undefined) {
-            session.cancel();
-            await completion;
-          }
+          session.cancel();
+          await session.whenIdle();
           await advance();
           return true;
         }
@@ -382,7 +375,7 @@ export class SessionWorker<TContext = unknown> {
         // Paused for an answer: inputs ahead of the resume that answers it are the ones the
         // paused turn already took (the service accepts no new input while interrupted), so
         // they are done, not dispatchable. Without a resume there is nothing to do but wait.
-        if (session.status.state === "interrupted" && completion === undefined) {
+        if (session.status.state === "interrupted" && resuming === undefined) {
           const resumeAt = items.findIndex((item) => item.kind === "control" && item.command.kind === "resume");
           if (resumeAt === -1) break;
           for (const item of items.slice(0, resumeAt)) {
@@ -395,43 +388,32 @@ export class SessionWorker<TContext = unknown> {
         for (const item of items) {
           if (halted()) break;
           outstanding.push(item);
-          const id = inboxItemId(item);
           if (item.kind === "input") {
-            const receipt = session.dispatchAccepted(item.input, item.origin.kind === "external"
-              ? {
-                  kind: "external",
-                  source: item.origin.source,
-                  deliveryId: item.origin.deliveryId,
-                  channel: item.mode === "follow_up" ? "follow_up" : "steering",
-                  ...(item.origin.actor !== undefined ? { actor: item.origin.actor } : {}),
-                  ...(item.origin.metadata !== undefined ? { metadata: item.origin.metadata } : {}),
-                }
-              : { kind: item.mode === "follow_up" ? "user_follow_up" : "user", deliveryId: item.origin.deliveryId });
-            if (receipt.completion !== undefined) {
-              // Resolved: the turn ran to some end (answered, refused by a guardrail, paused)
-              // and the input is dealt with even if no message ever named it. Rejected: the
-              // turn failed; if the message got in, `message.appended` already said so, and if
-              // it did not, the input is still after the cursor for the next drain.
-              completion = receipt.completion.then(() => { consumed.add(id); }, () => undefined);
-            }
+            // Its `steer.queued` record exists — that is how it got here. Back on the bus, which
+            // steers a running turn or wakes an idle session, exactly as a live enqueue would.
+            session.requeue(item.item);
           } else if (item.command.kind === "resume") {
-            completion = session.resume({ ...item.command.answers }).then(() => { consumed.add(id); }, () => { consumed.add(id); });
+            const id = inboxItemId(item);
+            // Settled either way: a resume that failed is not going to succeed by being re-read.
+            resuming = session.resume({ ...item.command.answers }).then(() => { consumed.add(id); }, () => { consumed.add(id); });
           }
         }
 
-        if (completion !== undefined) {
-          // A turn is running. Sleep until it ends or something new arrives, whichever first.
-          const settled = await Promise.race([
-            completion.then(() => "done" as const),
-            wake.wait().then(() => "woken" as const),
-          ]);
-          if (settled === "done") completion = undefined;
+        // Sleep until the session is idle or something new arrives, whichever first. `whenIdle`
+        // counts the run a requeue above just woke.
+        const settled = await Promise.race([
+          session.whenIdle().then(() => "idle" as const),
+          wake.wait().then(() => "woken" as const),
+        ]);
+        if (settled === "idle") {
+          await resuming;
+          resuming = undefined;
         }
         await advance();
-        // Nothing running and nothing new: done. Anything still outstanding was dispatched to a
-        // turn that ended without taking it; it is still after the cursor, and the next run —
-        // the next append, or the next claim — dispatches it again on a fresh object.
-        if (completion === undefined && items.length === 0) break;
+        // Idle and nothing new: done. Anything still outstanding was requeued to a run that
+        // ended without taking it; it is still after the cursor, and the next run — the next
+        // append, or the next claim — requeues it again on a fresh object.
+        if (settled === "idle" && items.length === 0) break;
       }
     } finally {
       unsubscribe();

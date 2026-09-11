@@ -8,7 +8,7 @@
 // open the session's event stream, send the message, fold events into replies -- so the shape
 // of the file is the same and only the event vocabulary differs.
 
-import type { AgentEvent } from "operon-agents";
+import type { AgentEvent, PromptOrigin } from "operon-agents";
 import { ManagedAgentsClient, ManagedApiClientError } from "operon-managed-agents/client";
 import type { ManagedSession } from "operon-managed-agents/protocol";
 import { toolLabel, toolsFence, truncate, TITLE_MAX, type BriefStats, type ToolCall } from "./brief.ts";
@@ -141,14 +141,12 @@ export function userTextOf(content: unknown): string {
   return match?.[1] !== undefined ? match[1].trim() : text;
 }
 
-// Which delivery a journaled user message -- or the turn it started -- came in as, whichever
-// origin it was filed under: `user` for the colleague's own words, `external` for a relayed
-// party's. Undefined for everything else the engine puts in the user role (reminders,
-// compaction summaries): those answer no delivery.
-export function deliveryOf(origin: { readonly kind: string; readonly deliveryId?: string } | undefined): string | undefined {
-  return origin?.kind === "user" || origin?.kind === "user_follow_up" || origin?.kind === "external"
-    ? origin.deliveryId
-    : undefined;
+// Which steer a journaled user message -- or the turn it started -- came in as: the id the
+// server's receipt named, carried as `origin.steerId` whatever kind the origin is. Undefined for
+// everything else the engine puts in the user role (reminders, compaction summaries): those went
+// through no bus and answer no message.
+export function steerOf(origin: PromptOrigin | undefined): string | undefined {
+  return origin !== undefined && "steerId" in origin ? origin.steerId : undefined;
 }
 
 // "WebSearch: solid-state batteries" reads better than "WebSearch". Tool inputs are free-form
@@ -300,22 +298,22 @@ async function streamTurn(
     signal: controller.signal,
     ...(after !== undefined ? { after } : {}),
   });
-  // The receipt names our delivery. A previous turn can still be running server-side (Stop only
+  // The receipt names our steer. A previous turn can still be running server-side (Stop only
   // abandons the response, and a dropped stream leaves the research going); `follow_up` queues
   // the message as its own turn behind it, rather than steering it into the running one.
   // Everything on the stream before our turn begins is therefore that turn's leftovers,
   // discarded below rather than posted as if it answered this message. The event log keeps the
   // discarded replies; reopening the chat replays them.
-  let deliveryId: string;
+  let steerId: string;
   try {
     const receipt = await client.sessions.messages.create(sessionId, { input: text, mode: "follow_up" });
-    deliveryId = receipt.deliveryId;
+    steerId = receipt.steerId;
   } catch (err) {
     controller.abort();
     throw err;
   }
 
-  // Which turn is ours. Unknown until the delivery shows up -- as the origin of a fresh
+  // Which turn is ours. Unknown until our message shows up -- as the origin of a fresh
   // `turn.started`, or as a `message.appended` inside a turn already running (the server
   // journals the prompt ahead of its turn, so the next turn to start is then ours).
   let currentTurn: string | undefined;
@@ -348,14 +346,14 @@ async function streamTurn(
       // ── Anchoring: find the turn that took our delivery ──
       if (event.type === "turn.started") {
         currentTurn = event.turnId;
-        if (claimNextTurn || deliveryOf(event.origin) === deliveryId) {
+        if (claimNextTurn || steerOf(event.origin) === steerId) {
           ourTurn = event.turnId;
           claimNextTurn = false;
         }
         continue;
       }
       if (event.type === "message.appended" && event.message.role === "user") {
-        if (ourTurn === undefined && deliveryOf(event.origin) === deliveryId) {
+        if (ourTurn === undefined && steerOf(event.origin) === steerId) {
           if (currentTurn !== undefined) ourTurn = currentTurn;
           else claimNextTurn = true;
         }
@@ -442,22 +440,22 @@ async function streamTurn(
         case "error":
           console.warn(`[managed-agent] ${sessionId} error: ${event.message}`);
           break;
+        case "turn.paused": {
+          // The turn parked on an approval: no turn.ended follows, the session is interrupted
+          // and refuses new input until someone answers -- the same dead end Anthropic's
+          // `requires_action` stop reason names. This bridge has no approval surface, so it
+          // can only say so.
+          if (ourTurn !== currentTurn) break;
+          currentTurn = undefined;
+          await closeOpen();
+          await thread.post(STUCK);
+          return { finished: false, replied };
+        }
         case "turn.ended": {
           currentTurn = undefined;
           if (!ours(event)) break;
           await closeOpen();
-          if (event.reason === "completed") {
-            // A turn that parked on an approval also ends; only the interruption list tells the
-            // two apart. This bridge cannot answer one (no approval surface), and the session
-            // refuses new input until someone does -- the same dead end Anthropic's
-            // `requires_action` stop reason names.
-            const pending = await client.sessions.interruptions(sessionId);
-            if (pending.data.length > 0) {
-              await thread.post(STUCK);
-              return { finished: false, replied };
-            }
-            return { finished: true, replied };
-          }
+          if (event.reason === "completed") return { finished: true, replied };
           if (event.reason === "cancelled") {
             await thread.post("Research run stopped early (cancelled). Try again.");
             return { finished: false, replied };

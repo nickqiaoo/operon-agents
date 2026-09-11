@@ -161,7 +161,7 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
   faux.unregister();
 }
 
-/** `steerTo` on an idle session now goes through the bus, so its record carries a `steerId`. */
+/** `steerTo` on an idle session goes through the bus, so its record carries the caller's `steerId`. */
 async function steerToIdleGoesThroughTheBus(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -177,29 +177,28 @@ async function steerToIdleGoesThroughTheBus(): Promise<void> {
   const accepted = session.steerTo("main", "a teammate needs your input", {
     kind: "external",
     source: "peer",
-    deliveryId: "pm_1",
     actor: "agent-b",
     channel: "follow_up",
-  });
-  check("steerTo: accepted while idle", accepted);
+  }, { id: "pm_1" });
+  check("steerTo: accepted while idle, under the caller's id", accepted?.steerId === "pm_1" && accepted.wakeTurnId !== null);
 
   const woke = await waitFor(() => turnsStarted(events) === 2);
   check("steerTo: idle target woke on its own", woke);
 
   const appended = events.find(
-    (event) => event.type === "message.appended" && event.origin?.kind === "external" && event.origin.deliveryId === "pm_1",
+    (event) => event.type === "message.appended" && event.origin?.kind === "external" && event.origin.steerId === "pm_1",
   );
   check(
     "steerTo: provenance survived onto the journal record",
     appended?.type === "message.appended" && appended.origin?.kind === "external" && appended.origin.actor === "agent-b",
   );
   check(
-    "steerTo: the record now carries a steerId (it went through the bus)",
-    appended?.type === "message.appended" && typeof appended.origin?.steerId === "string",
+    "steerTo: the enqueue was journaled as steer.queued under the same id",
+    events.some((event) => event.type === "steer.queued" && event.steerId === "pm_1"),
   );
   check(
     "steerTo: a subagent frame that is not running stays unreachable",
-    session.steerTo("main/nobody", "hi", { kind: "external", source: "peer", deliveryId: "pm_2", channel: "follow_up" }) === false,
+    session.steerTo("main/nobody", "hi", { kind: "external", source: "peer", channel: "follow_up" }, { id: "pm_2" }) === undefined,
   );
 
   await session.close();

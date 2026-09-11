@@ -30,7 +30,7 @@ import { subscribeTelemetryProjection } from "../telemetry/projection.ts";
 import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
 import type { McpServerView, MCPTool } from "../mcp/index.ts";
-import { SteerBus, steerOriginToPromptOrigin, type SteerContent, type SteerOrigin } from "../loop/steer.ts";
+import { SteerBus, type SteerContent, type SteerOptions, type SteerOrigin, type SteerReceipt } from "../loop/steer.ts";
 import type { Capability, CapabilityDiagnostic, ProvisionContext, SessionControls } from "../capabilities/capability.ts";
 import { type SubagentRecord, type SubagentStatus } from "./subagent.ts";
 import { SystemPromptContextCache, type SystemPromptContext } from "./instruction-context.ts";
@@ -236,20 +236,22 @@ export class Session implements SessionPort {
         : subscribeTelemetryProjection(this.events, telemetry.withContext({ session_id: id }), { resumed: opts.resumed === true });
     this.responder = scope.get(T.Responder);
     this.steer = scope.require(T.Steer);
-    // Every enqueue — user steer/follow-up, cron fire, background settle — surfaces on the
-    // event stream, so clients can render a pending queue and later match `origin.steerId`
-    // on the consuming `message.appended` to know when the model actually saw it.
-    this.steer.setEnqueueListener((item, channel) => {
-      void this.events.emit({
+    // Every enqueue — user steer/follow-up, cron fire, background settle, a managed delivery —
+    // is journaled as a `steer.queued` record and surfaces on the event stream. The write is
+    // handed back so the producer's receipt can settle on durability; clients render a pending
+    // queue from the events and match `origin.steerId` on the consuming `message.appended` to
+    // know when the model actually saw it. `steer.queued` is a persisted lifecycle event, so
+    // this one emit is both the record and the broadcast.
+    this.steer.setEnqueueListener((item) =>
+      this.events.emit({
         type: "steer.queued",
         steerId: item.id,
-        channel,
-        origin: steerOriginToPromptOrigin(item.origin, item.id),
+        channel: item.channel,
+        origin: item.origin,
         message: item.message,
         address: "main",
         sessionId: id,
-      });
-    });
+      }));
     // Env fallback (`AGENTS_LOG`) is resolved here so every entry point — direct `Session.open`,
     // the Runner's ephemeral session, or the harness — honors it from one place. The harness
     // tier normally provides `T.Logger`; a parentless session scope has nothing above it.
@@ -581,19 +583,18 @@ export class Session implements SessionPort {
   }
 
   /**
-   * Hand a message to the frame running at `address`; `false` when nobody is there.
+   * Hand a message to the frame running at `address`; undefined when nobody is there.
    *
    * This is the whole seam an external coordinator needs in order to address a subagent: it can
    * already learn who exists from `agent.started` / `agent.ended` (both carry `address`), but it
-   * has no way to reach a child's inbox — every frame owns a private `SteerBus`. Deliberately
+   * has no way to reach a child's queue — every frame owns a private `SteerBus`. Deliberately
    * knows nothing about peers, rosters or visibility: those are policy, and policy belongs to
    * whoever is coordinating, not to the engine.
    */
-  steerTo(address: string, content: SteerContent, origin: SteerOrigin): boolean {
+  steerTo(address: string, content: SteerContent, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined {
     const bus = address === DEFAULT_ADDRESS ? this.steer : this.frameBuses.get(address);
-    if (bus === undefined) return false;
-    bus.steer(content, origin);
-    return true;
+    if (bus === undefined) return undefined;
+    return bus.steer(content, origin, options);
   }
 
   /** @internal Cached conversation owner. Durable sessions can always rebuild it from the log. */

@@ -20,6 +20,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
+  askUserQuestionTool,
   compactionCapability,
   createHarness,
   createModelRuntime,
@@ -67,7 +68,8 @@ const cannedSearch: WebSearchProvider = {
     return [{ title: "Result", url: "https://example.com/ssb", snippet: `about ${query}` }];
   },
 };
-const tools = [webSearchTool(cannedSearch)];
+// AskUserQuestion is here only for pass 4: with nobody attached it pauses the session durably.
+const tools = [webSearchTool(cannedSearch), askUserQuestionTool];
 const repository = new DiskSessionRepository(home);
 const harness = createHarness({
   model,
@@ -209,6 +211,22 @@ try {
   const foreign = await service.create({ agent: "analyst", environment: "research", title: "x" });
   await client.sessions.delete(foreign.id);
   check("http: a deleted session is gone from the sidebar", !(listed.some((s) => s.id === foreign.id)));
+
+  // ── 4. A turn that pauses (a question with nobody to answer it) ─────────────────────────
+  // The pause is `turn.paused`; no `turn.ended` follows, so the bridge must not wait for one.
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("AskUserQuestion", { questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }] }] })], { stopReason: "toolUse" }),
+  ]);
+  const paused = await createSession();
+  const stuck = recorder(`web:local:${paused.id}`);
+  const watchdog = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 15_000).unref());
+  const outcome = await Promise.race([runTurn(stuck.thread, paused.id, "pick one").then(() => "returned" as const), watchdog]);
+  check("pause: runTurn returns on turn.paused instead of waiting for turn.ended", outcome === "returned");
+  check("pause: the user is told the conversation is stuck", stuck.posts.map(untag).some((post) => post.startsWith("The agent asked for an approval")), stuck.posts);
+  check("pause: the session is interrupted server-side", (await client.sessions.retrieve(paused.id)).state === "interrupted");
+  const again = recorder(`web:local:${paused.id}`);
+  await runTurn(again.thread, paused.id, "hello?");
+  check("pause: a later message on the stuck session is refused with the same notice", again.posts.map(untag)[0]?.startsWith("The agent asked for an approval") === true, again.posts);
 } finally {
   await managed.close();
   runtime.models.deleteProvider(faux.provider.id);

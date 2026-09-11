@@ -67,8 +67,8 @@ async function main(): Promise<void> {
   check("gen: output messages JSON", JSON.parse(String(gen?.attributes["gen_ai.output.messages"]))[0]?.text === "a cat");
   check("gen: retry is a span event with attributes", gen?.events.length === 1 && gen.events[0]?.name === "retry" && gen.events[0].attributes?.reason === "429");
   check("tool: args + result JSON, raw (no redaction by default)", String(tool?.attributes["gen_ai.tool.call.arguments"]).includes("sk-ant-SECRET") && JSON.parse(String(tool?.attributes["gen_ai.tool.call.result"])).isError === true);
-  check("tool: error status carries the tool's text", tool?.status.code === 2 && tool.status.message === "nope" && tool.attributes["agent_framework.tool.is_error"] === true);
-  check("message: content attribute + origin", typeof msg?.attributes["agent_framework.message.content"] === "string" && msg.attributes["agent_framework.message.origin"] === "user");
+  check("tool: error status carries the tool's text", tool?.status.code === 2 && tool.status.message === "nope" && tool.attributes["operon_agents.tool.is_error"] === true);
+  check("message: content attribute + origin", typeof msg?.attributes["operon_agents.message.content"] === "string" && msg.attributes["operon_agents.message.origin"] === "user");
   check("timing: span times come from the bridge clock", root !== undefined && root.startTime[0] * 1000 + Math.round(root.startTime[1] / 1e6) >= 1_700_000_000_000);
 
   // Redaction opt-in.

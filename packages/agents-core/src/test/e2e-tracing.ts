@@ -7,6 +7,7 @@ import {
   type SpanRecord,
   type TraceRecord,
   type TracingExporter,
+  type TracingProcessor,
 } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -106,6 +107,47 @@ async function main(): Promise<void> {
 
   const turnErr = turn?.error?.message ?? "";
   check("redaction: secret in span error is masked at export", turnErr.includes("[REDACTED]") && !turnErr.includes(SECRET));
+
+  // A durable pause: the run stops on `turn.paused` with no `agent.ended`, and continues later
+  // as a new run. Everything open must end at the pause, or it is never exported.
+  {
+    const pauseSink = new ListenerSink();
+    const started: string[] = [];
+    const ended: string[] = [];
+    const endedTraces: string[] = [];
+    const endedSpans: SpanRecord[] = [];
+    const recording: TracingProcessor = {
+      onTraceStart: (t) => void started.push(t.traceId),
+      onTraceEnd: (t) => void endedTraces.push(t.traceId),
+      onSpanStart: (s) => void started.push(s.spanId),
+      onSpanEnd: (s) => {
+        ended.push(s.spanId);
+        endedSpans.push(s.toJSON());
+      },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    };
+    const offPause = eventSinkTracingBridge(pauseSink, recording, { now: () => ++clock });
+    const e = (body: Record<string, unknown>): Promise<void> => pauseSink.emit({ sessionId: "s3", address: "main", ...body } as AgentEvent);
+    await e({ type: "agent.started", agent: "main" });
+    await e({ type: "turn.started", turnId: "t1" });
+    await e({ type: "tool.call.started", toolCallId: "ask1", toolName: "AskUserQuestion" });
+    await e({ type: "turn.paused", pending: [{ kind: "input", toolCallId: "ask1" }] });
+    const pausedTurn = endedSpans.find((s) => s.span_data.type === "turn");
+    check("pause: the turn span ends, reason paused", pausedTurn?.span_data.type === "turn" && pausedTurn.span_data.reason === "paused" && pausedTurn.ended_at !== null);
+    const suspended = endedSpans.find((s) => s.span_data.type === "tool");
+    check("pause: the suspended tool span ends marked paused, not failed", suspended !== undefined && suspended.error === null && suspended.events?.some((ev) => ev.name === "paused") === true);
+    const pausedAgent = endedSpans.find((s) => s.span_data.type === "agent");
+    check("pause: the agent span ends and the trace is over", pausedAgent !== undefined && endedTraces.length === 1);
+    // The continuation: a fresh run, a fresh trace of the same session.
+    await e({ type: "agent.started", agent: "main" });
+    await e({ type: "turn.started", turnId: "t2" });
+    await e({ type: "tool.result", toolCallId: "ask1", toolName: "AskUserQuestion", result: { content: [] } });
+    await e({ type: "turn.ended", turnId: "t2", reason: "completed" });
+    await e({ type: "agent.ended", agent: "main" });
+    offPause();
+    check("pause: the resumed run is a second trace, and nothing is left open", endedTraces.length === 2 && started.length === ended.length + 2);
+  }
 
   // Noop processor: bridge drives it without throwing and produces nothing.
   const noopSink = new ListenerSink();

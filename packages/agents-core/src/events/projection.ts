@@ -525,8 +525,6 @@ export class SessionProjection {
           message: event.message,
         });
         break;
-      case "delivery.accepted":
-        break;
       case "tool.call.started": {
         const turn = state.turn;
         if (turn === undefined) break;

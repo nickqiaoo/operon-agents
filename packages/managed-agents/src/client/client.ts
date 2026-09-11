@@ -4,7 +4,7 @@ import type {
   CancelManagedSessionResponse,
   CreateManagedMessageRequest,
   CreateManagedSessionRequest,
-  DeliveryReceiptResource,
+  MessageReceiptResource,
   InterruptionsResponse,
   ListSessionEventsOptions,
   ListSessionEventsResponse,
@@ -171,7 +171,7 @@ export class ManagedSessionsClient {
       sessionId: string,
       request: CreateManagedMessageRequest,
       options: CreateManagedMessageOptions = {},
-    ): Promise<DeliveryReceiptResource> =>
+    ): Promise<MessageReceiptResource> =>
       this.root.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: "POST",
         body: request,

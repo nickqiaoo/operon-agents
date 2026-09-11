@@ -217,10 +217,10 @@ try {
       { idempotencyKey: "message-1" },
     ),
   ]);
-  // Always "queued" now: accepting an input and running it are separate, so a receipt cannot
-  // claim a turn has started — whoever holds the lease decides that later.
-  check("message: returns acceptance receipt", receipt.status === "queued" && receipt.sessionId === session.id);
-  check("message: concurrent idempotency key returns the same receipt", duplicate.deliveryId === receipt.deliveryId);
+  // A receipt names the steer and nothing more: accepting an input and running it are separate,
+  // so it cannot claim a turn has started — whoever holds the lease decides that later.
+  check("message: returns acceptance receipt", receipt.channel === "steering" && receipt.sessionId === session.id);
+  check("message: concurrent idempotency key returns the same receipt", duplicate.steerId === receipt.steerId);
   const liveMessage = await nextEvent(iterator, "message.appended");
   const ended = await nextEvent(iterator, "turn.ended");
   check("stream: prompt events arrive independently", ended.address === "main");
@@ -234,7 +234,7 @@ try {
     "message: the caller's own words reach the model bare, as the user",
     liveMessage.type === "message.appended"
       && liveMessage.origin?.kind === "user"
-      && liveMessage.origin.deliveryId === receipt.deliveryId
+      && liveMessage.origin.steerId === receipt.steerId
       && textOf(liveMessage.message) === "hello",
   );
 
@@ -251,8 +251,8 @@ try {
     "message: relayed words reach the model inside the external envelope",
     relayedMessage.type === "message.appended"
       && relayedMessage.origin?.kind === "external"
-      && relayedMessage.origin.deliveryId === relayed.deliveryId
-      && textOf(relayedMessage.message).startsWith('<external-message source="ci" deliveryId="')
+      && relayedMessage.origin.steerId === relayed.steerId
+      && textOf(relayedMessage.message).startsWith('<external-message source="ci" id="')
       && textOf(relayedMessage.message).includes('actor="ci-bot"')
       && textOf(relayedMessage.message).includes("NOT a message from the user")
       && textOf(relayedMessage.message).includes("the build is red"),
@@ -304,7 +304,7 @@ try {
       (event) => event.type === "message.appended"
         && event.message.role === "user"
         && event.origin?.kind === "user"
-        && event.origin.deliveryId === receipt.deliveryId,
+        && event.origin.steerId === receipt.steerId,
     ).length === 1,
   );
 
@@ -336,7 +336,7 @@ try {
   const liveReceipt = await running.client.sessions.messages.create(session.id, { input: "again" });
   // A cold session accepts work the same way a warm one does — acceptance is a write, so there
   // is nothing to reopen before it succeeds. The turn follows once a worker picks it up.
-  check("host: reopened session receives work", liveReceipt.status === "queued");
+  check("host: reopened session receives work", typeof liveReceipt.steerId === "string");
   const liveEnded = await nextEvent(reopenedLiveIterator, "turn.ended");
   check("stream: observes reopened HarnessSession", liveEnded.sessionId === session.id);
   await reopenedLiveIterator.return?.();
@@ -440,7 +440,7 @@ try {
   await running.client.sessions.delete(duplicateId);
 
   const second = await running.client.sessions.messages.create(session.id, { input: "again" });
-  check("restart: reopened session can continue", second.status === "queued");
+  check("restart: reopened session can continue", typeof second.steerId === "string");
   // Wait for the fire-and-observe delivery before deleting its durable store.
   const active = running.managed.server.listening;
   check("server: remains live after immediate receipt", active);

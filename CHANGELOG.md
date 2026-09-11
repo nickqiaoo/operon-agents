@@ -7,6 +7,79 @@ released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **OTel span attributes are namespaced `operon_agents.*`** (`operon-agents-core`).
+  `OTelTracingProcessor` named the framework's own attributes `agent_framework.*` — the
+  project's previous name — and its default tracer `agent-framework`. They are now
+  `operon_agents.*` (`operon_agents.span.type`, `operon_agents.turn.id`,
+  `operon_agents.usage.cost_usd`, …) and `operon-agents`. The `gen_ai.*` semantic-convention
+  attributes are unchanged. A collector query or dashboard filtering on the old prefix needs
+  the new one.
+- **One way into a session: every message is a steer, and every steer is journaled**
+  (`operon-agents-core`, `operon-agents`, `operon-agents-peers`, `operon-managed-agents`).
+  `deliver()` / `dispatchAccepted()` and the `inbox.received` record they wrote duplicated the
+  SteerBus one concept over — a second identity (`deliveryId` beside `steerId`), a second receipt,
+  a second event (`delivery.accepted` beside `steer.queued`), and a second copy of the bus's
+  idle-wake decision — for one bit of difference: acceptance was written down before dispatch.
+  The bus now does that for every producer. `SteerBus.steer()` hands the enqueue to the owning
+  session, which journals it as the `steer.queued` lifecycle record before anything can consume
+  it, and the receipt gained `journaled`, a promise that settles on durability — so a user's
+  follow-up typed mid-turn is now as crash-safe as a managed API delivery was. `steerTo` returns
+  the `SteerReceipt` (undefined when refused) and takes `{ id }` to name the steer, which is what
+  `operon-agents-peers` now does with its message id; `steer()` / `followUp()` return the receipt
+  too. New: `SteerBus.requeue()` / `HarnessSession.requeue()` put a message whose record already
+  exists back on a bus without journaling it again (what a managed worker does with what it finds
+  in the log), `HarnessSession.whenIdle()`, and the pure `buildSteerMessage` /
+  `steerQueuedRecord` / `steerMessageFromRecord` helpers so a writer without a session object
+  produces the identical record. `SteerMessage` carries its `channel` and the persisted
+  `PromptOrigin`. Removed: `deliver`, `dispatchAccepted`, `DeliveryOptions`, `DeliveryMode`,
+  `AcceptedOrigin`, `DeliveryReceipt`, `InboxOrigin`, the `inbox.received` record, the
+  `delivery.accepted` event, and `deliveryId` on every origin — `origin.steerId` is the one
+  identity from enqueue to consumption. `<external-message>` names it `id="…"`. Logs written
+  before this change still replay (the reducer never read `inbox.received`), but their
+  unconsumed inputs are not requeued.
+- **Managed API: `messages.create` returns the steer** (`operon-managed-agents`). The receipt is
+  `{ steerId, sessionId, acceptedAt, channel }` (`MessageReceiptResource`; `deliveryId`, `status`
+  and the `"turn"` channel are gone — a receipt never knew whether a turn had started). `mode` is
+  `"steer"` (default) or `"follow_up"`; `"auto"` was the same thing as `"steer"`. Clients anchor
+  on `origin.steerId`, as `run()` and the examples now do. The worker requeues what it reads
+  from the log instead of re-dispatching it, and waits on the session going idle rather than on
+  a per-input completion.
+
+### Fixed
+
+- **Tracing: a run that pauses is exported** (`operon-agents-core`). A durable pause
+  (`turn.paused` — an approval, an `AskUserQuestion`) stops a run without an `agent.ended`, and
+  the continuation starts as a new run; `eventSinkTracingBridge` kept the paused run's agent,
+  turn and tool spans open and its trace live, so none of them ever reached an exporter and the
+  processor held them until shutdown. The bridge now ends them at the pause: the turn with
+  reason `paused`, the suspended tool calls marked `paused` (not failed), the agent span closed
+  and the trace ended; the resumed run is the next trace of the same session.
+
+- **A headless session's `AskUserQuestion` now pauses durably instead of being dismissed**
+  (`operon-agents`, `operon-agents-core`). `QuestionResponder` gained `isLiveQuestioner?()`, the
+  question-side twin of `Responder.isLiveApprover`; the harness responder answers `false` while no
+  question handler is set, and the tool then suspends (`turn.paused` with the questions on the
+  pending list, answered through `resume`) rather than reporting "User dismissed the question".
+  Before, a managed session -- nobody attached, driven over the API -- could never ask: the
+  harness always supplied a responder, so the tool's headless path was unreachable. A live client
+  that registered a question handler is unchanged; one that registered none but set an approval
+  handler now pauses on a question too.
+
+### Added
+
+- `examples/linear-github`: an engineer delegated Linear issues that asks in the issue thread,
+  opens a pull request, and continues from `@mention`s in PR review comments -- Chat SDK's Linear
+  and GitHub adapters bridged to `operon-managed-agents`. Sessions run in E2B sandboxes when
+  `E2B_API_KEY` is set (one per session, reconnected on open, paused on close), in host
+  directories otherwise; the faux-model end-to-end test runs in both modes. The issue names the
+  repository: a session's environment id is `owner/name`, from the issue's label in Linear's
+  `repo` label group (`GITHUB_REPO` when it has none), and one server works every repository
+  its GitHub App is installed on.
+
 ## [0.1.0-alpha.7] — 2026-09-08
 
 ### Changed

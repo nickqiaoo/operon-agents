@@ -1,22 +1,22 @@
 /**
- * Delivery idempotency.
+ * Message idempotency.
  *
- * A client that retries a message after a timeout must not have it delivered twice, and it
+ * A client that retries a message after a timeout must not have it accepted twice, and it
  * cannot tell from a failed request whether the first attempt landed. Keyed by
  * `(sessionId, key)`: the same key on a different session is a different delivery.
  */
-import type { DeliveryReceiptResource } from "../protocol/types.ts";
+import type { MessageReceiptResource } from "../protocol/types.ts";
 
 export interface ManagedDeliveryIdempotencyStore {
   run(
     sessionId: string,
     key: string,
-    operation: () => Promise<DeliveryReceiptResource>,
-  ): Promise<DeliveryReceiptResource>;
+    operation: () => Promise<MessageReceiptResource>,
+  ): Promise<MessageReceiptResource>;
 }
 export class MemoryManagedDeliveryIdempotencyStore implements ManagedDeliveryIdempotencyStore {
   private readonly entries = new Map<string, {
-    readonly result: Promise<DeliveryReceiptResource>;
+    readonly result: Promise<MessageReceiptResource>;
     settled: boolean;
     expiresAt: number;
   }>();
@@ -33,8 +33,8 @@ export class MemoryManagedDeliveryIdempotencyStore implements ManagedDeliveryIde
   async run(
     sessionId: string,
     key: string,
-    operation: () => Promise<DeliveryReceiptResource>,
-  ): Promise<DeliveryReceiptResource> {
+    operation: () => Promise<MessageReceiptResource>,
+  ): Promise<MessageReceiptResource> {
     const compound = `${sessionId}\0${key}`;
     const now = Date.now();
     this.pruneExpired(now);

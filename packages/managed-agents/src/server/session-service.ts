@@ -16,10 +16,12 @@
  */
 import {
   agentEventFromRecord,
+  buildSteerMessage,
   INTERRUPTION_STATE_KEY,
   newAgentEventId,
   flattenPendingInterrupts,
   parseInterruptionState,
+  steerQueuedRecord,
   watchRecordsByPolling,
   SessionRepositoryConflictError,
   type AgentEvent,
@@ -31,15 +33,16 @@ import {
   type SessionRepository,
   type SessionStore,
   type SessionSummary,
+  type SteerOrigin,
 } from "operon-agents";
 import type {
   AgentRef,
   ControlReceiptResource,
   CreateManagedMessageRequest,
   CreateManagedSessionRequest,
-  DeliveryReceiptResource,
   EnvironmentRef,
   ManagedSession,
+  MessageReceiptResource,
   UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import { CONTROL_RECORD_NAME, hasUnprocessedInbox, type ControlCommand } from "./inbox.ts";
@@ -455,14 +458,17 @@ export class SessionService {
    * Accept an input and return a receipt. The write is awaited, so the receipt means the input
    * survives a crash — not merely that it reached a process.
    *
-   * Acceptance is all this does. Whether the input steers a turn already in flight or starts a
-   * fresh one is decided when a worker processes it, which can be an arbitrary moment later.
+   * Acceptance is all this does, and it is the same acceptance a local steer has: the record
+   * written here is the `steer.queued` a session's own bus would journal, built by the same
+   * function, so the worker that later opens the session puts it back on the bus unchanged.
+   * Whether it then steers a turn already in flight or wakes an idle session is decided when a
+   * worker processes it, which can be an arbitrary moment later.
    */
   async appendEvent(
     id: string,
     request: CreateManagedMessageRequest,
     idempotencyKey?: string,
-  ): Promise<DeliveryReceiptResource> {
+  ): Promise<MessageReceiptResource> {
     assertCreateMessageRequest(request);
     if (idempotencyKey !== undefined) {
       return this.idempotency.run(id, idempotencyKey, () => this.acceptEvent(id, request));
@@ -473,48 +479,38 @@ export class SessionService {
   private async acceptEvent(
     id: string,
     request: CreateManagedMessageRequest,
-  ): Promise<DeliveryReceiptResource> {
+  ): Promise<MessageReceiptResource> {
     const summary = await this.summary(id);
     await this.requireMetadata(id);
     if (summary.durableState === "interrupted") {
       throw new ManagedConflictError(`session "${id}" is interrupted; resume it before delivering new work`);
     }
     const acceptedAt = Date.now();
-    const deliveryId = managedDeliveryId();
-    const mode = request.mode ?? "auto";
+    const channel = request.mode === "follow_up" ? "follow_up" : "steering";
+    // Whose words, not which transport: the caller is this session's user unless it says it is
+    // relaying someone else's. The bus files a user's words by kind — `user` steers, a
+    // `user_follow_up` queues behind the turn — and a relay by its declared channel.
+    const origin: SteerOrigin = request.origin === "external"
+      ? {
+          kind: "external",
+          source: request.source ?? "managed-api",
+          channel,
+          ...(request.actor !== undefined ? { actor: request.actor } : {}),
+          ...(request.metadata !== undefined
+            ? { metadata: request.metadata as Readonly<Record<string, ExternalOriginMetadataValue>> }
+            : {}),
+        }
+      : { kind: channel === "follow_up" ? "user_follow_up" : "user" };
+    const item = buildSteerMessage(request.input, origin, { now: () => acceptedAt });
     await this.work.append(id, {
-      type: "inbox.received",
+      ...steerQueuedRecord(item, acceptedAt),
       // Assigned here because this writes through a plain repository handle, not through a
       // session's publishing store (which stamps one on the way past). Without it the record
       // is unprojectable — invisible to `listEvents` and to every client, whose reconnect
       // protocol dedupes on exactly this id.
       eventId: newAgentEventId(),
-      time: acceptedAt,
-      address: "main",
-      input: request.input,
-      // Whose words, not which transport: the caller is this session's user unless it says it is
-      // relaying someone else's. `mode` is the record's own field, so the origin never carries
-      // `user_follow_up` — the worker files a `user` delivery by mode when it dispatches.
-      origin: request.origin === "external"
-        ? {
-            kind: "external",
-            source: request.source ?? "managed-api",
-            deliveryId,
-            ...(request.actor !== undefined ? { actor: request.actor } : {}),
-            ...(request.metadata !== undefined
-              ? { metadata: request.metadata as Readonly<Record<string, ExternalOriginMetadataValue>> }
-              : {}),
-          }
-        : { kind: "user", deliveryId },
-      mode,
     } satisfies AgentRecord);
-    return {
-      deliveryId,
-      sessionId: id,
-      acceptedAt,
-      status: "queued",
-      channel: mode === "follow_up" ? "follow_up" : mode === "steer" ? "steering" : "turn",
-    };
+    return { steerId: item.id, sessionId: id, acceptedAt, channel: item.channel };
   }
 
   /**
@@ -688,8 +684,8 @@ function assertCreateMessageRequest(input: unknown): asserts input is CreateMana
   if (input.metadata !== undefined && !isRecord(input.metadata)) {
     throw new ManagedInvalidRequestError("metadata must be an object");
   }
-  if (input.mode !== undefined && input.mode !== "auto" && input.mode !== "steer" && input.mode !== "follow_up") {
-    throw new ManagedInvalidRequestError("mode must be auto, steer or follow_up");
+  if (input.mode !== undefined && input.mode !== "steer" && input.mode !== "follow_up") {
+    throw new ManagedInvalidRequestError("mode must be steer or follow_up");
   }
 }
 
@@ -701,12 +697,6 @@ let managedIdCounter = 0;
 function managedSessionId(): string {
   managedIdCounter += 1;
   return `ms_${Date.now().toString(36)}_${managedIdCounter.toString(36)}`;
-}
-
-let deliveryCounter = 0;
-function managedDeliveryId(): string {
-  deliveryCounter += 1;
-  return `delivery_${Date.now().toString(36)}_${deliveryCounter.toString(36)}`;
 }
 
 let commandCounter = 0;

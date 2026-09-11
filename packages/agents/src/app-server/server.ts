@@ -264,13 +264,13 @@ export class AppServer {
 
   private onSessionSteer(params: SessionSteerParams): SessionSteerResult {
     const session = this.requireSession(params);
-    return { accepted: true, steerId: session.steer(params.text) };
+    return { accepted: true, steerId: session.steer(params.text).steerId };
   }
 
   private onSessionFollowUp(params: SessionFollowUpParams): SessionFollowUpResult {
     const session = this.requireSession(params);
-    const steerId = session.followUp(params.text);
-    return steerId === null ? { accepted: false } : { accepted: true, steerId };
+    const receipt = session.followUp(params.text);
+    return receipt === null ? { accepted: false } : { accepted: true, steerId: receipt.steerId };
   }
 
   private onSessionCancel(params: SessionRef): Record<string, never> {

@@ -161,7 +161,7 @@ async function main(): Promise<void> {
   } as unknown as PgSessionRepository;
   const alpha = new PgSessionWork({ pool, repository, ownerId: "node-alpha" });
   const beta = new PgSessionWork({ pool, repository, ownerId: "node-beta" });
-  const record: AgentRecord = { type: "inbox.received", address: "main", input: "hi", mode: "auto", origin: { kind: "external", source: "t", deliveryId: "d1" } };
+  const record: AgentRecord = { type: "custom", name: "test.record", address: "main", data: { hi: true } };
 
   // ── append wakes; claim takes ─────────────────────────────────────────────────
   check("claim: an empty table offers nothing", (await alpha.claim()) === undefined);

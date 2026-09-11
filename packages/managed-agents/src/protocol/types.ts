@@ -62,16 +62,25 @@ export interface CreateManagedMessageRequest {
   readonly actor?: string;
   /** `external` only: attributes rendered onto the envelope. */
   readonly metadata?: Readonly<Record<string, string | number | boolean | null>>;
-  readonly mode?: "auto" | "steer" | "follow_up";
+  /**
+   * Which queue the message is filed into (default `steer`). `steer`: taken at the running
+   * turn's next step boundary, or — with nothing running — as the next turn's prompt.
+   * `follow_up`: a prompt of its own, queued behind the turn in flight.
+   */
+  readonly mode?: "steer" | "follow_up";
 }
 
-export interface DeliveryReceiptResource {
-  readonly deliveryId: string;
+/**
+ * The receipt for an accepted message. It means the message's `steer.queued` record is durable
+ * — a worker will take it — not that a turn has started: whoever holds the session decides that
+ * later. `steerId` is the message's identity from here on: on the `steer.queued` event, and as
+ * `origin.steerId` of the `message.appended` that shows the model saw it.
+ */
+export interface MessageReceiptResource {
+  readonly steerId: string;
   readonly sessionId: string;
   readonly acceptedAt: number;
-  readonly status: "started" | "queued";
-  readonly channel: "turn" | "steering" | "follow_up";
-  readonly steerId?: string;
+  readonly channel: "steering" | "follow_up";
 }
 
 export interface ListSessionEventsResponse {

@@ -1,10 +1,5 @@
 import type { ImageContent, Message, TextContent, Usage } from "../protocol/index.ts";
-import type { CompactionSummaryOrigin, ExternalPromptOrigin, LoadedToolSchema, PromptOrigin, UserPromptOrigin } from "./origin.ts";
-
-/** Who an accepted input (`inbox.received`) is from — see that record's doc. */
-export type InboxOrigin =
-  | (UserPromptOrigin & { readonly deliveryId: string })
-  | ExternalPromptOrigin;
+import type { CompactionSummaryOrigin, LoadedToolSchema, PromptOrigin } from "./origin.ts";
 
 /**
  * A record in a session's append log. The log is a FLAT, linear, append-only stream
@@ -55,31 +50,6 @@ export type AgentRecordBody =
       readonly tokensAfter: number;
       /** See `CompactionSummaryOrigin.loadedTools`; folded onto the summary's origin. */
       readonly loadedTools?: readonly LoadedToolSchema[];
-    }
-  // ── Inbox (accepted, not yet processed) ──
-  // An externally delivered input, journaled the moment it is ACCEPTED — before any capability
-  // rewrite, guardrail check, or run. It is the durable receipt behind a delivery's 202: once
-  // this record has a sequence, the input survives a crash and a later run will pick it up.
-  //
-  // Deliberately NOT history-bearing. What the model ends up seeing is journaled separately as
-  // `context.append_message`, because it can legitimately differ from what arrived: a capability
-  // may rewrite the prompt, a guardrail may reject it outright, and a capability that answers
-  // the prompt itself journals no message at all. Reducing this record into history would make
-  // replay disagree with what the model actually saw.
-  //
-  // `origin.deliveryId` is the idempotency key: a re-processed inbox record whose delivery
-  // already produced history is skipped rather than replayed into the model.
-  //
-  // `origin.kind` says WHOSE words these are, not how they arrived: `user` is the user's own
-  // input, handed over by the party holding the session's control surface (a managed API
-  // caller); `external` relays another party's words (a peer, a webhook) and is rendered to the
-  // model as such. Both are anchored on `deliveryId`.
-  | {
-      readonly type: "inbox.received";
-      readonly input: string;
-      readonly origin: InboxOrigin;
-      /** Delivery mode as accepted — `steer` targets a running turn, `follow_up` queues after it. */
-      readonly mode: "auto" | "steer" | "follow_up";
     }
   // A host-injected message that should enter the model's context.
   | {
@@ -346,11 +316,10 @@ export function reduceHistory(records: readonly AgentRecord[]): ReducedHistory {
       case "context.apply_compaction":
         foldCompaction(state, record.cutoff, record.summary, record.summaryTimestamp, record.loadedTools);
         break;
-      // Audit / bookkeeping — not reduced into history.
-      // `inbox.received` is the accepted input, not the seen input: what the model saw is
-      // journaled as `context.append_message` after capabilities and guardrails have had
-      // their say. Folding it here would double-count, or resurrect a rejected prompt.
-      case "inbox.received":
+      // Audit / bookkeeping — not reduced into history. A queued steer (`event.lifecycle` /
+      // `steer.queued`) is the accepted input, not the seen input: what the model saw is
+      // journaled as `context.append_message` when a turn drains it. Folding the record here
+      // would double-count, or resurrect a message no turn ever took.
       case "metadata":
       case "usage.record":
       case "permission.record_approval":

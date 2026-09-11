@@ -100,7 +100,7 @@ async function main(): Promise<void> {
 function scriptedClient(script: {
   readonly phases: ReadonlyArray<readonly AgentEvent[]>;
   readonly interruptions: ReadonlyArray<readonly unknown[]>;
-  readonly deliveryId?: string;
+  readonly steerId?: string;
 }): { client: ManagedAgentsClient; order: string[]; resumed: unknown[] } {
   const order: string[] = [];
   const resumed: unknown[] = [];
@@ -130,7 +130,7 @@ function scriptedClient(script: {
       messages: {
         create: async () => {
           order.push("send");
-          return { status: "queued", deliveryId: script.deliveryId ?? "d1" };
+          return { steerId: script.steerId ?? "d1", channel: "steering" };
         },
       },
       interruptions: async () => ({ data: script.interruptions[interruptIndex++] ?? [] }),
@@ -150,7 +150,7 @@ function scriptedClient(script: {
 async function interruptionPaths(): Promise<void> {
   const ev = (body: Record<string, unknown>, eventId: string): AgentEvent =>
     ({ ...body, address: "main", sessionId: "s", eventId }) as unknown as AgentEvent;
-  const external = { kind: "external", source: "managed-api", deliveryId: "d1" };
+  const external = { kind: "external", source: "managed-api", steerId: "d1" };
   const assistant = (text: string, eventId: string): AgentEvent =>
     ev({ type: "message.appended", message: { role: "assistant", content: [{ type: "text", text }] } }, eventId);
 
@@ -184,7 +184,7 @@ async function interruptionPaths(): Promise<void> {
   check("run: opens the stream once, before sending, and keeps it across the pause", paused.order.join(",") === "stream,send,resume");
   check("run: the caller's answers reach resume", JSON.stringify(paused.resumed[0]) === JSON.stringify({ a1: { decision: "approve" } }));
 
-  // A steer: our delivery lands inside a turn that was already running.
+  // A steer: our message lands inside a turn that was already running.
   const steered = scriptedClient({
     phases: [[
       ev({ type: "turn.started", turnId: "t5" }, "s1"),
@@ -195,7 +195,7 @@ async function interruptionPaths(): Promise<void> {
     interruptions: [[]],
   });
   const steeredResult = await run(steered.client, "s", "go");
-  check("run: a delivery steered into a running turn ends with that turn", steeredResult.output === "steered answer");
+  check("run: a message steered into a running turn ends with that turn", steeredResult.output === "steered answer");
 
   // The same pause with no handler must reject rather than wait.
   const unhandled = scriptedClient({ phases: [ourTurn], interruptions: [[{ approvalId: "a1" }]] });

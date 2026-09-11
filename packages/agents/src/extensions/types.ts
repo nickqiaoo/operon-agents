@@ -41,6 +41,7 @@ import type {
   PendingApprovalInterrupt,
   SessionStore,
   SteerContent,
+  SteerOptions,
   SteerOrigin,
   SteerReceipt,
   StepStopReason,
@@ -143,17 +144,18 @@ export interface ExtensionHost {
 export interface HarnessSessionHandle {
   readonly id: string;
   prompt(input: AgentInput): Promise<RunResult>;
-  steer(input: string): string;
-  followUp(input: string): string | null;
+  steer(input: string): SteerReceipt;
+  followUp(input: string): SteerReceipt | null;
   /**
    * Hand a message to a specific frame in that session — `main` for its root agent,
-   * `main/<agentId>` for one of its subagents — carrying your own provenance. `false` when no
-   * frame is running there.
+   * `main/<agentId>` for one of its subagents — carrying your own provenance. Undefined when no
+   * frame is running there. The receipt's `steerId` (your own, via `options.id`, or minted) is
+   * what the recipient's journal carries as `origin.steerId` once the message is consumed.
    *
    * `steer`/`followUp` above can only ever reach the root; this is what lets an extension address
    * an individual subagent, which is what coordination between agents requires.
    */
-  steerTo(address: string, content: string, origin: SteerOrigin): boolean;
+  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined;
   cancel(): void;
   close(): Promise<void>;
 }

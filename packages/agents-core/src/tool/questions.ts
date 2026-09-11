@@ -41,4 +41,12 @@ export type QuestionResult = QuestionResponse | QuestionAnswers | null;
  */
 export interface QuestionResponder {
   requestQuestion?(request: QuestionRequest, options?: { readonly signal?: AbortSignal }): Promise<QuestionResult>;
+  /**
+   * Whether anyone is there to answer a question right now. `false` means the session is
+   * headless -- a durable session driven over an API, with nobody attached -- so a question
+   * suspends the run durably (it surfaces on the paused run's pending list, answered through
+   * `Runner.resume`) instead of being asked into the void. Absent means live. Mirrors
+   * `Responder.isLiveApprover` for approvals.
+   */
+  isLiveQuestioner?(): boolean;
 }

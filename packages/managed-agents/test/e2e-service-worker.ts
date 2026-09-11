@@ -57,25 +57,25 @@ async function main(): Promise<void> {
   // ── one message, one turn ─────────────────────────────────────────────────────
   const session = await service.create({ agent: "default", environment: "default" });
   const receipt = await service.appendEvent(session.id, { input: "first question" });
-  check("accepted before any worker existed", receipt.status === "queued");
+  check("accepted before any worker existed", typeof receipt.steerId === "string");
 
   const drained = await worker.drain(session.id);
   check("worker drained the session", drained);
 
   const events = await service.listEvents(session.id, { limit: 100 });
   const types = events.data.map((e) => e.type);
-  check("acceptance is in history", types.includes("delivery.accepted"));
+  check("acceptance is in history", types.includes("steer.queued"));
   const assistant = events.data.filter(
     (e) => e.type === "message.appended" && e.message.role === "assistant",
   );
   check("the worker's turn produced an assistant message", assistant.length === 1);
-  // Count only what WE delivered: capabilities also inject user-role messages (environment
-  // context, reminders), and those answer no delivery — ours carries the delivery it came in as.
+  // Count only what WE sent: capabilities also inject user-role messages (environment
+  // context, reminders), and those went through no bus — ours carries the steer it came in as.
   const delivered = (page: readonly AgentEvent[]): number =>
     page.filter((e) =>
       e.type === "message.appended"
       && (e.origin?.kind === "user" || e.origin?.kind === "user_follow_up" || e.origin?.kind === "external")
-      && e.origin.deliveryId !== undefined).length;
+      && e.origin.steerId !== undefined).length;
   check("the accepted input entered the conversation exactly once", delivered(events.data) === 1);
 
   // ── draining again is a no-op: the cursor says it is done ─────────────────────

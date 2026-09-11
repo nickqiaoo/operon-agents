@@ -446,7 +446,7 @@ never ended early by an older turn's `turn.ended` arriving in the backfill.
 ## 7 · The journey of one prompt (threading all six rings)
 
 ```
-⑤ desktop → app-server RPC "prompt"                    (or ⑤ HTTP POST /messages → journal inbox → worker claims it)
+⑤ desktop → app-server RPC "prompt"                    (or ⑤ HTTP POST /messages → journal steer.queued → worker claims it)
 ③ HarnessSession.prompt()  ── run gate (stands down during a barrier) ── extension run.start decision point (30s guardrail)
 ① Runner.run → acquireSession → withRunLock (single owner)
 ① Runner.execute → beginRun → ② assembleCapabilities (10s start timeout, absence isolated)

@@ -14,7 +14,7 @@ import {
   rawTextOf,
   SEARCH_TOOL,
   toolCallOf,
-  deliveryOf,
+  steerOf,
   userTextOf,
 } from "./managed-agents.ts";
 
@@ -109,10 +109,10 @@ export async function historyOf(sessionId: string): Promise<UIMessageJSON[]> {
     projection.apply(event);
     if (event.address !== "main") continue;
     if (event.type === "message.appended") {
-      if (event.message.role === "user") pendingDelivery = deliveryOf(event.origin) ?? pendingDelivery;
+      if (event.message.role === "user") pendingDelivery = steerOf(event.origin) ?? pendingDelivery;
     } else if (event.type === "turn.started") {
       running = event.turnId;
-      const delivery = deliveryOf(event.origin) ?? pendingDelivery;
+      const delivery = steerOf(event.origin) ?? pendingDelivery;
       if (delivery !== undefined) turnOf.set(delivery, event.turnId);
       pendingDelivery = undefined;
     } else if (event.type === "turn.ended") {
@@ -157,7 +157,7 @@ export async function historyOf(sessionId: string): Promise<UIMessageJSON[]> {
         // answer a delivery. Everything else the engine journals as a user-role message --
         // compaction summaries, injected reminders -- is context for the model, not something
         // the colleague said.
-        const delivery = deliveryOf(origin);
+        const delivery = steerOf(origin);
         if (delivery === undefined) return;
         closeTurn();
         searches = 0;

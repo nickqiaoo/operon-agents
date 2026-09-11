@@ -87,7 +87,7 @@ async function main(): Promise<void> {
 
   const spans = exporter.getFinishedSpans();
   const byFrameworkId = new Map<string, ReadableSpan>();
-  for (const span of spans) byFrameworkId.set(String(span.attributes["agent_framework.span_id"]), span);
+  for (const span of spans) byFrameworkId.set(String(span.attributes["operon_agents.span_id"]), span);
 
   const otelAgent = byFrameworkId.get("span_agent");
   const otelTurn = byFrameworkId.get("span_turn");
@@ -96,8 +96,8 @@ async function main(): Promise<void> {
 
   check("exports four OTel spans", spans.length === 4);
   check("agent span carries GenAI agent name", otelAgent?.attributes["gen_ai.agent.name"] === "main");
-  check("trace metadata primitives are included", otelAgent?.attributes["agent_framework.trace.metadata.env"] === "test");
-  check("nested metadata is ignored", otelAgent?.attributes["agent_framework.trace.metadata.ignoredNested"] === undefined);
+  check("trace metadata primitives are included", otelAgent?.attributes["operon_agents.trace.metadata.env"] === "test");
+  check("nested metadata is ignored", otelAgent?.attributes["operon_agents.trace.metadata.ignoredNested"] === undefined);
 
   const traceId = otelAgent?.spanContext().traceId;
   check(

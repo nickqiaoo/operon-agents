@@ -6,7 +6,7 @@
  * the message with no trace of it ever existing.
  *
  * The durable anchor on the other side is the recipient's own journal — a delivered peer message
- * is recorded with `origin.deliveryId`, so a restart can tell "already delivered" from "never
+ * is recorded with `origin.steerId` equal to the message id, so a restart can tell "already delivered" from "never
  * arrived" by looking there. This ledger therefore never tracks delivery itself; `settle` only
  * reclaims space.
  */

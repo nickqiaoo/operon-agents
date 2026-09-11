@@ -33,5 +33,5 @@ const consume = (async () => {
 })();
 
 const receipt = await client.sessions.messages.create(session.id, { input: TASK });
-console.log(`▸ ${receipt.status}: ${receipt.deliveryId}`);
+console.log(`▸ accepted on the ${receipt.channel} channel: ${receipt.steerId}`);
 await consume;

@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   broadcaster.publish(session.id, liveOnly(session.id, "evt_live_2", "another delta"));
   await consuming;
 
-  check("backfill delivered the persisted event", seen[0]?.type === "delivery.accepted");
+  check("backfill delivered the persisted event", seen[0]?.type === "steer.queued");
   const live = seen.filter((e) => e.type === "warning");
   check("live-only events reached the subscriber", live.length === 2);
   check(
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
   // Publish the SAME persisted event the backfill will also produce. A naive implementation
   // yields it twice; this must yield it once.
   const events = await service.listEvents(session.id, { limit: 10 });
-  const persisted = events.data.find((e) => e.type === "delivery.accepted")!;
+  const persisted = events.data.find((e) => e.type === "steer.queued")!;
 
   const seen2: AgentEvent[] = [];
   const controller2 = new AbortController();
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     seen3.push(event);
     controller3.abort();
   }
-  check("no broadcaster: persisted events still stream", seen3[0]?.type === "delivery.accepted");
+  check("no broadcaster: persisted events still stream", seen3[0]?.type === "steer.queued");
 
   // ── the real thing: deltas produced by an actual turn ─────────────────────────
   // Everything above uses hand-published events to pin the seam logic. This runs a turn and

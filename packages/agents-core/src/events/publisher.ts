@@ -247,21 +247,6 @@ function projectableEventBody(record: AgentRecord): AgentEventBody | undefined {
               progress: projected.progress,
             };
       }
-    // The durable half of a delivery receipt. Projecting it means a client that reconnects and
-    // replays history sees "this was accepted" even if the run that consumes it never started —
-    // which is the whole point of journaling acceptance separately from processing.
-    //
-    // `channel` here is the delivery's INTENT, not the outcome: acceptance can precede
-    // processing by an arbitrary gap, so whether an `auto` delivery ends up steering a running
-    // turn or starting a fresh one isn't known yet. The outcome is carried by the events the
-    // run itself emits (`steer.queued` / `turn.started`).
-    case "inbox.received":
-      return {
-        type: "delivery.accepted",
-        deliveryId: record.origin.deliveryId,
-        ...(record.origin.kind === "external" ? { source: record.origin.source } : {}),
-        channel: record.mode === "follow_up" ? "follow_up" : record.mode === "steer" ? "steering" : "turn",
-      };
     case "metadata":
     case "permission.record_approval":
     case "permission.set_mode":
@@ -294,7 +279,6 @@ export function isDurableAgentEvent(event: AgentEvent): boolean {
     case "agent.handoff":
     case "guardrail.blocked":
     case "workflow.progress":
-    case "delivery.accepted":
       return true;
     default:
       return false;

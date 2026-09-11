@@ -10,7 +10,7 @@
  *     the replay — and the ordering is still the only way to be sure of seeing it live.
  *  2. The stream begins with history. On a session that has run before, the first `turn.ended`
  *     to arrive is an OLD one; ending on it returns the previous answer for the new question.
- *     Nothing counts until the turn that took our delivery is known, and only that turn's end
+ *     Nothing counts until the turn that took our message is known, and only that turn's end
  *     is an ending.
  *  3. Idle is transient. A session goes idle between parallel tool executions and while waiting
  *     for an answer from you; breaking on the first idle ends the loop mid-conversation.
@@ -23,7 +23,7 @@
  * ("Do not break on session.status_idle alone"). A hazard that needs its own documentation
  * section is one the library should absorb.
  */
-import type { AgentEvent } from "operon-agents";
+import type { AgentEvent, PromptOrigin } from "operon-agents";
 import type { ManagedAgentsClient } from "./client.ts";
 import type { CreateManagedMessageRequest, ManagedSession } from "../protocol/types.ts";
 
@@ -110,10 +110,11 @@ export async function run(
     // Trap 1: open first, then send. Reversing these can drop everything in between.
     const stream = await client.sessions.events.stream(sessionId, { signal: controller.signal });
     iterator = stream[Symbol.asyncIterator]();
-    const { deliveryId } = await client.sessions.messages.create(sessionId, request);
+    const { steerId } = await client.sessions.messages.create(sessionId, request);
 
-    // Trap 2: which turn is ours. Unknown until the delivery shows up — as the origin of a
-    // fresh `turn.started`, or as a `message.appended` inside a turn already running (a steer).
+    // Trap 2: which turn is ours. Unknown until our message shows up — as a `message.appended`
+    // carrying our steer id, either inside a turn already running (a steer) or just ahead of the
+    // turn that was woken to take it.
     let currentTurn: string | undefined;
     let ourTurn: string | undefined;
     // After answering a pause, the continuation is ours whatever id it runs under.
@@ -137,14 +138,14 @@ export async function run(
 
         if (event.type === "turn.started") {
           currentTurn = event.turnId;
-          if (claimNextTurn || deliveryOf(event.origin) === deliveryId) {
+          if (claimNextTurn || steerOf(event.origin) === steerId) {
             ourTurn = event.turnId;
             claimNextTurn = false;
           }
           continue;
         }
         if (event.type === "message.appended") {
-          if (ourTurn === undefined && deliveryOf(event.origin) === deliveryId) {
+          if (ourTurn === undefined && steerOf(event.origin) === steerId) {
             // Inside a turn: a steer, and that turn is ours. Between turns: the prompt was
             // journaled ahead of its turn, so the next one to start is ours.
             if (currentTurn !== undefined) ourTurn = currentTurn;
@@ -213,12 +214,10 @@ function textOf(content: unknown): string | undefined {
 }
 
 /**
- * The delivery a journaled prompt — or the turn it started — came in as, on whichever origin it
- * was filed under: `user` for the caller's own words, `external` for a relayed party's. Undefined
- * for everything else in the user role (reminders, compaction summaries): those answer no delivery.
+ * The steer a journaled prompt — or the turn it started — came in as: `origin.steerId`, whatever
+ * kind the origin is. Undefined for a message that never went through the bus (a reminder, a
+ * compaction summary): those answer no message of ours.
  */
-function deliveryOf(origin: { readonly kind: string; readonly deliveryId?: string } | undefined): string | undefined {
-  return origin?.kind === "user" || origin?.kind === "user_follow_up" || origin?.kind === "external"
-    ? origin.deliveryId
-    : undefined;
+function steerOf(origin: PromptOrigin | undefined): string | undefined {
+  return origin !== undefined && "steerId" in origin ? origin.steerId : undefined;
 }

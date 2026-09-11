@@ -60,7 +60,7 @@ export class OTelTracingProcessor implements TracingProcessor {
   private readonly activeSpans = new Map<string, { span: OTelSpan; context: Context }>();
 
   constructor(options: OTelTracingProcessorOptions = {}) {
-    this.tracer = options.tracer ?? trace.getTracer(options.tracerName ?? "agent-framework", options.tracerVersion);
+    this.tracer = options.tracer ?? trace.getTracer(options.tracerName ?? "operon-agents", options.tracerVersion);
     this.tracerProvider = options.tracerProvider;
     this.providerName = options.providerName;
     this.includeFrameworkIds = options.includeFrameworkIds ?? true;
@@ -149,20 +149,20 @@ export class OTelTracingProcessor implements TracingProcessor {
     return {
       ...(this.includeFrameworkIds
         ? {
-            "agent_framework.trace_id": span.traceId,
-            "agent_framework.span_id": span.spanId,
-            ...(span.parentId === null ? {} : { "agent_framework.parent_id": span.parentId }),
+            "operon_agents.trace_id": span.traceId,
+            "operon_agents.span_id": span.spanId,
+            ...(span.parentId === null ? {} : { "operon_agents.parent_id": span.parentId }),
           }
         : {}),
       ...(traceRecord === undefined
         ? {}
         : {
-            "agent_framework.trace.name": traceRecord.name,
+            "operon_agents.trace.name": traceRecord.name,
             ...(traceRecord.groupId === null ? {} : { "gen_ai.conversation.id": traceRecord.groupId }),
-            ...this.primitiveAttributes("agent_framework.trace.metadata", traceRecord.metadata),
+            ...this.primitiveAttributes("operon_agents.trace.metadata", traceRecord.metadata),
           }),
-      "agent_framework.span.type": span.data.type,
-      "agent_framework.span.phase": phase,
+      "operon_agents.span.type": span.data.type,
+      "operon_agents.span.phase": phase,
       ...this.genAiAttributes(span.data),
       ...(this.content === "none" ? {} : this.contentAttributes(span.data)),
     };
@@ -176,15 +176,15 @@ export class OTelTracingProcessor implements TracingProcessor {
           ...provider,
           "gen_ai.operation.name": "invoke_agent",
           "gen_ai.agent.name": data.name,
-          ...(data.handoffs === undefined ? {} : { "agent_framework.agent.handoffs": [...data.handoffs] }),
-          ...(data.tools === undefined ? {} : { "agent_framework.agent.tools": [...data.tools] }),
-          ...(data.prompt === undefined ? {} : { "agent_framework.agent.prompt": data.prompt }),
+          ...(data.handoffs === undefined ? {} : { "operon_agents.agent.handoffs": [...data.handoffs] }),
+          ...(data.tools === undefined ? {} : { "operon_agents.agent.tools": [...data.tools] }),
+          ...(data.prompt === undefined ? {} : { "operon_agents.agent.prompt": data.prompt }),
         };
       case "turn":
         return {
           ...provider,
-          "agent_framework.turn.id": data.turnId,
-          ...(data.reason === undefined ? {} : { "agent_framework.turn.reason": data.reason }),
+          "operon_agents.turn.id": data.turnId,
+          ...(data.reason === undefined ? {} : { "operon_agents.turn.reason": data.reason }),
         };
       case "generation":
         return {
@@ -201,52 +201,52 @@ export class OTelTracingProcessor implements TracingProcessor {
             ? {}
             : {
                 "gen_ai.response.finish_reasons": [data.stopReason],
-                "agent_framework.generation.stop_reason": data.stopReason,
+                "operon_agents.generation.stop_reason": data.stopReason,
               }),
           ...(data.usage?.input_tokens === undefined ? {} : { "gen_ai.usage.input_tokens": data.usage.input_tokens }),
           ...(data.usage?.output_tokens === undefined ? {} : { "gen_ai.usage.output_tokens": data.usage.output_tokens }),
-          ...(data.usage?.total_tokens === undefined ? {} : { "agent_framework.usage.total_tokens": data.usage.total_tokens }),
+          ...(data.usage?.total_tokens === undefined ? {} : { "operon_agents.usage.total_tokens": data.usage.total_tokens }),
           ...(data.usage?.cache_read_tokens === undefined ? {} : { "gen_ai.usage.cache_read.input_tokens": data.usage.cache_read_tokens }),
           ...(data.usage?.cache_write_tokens === undefined ? {} : { "gen_ai.usage.cache_creation.input_tokens": data.usage.cache_write_tokens }),
-          ...(data.usage?.reasoning_tokens === undefined ? {} : { "agent_framework.usage.reasoning_tokens": data.usage.reasoning_tokens }),
-          ...(data.usage?.cost_usd === undefined ? {} : { "agent_framework.usage.cost_usd": data.usage.cost_usd }),
-          ...(data.toolNames === undefined ? {} : { "agent_framework.generation.tools": [...data.toolNames] }),
+          ...(data.usage?.reasoning_tokens === undefined ? {} : { "operon_agents.usage.reasoning_tokens": data.usage.reasoning_tokens }),
+          ...(data.usage?.cost_usd === undefined ? {} : { "operon_agents.usage.cost_usd": data.usage.cost_usd }),
+          ...(data.toolNames === undefined ? {} : { "operon_agents.generation.tools": [...data.toolNames] }),
           ...(data.params?.temperature === undefined ? {} : { "gen_ai.request.temperature": data.params.temperature }),
           ...(data.params?.maxTokens === undefined ? {} : { "gen_ai.request.max_tokens": data.params.maxTokens }),
-          ...(data.params?.thinking === undefined ? {} : { "agent_framework.generation.thinking": String(data.params.thinking) }),
+          ...(data.params?.thinking === undefined ? {} : { "operon_agents.generation.thinking": String(data.params.thinking) }),
         };
       case "tool":
         return {
           ...provider,
           "gen_ai.operation.name": "execute_tool",
           "gen_ai.tool.name": data.name,
-          "agent_framework.tool.call_id": data.toolCallId,
-          ...(data.isError === undefined ? {} : { "agent_framework.tool.is_error": data.isError }),
+          "operon_agents.tool.call_id": data.toolCallId,
+          ...(data.isError === undefined ? {} : { "operon_agents.tool.is_error": data.isError }),
         };
       case "message":
         return {
           ...provider,
-          "agent_framework.message.role": data.role,
-          ...(data.origin === undefined ? {} : { "agent_framework.message.origin": data.origin }),
+          "operon_agents.message.role": data.role,
+          ...(data.origin === undefined ? {} : { "operon_agents.message.origin": data.origin }),
         };
       case "handoff":
         return {
           ...provider,
           "gen_ai.operation.name": "invoke_agent",
-          ...(data.from === undefined ? {} : { "agent_framework.handoff.from": data.from }),
-          ...(data.to === undefined ? {} : { "agent_framework.handoff.to": data.to }),
+          ...(data.from === undefined ? {} : { "operon_agents.handoff.from": data.from }),
+          ...(data.to === undefined ? {} : { "operon_agents.handoff.to": data.to }),
         };
       case "compaction":
         return {
-          "agent_framework.compaction.trigger": data.trigger ?? "unknown",
-          ...(data.tokensBefore === undefined ? {} : { "agent_framework.compaction.tokens_before": data.tokensBefore }),
-          ...(data.tokensAfter === undefined ? {} : { "agent_framework.compaction.tokens_after": data.tokensAfter }),
-          ...(data.compactedCount === undefined ? {} : { "agent_framework.compaction.compacted_count": data.compactedCount }),
+          "operon_agents.compaction.trigger": data.trigger ?? "unknown",
+          ...(data.tokensBefore === undefined ? {} : { "operon_agents.compaction.tokens_before": data.tokensBefore }),
+          ...(data.tokensAfter === undefined ? {} : { "operon_agents.compaction.tokens_after": data.tokensAfter }),
+          ...(data.compactedCount === undefined ? {} : { "operon_agents.compaction.compacted_count": data.compactedCount }),
         };
       case "custom":
         return {
-          "agent_framework.custom.name": data.name,
-          ...this.primitiveAttributes("agent_framework.custom.data", data.data),
+          "operon_agents.custom.name": data.name,
+          ...this.primitiveAttributes("operon_agents.custom.data", data.data),
         };
     }
   }
@@ -263,7 +263,7 @@ export class OTelTracingProcessor implements TracingProcessor {
         return {
           ...(data.system === undefined ? {} : { "gen_ai.system_instructions": this.text(data.system) }),
           ...(data.input === undefined ? {} : { "gen_ai.input.messages": this.json(data.input.map(serializeMessage)) }),
-          ...(data.inputMode === undefined ? {} : { "agent_framework.generation.input_mode": data.inputMode }),
+          ...(data.inputMode === undefined ? {} : { "operon_agents.generation.input_mode": data.inputMode }),
           ...(data.output === undefined ? {} : { "gen_ai.output.messages": this.json(data.output.map(serializePart)) }),
         };
       case "tool":
@@ -274,7 +274,7 @@ export class OTelTracingProcessor implements TracingProcessor {
       case "message":
         return data.content === undefined
           ? {}
-          : { "agent_framework.message.content": this.json(typeof data.content === "string" ? data.content : data.content.map(serializePart)) };
+          : { "operon_agents.message.content": this.json(typeof data.content === "string" ? data.content : data.content.map(serializePart)) };
       default:
         return {};
     }

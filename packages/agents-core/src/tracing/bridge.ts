@@ -19,6 +19,12 @@ export interface TracingBridgeOptions {
  * A trace outlives its root when a sub-agent it spawned is still running (a background agent):
  * it lingers until the last agent span closes, then ends. The next root `agent.started` opens a
  * fresh trace regardless.
+ *
+ * A durable pause (`turn.paused`) ends the run's spans there and then: the run stops without an
+ * `agent.ended`, and what continues it — after an answer, possibly days later, possibly on
+ * another node — starts as a new run and so a new trace of the same session. A span held open
+ * across the wait would never be exported, and would say the model was busy when it was waiting
+ * on a person.
  */
 interface TraceState {
   readonly trace: Trace;
@@ -216,6 +222,29 @@ export function eventSinkTracingBridge(sink: EventSink, processor: TracingProces
         }
         finish(span);
         st.turnByAddress.delete(address);
+        break;
+      }
+      case "turn.paused": {
+        // The run stops here: close everything open at this address so it is exported now.
+        // The turn says why it ended; the tools that suspended are marked, not failed; and the
+        // agent span closes so the trace can end. The continuation is a run of its own.
+        flushSettledGen(st, address);
+        const turn = st.turnByAddress.get(address);
+        for (const [toolCallId, tool] of [...st.toolById]) {
+          if (turn === undefined || tool.parentId !== turn.spanId) continue;
+          tool.addEvent("paused", now());
+          finish(tool);
+          st.toolById.delete(toolCallId);
+        }
+        if (turn !== undefined && turn.data.type === "turn") turn.data = { ...turn.data, reason: "paused" };
+        finish(turn);
+        st.turnByAddress.delete(address);
+        const agent = st.agentByAddress.get(address);
+        agent?.addEvent("paused", now(), { pending: event.pending.length });
+        finish(agent);
+        st.agentByAddress.delete(address);
+        if (isRoot(address)) st.rootEnded = true;
+        endTraceIfDone(sessionId, st);
         break;
       }
       case "turn.step.started": {

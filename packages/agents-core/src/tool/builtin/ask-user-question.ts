@@ -116,11 +116,12 @@ export const askUserQuestionTool = defineTool({
           ].join("\n"),
         );
       }
-      // No responder at all (headless / durable session): suspend instead of failing — the
-      // questions surface on the paused run and the answer comes back through Runner.resume.
-      // A responder WITHOUT requestQuestion stays the soft-failure path below: that client is
-      // live but cannot render questions, so pausing durably would hang the conversation.
-      if (ctx.responder === undefined) {
+      // No responder at all, or one that says nobody is attached (headless / durable session):
+      // suspend instead of failing — the questions surface on the paused run and the answer
+      // comes back through Runner.resume. A LIVE responder WITHOUT requestQuestion stays the
+      // soft-failure path below: that client is present but cannot render questions, so
+      // pausing durably would hang the conversation.
+      if (ctx.responder === undefined || ctx.responder.isLiveQuestioner?.() === false) {
         ctx.suspend({ kind: "question", display: { questions: toQuestionItems(args.questions) } });
         // suspend() must interrupt (typed `never`); a non-conforming context falling
         // through would misreport the pause as the "unsupported" soft failure below.

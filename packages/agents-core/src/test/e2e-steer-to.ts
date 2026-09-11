@@ -89,10 +89,9 @@ async function main(): Promise<void> {
         acceptedWhileRunning = session.steerTo(deliveredTo!, "MESSAGE_FOR_THE_CHILD", {
           kind: "external",
           source: "peer",
-          deliveryId: "d1",
           actor: "some-other-agent",
           channel: "follow_up",
-        });
+        }, { id: "d1" }) !== undefined;
         return fauxAssistantMessage("working", { stopReason: "stop" });
       },
       fauxAssistantMessage("saw the message", { stopReason: "stop" }),
@@ -113,13 +112,13 @@ async function main(): Promise<void> {
     check("steerTo: provenance survives as an external message", childHistory.includes("source=") && childHistory.includes("peer"));
 
     // After the run, the frame is gone — an unreachable target must say so rather than pretend.
-    const afterEnded = session.steerTo(deliveredTo!, "TOO_LATE", { kind: "external", source: "peer", deliveryId: "d2", channel: "follow_up" });
+    const afterEnded = session.steerTo(deliveredTo!, "TOO_LATE", { kind: "external", source: "peer", channel: "follow_up" }, { id: "d2" }) !== undefined;
     check("lifecycle: agent.ended was observed", ended.some((a) => a === deliveredTo));
     check("steerTo: a finished frame refuses (false, not a silent drop)", afterEnded === false);
     check("steerTo: nothing was appended after the fact", !JSON.stringify((await replayContext(store, deliveredTo!)).history).includes("TOO_LATE"));
 
     // The root frame is addressable too, under the default address.
-    const toRoot = session.steerTo("main", "FOR_THE_ROOT", { kind: "external", source: "peer", deliveryId: "d3", channel: "follow_up" });
+    const toRoot = session.steerTo("main", "FOR_THE_ROOT", { kind: "external", source: "peer", channel: "follow_up" }, { id: "d3" }) !== undefined;
     check("steerTo: the root frame is reachable at `main`", toRoot);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -21,7 +21,7 @@ import {
 } from "../events/index.ts";
 import { DEFAULT_ADDRESS, SessionBusyError, type AgentRecord, type SessionStore } from "../store/index.ts";
 import type { PromptOrigin, SessionLease, SessionLock } from "../store/index.ts";
-import { SteerBus, steerOriginToPromptOrigin } from "../loop/steer.ts";
+import { SteerBus } from "../loop/steer.ts";
 import {
   INTERRUPTION_STATE_KEY,
   applyInterruptionAnswers,
@@ -833,6 +833,11 @@ class Engine<TContext> {
     let current = initial;
     let resume = resumeFrom;
     let canDrainFollowUps = drainQueuedAtStart === true;
+    // A wake run has no input of its own: whatever is queued IS its prompt, on either channel.
+    // A steer that landed on an idle session interrupts nothing — it is simply the next thing
+    // said — so it is appended here, ahead of the turn's boundary injections, exactly where a
+    // prompt would go. Once only: later steers arrive mid-turn and are drained at step boundaries.
+    let drainSteeringAtStart = drainQueuedAtStart === true;
     emitRunEvent(state, { type: "agent.started", agent: current.name, ...(state.parentToolCallId ? { parentToolCallId: state.parentToolCallId } : {}) });
 
     while (true) {
@@ -851,9 +856,15 @@ class Engine<TContext> {
       // whether to loop; this next iteration consumes the queued prompts as its new input.
       // Deliberately NOT reset on handoff: the pre-handoff agent's turn already ran, so the
       // target agent's first iteration draining a queued follow-up still honors this rule.
+      if (drainSteeringAtStart) {
+        drainSteeringAtStart = false;
+        for (const { message, origin } of state.steer.drainSteering()) {
+          context.appendMessage(message, origin);
+        }
+      }
       if (canDrainFollowUps) {
-        for (const { id, message, origin } of state.steer.drainFollowUps()) {
-          context.appendMessage(message, steerOriginToPromptOrigin(origin, id));
+        for (const { message, origin } of state.steer.drainFollowUps()) {
+          context.appendMessage(message, origin);
         }
       }
 
@@ -929,7 +940,7 @@ class Engine<TContext> {
             : undefined,
           maxSteps: current.maxStepsPerTurn ?? this.config.maxStepsPerTurn,
           maxRetriesPerStep: this.config.maxRetriesPerStep,
-          drainSteering: () => state.steer.drainSteering().map((s) => ({ message: s.message, origin: steerOriginToPromptOrigin(s.origin, s.id) })),
+          drainSteering: () => state.steer.drainSteering().map((s) => ({ message: s.message, origin: s.origin })),
           // One sink: the loop dispatches real AgentEvent bodies; we only add the envelope.
           dispatchEvent: (body) => void emitRunEvent(state, body),
           logger: state.session.logger,

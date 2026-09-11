@@ -1,7 +1,6 @@
 export type {
   AgentRecord,
   AgentRecordBody,
-  InboxOrigin,
   SessionStore,
   StateKey,
   ReadRecordsFilter,

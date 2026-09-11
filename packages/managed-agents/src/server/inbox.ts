@@ -1,10 +1,16 @@
 /**
  * The inbox: what a session has been asked to do that no turn has dealt with yet.
  *
- * It is not a table. It is a READ of the session log — every `inbox.received` and every
+ * It is not a table. It is a READ of the session log — every `steer.queued` record and every
  * control record after the worker's cursor — which is what makes it impossible to lose: the
- * log is the only thing a delivery writes, so there is no second place for the two to disagree.
- * Queues, pending marks and wake-up signals are indexes over this read, never the truth of it.
+ * log is the only thing an accepted message writes, so there is no second place for the two to
+ * disagree. Queues, pending marks and wake-up signals are indexes over this read, never the
+ * truth of it.
+ *
+ * The input records are the framework's own: a message accepted over the API is journaled
+ * exactly as one steered into a local session is (`steerQueuedRecord`), and a worker puts it
+ * back on a session's bus unchanged (`HarnessSession.requeue`). Only the control commands are
+ * this layer's vocabulary, and they ride the log as `custom` records.
  *
  * Shared by the two things that need the same answer to "is there work here?": the worker (to
  * do it) and the service (to tell a watching client nobody is doing it). One definition, so
@@ -12,7 +18,7 @@
  * read — set by the same write that creates an item, cleared by a holder about to read — never
  * the truth of it.
  */
-import type { AgentRecord, InboxOrigin, InterruptAnswer, SessionStore } from "operon-agents";
+import { steerMessageFromRecord, type AgentRecord, type InterruptAnswer, type SessionStore, type SteerMessage } from "operon-agents";
 
 /** Where processing stopped. Everything at or before it has been dealt with. */
 export const INBOX_CURSOR_KEY = "inbox:cursor";
@@ -27,7 +33,7 @@ export const CONTROL_RECORD_NAME = "managed.control";
 export type ControlCommand =
   | {
       readonly kind: "cancel";
-      /** Idempotency identity, the way `deliveryId` is for an input. */
+      /** Idempotency identity, the way `steerId` is for an input. */
       readonly commandId: string;
       readonly requestedAt: number;
       readonly actor?: string;
@@ -40,13 +46,11 @@ export type ControlCommand =
       readonly actor?: string;
     };
 
+/** An accepted message: its `steer.queued` record, ready to be put back on a bus. */
 export interface InboxInput {
   readonly kind: "input";
   readonly sequence: string;
-  readonly input: string;
-  /** Whose words: the session's user (`user`) or a relayed party (`external`). */
-  readonly origin: InboxOrigin;
-  readonly mode: "auto" | "steer" | "follow_up";
+  readonly item: SteerMessage;
 }
 
 export interface InboxControl {
@@ -57,9 +61,9 @@ export interface InboxControl {
 
 export type InboxItem = InboxInput | InboxControl;
 
-/** The identity an item is tracked by once dispatched: `deliveryId` or `commandId`. */
+/** The identity an item is tracked by once dispatched: `steerId` or `commandId`. */
 export function inboxItemId(item: InboxItem): string {
-  return item.kind === "input" ? item.origin.deliveryId : item.command.commandId;
+  return item.kind === "input" ? item.item.id : item.command.commandId;
 }
 
 export async function readInboxCursor(store: SessionStore): Promise<string | undefined> {
@@ -93,9 +97,8 @@ export async function hasUnprocessedInbox(store: SessionStore): Promise<boolean>
 }
 
 function inboxItemFromRecord(sequence: string, record: AgentRecord): InboxItem | undefined {
-  if (record.type === "inbox.received") {
-    return { kind: "input", sequence, input: record.input, origin: record.origin, mode: record.mode };
-  }
+  const steer = steerMessageFromRecord(record);
+  if (steer !== undefined) return { kind: "input", sequence, item: steer };
   if (record.type === "custom" && record.name === CONTROL_RECORD_NAME) {
     const command = parseControlCommand(record.data);
     return command === undefined ? undefined : { kind: "control", sequence, command };

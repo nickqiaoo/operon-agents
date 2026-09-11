@@ -51,9 +51,10 @@ import {
   type ThinkingLevel,
   type Tool,
   type PromptOrigin,
-  type ExternalOriginMetadataValue,
-  type SteerChannel,
+  type SteerMessage,
+  type SteerOptions,
   type SteerOrigin,
+  type SteerReceipt,
   Agent,
   buildAgentFromProfile,
   INTERRUPTION_STATE_KEY,
@@ -62,7 +63,6 @@ import {
   Runner,
   Session,
   emptyUsage,
-  renderSteerText,
   isGuardrailTripwireError,
   type GuardrailTripwireError,
   askUserQuestionTool,
@@ -134,44 +134,12 @@ export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number; scopeDi
   if (ms.runSettle !== undefined) CLOSE_RUN_WAIT_MS = ms.runSettle;
   if (ms.scopeDispose !== undefined) SCOPE_DISPOSE_TIMEOUT_MS = ms.scopeDispose;
 }
-export type DeliveryMode = "auto" | "steer" | "follow_up";
-
 /** Rendezvous budget for `replaceExtension` when the caller names none. */
 const DEFAULT_REPLACE_TIMEOUT_MS = 30_000;
 /** Session-store key holding the per-session extension params map (see `createSession({ params })`). */
 const EXTENSION_PARAMS_STATE_KEY = "extensions:params";
 /** Session state slot for an explicit `workspaceKey` — durable workspace identity (see `OpenSessionOptionsBase.workspaceKey`). */
 const WORKSPACE_KEY_STATE_KEY = "workspace:key";
-
-export interface DeliveryOptions {
-  readonly source: string;
-  readonly actor?: string;
-  readonly metadata?: Readonly<Record<string, ExternalOriginMetadataValue>>;
-  /** auto: steer a running turn, or start an idle one. */
-  readonly mode?: DeliveryMode;
-}
-
-/**
- * Provenance a worker hands `dispatchAccepted` for an input whose acceptance is already
- * journaled. `user` / `user_follow_up`: the user's own words, delivered on their behalf by the
- * party holding the session's control surface (a managed API caller) — rendered bare, filed as
- * steering / follow-up. `external`: another party's words, rendered inside the envelope.
- */
-export type AcceptedOrigin =
-  | (SteerOrigin & { readonly kind: "external" })
-  | { readonly kind: "user"; readonly deliveryId: string }
-  | { readonly kind: "user_follow_up"; readonly deliveryId: string };
-
-export interface DeliveryReceipt {
-  readonly deliveryId: string;
-  readonly sessionId: string;
-  readonly acceptedAt: number;
-  readonly status: "started" | "queued";
-  readonly channel: "turn" | SteerChannel;
-  readonly steerId?: string;
-  /** Present when delivery started an idle session. */
-  readonly completion?: Promise<RunResult>;
-}
 
 export interface HarnessSessionStatus {
   readonly state: HarnessSessionState;
@@ -586,6 +554,12 @@ class MutableResponder implements Responder {
     return this.approvalHandler !== undefined;
   }
 
+  /** Same rule for questions: no handler ⇒ nobody attached ⇒ AskUserQuestion suspends durably
+   *  (the question is on the paused run's pending list) instead of being dismissed unanswered. */
+  isLiveQuestioner(): boolean {
+    return this.questionHandler !== undefined;
+  }
+
   async requestApproval(request: ApprovalRequest, options?: ApprovalRequestOptions): Promise<ApprovalResponse> {
     if (this.approvalHandler) return this.approvalHandler(request, options);
     return { decision: "rejected", feedback: "No approval handler registered on this session." };
@@ -645,7 +619,6 @@ export class HarnessSession<TContext = unknown> {
   private readonly closingNotified = new Promise<void>((resolve) => {
     this.notifyClosing = resolve;
   });
-  private deliveryCounter = 0;
   /** A wake is already scheduled on the microtask queue; more enqueues fold into it. */
   private wakeScheduled = false;
   /** Per-session turn cap; the Runner's own config is the fallback. */
@@ -858,143 +831,52 @@ export class HarnessSession<TContext = unknown> {
 
   /**
    * Hand a message to the frame running at `address` in this session (`main` for the root agent,
-   * `main/<agentId>` for a subagent); `false` when nobody is there. The seam an out-of-process
-   * coordinator uses to address a specific subagent.
+   * `main/<agentId>` for a subagent); undefined when nobody is there, or the session is paused
+   * on a question. The seam an out-of-process coordinator uses to address a specific subagent.
+   *
+   * The receipt's `journaled` settles once the `steer.queued` record is on disk — the moment a
+   * caller may answer "accepted" to someone else and mean it survives a crash. A running frame
+   * drains the message at its next boundary; an idle root frame is woken to take it.
    */
-  steerTo(address: string, content: string, origin: SteerOrigin): boolean {
-    if (this.closed || this.lastRunInterrupted) return false;
+  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined {
+    if (this.closed || this.lastRunInterrupted) return undefined;
     // A run in flight drains its own queues, so handing the message to the frame is enough.
-    if (this.hasActiveRuns()) return this.core.steerTo(address, content, origin);
+    if (this.hasActiveRuns()) return this.core.steerTo(address, content, origin, options);
     // Idle: only the root frame can be woken. A subagent whose frame has ended is not a teammate
     // waiting for mail — it is a finished delegation, and only the parent that delegated it can
     // decide to continue it (`Agent(resume=...)`). Its store, capabilities, permissions and
     // lifetime are all the parent's; there is no independent agent here to start.
-    if (address !== DEFAULT_ADDRESS) return false;
+    if (address !== DEFAULT_ADDRESS) return undefined;
     // Queue it and let the idle-wake listener start the turn. Going through the bus (rather
-    // than synthesizing a prompt here) is what gives the message a `steerId` on its journal
-    // record, same as every other producer — the enqueue→consume trail stays unbroken.
-    this.core.steer.steer(content, origin);
-    return true;
+    // than synthesizing a prompt here) is what gives the message its `steer.queued` record and
+    // a `steerId` on its journal record, same as every other producer.
+    return this.core.steer.steer(content, origin, options);
   }
 
   /**
-   * Deliver an externally-originated message. A running session receives it through the
-   * requested SteerBus channel; an idle session starts a new turn immediately.
+   * Put a message whose `steer.queued` record ALREADY exists back on the bus.
    *
-   * ACCEPTANCE IS DURABLE BEFORE THIS RESOLVES. The input is journaled as `inbox.received`
-   * and that write is awaited before a receipt exists, so the receipt means "this survives a
-   * crash", not merely "this reached a process". Previously the message lived only in memory
-   * (SteerBus, or an argument to `runPrompt`) until the run that consumed it journaled it —
-   * a crash in that window lost a delivery the caller had already been told was accepted.
-   *
-   * The provenance of what the model ultimately sees is still persisted on the eventual
-   * `message.appended` record: acceptance and processing are journaled separately because
-   * they can legitimately differ (capability rewrite, guardrail rejection, or a capability
-   * answering the prompt outright).
+   * For whoever holds a reopened session and finds, in its log, accepted messages no turn ever
+   * consumed — a `steer.queued` with no `message.appended` carrying its `steerId`. That happens
+   * when acceptance and execution are different processes (a managed API node writes the record,
+   * a worker runs it later, possibly on another machine) or when the process that accepted a
+   * message died before a turn drained it. Nothing is journaled again: the record and its
+   * `steer.queued` event exist from the first acceptance. Run state is read NOW, not then — a
+   * running turn drains it at its next boundary, an idle session is woken to take it.
    */
-  async deliver(input: string, options: DeliveryOptions): Promise<DeliveryReceipt> {
+  requeue(item: SteerMessage): SteerReceipt {
     if (this.closed) throw new Error(`session "${this.id}" is closed`);
-    if (this.lastRunInterrupted && !this.hasActiveRuns()) {
-      throw new Error(`session "${this.id}" is interrupted; resume it before delivering new work`);
-    }
-    if (!options.source.trim()) throw new Error("delivery source must not be empty");
-    this.deliveryCounter += 1;
-    const deliveryId = `delivery_${Date.now().toString(36)}_${this.deliveryCounter.toString(36)}`;
-    const mode = options.mode ?? "auto";
-    const channel: SteerChannel = mode === "follow_up" ? "follow_up" : "steering";
-    const external = {
-      kind: "external" as const,
-      source: options.source,
-      deliveryId,
-      actor: options.actor,
-      metadata: options.metadata,
-      channel,
-    };
-    const acceptedAt = Date.now();
-
-    // Durable acceptance, before anything is dispatched. A stored session gets its receipt from
-    // this record (the store is publication-aware, so the append also produces the
-    // `delivery.accepted` event); a storeless one has nothing to be durable about and emits the
-    // event directly.
-    if (this.core.store !== undefined) {
-      await this.core.store.appendRecord({
-        type: "inbox.received",
-        time: acceptedAt,
-        address: "main",
-        input,
-        origin: external,
-        mode,
-      });
-    } else {
-      void this.core.events.emit({
-        type: "delivery.accepted",
-        deliveryId,
-        source: options.source,
-        channel,
-        address: "main",
-        sessionId: this.id,
-      });
-    }
-
-    return this.dispatchAccepted(input, external, acceptedAt);
+    return this.core.steer.requeue(item);
   }
 
   /**
-   * Dispatch an input whose acceptance is ALREADY journaled.
-   *
-   * A worker draining a session's inbox calls this directly: the `inbox.received` record exists,
-   * so going back through `deliver` would write a second one and count the delivery twice. The
-   * split is the whole reason acceptance and dispatch are separable — accepting is a durable
-   * write that must happen before a receipt exists, dispatching is what someone holding the
-   * session's lease does with it afterwards, possibly on another machine, possibly much later.
-   *
-   * Run state is read HERE, not at acceptance: by now a turn may have started or ended, so
-   * whether this steers work in flight or starts a fresh turn can only be decided now.
+   * Settles when no run is in flight. Yields once first, so a run that an enqueue on the
+   * previous line scheduled (the idle wake fires from a microtask) is counted as in flight
+   * rather than missed. A run that starts afterwards is not waited for.
    */
-  dispatchAccepted(
-    input: string,
-    origin: AcceptedOrigin,
-    acceptedAt: number = Date.now(),
-  ): DeliveryReceipt {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
-    const deliveryId = origin.deliveryId;
-    const channel: SteerChannel = origin.kind === "external"
-      ? origin.channel ?? "steering"
-      : origin.kind === "user_follow_up" ? "follow_up" : "steering";
-
-    if (this.hasActiveRuns()) {
-      const receipt = this.core.steer.steer(input, origin);
-      return {
-        deliveryId,
-        sessionId: this.id,
-        acceptedAt,
-        status: "queued",
-        channel,
-        steerId: receipt.steerId,
-      };
-    }
-
-    // A fresh turn is a fresh prompt: a follow-up landing on an idle session is simply the
-    // user's next prompt, so it is journaled as `user`, not `user_follow_up`.
-    const promptOrigin: PromptOrigin = origin.kind === "external"
-      ? {
-          kind: "external",
-          source: origin.source,
-          deliveryId,
-          ...(origin.actor !== undefined ? { actor: origin.actor } : {}),
-          ...(origin.metadata !== undefined ? { metadata: origin.metadata } : {}),
-        }
-      : { kind: "user", deliveryId };
-    const message = {
-      role: "user" as const,
-      content: [{ type: "text" as const, text: renderSteerText(origin, input) }],
-      timestamp: acceptedAt,
-    };
-    const completion = this.runPrompt([message], promptOrigin);
-    // Callers may only need acceptance. Keep a fire-and-observe delivery from becoming an
-    // unhandled rejection; awaiting `completion` still receives the original rejection.
-    completion.catch(() => undefined);
-    return { deliveryId, sessionId: this.id, acceptedAt, status: "started", channel: "turn", completion };
+  async whenIdle(): Promise<void> {
+    await Promise.resolve();
+    await this.allRunsSettled();
   }
 
   /**
@@ -1024,7 +906,7 @@ export class HarnessSession<TContext = unknown> {
     if (this.hasActiveRuns()) throw new Error(`session "${this.id}" already has an active run`);
     const controller = new AbortController();
     // Set this BEFORE the first await (past the gate). A host returning 202 from resume can
-    // immediately observe `running`, and a concurrent delivery joins this resumed turn instead
+    // immediately observe `running`, and a concurrent steer joins this resumed turn instead
     // of seeing stale interrupted state while the control record is being read.
     this.beginRun(controller);
     try {
@@ -1133,22 +1015,24 @@ export class HarnessSession<TContext = unknown> {
   }
 
   /**
-   * Inject a user message into the in-flight (or next) turn. Returns the steer's correlation
-   * id: a `steer.queued` event carries it now, and the consuming `message.appended` event's
-   * `origin.steerId` matches it when the model actually sees the message.
+   * Inject a user message into the in-flight (or next) turn. The receipt's `steerId` is the
+   * correlation key: a `steer.queued` event carries it now, and the consuming `message.appended`
+   * event's `origin.steerId` matches it when the model actually sees the message; `journaled`
+   * settles once the `steer.queued` record is durable.
    */
-  steer(input: string): string {
-    return this.core.steer.steer(input, { kind: "user" }).steerId;
+  steer(input: string): SteerReceipt {
+    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    return this.core.steer.steer(input, { kind: "user" });
   }
 
   /**
    * Queue a user message for a new turn after the current run's active turn finishes.
-   * Returns the steer's correlation id (see `steer`), or null when the session has no
-   * active run — use `prompt` instead in that case.
+   * Returns the receipt (see `steer`), or null when the session has no active run — use
+   * `prompt` instead in that case.
    */
-  followUp(input: string): string | null {
+  followUp(input: string): SteerReceipt | null {
     if (!this.hasActiveRuns()) return null;
-    return this.core.steer.followUp(input).steerId;
+    return this.core.steer.followUp(input);
   }
 
   /** Abort every run this session has accepted: the one in flight AND any queued behind it. */
