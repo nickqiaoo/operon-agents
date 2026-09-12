@@ -15,3 +15,5 @@ release/
 /mini-*.mjs
 /docs/*
 !/docs/architecture.md
+
+.agent-memory/
