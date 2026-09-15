@@ -59,6 +59,9 @@ class RepositoryStorage implements SessionStorage {
   restore(id: string): Promise<void> {
     return this.repo.restore(id);
   }
+  rename(id: string, title: string): Promise<void> {
+    return this.repo.rename(id, title);
+  }
   async scratch(workDir: string = SCRATCH_WORKDIR): Promise<SessionStore> {
     return (await this.repo.create({ workDir })).store;
   }

@@ -19,7 +19,7 @@ import {
   type WriteTextIfUnchangedOptions,
 } from "./machine.ts";
 import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
-import { fileVersionsMatch, normalizeForCompare } from "./support/machine-ops.ts";
+import { fileVersionsMatch, hashFileContent, normalizeForCompare } from "./support/machine-ops.ts";
 
 function fileKindFromStats(s: Stats): FileKind {
   if (s.isFile()) return "file";
@@ -262,10 +262,11 @@ export class LocalMachine extends BaseMachine {
     } else {
       if (st === undefined) throw new StaleFileError("File no longer exists. Read it again before attempting to write it.");
       if (!fileVersionsMatch(options.expected, fileVersionFromStats(st))) {
-        if (options.expectedContent !== undefined) {
+        if (options.expectedContentHash !== undefined) {
           let confirmedUnchanged = false;
           try {
-            confirmedUnchanged = normalizeForCompare(readFileSync(target).toString(encoding)) === options.expectedContent;
+            confirmedUnchanged =
+              hashFileContent(normalizeForCompare(readFileSync(target).toString(encoding))) === options.expectedContentHash;
           } catch {
             confirmedUnchanged = false;
           }

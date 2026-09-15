@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { downloadZip, extractZip } from "./archive.ts";
+import { describeIssue, optionalText, optionalTextList } from "./fields.ts";
 import { codeloadZipUrl } from "./github-resolver.ts";
 import { resolveInstallSource, sanitizeSubdir } from "./source.ts";
 import type { PluginGithubRef } from "./types.ts";
@@ -78,21 +80,50 @@ export async function materializeGithubRepo(options: {
   return extractZip(buffer, options.destDir);
 }
 
+/** Codex source object: { source: "local"|"git-subdir"|"url", path|url, ref|sha }. */
+const CodexSourceSchema = z.object({
+  source: optionalText,
+  path: optionalText,
+  url: optionalText,
+  ref: optionalText,
+  sha: optionalText,
+});
+
+const MarketplaceEntrySchema = z.object({
+  id: optionalText,
+  name: optionalText,
+  displayName: optionalText,
+  source: CodexSourceSchema,
+  tier: optionalText,
+  version: optionalText,
+  description: optionalText,
+  shortDescription: optionalText,
+  homepage: optionalText,
+  websiteURL: optionalText,
+  keywords: optionalTextList,
+});
+
+const MarketplaceSchema = z.object({
+  version: optionalText,
+  plugins: z.array(MarketplaceEntrySchema),
+});
+
 /** Parse + validate a marketplace registry string against a cached repo location. */
 export function parseMarketplace(raw: string, location: MarketplaceLocation): Marketplace {
-  let parsed: unknown;
+  let json: unknown;
   try {
-    parsed = JSON.parse(raw);
+    json = JSON.parse(raw);
   } catch (error) {
     throw new Error(`Plugin marketplace is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!isRecord(parsed)) throw new TypeError("Plugin marketplace must be an object.");
-  const rawPlugins = parsed["plugins"];
-  if (!Array.isArray(rawPlugins)) throw new TypeError('Plugin marketplace must contain a "plugins" array.');
+  const parsed = MarketplaceSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new TypeError(`Plugin marketplace is malformed: ${parsed.error.issues.map(describeIssue).join("; ")}`);
+  }
   return {
     source: location.source,
-    version: stringField(parsed, "version"),
-    plugins: rawPlugins.map((entry, index) => parseEntry(entry, index, location)),
+    version: parsed.data.version,
+    plugins: parsed.data.plugins.map((entry, index) => toEntry(entry, index, location)),
   };
 }
 
@@ -131,47 +162,39 @@ export function parseGithubMarketplaceSource(source: string): { owner: string; r
   return { owner: m[1]!, repo: m[2]!.replace(/\.git$/, ""), ...(m[3] ? { ref: m[3] } : {}) };
 }
 
-function parseEntry(value: unknown, index: number, location: MarketplaceLocation): MarketplaceEntry {
-  if (!isRecord(value)) throw new TypeError(`Plugin marketplace entry ${index + 1} must be an object.`);
-  const id = stringField(value, "id") ?? stringField(value, "name");
+function toEntry(value: z.output<typeof MarketplaceEntrySchema>, index: number, location: MarketplaceLocation): MarketplaceEntry {
+  const id = value.id ?? value.name;
   if (id === undefined) throw new Error(`Plugin marketplace entry ${index + 1} must define "id" or "name".`);
   return {
     id,
-    displayName: stringField(value, "displayName") ?? stringField(value, "name") ?? id,
-    source: resolveSource(value, location, id),
-    tier: stringField(value, "tier"),
-    version: stringField(value, "version"),
-    description: stringField(value, "description") ?? stringField(value, "shortDescription"),
-    homepage: stringField(value, "homepage") ?? stringField(value, "websiteURL"),
-    keywords: stringArrayField(value, "keywords"),
+    displayName: value.displayName ?? value.name ?? id,
+    source: resolveCodexSource(value.source, location, id),
+    tier: value.tier,
+    version: value.version,
+    description: value.description ?? value.shortDescription,
+    homepage: value.homepage ?? value.websiteURL,
+    keywords: value.keywords,
   };
 }
 
-function resolveSource(value: Record<string, unknown>, location: MarketplaceLocation, id: string): string {
-  const raw = value["source"];
-  if (!isRecord(raw)) throw new Error(`Plugin marketplace entry ${id} must define an object "source" (Codex format).`);
-  return resolveCodexSource(raw, location, id);
-}
-
-/** Codex source object: { source: "local"|"git-subdir"|"url", path|url, ref|sha }. */
-function resolveCodexSource(obj: Record<string, unknown>, location: MarketplaceLocation, id: string): string {
-  const kind = stringField(obj, "source");
-  const path = stringField(obj, "path");
+function resolveCodexSource(obj: z.output<typeof CodexSourceSchema>, location: MarketplaceLocation, id: string): string {
+  const kind = obj.source;
+  const path = obj.path;
   if (kind === "local" || (kind === undefined && path !== undefined)) {
     if (path === undefined) throw new Error(`Plugin marketplace entry ${id}: local source requires "path".`);
     // `local` is relative to the repo ROOT → absolute path in the cached repo (install = local copy).
     return join(location.repoRoot, cleanSubdir(path));
   }
   if (kind === "git-subdir") {
-    const url = stringField(obj, "url");
+    const url = obj.url;
     if (url === undefined) throw new Error(`Plugin marketplace entry ${id}: git-subdir source requires "url".`);
-    const ref = stringField(obj, "ref") ?? stringField(obj, "sha") ?? "HEAD";
+    const ref = obj.ref ?? obj.sha ?? "HEAD";
     const sub = path !== undefined ? cleanSubdir(path) : undefined;
     const base = `${stripTrailingSlash(url)}/tree/${ref}`;
     return sub !== undefined ? `${base}#path=${sub}` : base;
   }
   if (kind === "url") {
-    const url = stringField(obj, "url") ?? path;
+    const url = obj.url ?? path;
     if (url === undefined) throw new Error(`Plugin marketplace entry ${id}: url source requires "url".`);
     return url;
   }
@@ -186,24 +209,6 @@ function cleanSubdir(p: string): string {
 
 function stripTrailingSlash(s: string): string {
   return s.replace(/\/$/, "");
-}
-
-function stringField(value: Record<string, unknown>, field: string): string | undefined {
-  const raw = value[field];
-  if (typeof raw !== "string") return undefined;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function stringArrayField(value: Record<string, unknown>, field: string): readonly string[] | undefined {
-  const raw = value[field];
-  if (!Array.isArray(raw)) return undefined;
-  const out = raw.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter((item) => item.length > 0);
-  return out.length > 0 ? out : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ── Per-entry detail enrichment (logo / description) ─────────────────────────
@@ -237,9 +242,9 @@ export async function loadMarketplaceEntryDetails(source: string): Promise<Marke
   if (resolved.kind !== "local-path") return null;
   for (const candidate of ENTRY_MANIFEST_CANDIDATES) {
     try {
-      const manifest: unknown = JSON.parse(await readFile(join(resolved.path, candidate), "utf8"));
-      if (!isRecord(manifest)) continue;
-      return extractEntryDetails(manifest, resolved.path);
+      const manifest = DetailsManifestSchema.safeParse(JSON.parse(await readFile(join(resolved.path, candidate), "utf8")));
+      if (!manifest.success) continue;
+      return extractEntryDetails(manifest.data, resolved.path);
     } catch {
       // Missing/parse error for this candidate — try the next, then give up (null).
     }
@@ -247,15 +252,33 @@ export async function loadMarketplaceEntryDetails(source: string): Promise<Marke
   return null;
 }
 
-function extractEntryDetails(manifest: Record<string, unknown>, dir: string): MarketplaceEntryDetails {
+// Display metadata only: a field of the wrong type is ignored, never a reason to hide the entry.
+const lenientText = optionalText.catch(undefined);
+const DetailsManifestSchema = z.looseObject({
+  interface: z
+    .looseObject({
+      displayName: lenientText,
+      shortDescription: lenientText,
+      longDescription: lenientText,
+      logo: lenientText,
+      composerIcon: lenientText,
+      brandColor: lenientText,
+    })
+    .catch({}),
+  displayName: lenientText,
+  name: lenientText,
+  description: lenientText,
+  logo: lenientText,
+  icon: lenientText,
+});
+
+function extractEntryDetails(manifest: z.output<typeof DetailsManifestSchema>, dir: string): MarketplaceEntryDetails {
   // Codex puts the user-facing fields under `interface`; operon uses top-level fields.
-  const iface = isRecord(manifest["interface"]) ? manifest["interface"] : {};
-  const displayName = stringField(iface, "displayName") ?? stringField(manifest, "displayName") ?? stringField(manifest, "name");
-  const description =
-    stringField(iface, "shortDescription") ?? stringField(iface, "longDescription") ?? stringField(manifest, "description");
-  const logoRel =
-    stringField(iface, "logo") ?? stringField(iface, "composerIcon") ?? stringField(manifest, "logo") ?? stringField(manifest, "icon");
-  const brandColor = stringField(iface, "brandColor");
+  const iface = manifest.interface;
+  const displayName = iface.displayName ?? manifest.displayName ?? manifest.name;
+  const description = iface.shortDescription ?? iface.longDescription ?? manifest.description;
+  const logoRel = iface.logo ?? iface.composerIcon ?? manifest.logo ?? manifest.icon;
+  const brandColor = iface.brandColor;
 
   let logoUrl: string | undefined;
   let logoPath: string | undefined;

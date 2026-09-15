@@ -29,8 +29,7 @@ function check(label: string, ok: boolean): void {
 function reminderText(messages: readonly Message[]): string {
   return messages
     .filter((m) => m.role === "user")
-    .flatMap((m) => m.content)
-    .map((c) => (c.type === "text" ? c.text : ""))
+    .flatMap((m) => typeof m.content === "string" ? [m.content] : m.content.map((c) => c.type === "text" ? c.text : ""))
     .filter((t) => t.includes("<system-reminder>"))
     .join("\n");
 }
@@ -183,14 +182,14 @@ async function testSessionSkillService(machine: LocalMachine, roots: readonly Sk
   try {
     const skills = await session.listSkills();
     const result = await session.activateSkill("greeter", "World");
-    const steered = steer.drainSteering().map((s) => s.message);
-    const text = steered
-      .flatMap((m) => m.content)
-      .map((c) => (c.type === "text" ? c.text : ""))
-      .join("\n");
+    const queued = steer.drainSteering();
+    const steered = queued.map((s) => s.message);
+    const text = reminderText(steered);
 
     check("session skills: listSkills exposes the scanned catalog", skills.some((skill) => skill.name === "greeter"));
-    check("session skills: activateSkill returns activation metadata", result.skillName === "greeter" && result.skillArgs === "World" && typeof result.turnId === "string");
+    check("session skills: activateSkill returns activation metadata", result.skillName === "greeter" && result.skillArgs === "World" && typeof result.steerId === "string");
+    check("session skills: receipt identifies the queued message", result.steerId === queued[0]?.id);
+    check("session skills: activation does not invent a turn id", !("turnId" in result));
     check("session skills: activateSkill emits skill.activated", activated?.type === "skill.activated" && activated.skillName === "greeter" && activated.trigger === "user-slash");
     check("session skills: activation enters steer queue as a system reminder", text.includes('<system-reminder>\n<skill-loaded name="greeter" args="World">') && text.includes("Greeting for World."));
   } finally {

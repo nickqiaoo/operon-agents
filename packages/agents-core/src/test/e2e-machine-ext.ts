@@ -22,7 +22,7 @@ import {
   type RunCommandResult,
   type WriteFileResult,
 } from "../index.ts";
-import { SshProcess, buildSshExecCommand, fileVersionFromInfo, readTextFile, sshShellQuote } from "../internal.ts";
+import { SshProcess, buildSshExecCommand, fileVersionFromInfo, hashFileContent, readTextFile, sshShellQuote } from "../internal.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -409,12 +409,12 @@ async function main(): Promise<void> {
     }
     check("ssh-cas: external write between upload and swap → StaleFileError, tmp cleaned", raced && (await readTextFile(machine, casPath)) === "v2" && noTmp());
 
-    // mtime moved but content unchanged (a linter touch) → expectedContent review passes.
+    // mtime moved but content unchanged (a linter touch) → digest review passes.
     const touchedContent = await readTextFile(machine, casPath);
     const touchedVersion = fileVersionFromInfo(await machine.fileInfo(casPath));
     sftp._mtimes.set(casPath, 12_345);
-    const w4 = await machine.writeTextIfUnchanged(casPath, "v4", { expected: touchedVersion, expectedContent: touchedContent });
-    check("ssh-cas: mtime moved but expectedContent matches → write proceeds", w4.bytesWritten === 2 && (await readTextFile(machine, casPath)) === "v4");
+    const w4 = await machine.writeTextIfUnchanged(casPath, "v4", { expected: touchedVersion, expectedContentHash: hashFileContent(touchedContent) });
+    check("ssh-cas: mtime moved but content digest matches → write proceeds", w4.bytesWritten === 2 && (await readTextFile(machine, casPath)) === "v4");
 
     // The swap preserves the target's permission bits.
     sftp._modes.set(casPath, S_IFREG | 0o600);
@@ -502,12 +502,12 @@ async function main(): Promise<void> {
     } catch (error) {
       refused = error instanceof StaleFileError;
     }
-    check("base-cas: mtime-less + no expectedContent → StaleFileError (unverifiable is refused)", refused);
+    check("base-cas: mtime-less + no content digest → StaleFileError (unverifiable is refused)", refused);
     check("base-cas: the refused write left the file untouched", memNoM.files.get("/g.txt")!.toString() === "abcd");
 
-    const okByContent = await memNoM.writeTextIfUnchanged("/g.txt", "next", { expected: {}, expectedContent: "abcd" });
+    const okByContent = await memNoM.writeTextIfUnchanged("/g.txt", "next", { expected: {}, expectedContentHash: hashFileContent("abcd") });
     check(
-      "base-cas: mtime-less + matching expectedContent → write proceeds",
+      "base-cas: mtime-less + matching content digest → write proceeds",
       okByContent.bytesWritten === 4 && memNoM.files.get("/g.txt")!.toString() === "next",
     );
   }

@@ -48,7 +48,7 @@ export const writeTool = defineTool({
     const path = await resolveToolPath(args.path, ctx.machine, "write");
     return {
       accesses: ToolAccesses.writeFile(path),
-      display: { title: `Writing ${args.path}` },
+      display: { title: `Writing ${args.path}`, path: args.path, content: args.content },
       ...pathApproval("Write", ctx.machine, path),
       run: (runCtx) => execute(args, path, runCtx),
     };
@@ -89,9 +89,9 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
 
     const result = await machine.writeTextIfUnchanged(safePath, nextContent, {
       expected: info !== undefined ? record!.version : "must-not-exist",
-      // Only a full read's content can be compared against the whole file; a paged
-      // record's text would differ from it by definition and read as a conflict.
-      ...(record?.fullRead === true && record.content !== undefined ? { expectedContent: record.content } : {}),
+      // Only a full read's digest can be compared against the whole file; a paged
+      // record's would differ from it by definition and read as a conflict.
+      ...(record?.fullRead === true && record.contentHash !== undefined ? { expectedContentHash: record.contentHash } : {}),
     });
 
     ledger?.recordWrite(safePath, result.version, {

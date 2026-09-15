@@ -105,7 +105,7 @@ async function main(): Promise<void> {
               token: token("dyn-commands", "session"),
               create: () => ({
                 sessionCommands: () => [
-                  { name: "dyncmd", description: "dynamic test command", run: async (_ctx, args) => ({ ok: true, message: `dyn:${args}` }) },
+                  { name: "dyncmd", description: "dynamic test command", run: async (_ctx: unknown, args: string) => ({ ok: true, message: `dyn:${args}` }) },
                 ],
               }),
             },
@@ -122,7 +122,9 @@ async function main(): Promise<void> {
       const skill = await commands.run("/skill:review src/app.ts", { session });
       const activation = skill.data as SkillActivationResult | undefined;
       check("commands: /skill:<name> activates a skill", skill.ok && activation?.skillName === "review" && activation.skillArgs === "src/app.ts");
-      check("commands: skill activation emits event + steer", activated?.type === "skill.activated" && steer.drainSteering().length === 1);
+      const skillMessages = steer.drainSteering();
+      check("commands: skill activation emits event + steer", activated?.type === "skill.activated" && skillMessages.length === 1);
+      check("commands: skill result correlates to its message without a speculative turn id", typeof activation?.steerId === "string" && activation.steerId === skillMessages[0]?.id && !("turnId" in activation));
 
       const install = await commands.run(`/plugins install ${pluginRoot}`, { session });
       check("commands: /plugins install installs from local path", install.ok && install.message.includes("demo-plugin"));

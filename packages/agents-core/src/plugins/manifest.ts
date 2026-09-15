@@ -1,8 +1,10 @@
 import path from "node:path";
+import { z } from "zod";
 import { McpServerConfigSchema, type McpServerConfig, type Machine } from "../index.ts";
 import { loadPluginHooks } from "./hooks.ts";
 import { PLUGIN_NAME_REGEX, type PluginDiagnostic, type PluginInterface, type PluginManifest } from "./types.ts";
 import { readTextFile } from "../tool/support/machine-ops.ts";
+import { describeIssue, optionalText } from "./fields.ts";
 
 const PLUGIN_ROOT_MANIFEST = "agents.plugin.json";
 const PLUGIN_DIR_MANIFEST = ".agents-plugin/plugin.json";
@@ -13,6 +15,45 @@ const CODEX_DIR_MANIFEST = ".codex-plugin/plugin.json";
 // Runtime fields we still do not execute. `hooks` is supported (see loadPluginHooks).
 const UNSUPPORTED_RUNTIME_FIELDS = ["tools", "commands", "apps", "inject", "configFile", "bootstrap"] as const;
 
+const AuthorSchema = z.union([
+  z.string().transform((name): PluginManifest["author"] => ({ name })),
+  z.object({ name: optionalText, email: optionalText }).transform(
+    ({ name, email }): PluginManifest["author"] => (name === undefined && email === undefined ? undefined : { name, email }),
+  ),
+]);
+
+const InterfaceSchema = z
+  .object({ displayName: optionalText, shortDescription: optionalText, longDescription: optionalText })
+  .transform((iface): PluginInterface | undefined => (Object.values(iface).some((v) => v !== undefined) ? iface : undefined));
+
+/**
+ * The manifest as written. Fields that need the filesystem to be resolved (`skills`,
+ * `mcpServers`, `hooks`) are shape-checked here and resolved below; everything else lands in
+ * the `PluginManifest` as is. Unknown fields pass through so a newer plugin still loads.
+ */
+const RawManifestSchema = z.looseObject({
+  name: z.string({ error: "is required" }).refine((name) => name.trim().length > 0, "is required"),
+  version: optionalText,
+  description: optionalText,
+  keywords: z.array(z.string()).optional(),
+  homepage: optionalText,
+  license: optionalText,
+  author: AuthorSchema.optional(),
+  skills: z.union([z.string(), z.array(z.string())], { error: "must be a string or string[]" }).optional(),
+  sessionStart: z.object({ skill: z.string().refine((skill) => skill.trim().length > 0, "is required when sessionStart is present") }).optional(),
+  mcpServers: z.union([z.string(), z.record(z.string(), z.unknown())], { error: "must be an object or a path to a .mcp.json" }).optional(),
+  hooks: z.unknown().optional(),
+  interface: InterfaceSchema.optional(),
+  skillInstructions: z.string().optional(),
+});
+
+type RawManifest = z.output<typeof RawManifestSchema>;
+
+// A malformed optional field is reported and dropped, not fatal: the plugin still loads with
+// what was valid, the way it always has. `name` and `skills` are the two a plugin cannot do
+// without, so those stay errors.
+const FATAL_FIELDS = new Set(["name"]);
+const ERROR_FIELDS = new Set(["skills"]);
 
 export interface ParsedManifestResult {
   readonly manifest?: PluginManifest;
@@ -34,29 +75,28 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
     return { diagnostics: [{ severity: "error", message: `No manifest at ${candidates.join(", ")}` }] };
   }
 
-  let raw: unknown;
+  let json: unknown;
   try {
-    raw = JSON.parse(await readTextFile(machine, manifestPath));
+    json = JSON.parse(await readTextFile(machine, manifestPath));
   } catch (error) {
     return { manifestPath, diagnostics: [{ severity: "error", message: `Failed to parse ${manifestPath}: ${(error as Error).message}` }] };
   }
-  if (!isObject(raw)) {
+  if (!isObject(json)) {
     return { manifestPath, diagnostics: [{ severity: "error", message: "manifest must be a JSON object" }] };
   }
 
   const diagnostics: PluginDiagnostic[] = [];
-  const name = typeof raw["name"] === "string" ? raw["name"].trim() : "";
-  if (name.length === 0) {
-    diagnostics.push({ severity: "error", message: '"name" is required' });
-    return { manifestPath, diagnostics };
-  }
+  const raw = parseTolerant(json, diagnostics);
+  if (raw === undefined) return { manifestPath, diagnostics };
+
+  const name = raw.name.trim();
   if (!PLUGIN_NAME_REGEX.test(name)) {
     diagnostics.push({ severity: "error", message: `"name" must match ${PLUGIN_NAME_REGEX} (got "${name}")` });
     return { manifestPath, diagnostics };
   }
 
-  let skills = await resolveSkillsField(machine, pluginRoot, raw["skills"], diagnostics);
-  if (raw["skills"] === undefined && (await isFile(machine, path.join(pluginRoot, "SKILL.md")))) {
+  let skills = await resolveSkillsField(machine, pluginRoot, raw.skills, diagnostics);
+  if (raw.skills === undefined && (await isFile(machine, path.join(pluginRoot, "SKILL.md")))) {
     skills = [pluginRoot];
   }
 
@@ -64,40 +104,60 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
     if (raw[field] !== undefined) diagnostics.push({ severity: "info", message: `"${field}" is present but not supported` });
   }
 
-  const hooks = await loadPluginHooks(machine, pluginRoot, raw["hooks"], diagnostics);
+  const hooks = await loadPluginHooks(machine, pluginRoot, raw.hooks, diagnostics);
 
   const manifest: PluginManifest = {
     name,
-    version: stringField(raw, "version"),
-    description: stringField(raw, "description"),
-    keywords: stringArrayField(raw, "keywords"),
-    homepage: stringField(raw, "homepage"),
-    license: stringField(raw, "license"),
-    author: readAuthor(raw["author"]),
+    version: raw.version,
+    description: raw.description,
+    keywords: raw.keywords,
+    homepage: raw.homepage,
+    license: raw.license,
+    author: raw.author,
     skills,
-    sessionStart: readSessionStart(raw["sessionStart"], diagnostics),
-    mcpServers: await readMcpServers(machine, pluginRoot, raw["mcpServers"], diagnostics),
+    sessionStart: raw.sessionStart === undefined ? undefined : { skill: raw.sessionStart.skill.trim() },
+    mcpServers: await readMcpServers(machine, pluginRoot, raw.mcpServers, diagnostics),
     ...(hooks.length > 0 ? { hooks } : {}),
-    interface: readInterface(raw["interface"]),
-    skillInstructions: typeof raw["skillInstructions"] === "string" ? raw["skillInstructions"] : undefined,
+    interface: raw.interface,
+    skillInstructions: raw.skillInstructions,
   };
   return { manifest, manifestPath, diagnostics };
+}
+
+/**
+ * Validate the manifest, reporting each malformed field by name. A bad `name` ends parsing;
+ * any other bad field is dropped and the rest is parsed again, so one typo in `author` does
+ * not cost the plugin its skills.
+ */
+function parseTolerant(json: Record<string, unknown>, diagnostics: PluginDiagnostic[]): RawManifest | undefined {
+  const first = RawManifestSchema.safeParse(json);
+  if (first.success) return first.data;
+
+  const dropped = new Set<string>();
+  for (const issue of first.error.issues) {
+    const field = String(issue.path[0] ?? "");
+    if (FATAL_FIELDS.has(field) || issue.path.length === 0) {
+      diagnostics.push({ severity: "error", message: describeIssue(issue) });
+      return undefined;
+    }
+    diagnostics.push({ severity: ERROR_FIELDS.has(field) ? "error" : "warn", message: describeIssue(issue) });
+    dropped.add(field);
+  }
+  const pruned = Object.fromEntries(Object.entries(json).filter(([key]) => !dropped.has(key)));
+  const second = RawManifestSchema.safeParse(pruned);
+  if (second.success) return second.data;
+  for (const issue of second.error.issues) diagnostics.push({ severity: "error", message: describeIssue(issue) });
+  return undefined;
 }
 
 async function resolveSkillsField(
   machine: Machine,
   pluginRoot: string,
-  raw: unknown,
+  raw: string | readonly string[] | undefined,
   diagnostics: PluginDiagnostic[],
 ): Promise<readonly string[]> {
   if (raw === undefined) return [];
-  const entries: string[] = [];
-  if (typeof raw === "string") entries.push(raw);
-  else if (Array.isArray(raw) && raw.every((e) => typeof e === "string")) entries.push(...(raw as string[]));
-  else {
-    diagnostics.push({ severity: "error", message: '"skills" must be a string or string[]' });
-    return [];
-  }
+  const entries = typeof raw === "string" ? [raw] : raw;
 
   const resolved: string[] = [];
   for (const entry of entries) {
@@ -119,24 +179,10 @@ async function resolveSkillsField(
   return resolved;
 }
 
-function readSessionStart(raw: unknown, diagnostics: PluginDiagnostic[]): PluginManifest["sessionStart"] {
-  if (raw === undefined) return undefined;
-  if (!isObject(raw)) {
-    diagnostics.push({ severity: "warn", message: '"sessionStart" must be an object' });
-    return undefined;
-  }
-  const skill = typeof raw["skill"] === "string" ? raw["skill"].trim() : "";
-  if (skill.length === 0) {
-    diagnostics.push({ severity: "warn", message: '"sessionStart.skill" is required when sessionStart is present' });
-    return undefined;
-  }
-  return { skill };
-}
-
 async function readMcpServers(
   machine: Machine,
   pluginRoot: string,
-  raw: unknown,
+  raw: string | Readonly<Record<string, unknown>> | undefined,
   diagnostics: PluginDiagnostic[],
 ): Promise<PluginManifest["mcpServers"]> {
   if (raw === undefined) return undefined;
@@ -202,38 +248,6 @@ async function normalizePluginMcpServer(
     diagnostics.push({ severity: "warn", message: `"mcpServers.${name}.command" resolves outside the plugin` });
   }
   return config;
-}
-
-function readAuthor(raw: unknown): PluginManifest["author"] {
-  if (typeof raw === "string") return { name: raw };
-  if (!isObject(raw)) return undefined;
-  const name = stringField(raw, "name");
-  const email = stringField(raw, "email");
-  if (name === undefined && email === undefined) return undefined;
-  return { name, email };
-}
-
-function readInterface(raw: unknown): PluginInterface | undefined {
-  if (!isObject(raw)) return undefined;
-  const out: PluginInterface = {
-    displayName: stringField(raw, "displayName"),
-    shortDescription: stringField(raw, "shortDescription"),
-    longDescription: stringField(raw, "longDescription"),
-  };
-  return Object.values(out).some((v) => v !== undefined) ? out : undefined;
-}
-
-function stringField(raw: Record<string, unknown>, key: string): string | undefined {
-  const value = raw[key];
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
-}
-
-function stringArrayField(raw: Record<string, unknown>, key: string): readonly string[] | undefined {
-  const value = raw[key];
-  if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) return undefined;
-  return value as readonly string[];
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

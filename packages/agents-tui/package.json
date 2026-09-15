@@ -2,7 +2,7 @@
   "name": "operon-agents-tui",
   "version": "0.0.0",
   "private": true,
-  "description": "A terminal client for operon-agents, built on @earendil-works/pi-tui and wired only through the public Harness API. Used for internal debugging.",
+  "description": "A terminal client for operon-agents, built on operon-pi-tui and wired only through the public Harness API.",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -22,15 +22,22 @@
     "README.md"
   ],
   "scripts": {
-    "build": "pnpm --filter operon-agents build && tsc -p tsconfig.build.json && chmod +x dist/main.js",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/main.js",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-transform-types --no-warnings --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "node --test --experimental-transform-types --no-warnings \"test/**/*.test.ts\"",
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.84.1",
     "chalk": "^5.6.2",
-    "operon-agents": "workspace:*"
+    "cli-highlight": "^2.1.11",
+    "operon-agents": "workspace:*",
+    "operon-pi-tui": "workspace:*",
+    "smol-toml": "^1.4.1",
+    "zod": "^4.1.0"
+  },
+  "optionalDependencies": {
+    "@mariozechner/clipboard": "^0.3.9"
   }
 }

@@ -1,0 +1,39 @@
+{
+  "name": "operon-pi-tui",
+  "version": "0.84.4",
+  "private": true,
+  "description": "Terminal UI library with differential rendering. Vendored from @moonshot-ai/pi-tui (a fork of @earendil-works/pi-tui 0.84.1); see AGENTS.md for the local divergences that must be preserved.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "native",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --no-warnings test/*.test.ts"
+  },
+  "dependencies": {
+    "get-east-asian-width": "1.6.0",
+    "marked": "18.0.5"
+  },
+  "devDependencies": {
+    "@xterm/headless": "5.5.0",
+    "chalk": "^5.6.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

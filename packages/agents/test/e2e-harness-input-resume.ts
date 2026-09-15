@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineModel, defineAgent, DiskSessionRepository, type Tool } from "operon-agents-core";
+import { defineAgent, DiskSessionRepository, type AgentEvent, type SteerReceipt, type Tool } from "operon-agents-core";
 import { createHarness } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -22,6 +22,102 @@ function check(label: string, ok: boolean): void {
 
 interface PickState {
   readonly candidates: string[];
+}
+
+async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "invalid-answer"): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "af-resume-steer-"));
+  const faux = registerFauxProvider();
+  const model = faux.getChatModel()!;
+  const harness = createHarness({
+    model,
+    workDir: home,
+    harness: (scope) => scope.register(T.SessionRepository, new DiskSessionRepository(join(home, "sessions")), { owned: false }),
+    permission: { mode: "yolo" },
+  });
+  let onResumed: (() => void) | undefined;
+  let onPausedAgain: (() => void) | undefined;
+  let pauses = 0;
+  const pick: Tool = {
+    schema: { name: "pick", description: "pause for input", parameters: { type: "object", properties: {} } },
+    resolve: () => ({
+      approvalRule: "pick",
+      run: async (ctx) => {
+        if (ctx.resumed) {
+          onResumed?.();
+          return { content: [{ type: "text", text: "picked" }] };
+        }
+        if (++pauses > 1) onPausedAgain?.();
+        ctx.suspend({ kind: "choice", display: { title: "Pick one" } }, {});
+        return undefined as never;
+      },
+    }),
+  };
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("pick", {}), { stopReason: "toolUse" }),
+    mode === "reinterrupt"
+      ? fauxAssistantMessage(fauxToolCall("pick", {}), { stopReason: "toolUse" })
+      : fauxAssistantMessage("resumed", { stopReason: "stop" }),
+    fauxAssistantMessage("consumed late messages", { stopReason: "stop" }),
+  ]);
+  try {
+    const session = await harness.createSession({ agent: defineAgent({ name: "picker", model, instructions: "x", tools: [pick] }) });
+    const first = await session.prompt("pick");
+    const pending = first.interruptions![0]!;
+    check(`${mode}: paused root refuses steerTo before resume`, session.steerTo("main", "not yet", { kind: "user" }) === undefined);
+    const events: AgentEvent[] = [];
+    const late: SteerReceipt[] = [];
+    let during: SteerReceipt | undefined;
+    let gate: ReturnType<typeof session.holdAtBoundary> | undefined;
+    let injected = false;
+    onResumed = () => { during = session.steerTo("main", "during resumed tool", { kind: "user" }); };
+    onPausedAgain = () => { late.push(session.steer("keep for the next resume")); };
+    session.onEvent((event) => {
+      events.push(event);
+      if (event.type !== "agent.ended" || injected || (mode !== "complete" && mode !== "gated")) return;
+      injected = true;
+      if (mode === "gated") gate = session.holdAtBoundary();
+      late.push(session.steer("late one"), session.steer("late two"));
+    });
+    const resuming = session.resume({
+      [mode === "invalid-answer" ? "unknown-answer" : pending.approvalId]: { kind: "input", data: "chosen" },
+    });
+    // The call has registered its run but is still awaiting the durable control record.
+    const early = session.steerTo("main", "while loading resume state", { kind: "user" });
+    check(`${mode}: resume synchronously reports running and accepts steerTo`, session.status.state === "running" && early !== undefined);
+    check(`${mode}: absent child is not started by steerTo`, session.steerTo("main/missing", "hello", { kind: "user" }) === undefined);
+    const outcome = await resuming.then((result) => result.status, (error: Error) => error.message);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await session.whenIdle();
+
+    if (mode === "invalid-answer" || mode === "reinterrupt") {
+      check(`${mode}: resume preserves the durable pause`, mode === "invalid-answer" ? outcome.includes("not pending") : outcome === "interrupted");
+      check(`${mode}: queued input cannot wake a paused run`, session.status.state === "interrupted" && session.status.hasQueuedMessages);
+      check(`${mode}: no extra run starts`, events.filter((event) => event.type === "agent.started").length === (mode === "invalid-answer" ? 0 : 1));
+      check(`${mode}: the pending interruption remains recoverable`, (await session.pendingInterruptions()).length > 0);
+      check(`${mode}: paused root still refuses steerTo`, session.steerTo("main", "not yet", { kind: "user" }) === undefined);
+    } else {
+      check(`${mode}: resume completes`, outcome === "completed");
+      check(`${mode}: steerTo accepts input during resumed execution`, during !== undefined);
+      if (mode === "gated") {
+        check("gated: run exit leaves late input queued behind the barrier", gate !== undefined && session.status.hasQueuedMessages && events.filter((event) => event.type === "agent.started").length === 1);
+        gate!.release();
+        await session.whenIdle();
+      }
+      const consumed = events.filter((event) => event.type === "message.appended").map((event) => event.origin && "steerId" in event.origin ? event.origin.steerId : undefined);
+      check(`${mode}: early and in-flight steers are consumed`, early !== undefined && during !== undefined && consumed.includes(early.steerId) && consumed.includes(during.steerId));
+      check(`${mode}: both late messages are consumed exactly once`, late.length === 2 && late.every((receipt) => consumed.filter((id) => id === receipt.steerId).length === 1));
+      check(`${mode}: late messages produce exactly one wake run`, events.filter((event) => event.type === "agent.started").length === 2);
+      check(`${mode}: session finishes idle with an empty queue`, session.status.state === "idle" && !session.status.hasQueuedMessages);
+    }
+    const closing = session.close();
+    check(`${mode}: closing refuses steerTo`, session.steerTo("main", "closed", { kind: "user" }) === undefined);
+    await closing;
+    check(`${mode}: closed refuses steerTo`, session.steerTo("main", "closed", { kind: "user" }) === undefined);
+  } finally {
+    await harness.close();
+    faux.unregister();
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 async function main(): Promise<void> {
@@ -97,6 +193,8 @@ async function main(): Promise<void> {
     rmSync(home, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
   }
+
+  for (const mode of ["complete", "gated", "reinterrupt", "invalid-answer"] as const) await testResumeSteering(mode);
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

@@ -116,6 +116,9 @@ const session = await harness.createSession();
   await loader.load("future-plugin").catch((error) => { refused = String(error); });
   check("engine: and cannot be loaded", refused.includes("99.0.0"));
   check("engine: the current framework version satisfies an equal `engine`", (await loader.list()).find((p) => p.id === "echo-plugin")?.state === "new");
+  await writePlugin(dir, "typo-plugin", { id: "typo-plugin", engine: "latest" }, echoPluginSource("typo"), T1);
+  const typo = (await loader.list()).find((p) => p.dir.endsWith("typo-plugin"));
+  check("manifest: a malformed field lists as 'error' naming the field", typo?.state === "error" && typo.error?.includes('"engine"') === true);
   check("unload: definitions() no longer carries it", loader.definitions().length === 0);
 }
 

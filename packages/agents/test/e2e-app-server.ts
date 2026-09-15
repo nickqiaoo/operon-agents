@@ -153,6 +153,13 @@ async function pairedHalf(): Promise<void> {
       notFound = (e as { code?: number }).code === -32001;
     }
     check("error: unknown session → -32001", notFound);
+    let invalid = false;
+    try {
+      await client2.prompt("", "hi");
+    } catch (e) {
+      invalid = (e as { code?: number }).code === -32602 && (e as Error).message.includes("sessionId");
+    }
+    check("error: malformed params → -32602 naming the field", invalid);
     client2.close();
 
     await client.closeSession(sessionId);

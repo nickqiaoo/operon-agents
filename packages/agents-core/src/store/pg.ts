@@ -444,6 +444,14 @@ export class PgSessionRepository implements SessionRepository {
       [id, Date.now()],
     );
   }
+  async rename(id: string, title: string): Promise<void> {
+    await this.ready();
+    await this.pool.query(`update session_meta set title=$2, updated_at=$3 where id=$1`, [
+      id,
+      title.length > 0 ? title : null,
+      Date.now(),
+    ]);
+  }
 
   async close(): Promise<void> {
     if (this.ownsPool) await this.pool.end?.();

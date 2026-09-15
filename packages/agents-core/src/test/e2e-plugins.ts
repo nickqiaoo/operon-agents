@@ -172,6 +172,16 @@ async function main(): Promise<void> {
     // 2. manifest parsing.
     const parsed = await parseManifest(MACHINE, goodRoot);
     check("manifest: parsed with no error diagnostics", parsed.manifest !== undefined && !parsed.diagnostics.some((d) => d.severity === "error"));
+    const sloppyRoot = path.join(tmp, "sloppy-plugin");
+    await writePlugin(sloppyRoot, { name: "sloppy-plugin", author: 42, keywords: "not-a-list", sessionStart: { skill: " " } });
+    const sloppy = await parseManifest(MACHINE, sloppyRoot);
+    check(
+      "manifest: a malformed optional field is dropped with a warning naming it",
+      sloppy.manifest?.name === "sloppy-plugin" && sloppy.manifest.author === undefined && sloppy.manifest.keywords === undefined && sloppy.manifest.sessionStart === undefined
+        && ['"author"', '"keywords"', '"sessionStart.skill"'].every((field) => sloppy.diagnostics.some((d) => d.severity === "warn" && d.message.includes(field))),
+    );
+    const nameless = await parseManifest(MACHINE, badRoot);
+    check("manifest: a missing name is an error naming the field", nameless.manifest === undefined && nameless.diagnostics.some((d) => d.severity === "error" && d.message.includes('"name"')));
     check("manifest: name + skills + sessionStart + mcpServers", parsed.manifest?.name === "demo-plugin" && (parsed.manifest?.skills?.length ?? 0) === 1 && parsed.manifest?.sessionStart?.skill === "greet" && parsed.manifest?.mcpServers?.["weather"] !== undefined);
     check(
       "manifest: default hooks/hooks.json loaded + PLUGIN_ROOT expanded",

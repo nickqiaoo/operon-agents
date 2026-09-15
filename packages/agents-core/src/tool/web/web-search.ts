@@ -31,7 +31,7 @@ export function webSearchTool(provider: WebSearchProvider): Tool {
       return {
         accesses: ToolAccesses.none(),
         approvalRule: "WebSearch",
-        display: { title: `Searching: ${preview}` },
+        display: { title: `Searching: ${preview}`, query: args.query },
         run: async (ctx): Promise<ToolResult> => {
           try {
             const results = await provider.search(args.query, {

@@ -27,7 +27,6 @@ import {
   type AgentEvent,
   type AgentRecord,
   type DeleteSessionOptions,
-  type ExternalOriginMetadataValue,
   type InterruptAnswer,
   type PendingRunInterrupt,
   type SessionRepository,
@@ -36,16 +35,21 @@ import {
   type SteerOrigin,
 } from "operon-agents";
 import type {
-  AgentRef,
   ControlReceiptResource,
   CreateManagedMessageRequest,
   CreateManagedSessionRequest,
-  EnvironmentRef,
   ManagedSession,
   MessageReceiptResource,
   UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import { CONTROL_RECORD_NAME, hasUnprocessedInbox, type ControlCommand } from "./inbox.ts";
+import {
+  CreateMessageRequestSchema,
+  CreateSessionRequestSchema,
+  InterruptAnswersSchema,
+  UpdateSessionRequestSchema,
+  parseRequest,
+} from "./request-schemas.ts";
 import type { SessionWork } from "./work.ts";
 import {
   MemoryManagedSessionMetadataStore,
@@ -185,10 +189,9 @@ export class SessionService {
    * and tool configuration a worker holds, and doing it here would make creation depend on
    * execution being available.
    */
-  async create(input: CreateManagedSessionRequest): Promise<ManagedSession> {
-    assertCreateSessionRequest(input);
-    const agent = agentRef(input.agent);
-    const environment = environmentRef(input.environment);
+  async create(request: CreateManagedSessionRequest): Promise<ManagedSession> {
+    const input = parseRequest(CreateSessionRequestSchema, request);
+    const { agent, environment } = input;
     const resolved = await this.environments.resolve(environment);
     const now = Date.now();
     const sessionId = input.id ?? managedSessionId();
@@ -242,8 +245,8 @@ export class SessionService {
    * the store's observer before this resolves. Like `interruptions`, it opens the store beside
    * whoever may be running the session: `meta` is written by nobody during a turn.
    */
-  async update(id: string, input: UpdateManagedSessionRequest): Promise<ManagedSession> {
-    assertUpdateSessionRequest(input);
+  async update(id: string, request: UpdateManagedSessionRequest): Promise<ManagedSession> {
+    const input = parseRequest(UpdateSessionRequestSchema, request);
     const metadata = await this.requireMetadata(id);
     await this.summary(id);
     const handle = await this.repository.open(id);
@@ -466,10 +469,10 @@ export class SessionService {
    */
   async appendEvent(
     id: string,
-    request: CreateManagedMessageRequest,
+    input: CreateManagedMessageRequest,
     idempotencyKey?: string,
   ): Promise<MessageReceiptResource> {
-    assertCreateMessageRequest(request);
+    const request = parseRequest(CreateMessageRequestSchema, input);
     if (idempotencyKey !== undefined) {
       return this.idempotency.run(id, idempotencyKey, () => this.acceptEvent(id, request));
     }
@@ -496,9 +499,7 @@ export class SessionService {
           source: request.source ?? "managed-api",
           channel,
           ...(request.actor !== undefined ? { actor: request.actor } : {}),
-          ...(request.metadata !== undefined
-            ? { metadata: request.metadata as Readonly<Record<string, ExternalOriginMetadataValue>> }
-            : {}),
+          ...(request.metadata !== undefined ? { metadata: request.metadata } : {}),
         }
       : { kind: channel === "follow_up" ? "user_follow_up" : "user" };
     const item = buildSteerMessage(request.input, origin, { now: () => acceptedAt });
@@ -537,9 +538,10 @@ export class SessionService {
    */
   async answerInterruption(
     id: string,
-    answers: Readonly<Record<string, InterruptAnswer>>,
+    input: Readonly<Record<string, InterruptAnswer>>,
     options: { readonly actor?: string } = {},
   ): Promise<ControlReceiptResource> {
+    const answers = parseRequest(InterruptAnswersSchema, input);
     if ((await this.summary(id)).durableState !== "interrupted") {
       throw new ManagedConflictError(`session "${id}" has no interrupted run to resume`);
     }
@@ -614,78 +616,6 @@ export class SessionService {
       activeTurnId: null,
       hasQueuedMessages: false,
     };
-  }
-}
-
-function agentRef(value: AgentRef | string): AgentRef {
-  if (typeof value === "string") {
-    if (!value.trim()) throw new ManagedInvalidRequestError("agent id must not be empty");
-    return { id: value };
-  }
-  if (!isRecord(value) || typeof value.id !== "string" || !value.id.trim()) {
-    throw new ManagedInvalidRequestError("agent must be an id string or an object with a non-empty id");
-  }
-  if (value.version !== undefined && typeof value.version !== "string") {
-    throw new ManagedInvalidRequestError("agent version must be a string");
-  }
-  return value;
-}
-
-function environmentRef(value: EnvironmentRef | string): EnvironmentRef {
-  if (typeof value === "string") {
-    if (!value.trim()) throw new ManagedInvalidRequestError("environment id must not be empty");
-    return { id: value };
-  }
-  if (!isRecord(value) || typeof value.id !== "string" || !value.id.trim()) {
-    throw new ManagedInvalidRequestError("environment must be an id string or an object with a non-empty id");
-  }
-  return value as EnvironmentRef;
-}
-
-function assertCreateSessionRequest(input: unknown): asserts input is CreateManagedSessionRequest {
-  if (!isRecord(input)) throw new ManagedInvalidRequestError("request body must be an object");
-  if (input.id !== undefined && (typeof input.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(input.id))) {
-    throw new ManagedInvalidRequestError("session id may contain only letters, digits, underscores and hyphens");
-  }
-  if (input.title !== undefined && typeof input.title !== "string") {
-    throw new ManagedInvalidRequestError("title must be a string");
-  }
-  if (input.metadata !== undefined && !isRecord(input.metadata)) {
-    throw new ManagedInvalidRequestError("metadata must be an object");
-  }
-  agentRef(input.agent as AgentRef | string);
-  environmentRef(input.environment as EnvironmentRef | string);
-}
-
-function assertUpdateSessionRequest(input: unknown): asserts input is UpdateManagedSessionRequest {
-  if (!isRecord(input)) throw new ManagedInvalidRequestError("request body must be an object");
-  if (typeof input.title !== "string" || !input.title.trim()) {
-    throw new ManagedInvalidRequestError("title must be a non-empty string");
-  }
-}
-
-function assertCreateMessageRequest(input: unknown): asserts input is CreateManagedMessageRequest {
-  if (!isRecord(input)) throw new ManagedInvalidRequestError("request body must be an object");
-  if (typeof input.input !== "string" || !input.input.trim()) {
-    throw new ManagedInvalidRequestError("input must not be empty");
-  }
-  if (input.origin !== undefined && input.origin !== "user" && input.origin !== "external") {
-    throw new ManagedInvalidRequestError("origin must be user or external");
-  }
-  if (input.origin !== "external" && (input.source !== undefined || input.actor !== undefined || input.metadata !== undefined)) {
-    throw new ManagedInvalidRequestError('source, actor and metadata describe a relayed delivery; set origin: "external"');
-  }
-  if (input.source !== undefined && (typeof input.source !== "string" || !input.source.trim())) {
-    throw new ManagedInvalidRequestError("source must be a non-empty string");
-  }
-  if (input.actor !== undefined && typeof input.actor !== "string") {
-    throw new ManagedInvalidRequestError("actor must be a string");
-  }
-  if (input.metadata !== undefined && !isRecord(input.metadata)) {
-    throw new ManagedInvalidRequestError("metadata must be an object");
-  }
-  if (input.mode !== undefined && input.mode !== "steer" && input.mode !== "follow_up") {
-    throw new ManagedInvalidRequestError("mode must be steer or follow_up");
   }
 }
 

@@ -18,7 +18,7 @@ import {
   type Tool,
   type ToolResult,
 } from "../index.ts";
-import { matchesBashRule } from "../internal.ts";
+import { hashFileContent, matchesBashRule } from "../internal.ts";
 import { MAX_UNPAGED_FILE_BYTES } from "../tool/builtin/read.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 
     const r1 = await runTool(readTool, { path: notes }, ctx);
     check("read: line-numbered output", text(r1).includes("1\talpha") && text(r1).includes("3\tgamma"));
-    check("read: full read recorded", ledger.get(notes)?.fullRead === true && ledger.get(notes)?.content === "alpha\nbeta\ngamma\n");
+    check("read: full read recorded", ledger.get(notes)?.fullRead === true && ledger.get(notes)?.contentHash === hashFileContent("alpha\nbeta\ngamma\n"));
 
     const partial = await runTool(readTool, { path: notes, n_lines: 1 }, ctx);
     check("read: partial output", text(partial).includes("1\talpha") && !text(partial).includes("2\tbeta"));
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
 
       await runTool(readTool, { path: big, line_offset: 1, n_lines: 100 }, ctx);
       check("read: an explicitly paged read is not a full read", ledger.get(big)?.fullRead === false);
-      check("read: a paged read retains no content to compare against", ledger.get(big)?.content === undefined);
+      check("read: a paged read retains no content to compare against", ledger.get(big)?.contentHash === undefined);
 
       // Line 400 was never in that 100-line window, yet the edit resolves: uniqueness is
       // checked against the whole file on disk, not against what the model was shown.
@@ -219,7 +219,50 @@ async function main(): Promise<void> {
     await writeFile(staleEditFile, "one\nchanged\n");
     await bumpMtime(staleEditFile);
     const editStale = await runTool(editTool, { path: staleEditFile, old_string: "one", new_string: "uno" }, ctx);
-    check("edit: external modification rejected", editStale.isError === true && text(editStale).includes("modified since read"));
+    check(
+      "edit: changed since read but old_string still unique → applied against the current file",
+      !editStale.isError && readFileSync(staleEditFile, "utf8") === "uno\nchanged\n",
+    );
+    check("edit: a recovered edit says the file holds changes not in context", text(editStale).includes("modified on disk since you last read it"));
+    const afterRecovered = await runTool(editTool, { path: staleEditFile, old_string: "uno", new_string: "eins" }, ctx);
+    check(
+      "edit: after a recovered edit the ledger is current — the next edit is an ordinary one",
+      !afterRecovered.isError && !text(afterRecovered).includes("note:") && readFileSync(staleEditFile, "utf8") === "eins\nchanged\n",
+    );
+    const reread = await runTool(readTool, { path: staleEditFile }, ctx);
+    check("edit: the note's advice works — a Read after the write serves content, not the unchanged stub", text(reread).includes("2\tchanged"));
+
+    // Every stale edit short of one unambiguous match goes back for a Read — and says
+    // "modified", not "not found": the model's view is what is wrong, not its old_string.
+    const staleGone = path.join(dir, "stale-gone.txt");
+    await writeFile(staleGone, "alpha\nbeta\n");
+    await runTool(readTool, { path: staleGone }, ctx);
+    await writeFile(staleGone, "gamma\nbeta\n");
+    await bumpMtime(staleGone);
+    const goneEdit = await runTool(editTool, { path: staleGone, old_string: "alpha", new_string: "A" }, ctx);
+    check("edit: stale + old_string gone → modified-since-read", goneEdit.isError === true && text(goneEdit).includes("modified since read"));
+
+    const staleDup = path.join(dir, "stale-dup.txt");
+    await writeFile(staleDup, "x = 1\n");
+    await runTool(readTool, { path: staleDup }, ctx);
+    await writeFile(staleDup, "x = 1\nx = 1\n");
+    await bumpMtime(staleDup);
+    const dupEdit = await runTool(editTool, { path: staleDup, old_string: "x = 1", new_string: "x = 2" }, ctx);
+    check(
+      "edit: stale + old_string no longer unique → modified-since-read, file untouched",
+      dupEdit.isError === true && text(dupEdit).includes("modified since read") && readFileSync(staleDup, "utf8") === "x = 1\nx = 1\n",
+    );
+
+    const staleAll = path.join(dir, "stale-all.txt");
+    await writeFile(staleAll, "k\n");
+    await runTool(readTool, { path: staleAll }, ctx);
+    await writeFile(staleAll, "k\nextra\n");
+    await bumpMtime(staleAll);
+    const allEdit = await runTool(editTool, { path: staleAll, old_string: "k", new_string: "K", replace_all: true }, ctx);
+    check(
+      "edit: stale + replace_all is never recovered (it would rewrite unseen occurrences)",
+      allEdit.isError === true && text(allEdit).includes("modified since read") && readFileSync(staleAll, "utf8") === "k\nextra\n",
+    );
 
     const created = path.join(dir, "created.txt");
     const create = await runTool(writeTool, { path: created, content: "hello\n" }, ctx);

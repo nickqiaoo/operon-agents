@@ -108,8 +108,8 @@ export interface DirEntry {
  * Version stamp for optimistic-concurrency writes. mtime and nothing else
  * (local-first): on hosts with a reliable mtime the check is free; hosts
  * without one (some sandbox vendors) leave `mtimeMs` undefined, and every
- * check there falls back to content comparison (see FileFreshnessLedger).
- * No hashing anywhere.
+ * check there falls back to content comparison (see FileFreshnessLedger),
+ * done on a digest (`hashFileContent`) so neither side retains the text.
  *
  * Size deliberately plays no part. It only ever ruled on cases the mtime had
  * already decided, except for one it decided WRONG: an mtime-less backend
@@ -139,10 +139,11 @@ export interface WriteTextIfUnchangedOptions extends WriteTextOptions {
    */
   readonly expected: FileVersion | "must-not-exist";
   /**
-   * Prior full content (LF-normalized) for false-positive review when the mtime moved
-   * or is unavailable. Omit to treat any mtime change as a conflict.
+   * `hashFileContent` of the prior full content (LF-normalized, BOM-stripped), for
+   * false-positive review when the mtime moved or is unavailable. Omit to treat any
+   * mtime change as a conflict.
    */
-  readonly expectedContent?: string;
+  readonly expectedContentHash?: string;
 }
 
 export interface WriteTextResult {
@@ -322,7 +323,7 @@ export interface Machine {
    *   (server-enforced SFTP EXCL create), even against external writers.
    *
    * Errors: {@link StaleFileError} — the file changed, OR the backend could not
-   * establish that it hadn't (no mtime and no `expectedContent` to review against;
+   * establish that it hadn't (no mtime and no `expectedContentHash` to review against;
    * unverifiable is refused, not waved through); {@link FileExistsError} —
    * "must-not-exist" violated.
    */

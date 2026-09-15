@@ -17,6 +17,8 @@ export * from "./harness.ts";
 // Core supplies the primitives they are built on (Capability / LoopHooks / ToolFilter / Injector).
 export * from "./extensions/index.ts";
 export * from "./cron/index.ts";
+// Model providers the host configures (a self-hosted endpoint, a gateway) — see providers.ts.
+export * from "./providers.ts";
 
 // Deployment composition roots: local vs server injection presets (Invariant 7 — no engine "mode").
 export * from "./local.ts";

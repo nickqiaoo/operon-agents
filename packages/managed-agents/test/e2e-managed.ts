@@ -269,6 +269,20 @@ try {
     relayAttributesRefused = error instanceof ManagedApiClientError && error.status === 400 && error.code === "invalid_request";
   }
   check("message: relay attributes without origin: external are refused", relayAttributesRefused);
+  let nestedMetadataRefused = "";
+  try {
+    await running.client.sessions.messages.create(session.id, { input: "x", origin: "external", metadata: { build: { red: true } } as never });
+  } catch (error) {
+    if (error instanceof ManagedApiClientError && error.status === 400) nestedMetadataRefused = error.message;
+  }
+  check("message: a malformed body is refused naming the field", nestedMetadataRefused.includes("metadata.build"));
+  let badAnswerRefused = "";
+  try {
+    await running.client.sessions.resume(session.id, { t1: { kind: "bogus" } as never });
+  } catch (error) {
+    if (error instanceof ManagedApiClientError && error.status === 400) badAnswerRefused = error.message;
+  }
+  check("resume: a malformed answer is refused naming the answer", badAnswerRefused.includes("answers.t1"));
   controller.abort();
 
   // turn.ended is live; the run settles only after its journal flush completes. Historical

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isDurableAgentEvent, type InterruptAnswer } from "operon-agents";
+import { isDurableAgentEvent } from "operon-agents";
+import { ResumeSessionRequestSchema, parseRequest } from "./request-schemas.ts";
 import type {
   CreateManagedMessageRequest,
   CreateManagedSessionRequest,
@@ -7,7 +8,6 @@ import type {
   ListSessionEventsResponse,
   ListManagedSessionsResponse,
   ManagedApiError,
-  ResumeManagedSessionRequest,
   UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import {
@@ -234,12 +234,8 @@ export function createManagedHttpServer<TContext = unknown>(
     }
     if (method === "POST" && parts[2] === "resume" && parts.length === 3) {
       await authorize(request, "sessions.resume", sessionId);
-      const body = await readJson<ResumeManagedSessionRequest>(request, maxBodyBytes);
-      if (!isRecord(body.answers)) return sendJson(response, 400, apiError("invalid_request", "answers must be an object"));
-      const receipt = await options.service.answerInterruption(
-        sessionId,
-        body.answers as Readonly<Record<string, InterruptAnswer>>,
-      );
+      const body = parseRequest(ResumeSessionRequestSchema, await readJson(request, maxBodyBytes));
+      const receipt = await options.service.answerInterruption(sessionId, body.answers);
       void options.worker?.drain(sessionId).catch(() => undefined);
       return sendJson(response, 202, receipt);
     }

@@ -232,7 +232,7 @@ export const readTool = defineTool({
     const path = await resolveToolPath(args.path, ctx.machine, "read");
     return {
       accesses: ToolAccesses.readFile(path),
-      display: { title: `Reading ${args.path}` },
+      display: { title: `Reading ${args.path}`, path: args.path },
       ...pathApproval("Read", ctx.machine, path),
       run: (runCtx) => execute(args, path, runCtx),
     };

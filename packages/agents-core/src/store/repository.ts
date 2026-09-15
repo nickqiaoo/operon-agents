@@ -116,6 +116,8 @@ export interface SessionRepository {
   delete(id: string, options?: DeleteSessionOptions): Promise<void>;
   /** Clear a soft delete. No-op when the session is absent or was never deleted. */
   restore(id: string): Promise<void>;
+  /** Set (or clear, with an empty string) the session's title. No-op when the session is absent. */
+  rename(id: string, title: string): Promise<void>;
 }
 
 export class SessionRepositoryNotFoundError extends Error {
@@ -258,6 +260,14 @@ export class MemorySessionRepository implements SessionRepository {
     if (entry === undefined || entry.meta.deletedAt === undefined) return;
     const { deletedAt: _dropped, ...rest } = entry.meta;
     entry.meta = { ...rest, updatedAt: Date.now() };
+    await entry.handle.store.putState("meta", entry.meta);
+  }
+
+  async rename(id: string, title: string): Promise<void> {
+    const entry = this.sessions.get(id);
+    if (entry === undefined) return;
+    const { title: _dropped, ...rest } = entry.meta;
+    entry.meta = { ...rest, ...(title.length > 0 ? { title } : {}), updatedAt: Date.now() };
     await entry.handle.store.putState("meta", entry.meta);
   }
 
@@ -420,6 +430,20 @@ export class DiskSessionRepository implements SessionRepository {
     await this.markDiskMeta(entry, {});
     const { deletedAt: _dropped, ...rest } = entry;
     await this.writeCatalog({ op: "upsert", entry: { ...rest, updatedAt: Date.now() } });
+  }
+
+  async rename(id: string, title: string): Promise<void> {
+    await this.ensureReconciled();
+    const entry = (await this.ensureCatalog()).get(id);
+    if (entry === undefined) return;
+    const raw = new DiskSessionStore(entry.sessionDir);
+    const meta = asSessionMeta(await raw.getState("meta"));
+    if (meta === undefined) return;
+    const updatedAt = Date.now();
+    const { title: _dropped, ...rest } = meta;
+    await raw.putState("meta", { ...rest, ...(title.length > 0 ? { title } : {}), updatedAt } satisfies SessionMeta);
+    const { title: _entryTitle, ...entryRest } = entry;
+    await this.writeCatalog({ op: "upsert", entry: { ...entryRest, ...(title.length > 0 ? { title } : {}), updatedAt } });
   }
 
   /** Rewrite the session's own `meta` state with (or without) the delete mark. */

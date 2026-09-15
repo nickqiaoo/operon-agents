@@ -87,6 +87,7 @@ import {
   type ApprovalRequestOptions,
   type Machine,
   type MachineFactory,
+  type ActivateSkillRequest,
   type SessionRepository,
   type ResolvedAgentProfile,
   taskCapability,
@@ -109,7 +110,7 @@ import { ServiceUnavailableError, isProbeProperty } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { assertOneSharedHalf, extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ExtensionWorkspaceContext, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
-import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult } from "operon-agents-core";
+import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult, type TodoItem } from "operon-agents-core";
 
 export type ApprovalHandler = (
   request: ApprovalRequest,
@@ -140,6 +141,13 @@ const DEFAULT_REPLACE_TIMEOUT_MS = 30_000;
 const EXTENSION_PARAMS_STATE_KEY = "extensions:params";
 /** Session state slot for an explicit `workspaceKey` — durable workspace identity (see `OpenSessionOptionsBase.workspaceKey`). */
 const WORKSPACE_KEY_STATE_KEY = "workspace:key";
+
+/** A slash command as listed by `HarnessSession.listCommands`. */
+export interface CommandInfo {
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly description: string;
+}
 
 export interface HarnessSessionStatus {
   readonly state: HarnessSessionState;
@@ -754,6 +762,9 @@ export class HarnessSession<TContext = unknown> {
   private endRun(controller: AbortController): void {
     this.runs.get(controller)?.resolve();
     this.runs.delete(controller);
+    // Input can arrive after the last drain while this run still counts as active. Every
+    // entry point must recheck on exit; the wake itself respects pauses, gates and other runs.
+    this.scheduleIdleWake();
   }
 
   /** A run is in flight or queued behind the core's run lock. */
@@ -823,9 +834,6 @@ export class HarnessSession<TContext = unknown> {
       throw error;
     } finally {
       this.endRun(controller);
-      // A follow-up can land after this run's last drain but before it settles — that enqueue
-      // saw an active run and stood down, so the run itself has to look once on the way out.
-      this.scheduleIdleWake();
     }
   }
 
@@ -839,9 +847,11 @@ export class HarnessSession<TContext = unknown> {
    * drains the message at its next boundary; an idle root frame is woken to take it.
    */
   steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined {
-    if (this.closed || this.lastRunInterrupted) return undefined;
+    if (this.closed) return undefined;
     // A run in flight drains its own queues, so handing the message to the frame is enough.
+    // A resume keeps the prior interruption flag until it settles, but is already running.
     if (this.hasActiveRuns()) return this.core.steerTo(address, content, origin, options);
+    if (this.lastRunInterrupted) return undefined;
     // Idle: only the root frame can be woken. A subagent whose frame has ended is not a teammate
     // waiting for mail — it is a finished delegation, and only the parent that delegated it can
     // decide to continue it (`Agent(resume=...)`). Its store, capabilities, permissions and
@@ -976,9 +986,6 @@ export class HarnessSession<TContext = unknown> {
       })
       .finally(() => {
         this.endRun(controller);
-        // Same as runPrompt's exit: input queued after this run's last drain (a background
-        // notification landing at agent.ended) needs a wake, or it sits until the next prompt.
-        this.scheduleIdleWake();
       });
     // Guard the floating promise so iterate-only callers don't trip an unhandled rejection
     // (mirrors runStream's own internal guard); awaiters still receive a real rejection.
@@ -1091,6 +1098,18 @@ export class HarnessSession<TContext = unknown> {
   setPermissionMode(mode: PermissionMode): Promise<void> {
     return this.core.setPermissionMode(mode);
   }
+  /** The model this session runs on, as last set; undefined means the agent's own. */
+  get modelSetting(): string | ChatModel | undefined {
+    return this.core.modelSetting;
+  }
+  /** The thinking level this session runs at, as last set; undefined means the model's default. */
+  get thinkingSetting(): ThinkingLevel | undefined {
+    return this.core.thinkingSetting;
+  }
+  /** The permission mode in force right now — what a status line reads instead of tracking it. */
+  get permissionMode(): PermissionMode | undefined {
+    return this.core.permissionModeSetting;
+  }
 
   createGoal(...args: Parameters<Session["createGoal"]>): ReturnType<Session["createGoal"]> {
     return this.core.createGoal(...args);
@@ -1110,8 +1129,10 @@ export class HarnessSession<TContext = unknown> {
   listSkills(): ReturnType<Session["listSkills"]> {
     return this.core.listSkills();
   }
-  activateSkill(...args: Parameters<Session["activateSkill"]>): ReturnType<Session["activateSkill"]> {
-    return (this.core.activateSkill as (...a: unknown[]) => ReturnType<Session["activateSkill"]>)(...args);
+  activateSkill(name: string, args?: string): ReturnType<Session["activateSkill"]>;
+  activateSkill(request: ActivateSkillRequest): ReturnType<Session["activateSkill"]>;
+  activateSkill(nameOrRequest: string | ActivateSkillRequest, args?: string): ReturnType<Session["activateSkill"]> {
+    return (this.core.activateSkill as (...a: unknown[]) => ReturnType<Session["activateSkill"]>)(nameOrRequest, args);
   }
   listPlugins(): ReturnType<Session["listPlugins"]> {
     return this.core.listPlugins();
@@ -1136,6 +1157,22 @@ export class HarnessSession<TContext = unknown> {
   // ── context introspection — where the model's window is spent, as of the last turn ──
   getContextBreakdown(): ReturnType<Session["getContextBreakdown"]> {
     return this.core.getContextBreakdown();
+  }
+  /** Where this session's tools run. A host uses it to run a command in the same place the agent
+   *  does — one shell, one filesystem, one working directory. */
+  get machine(): Machine {
+    return this.core.machine;
+  }
+  /** The current todo list (the `TodoList` tool's latest state); empty without the todo capability. */
+  getTodos(): readonly TodoItem[] {
+    return this.core.get(T.Todo)?.get() ?? [];
+  }
+  /** Every slash command this session answers to — the static registry plus the ones its
+   *  capabilities and extensions contribute — for a UI's palette and autocompletion. */
+  listCommands(): readonly CommandInfo[] {
+    return sharedCommands()
+      .list(this.core)
+      .map((command) => ({ name: command.name, aliases: command.aliases ?? [], description: command.description }));
   }
 
   // ── extensions — hot attach/detach on the live session (host API; never a model tool) ──
@@ -1668,6 +1705,11 @@ export class Harness<TContext = unknown> {
 
   async listSessions(filter?: ListSessionsFilter): Promise<readonly SessionSummary[]> {
     return (await this.repository()).list(filter);
+  }
+
+  /** Set a session's title (an empty string clears it). Works on open and closed sessions alike. */
+  async renameSession(id: string, title: string): Promise<void> {
+    await (await this.repository()).rename(id, title.trim());
   }
 
   /**

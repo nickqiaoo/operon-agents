@@ -27,7 +27,7 @@ export function fetchUrlTool(provider: UrlFetchProvider): Tool {
       accesses: ToolAccesses.none(),
       approvalRule: "FetchURL",
       matchesRule: (rulePattern) => ruleMatchesUrl(rulePattern, args.url),
-      display: { title: `Fetching ${args.url}` },
+      display: { title: `Fetching ${args.url}`, url: args.url },
       run: async (ctx): Promise<ToolResult> => {
         try {
           const result = await provider.fetch(args.url, { signal: ctx.signal });

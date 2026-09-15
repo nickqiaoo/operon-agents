@@ -134,7 +134,7 @@ export const grepTool = defineTool({
         ? await resolveToolPath(args.path, ctx.machine, "search", SEARCH_ACCESS_POLICY)
         : ctx.machine.getcwd();
     return {
-      display: { title: `Searching for '${args.pattern}' in ${args.path ?? "."}` },
+      display: { title: `Searching for '${args.pattern}' in ${args.path ?? "."}`, pattern: args.pattern, ...(args.path !== undefined ? { path: args.path } : {}) },
       ...globApproval("Grep", args.pattern),
       run: (runCtx) => execution(args, runCtx.signal, [searchPath], runCtx.machine),
     };

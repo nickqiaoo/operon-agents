@@ -12,6 +12,8 @@
  */
 import { homedir } from "node:os";
 import { cronExtension } from "./cron/index.ts";
+import { createModelRuntimeFromConfig } from "./providers.ts";
+import type { ModelRuntime } from "operon-agents-core";
 import { join } from "node:path";
 import {
   type HookDef,
@@ -58,13 +60,22 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
   readonly logger?: Logger;
   /** Context budget for the default compaction capability. */
   readonly maxContextTokens?: number;
+  /**
+   * The model runtime this harness resolves providers through. Pass the same one the host used to
+   * build its `ChatModel` (see `createModelRuntimeFromConfig`) when a model lives on a configured
+   * endpoint — otherwise the two registries disagree about what exists. Omitted, the harness builds
+   * one from `<homeDir>/providers.toml` itself.
+   */
+  readonly modelRuntime?: ModelRuntime;
+  /** Skip reading `<homeDir>/providers.toml` entirely. Ignored when `modelRuntime` is given. */
+  readonly loadConfiguredProviders?: boolean;
 }
 
 /** Build `HarnessOptions` wired for a local, single-machine deployment. */
 export async function localHarnessOptions<TContext>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<HarnessOptions<TContext>> {
-  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, harness, workspace, session, extensions, ...engine } = options;
+  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelRuntime, loadConfiguredProviders, harness, workspace, session, extensions, ...engine } = options;
   const homeDir = home ?? join(homedir(), ".agents");
   // Agent profiles come from disk here; the server preset supplies them externally instead.
   const extraSubagentProfiles =
@@ -75,6 +86,13 @@ export async function localHarnessOptions<TContext>(
   // Installed plugins are read ONCE per process, not per session: the manager is a harness-tier
   // object, and `session.reloadPlugins()` is the explicit refresh.
   if (pluginManager !== undefined) await pluginManager.load();
+  // Configured endpoints are resolved once per harness, not per session: the registry is a
+  // harness-tier object, and a session only ever reads it.
+  const runtime =
+    modelRuntime ??
+    ((loadConfiguredProviders ?? true)
+      ? await createModelRuntimeFromConfig({ homeDir })
+      : undefined);
 
   return {
     ...engine,
@@ -84,6 +102,8 @@ export async function localHarnessOptions<TContext>(
       scope.register(T.SessionRepository, new DiskSessionRepository(homeDir));
       scope.register(T.Logger, logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) })), { owned: false });
       if (pluginManager !== undefined) scope.register(T.PluginManager, pluginManager, { owned: false });
+      // What `ExtensionHost.registerProvider` mutates, and where a session's model is looked up.
+      if (runtime !== undefined) scope.register(T.ModelRuntime, runtime, { owned: false });
       await harness?.(scope);
     },
     // One per working directory, shared by its sessions: the MCP connections (workspace servers +

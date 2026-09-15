@@ -139,6 +139,9 @@ export {
   summarizeSkill,
 } from "./skills/index.ts";
 export type {
+  ActivateSkillRequest,
+  SkillActivationResult,
+  SkillActivationTrigger,
   SkillsOptions,
   SkillCatalog,
   SkillDefinition,

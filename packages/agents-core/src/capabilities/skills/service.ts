@@ -27,7 +27,8 @@ export interface SkillActivationResult {
   readonly trigger: SkillActivationTrigger;
   readonly skillPath: string;
   readonly skillSource: SkillSource;
-  readonly turnId: string | null;
+  /** Matches `steer.queued.steerId` and the consuming `message.appended.origin.steerId`. */
+  readonly steerId: string;
 }
 
 export class UnsupportedSkillActivationError extends Error {
@@ -81,7 +82,7 @@ export class SkillsService {
       `<skill-loaded name="${escapeXmlAttr(skill.name)}"${argsAttr}>\n${body}\n</skill-loaded>`,
     );
 
-    const { wakeTurnId: turnId } = runtime.steer.steer(wrapped, { kind: "user" });
+    const { steerId } = runtime.steer.steer(wrapped, { kind: "user" });
     await runtime.events.emit({
       type: "skill.activated",
       address: request.address ?? "main",
@@ -101,7 +102,7 @@ export class SkillsService {
       trigger,
       skillPath: skill.path,
       skillSource: skill.source,
-      turnId,
+      steerId,
     };
   }
 }

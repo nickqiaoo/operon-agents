@@ -42,12 +42,12 @@ export type { HostReader, MaterializeOptions, WorkspaceEntry, WorkspaceSpec } fr
 export {
   FileFreshnessLedger,
   checkFreshness,
-  CONTENT_RETENTION_MAX_BYTES,
+  LEDGER_MAX_ENTRIES,
   FILE_NOT_READ_MESSAGE,
   FILE_MODIFIED_MESSAGE,
   FILE_UNCHANGED_STUB,
 } from "./file-freshness.ts";
-export type { FileReadRecord, FreshnessVerdict, RecordWriteOptions, CheckFreshnessInput } from "./file-freshness.ts";
+export type { FileReadRecord, FreshnessVerdict, RecordReadInput, RecordWriteOptions, CheckFreshnessInput } from "./file-freshness.ts";
 // Bash permission-rule matching helpers are on `operon-agents-core/internal`.
 export { LocalMachine, detectEnvironment } from "./machine-local.ts";
 export { NullMachine } from "./machine-null.ts";

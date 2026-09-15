@@ -11,6 +11,45 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A full terminal client** (`operon-agents-tui`, `operon-pi-tui`, both private). The debugging
+  TUI was ~1.6k lines with an approval dialog and a status line; it is now a real client, ported
+  from Kimi Code CLI (MIT) whose interface is built on the same `@earendil-works/pi-tui` baseline
+  ours was. The rendering layer is vendored as `operon-pi-tui`; everything that touches the engine
+  was rewritten against our types. What it gained: a multi-line editor with bracketed paste,
+  `@` file and `/` command completion, input history, an external-editor key, inline image paste,
+  and a `!` shell mode that runs on the session's own machine; markdown, LaTeX, syntax-highlighted
+  code and diffs; per-tool result renderers; a queue that steers into the running turn; a
+  two-line status line with the context gauge, git badge and a custom `status_line` command;
+  dialogs for approvals (with a full-screen diff preview), questions, the model, thinking level,
+  permission mode, theme, editor, sessions, tasks and plugins; `/status`, `/usage`, `/context`,
+  `/mcp`, `/plugins`, `/goal`, `/init`, `/fork`, `/title`, `/export-md`, `/copy` and `/continue`;
+  the todo and background-task panels; a theme system with custom JSON themes; terminal
+  notifications, progress and title. A resumed session is rebuilt from its journal
+  (`session.getRecords`) through the same hooks that render a live turn. Preferences live in
+  `~/.operon/tui.toml`.
+- **Host-configured model endpoints** (`operon-agents`). `<homeDir>/providers.toml` declares
+  endpoints the built-in catalog does not know — a local server, a gateway, a proxy — as a URL plus
+  how to authenticate, and their model lists are fetched from the endpoint
+  (`GET {base_url}/models`) rather than declared, because only it knows what it serves.
+  `createLocalHarness` reads the file, so every local host sees the same providers; pass
+  `modelRuntime` to share one registry between the model a host resolves and the models its
+  sessions can switch to, or `loadConfiguredProviders: false` to ignore the file. The pieces are
+  public as `createModelRuntimeFromConfig`, `loadProviderConfigs` and `providerFromConfig`, and
+  `operon-agents-core` now re-exports the engine's provider-construction surface (`createProvider`,
+  `envApiKeyAuth`, `lazyApi`) so a host can build one by hand. An unreachable endpoint warns and
+  does not fail startup.
+- **`HarnessSession`: `machine`, `listCommands`, `getTodos`** and **`Harness.renameSession`**
+  (`operon-agents`). `machine` is where the session's tools run, so a host can run a command in the
+  same place the agent does; `listCommands` is the session's own command set (engine plus
+  extensions) for a palette; `getTodos` reads the todo list a UI panel shows. `renameSession` sets
+  a session's title, which `SessionRepository.rename` carries to every backing (memory, disk,
+  Postgres, Redis).
+- **Richer tool `display` payloads** (`operon-agents-core`). Beyond a title, the built-in tools now
+  state what an approval panel has to draw: `Bash` its `command`, `Edit` its `path` plus
+  `before`/`after`, `Write` its `path` and `content`, `Read` its `path`, `Glob`/`Grep` their
+  `pattern` and `path`, `FetchURL` its `url`, `WebSearch` its `query`. A client renders a diff or a
+  command block from the display instead of re-parsing raw arguments.
+
 - **Code Mode** (`operon-code-mode`, new package; `operon-agents-core`). The model writes a
   TypeScript program that calls its tools, and one `RunCode` call does what would otherwise take
   a model round-trip per tool call — read N files and grep each, branch on a result, aggregate.
@@ -38,6 +77,67 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Skill activation returns `steerId` instead of `turnId`.** Match it to
+  `steer.queued.steerId` and `message.appended.origin.steerId` to track the queued skill
+  message. The removed field contained a synthetic wake ID, not an actual turn ID.
+
+- **Edit applies through a changed file when the match is still unambiguous** (`operon-agents-core`).
+  An edit to a file that changed on disk after its Read — a formatter run through Bash, a codegen
+  step, the user in an editor — was refused outright, costing a full re-read even when the change
+  was nowhere near the edited text. When `old_string` still matches exactly once in the file as it
+  is now, the edit applies and the result says the file holds changes the model has not seen.
+  A match that vanished or stopped being unique still asks for a Read, and so does every
+  `replace_all`, which would rewrite occurrences the model never saw. Unlike Claude Code this is
+  not tied to the path's permission rule: what the approver is shown is `old_string`/`new_string`
+  either way. The write's compare-and-swap now expects the version and text Edit itself just
+  read rather than the ledger's older record, which also closes the window between the check and
+  the write, and the file is read once per edit instead of twice.
+
+- **The file freshness ledger keeps a digest, not the file** (`operon-agents-core`, breaking). A
+  full read used to retain the whole text (up to 10 MB per file) in an unbounded map, so a long
+  session held every file it had ever read. A record now keeps a SHA-256 of the normalized text,
+  and the ledger is an LRU capped at `LEDGER_MAX_ENTRIES` (5000); a file that falls out reads as
+  not read yet, which asks for a Read rather than waving an edit through. Freshness is still
+  mtime-first — the digest only replaces the text in the content review that runs when the mtime
+  moved or the backend has none. API: `FileReadRecord.content` → `contentHash`;
+  `recordRead` takes a `RecordReadInput` whose `content` is hashed on the way in;
+  `WriteTextIfUnchangedOptions.expectedContent` → `expectedContentHash`, computed with
+  `hashFileContent` (`operon-agents-core/internal`); `CONTENT_RETENTION_MAX_BYTES` is gone.
+
+- **The TUI's `/model` picker offers configured providers only.** It listed the engine's whole
+  registry — over a thousand models across every provider it can speak to — which is a catalog, not
+  a choice. It now asks the engine which providers actually have credentials on this machine
+  (`Models.getAvailable()`): 16 models with one `ANTHROPIC_API_KEY`, 54 with two keys, instead of
+  1220. The model the session was started with is always offered even when no registry knows it, so
+  a custom endpoint stays selectable; `/model <provider/model>` still switches to anything the
+  engine can name; and a machine with nothing configured falls back to the full list rather than an
+  empty one.
+
+- **A provider failure is no longer silent in the TUI.** A run that fails before reaching the model
+  (no credentials for the provider just switched to, a rejected key, a rate limit) arrives as an
+  assistant message with `stopReason: "error"` and the reason on `errorMessage` — there is no
+  `error` event and `turn.ended` carries no text. The client read only user messages, so the turn
+  stopped with nothing said. It now surfaces that message, and a failed turn always reports
+  something even when nothing upstream supplied a reason.
+
+- **`HarnessSession.activateSkill` keeps both call forms.** It forwarded
+  `Parameters<Session["activateSkill"]>`, which collapses to the last overload, so
+  `activateSkill(name, args)` did not typecheck through the harness even though it worked. It now
+  declares both overloads. `ActivateSkillRequest`, `SkillActivationResult` and
+  `SkillActivationTrigger` are exported.
+
+- **Third-party input is validated by schema, and a rejection names the field**
+  (`operon-managed-agents`, `operon-agents`, `operon-agents-core`). Four places read input
+  written by someone else and checked it by hand, field by field: the managed API's request
+  bodies (`session-service.ts`), the app-server's JSON-RPC params (which were cast, not checked),
+  plugin manifests and marketplace indexes, and extension `manifest.json`. Each now parses with a
+  zod schema pinned to its wire type, so a malformed request or file is refused with a message
+  like `metadata.build: metadata values must be strings, numbers, booleans or null` instead of
+  being silently dropped or blowing up later. Behaviour is otherwise unchanged: a plugin
+  manifest still loads with its valid fields when an optional one is malformed (now with a
+  warning naming it), a bare `ApprovalResponse` is still accepted as a resume answer, and
+  unknown manifest fields still pass through. `zod` moves from a dev to a runtime dependency of
+  `operon-managed-agents`.
 - **OTel span attributes are namespaced `operon_agents.*`** (`operon-agents-core`).
   `OTelTracingProcessor` named the framework's own attributes `agent_framework.*` — the
   project's previous name — and its default tracer `agent-framework`. They are now
@@ -77,6 +177,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a per-input completion.
 
 ### Fixed
+
+- **Resumed sessions accept messages while running and wake for input received during
+  teardown.** A failed resume or another durable pause keeps messages queued until resumed;
+  a service barrier continues to defer the wake until released.
 
 - **Tracing: a run that pauses is exported** (`operon-agents-core`). A durable pause
   (`turn.paused` — an approval, an `AskUserQuestion`) stops a run without an `agent.ended`, and

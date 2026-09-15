@@ -7,6 +7,7 @@
  * helpers, the decode contract, and the caller-side text-file helpers
  * (readTextFile / writeTextFile) composed from the core members.
  */
+import { createHash } from "node:crypto";
 import type {
   DecodeErrors,
   Machine,
@@ -23,6 +24,16 @@ export function fileVersionFromInfo(info: FileInfo): FileVersion {
 export function normalizeForCompare(text: string): string {
   const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   return stripped.replaceAll("\r\n", "\n");
+}
+
+/**
+ * Digest of a `normalizeForCompare`d text — what the ledger retains and the CAS
+ * compares instead of the text itself. Keeps a record's footprint constant no matter
+ * how large the file is. It is a content-review key, never the freshness criterion:
+ * the mtime still decides whenever both sides have one.
+ */
+export function hashFileContent(normalizedText: string): string {
+  return createHash("sha256").update(normalizedText, "utf8").digest("base64url");
 }
 
 /**

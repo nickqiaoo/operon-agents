@@ -36,6 +36,7 @@ export {
   decodeText,
   fileVersionFromInfo,
   normalizeForCompare,
+  hashFileContent,
 } from "./tool/support/machine-ops.ts";
 export {
   matchesBashRule,

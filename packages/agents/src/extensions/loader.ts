@@ -2,6 +2,7 @@ import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { z } from "zod";
 import type { ExtensionDefinition } from "./types.ts";
 
 /** The slice of a session the loader swaps extensions on — `HarnessSession` satisfies it. */
@@ -80,6 +81,16 @@ export interface ExtensionManifest {
   /** One line for listings. */
   readonly description?: string;
 }
+
+/** The manifest as read from disk: only the fields above are checked; the rest pass through. */
+const ExtensionManifestSchema = z.looseObject({
+  id: z.string().refine((id) => id.trim().length > 0, 'must declare a non-empty string "id"'),
+  version: z.string().optional(),
+  entry: z.string().optional(),
+  engine: z.string().regex(VERSION_RE, 'must be a version like "1.2.0"').optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+});
 
 export type ExtensionFileState =
   /** Approved at the current mtime and produced a definition this loader holds. */
@@ -243,22 +254,20 @@ export class ExtensionLoader {
   private async scan(dirName: string): Promise<ScannedExtension> {
     const dir = join(this.directory, dirName);
     const manifestPath = join(dir, "manifest.json");
-    let manifest: ExtensionManifest;
+    let raw: unknown;
     try {
-      manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ExtensionManifest;
+      raw = JSON.parse(await readFile(manifestPath, "utf8"));
     } catch (error) {
       throw new Error(`unreadable manifest.json: ${messageOf(error)}`);
     }
-    if (typeof manifest.id !== "string" || !manifest.id.trim()) {
-      throw new Error("manifest.json must declare a non-empty string \"id\"");
+    const parsed = ExtensionManifestSchema.safeParse(raw);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((issue) => `${issue.path.length > 0 ? `"${issue.path.join(".")}" ` : ""}${issue.message}`);
+      throw new Error(`manifest.json: ${issues.join("; ")}`);
     }
-    if (manifest.engine !== undefined) {
-      if (typeof manifest.engine !== "string" || !VERSION_RE.test(manifest.engine)) {
-        throw new Error(`manifest "engine" must be a version like "1.2.0", got ${JSON.stringify(manifest.engine)}`);
-      }
-      if (compareVersions(FRAMEWORK_VERSION, manifest.engine) < 0) {
-        throw new Error(`requires operon-agents >= ${manifest.engine}; this host runs ${FRAMEWORK_VERSION}`);
-      }
+    const manifest: ExtensionManifest = parsed.data;
+    if (manifest.engine !== undefined && compareVersions(FRAMEWORK_VERSION, manifest.engine) < 0) {
+      throw new Error(`requires operon-agents >= ${manifest.engine}; this host runs ${FRAMEWORK_VERSION}`);
     }
     const entryPath = join(dir, manifest.entry ?? "index.js");
     const stats = await stat(entryPath).catch(() => {

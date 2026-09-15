@@ -8,7 +8,7 @@
  */
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 import { createHarness } from "../src/index.ts";
-import type { AgentEvent } from "operon-agents-core";
+import { SkillRegistry, skillsCapability, type AgentEvent, type SkillActivationResult } from "operon-agents-core";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -20,6 +20,63 @@ function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((part) => (part as { text?: string }).text ?? "").join("");
+}
+
+async function skillReceiptsTrackConsumption(): Promise<void> {
+  const faux = registerFauxProvider();
+  const registry = new SkillRegistry();
+  registry.registerBuiltinSkill({ name: "review", description: "Review code", path: "builtin/review", dir: "builtin", content: "Review the code.", metadata: {}, source: "builtin" });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let holdModel = false;
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    session: () => [skillsCapability({ registry, scan: false })],
+    extensions: [{
+      id: "skill-receipt-gate",
+      session(api) {
+        api.on("model.request", async () => {
+          if (!holdModel) return;
+          entered.resolve();
+          await release.promise;
+        });
+      },
+    }],
+  });
+  try {
+    const session = await harness.createSession();
+    const events: AgentEvent[] = [];
+    session.onEvent((event) => { events.push(event); });
+    const assertConsumed = (label: string, activation: SkillActivationResult): void => {
+      check(`${label}: returns a message id without a speculative turn id`, typeof activation.steerId === "string" && !("turnId" in activation));
+      check(`${label}: receipt matches the queued event`, events.some((event) => event.type === "steer.queued" && event.steerId === activation.steerId));
+      check(`${label}: receipt matches exactly one consumed message`, events.filter((event) => event.type === "message.appended" && event.origin && "steerId" in event.origin && event.origin.steerId === activation.steerId).length === 1);
+    };
+
+    faux.setResponses([fauxAssistantMessage("reviewed both", { stopReason: "stop" })]);
+    const gate = session.holdAtBoundary();
+    const activations = await Promise.all([session.activateSkill("review"), session.activateSkill("review")]);
+    check("skills idle: separate activations have distinct message ids", activations[0]!.steerId !== activations[1]!.steerId);
+    gate.release();
+    await session.whenIdle();
+    activations.forEach((activation, index) => assertConsumed(`skills idle ${index}`, activation));
+    check("skills idle: queued activations share one real turn", events.filter((event) => event.type === "turn.started").length === 1);
+
+    faux.setResponses([fauxAssistantMessage("first step", { stopReason: "stop" }), fauxAssistantMessage("reviewed mid-turn", { stopReason: "stop" })]);
+    holdModel = true;
+    const running = session.prompt("start work");
+    await entered.promise;
+    const activation = await session.activateSkill("review");
+    holdModel = false;
+    release.resolve();
+    const result = await running;
+    assertConsumed("skills running", activation);
+    check("skills running: activation is consumed within the active turn", result.output === "reviewed mid-turn" && events.filter((event) => event.type === "turn.started").length === 2);
+  } finally {
+    release.resolve();
+    await harness.close();
+    faux.unregister();
+  }
 }
 
 async function main(): Promise<void> {
@@ -51,7 +108,7 @@ async function main(): Promise<void> {
   });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
-  session.onEvent((event) => events.push(event));
+  session.onEvent((event) => { events.push(event); });
 
   // ── idle target: woken ────────────────────────────────────────────────────────
   check("steer: new session is idle", session.status.state === "idle");
@@ -111,6 +168,7 @@ async function main(): Promise<void> {
 
   await harness.close();
   faux.unregister();
+  await skillReceiptsTrackConsumption();
   const passed = checks.filter(([, ok]) => ok).length;
   console.log(`\n${passed}/${checks.length} checks passed`);
   if (passed !== checks.length) process.exit(1);

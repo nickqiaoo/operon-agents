@@ -18,9 +18,6 @@ import {
   success,
 } from "./codec.ts";
 import {
-  type ClientCancelRequestParams,
-  type ClientRequestApprovalParams,
-  type ClientRequestQuestionParams,
   type ClientCapabilities,
   type InitializeResult,
   type JsonRpcId,
@@ -32,6 +29,12 @@ import {
   type SessionSnapshotResult,
   type SessionSteerResult,
 } from "./protocol.ts";
+import {
+  ClientCancelRequestParamsSchema,
+  ClientRequestApprovalParamsSchema,
+  ClientRequestQuestionParamsSchema,
+  parseParams,
+} from "./params.ts";
 
 export type ApprovalHandler = (request: ApprovalRequest, sessionId: string) => Promise<ApprovalResponse> | ApprovalResponse;
 export type QuestionHandler = (
@@ -108,9 +111,10 @@ export class AppServerClient {
       return;
     }
     if (method === Method.ClientCancelRequest) {
-      const { id } = (params ?? {}) as ClientCancelRequestParams;
-      this.inboundAbort.get(id)?.abort();
-      this.inboundAbort.delete(id);
+      const parsed = ClientCancelRequestParamsSchema.safeParse(params);
+      if (!parsed.success) return;
+      this.inboundAbort.get(parsed.data.id)?.abort();
+      this.inboundAbort.delete(parsed.data.id);
     }
   }
 
@@ -130,12 +134,12 @@ export class AppServerClient {
 
   private async dispatchReverse(method: string, params: unknown, signal: AbortSignal): Promise<unknown> {
     if (method === Method.ClientRequestApproval) {
-      const p = params as ClientRequestApprovalParams;
+      const p = parseParams(ClientRequestApprovalParamsSchema, params);
       if (!this.approvalHandler) return { decision: "rejected", feedback: "no approval handler" } satisfies ApprovalResponse;
       return this.approvalHandler(p.request, p.sessionId);
     }
     if (method === Method.ClientRequestQuestion) {
-      const p = params as ClientRequestQuestionParams;
+      const p = parseParams(ClientRequestQuestionParamsSchema, params);
       if (!this.questionHandler) return null;
       return this.questionHandler(p.request, p.sessionId, { signal });
     }

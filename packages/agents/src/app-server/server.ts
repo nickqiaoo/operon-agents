@@ -49,8 +49,22 @@ import {
   type SessionSteerParams,
   type SessionSteerResult,
 } from "./protocol.ts";
-
-const INVOKABLE = new Set<string>(INVOKABLE_METHODS);
+import {
+  INVOKABLE,
+  InitializeParamsSchema,
+  parseParams,
+  SessionCancelParamsSchema,
+  SessionCloseParamsSchema,
+  SessionFollowUpParamsSchema,
+  SessionForkParamsSchema,
+  SessionInvokeParamsSchema,
+  SessionNewParamsSchema,
+  SessionPromptParamsSchema,
+  SessionRespondParamsSchema,
+  SessionResumeParamsSchema,
+  SessionSnapshotParamsSchema,
+  SessionSteerParamsSchema,
+} from "./params.ts";
 
 export interface AppServerOptions {
   readonly harness: Harness;
@@ -150,34 +164,35 @@ export class AppServer {
   }
 
   private async route(method: string, params: unknown): Promise<unknown> {
-    if (method === Method.Initialize) return this.onInitialize(params as InitializeParams);
+    if (method === Method.Initialize) return this.onInitialize(parseParams(InitializeParamsSchema, params));
     if (!this.initialized) throw new RpcError(ErrorCode.NotInitialized, "call initialize first");
 
+    // Method lookup before params: an unknown method is `MethodNotFound` whatever it carries.
     switch (method) {
       case Method.SessionNew:
-        return this.onSessionNew((params ?? {}) as SessionNewParams);
+        return this.onSessionNew(parseParams(SessionNewParamsSchema, params));
       case Method.SessionResume:
-        return this.onSessionResume(params as SessionResumeParams);
+        return this.onSessionResume(parseParams(SessionResumeParamsSchema, params));
       case Method.SessionFork:
-        return this.onSessionFork(params as SessionForkParams);
+        return this.onSessionFork(parseParams(SessionForkParamsSchema, params));
       case Method.SessionList:
         return this.harness.listSessions();
       case Method.SessionClose:
-        return this.onSessionClose(params as SessionRef);
+        return this.onSessionClose(parseParams(SessionCloseParamsSchema, params));
       case Method.SessionPrompt:
-        return this.onSessionPrompt(params as SessionPromptParams);
+        return this.onSessionPrompt(parseParams(SessionPromptParamsSchema, params));
       case Method.SessionSnapshot:
-        return this.onSessionSnapshot(params as SessionSnapshotParams);
+        return this.onSessionSnapshot(parseParams(SessionSnapshotParamsSchema, params));
       case Method.SessionRespond:
-        return this.onSessionRespond(params as SessionRespondParams);
+        return this.onSessionRespond(parseParams(SessionRespondParamsSchema, params));
       case Method.SessionSteer:
-        return this.onSessionSteer(params as SessionSteerParams);
+        return this.onSessionSteer(parseParams(SessionSteerParamsSchema, params));
       case Method.SessionFollowUp:
-        return this.onSessionFollowUp(params as SessionFollowUpParams);
+        return this.onSessionFollowUp(parseParams(SessionFollowUpParamsSchema, params));
       case Method.SessionCancel:
-        return this.onSessionCancel(params as SessionRef);
+        return this.onSessionCancel(parseParams(SessionCancelParamsSchema, params));
       case Method.SessionInvoke:
-        return this.onSessionInvoke(params as SessionInvokeParams);
+        return this.onSessionInvoke(parseParams(SessionInvokeParamsSchema, params));
       default:
         throw new RpcError(ErrorCode.MethodNotFound, `unknown method: ${method}`);
     }
@@ -186,9 +201,6 @@ export class AppServer {
   // ── Handshake ─────────────────────────────────────────────────────────────
 
   private onInitialize(params: InitializeParams): InitializeResult {
-    if (typeof params?.protocolVersion !== "number") {
-      throw new RpcError(ErrorCode.InvalidParams, "protocolVersion (number) required");
-    }
     this.clientApproval = params.clientCapabilities?.approval ?? false;
     this.clientQuestion = params.clientCapabilities?.question ?? false;
     this.initialized = true;
@@ -213,13 +225,13 @@ export class AppServer {
   }
 
   private async onSessionResume(params: SessionResumeParams): Promise<SessionInfo> {
-    const session = await this.harness.resumeSession(this.requireId(params));
+    const session = await this.harness.resumeSession(params.sessionId);
     this.wireSession(session);
     return { sessionId: session.id, workDir: session.workDir };
   }
 
   private async onSessionFork(params: SessionForkParams): Promise<SessionInfo> {
-    const session = await this.harness.forkSession(this.requireId(params), {
+    const session = await this.harness.forkSession(params.sessionId, {
       ...(params.title !== undefined ? { title: params.title } : {}),
     });
     this.wireSession(session);
@@ -227,7 +239,7 @@ export class AppServer {
   }
 
   private async onSessionClose(params: SessionRef): Promise<Record<string, never>> {
-    const id = this.requireId(params);
+    const id = params.sessionId;
     this.wired.get(id)?.unsubscribe();
     this.wired.delete(id);
     this.rejectReverseForSession(id, "session closed");
@@ -283,14 +295,14 @@ export class AppServer {
 
   private async onSessionInvoke(params: SessionInvokeParams): Promise<{ value: unknown }> {
     const session = this.requireSession(params);
-    if (typeof params.method !== "string" || !INVOKABLE.has(params.method)) {
-      throw new RpcError(ErrorCode.MethodNotFound, `not invokable: ${String(params.method)}`);
+    if (!INVOKABLE.has(params.method)) {
+      throw new RpcError(ErrorCode.MethodNotFound, `not invokable: ${params.method}`);
     }
     const fn = (session as unknown as Record<string, unknown>)[params.method];
     if (typeof fn !== "function") {
       throw new RpcError(ErrorCode.MethodNotFound, `not a method: ${params.method}`);
     }
-    const args = Array.isArray(params.args) ? params.args : [];
+    const args = [...(params.args ?? [])];
     const value = await (fn as (...a: unknown[]) => unknown).apply(session, args);
     return { value: toWireSafe(value) };
   }
@@ -357,15 +369,9 @@ export class AppServer {
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  private requireId(ref: SessionRef): string {
-    if (!ref || typeof ref.sessionId !== "string") throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
-    return ref.sessionId;
-  }
-
   private requireSession(ref: SessionRef): HarnessSession {
-    const id = this.requireId(ref);
-    const session = this.harness.getSession(id);
-    if (!session) throw new RpcError(ErrorCode.SessionNotFound, `session not found: ${id}`);
+    const session = this.harness.getSession(ref.sessionId);
+    if (!session) throw new RpcError(ErrorCode.SessionNotFound, `session not found: ${ref.sessionId}`);
     return session;
   }
 }

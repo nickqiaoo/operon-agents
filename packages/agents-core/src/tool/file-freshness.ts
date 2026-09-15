@@ -9,26 +9,23 @@
  * by the loop. Keys are host-canonical absolute paths.
  *
  * Freshness is mtime-first (local-first): when both sides have an mtime and it
- * matches, the file is fresh with zero extra I/O. Content comparison — against the
- * retained prior text, no hashing — runs only when the mtime moved (false-positive
- * review: cloud sync / antivirus / Windows) or is unavailable (mtime-less sandbox
- * backends).
+ * matches, the file is fresh with zero extra I/O. Content comparison runs only when
+ * the mtime moved (false-positive review: cloud sync / antivirus / Windows) or is
+ * unavailable (mtime-less sandbox backends), and compares a digest of the text the
+ * record was taken from — the text itself is never retained, so a record costs the
+ * same for a 1 KB file and a 10 MB one.
+ *
+ * Bounded as an LRU: an agent that has touched more than {@link LEDGER_MAX_ENTRIES}
+ * files forgets the least recently used, which then reads as "not read yet" — the
+ * conservative direction.
  */
 import type { FileVersion, LineEndings } from "./machine.ts";
 // Same predicate the Machine-side check uses (BaseMachine.assertUnchanged) — the two
 // run at different moments and must never disagree about what "unchanged" means.
-import { fileVersionsMatch } from "./support/machine-ops.ts";
+import { fileVersionsMatch, hashFileContent } from "./support/machine-ops.ts";
 
-/**
- * Above this, content is not retained (version-only record) — freshness then degrades to
- * conservative-stale on mtime change.
- *
- * It bounds the WRITE path, not the read path. A read can only retain content when it read
- * the file whole, which the Read tool's own output caps already keep far below this. A write
- * has no such ceiling: `recordWrite` retains whatever the model just produced, and nothing
- * stops that from being a multi-megabyte generated file.
- */
-export const CONTENT_RETENTION_MAX_BYTES = 10 * 1024 * 1024;
+/** Default record cap of a {@link FileFreshnessLedger}. */
+export const LEDGER_MAX_ENTRIES = 5000;
 
 export const FILE_NOT_READ_MESSAGE = "File has not been read yet. Read it first before writing to it.";
 export const FILE_MODIFIED_MESSAGE =
@@ -38,9 +35,9 @@ export const FILE_UNCHANGED_STUB =
 
 export interface FileReadRecord {
   readonly version: FileVersion;
-  /** Full text (LF-normalized, BOM-stripped) retained for full reads within the size cap. */
-  readonly content?: string;
-  /** True when the read had no offset/limit. Partial reads never pass content review. */
+  /** {@link hashFileContent} of the full text (LF-normalized, BOM-stripped); full reads only. */
+  readonly contentHash?: string;
+  /** True when the read covered the whole file. Partial reads never pass content review. */
   readonly fullRead: boolean;
   readonly range?: { readonly lineOffset: number; readonly maxLines?: number };
   readonly lineEndings: LineEndings;
@@ -54,43 +51,63 @@ export type FreshnessVerdict =
   | { readonly kind: "not-read" }
   | { readonly kind: "stale" };
 
+/** What a reader hands the ledger: the record, with the text in place of its digest. */
+export type RecordReadInput = Omit<FileReadRecord, "contentHash"> & {
+  /** Full text (LF-normalized, BOM-stripped) — hashed, not retained. Pass only for full reads. */
+  readonly content?: string;
+};
+
 export interface RecordWriteOptions {
+  /** The written text (LF-normalized, BOM-stripped) — hashed, not retained. */
   readonly content?: string;
   readonly lineEndings?: LineEndings;
   readonly encoding?: BufferEncoding;
 }
 
-function clampContent(record: FileReadRecord): FileReadRecord {
-  if (record.content === undefined) return record;
-  if (Buffer.byteLength(record.content, "utf8") <= CONTENT_RETENTION_MAX_BYTES) return record;
-  const { content: _dropped, ...rest } = record;
-  return rest;
-}
-
 export class FileFreshnessLedger {
+  // Map iteration order is insertion order: re-inserting on every touch keeps the
+  // least recently used entry first.
   private readonly records = new Map<string, FileReadRecord>();
+  private readonly maxEntries: number;
 
-  recordRead(path: string, record: FileReadRecord): void {
-    this.records.set(path, clampContent(record));
+  constructor(maxEntries: number = LEDGER_MAX_ENTRIES) {
+    this.maxEntries = maxEntries;
+  }
+
+  recordRead(path: string, input: RecordReadInput): void {
+    const { content, ...rest } = input;
+    this.put(path, { ...rest, ...(content !== undefined ? { contentHash: hashFileContent(content) } : {}) });
   }
 
   /** A successful write makes the writer the last reader. */
   recordWrite(path: string, version: FileVersion, options: RecordWriteOptions = {}): void {
-    this.records.set(
-      path,
-      clampContent({
-        version,
-        fullRead: true,
-        lineEndings: options.lineEndings ?? "LF",
-        encoding: options.encoding ?? "utf8",
-        readAt: Date.now(),
-        ...(options.content !== undefined ? { content: options.content } : {}),
-      }),
-    );
+    this.put(path, {
+      version,
+      fullRead: true,
+      lineEndings: options.lineEndings ?? "LF",
+      encoding: options.encoding ?? "utf8",
+      readAt: Date.now(),
+      ...(options.content !== undefined ? { contentHash: hashFileContent(options.content) } : {}),
+    });
   }
 
   get(path: string): FileReadRecord | undefined {
-    return this.records.get(path);
+    const record = this.records.get(path);
+    if (record !== undefined) {
+      this.records.delete(path);
+      this.records.set(path, record);
+    }
+    return record;
+  }
+
+  private put(path: string, record: FileReadRecord): void {
+    this.records.delete(path);
+    this.records.set(path, record);
+    while (this.records.size > this.maxEntries) {
+      const oldest = this.records.keys().next().value;
+      if (oldest === undefined) break;
+      this.records.delete(oldest);
+    }
   }
 
   delete(path: string): void {
@@ -125,9 +142,9 @@ export async function checkFreshness(input: CheckFreshnessInput): Promise<Freshn
 
   if (fileVersionsMatch(record.version, input.current)) return { kind: "fresh" };
 
-  if (record.fullRead && record.content !== undefined && input.currentContent !== undefined) {
+  if (record.fullRead && record.contentHash !== undefined && input.currentContent !== undefined) {
     const currentText = await input.currentContent();
-    if (currentText !== undefined && currentText === record.content) return { kind: "fresh" };
+    if (currentText !== undefined && hashFileContent(currentText) === record.contentHash) return { kind: "fresh" };
   }
 
   return { kind: "stale" };

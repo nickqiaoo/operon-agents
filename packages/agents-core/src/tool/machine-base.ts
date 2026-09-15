@@ -31,7 +31,7 @@ import {
   type WriteTextOptions,
   type WriteTextResult,
 } from "./machine.ts";
-import { fileVersionFromInfo, fileVersionsMatch, normalizeForCompare } from "./support/machine-ops.ts";
+import { fileVersionFromInfo, fileVersionsMatch, hashFileContent, normalizeForCompare } from "./support/machine-ops.ts";
 
 /** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
@@ -405,11 +405,11 @@ export abstract class BaseMachine implements Machine {
     // mtime moved or is unavailable — review against the prior content (the
     // Windows false-positive fallback, also the only check on mtime-less
     // sandbox backends).
-    if (options.expectedContent !== undefined) {
+    if (options.expectedContentHash !== undefined) {
       let confirmedUnchanged = false;
       try {
         const text = this.decodeText(await this.readBytes(path), { encoding, errors: "strict" });
-        confirmedUnchanged = normalizeForCompare(text) === options.expectedContent;
+        confirmedUnchanged = hashFileContent(normalizeForCompare(text)) === options.expectedContentHash;
       } catch {
         confirmedUnchanged = false;
       }

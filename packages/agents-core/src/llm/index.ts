@@ -9,6 +9,7 @@ export type {
   StreamResultOptions,
 } from "./model.ts";
 export { ChatModel, defineModel, tryGetPiModel } from "./define-model.ts";
+export * from "./provider.ts";
 export type { ModelConnection, ModelSpec } from "./define-model.ts";
 export { createModelRuntime, forceRefreshOAuth } from "./runtime.ts";
 export type { ModelRuntime, CreateModelRuntimeOptions } from "./runtime.ts";

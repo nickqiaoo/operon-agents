@@ -50,11 +50,11 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "operon-agents": "workspace:*"
+    "operon-agents": "workspace:*",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.1",
-    "operon-agents-core": "workspace:*",
-    "zod": "^4.0.0"
+    "operon-agents-core": "workspace:*"
   }
 }

@@ -99,6 +99,11 @@ credential store with no tenant dimension.
 Set `ANTHROPIC_API_KEY` (or the key for whichever provider you configure) before running. Supported
 provider types: `anthropic`, `openai`, `openai_responses`, `google-genai`, `vertexai`, `kimi`.
 
+An endpoint the engine does not ship with — a local server, a gateway, a proxy — is declared in
+`<homeDir>/providers.toml` as an address plus how to authenticate. `createLocalHarness` reads the
+file and asks each endpoint which models it serves, so those models are then nameable exactly like
+built-in ones.
+
 ## Examples
 
 Each example is runnable and imports from `operon-agents` exactly as a real consumer would.
@@ -130,6 +135,10 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start
 | `operon-code-mode` | Code Mode: the model writes a TypeScript program that calls its tools, run in a confined QuickJS (WebAssembly) runtime; every call goes through the engine's tool pipeline. |
 | `operon-sandbox` | Host-side sandbox lifecycle (E2B, Cloudflare), handing the framework a vendor-driven `Machine`. |
 | `operon-os-sandbox` | OS-level command sandboxing for the local machine, degrading to a plain local machine where unsupported. |
+
+Two more packages are private, not published: `operon-agents-tui` (the terminal client — see its
+[README](./packages/agents-tui/README.md)) and `operon-pi-tui` (the terminal rendering layer it is
+built on, vendored from a fork of `@earendil-works/pi-tui`).
 
 ## Architecture
 

@@ -437,6 +437,12 @@ export class RedisSessionRepository implements SessionRepository {
     await this.client.hset(this.metaKey(id), "deleted_at", "", "updated_at", String(now));
     await this.client.zadd(this.sessionsKey, now, id);
   }
+  async rename(id: string, title: string): Promise<void> {
+    if ((await this.client.exists(this.metaKey(id))) === 0) return;
+    const now = Date.now();
+    await this.client.hset(this.metaKey(id), "title", title, "updated_at", String(now));
+    await this.client.zadd(this.sessionsKey, now, id);
+  }
 
   async close(): Promise<void> {
     if (this.ownsClient) await this.client.quit?.();

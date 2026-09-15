@@ -3,7 +3,7 @@
  *  - readBytes: whole-file / prefix / window reads, byte-exactness, and default
  *    composition parity with the native local implementation
  *  - writeTextIfUnchanged: must-not-exist, mtime-fresh write, stale detection,
- *    mtime false-positive review via expectedContent
+ *    mtime false-positive review via expectedContentHash
  *  - writeText: unconditional overwrite, CRLF restore, bytesWritten
  *  - FileFreshnessLedger + checkFreshness verdicts (mtime-first, content fallback)
  *  - realpath: native local + `readlink -f` default composition
@@ -16,6 +16,7 @@ import {
   checkFreshness,
   FileExistsError,
   FileFreshnessLedger,
+  LEDGER_MAX_ENTRIES,
   LocalMachine,
   StaleFileError,
   type DirEntry,
@@ -26,7 +27,7 @@ import {
   type FileInfo,
 } from "../index.ts";
 import type { ReadFileRangeResult } from "../index.ts";
-import { fileVersionFromInfo } from "../internal.ts";
+import { fileVersionFromInfo, hashFileContent } from "../internal.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -144,15 +145,15 @@ async function main(): Promise<void> {
     }
     check("writeTextIfUnchanged: external modification → StaleFileError", stale);
 
-    // mtime false positive: same content, mtime bumped → expectedContent review passes.
+    // mtime false positive: same content, mtime bumped → content-digest review passes.
     const fp = path.join(dir, "fp.txt");
     const fpV = await host.writeTextIfUnchanged(fp, "same\n", { expected: "must-not-exist" });
     await utimes(fp, new Date(), new Date(Date.now() + 5_000));
     const fpWrite = await host
-      .writeTextIfUnchanged(fp, "next\n", { expected: fpV.version, expectedContent: "same\n" })
+      .writeTextIfUnchanged(fp, "next\n", { expected: fpV.version, expectedContentHash: hashFileContent("same\n") })
       .then(() => true)
       .catch(() => false);
-    check("writeTextIfUnchanged: mtime moved + content unchanged → expectedContent review passes", fpWrite);
+    check("writeTextIfUnchanged: mtime moved + content unchanged → digest review passes", fpWrite);
 
     const crlfOut = path.join(dir, "crlf-out.txt");
     const crlfRes = await host.writeText(crlfOut, "a\nb\n", { lineEndings: "CRLF" });
@@ -229,6 +230,22 @@ async function main(): Promise<void> {
 
     ledger.recordWrite(lPath, lVersion, { content: "content\n" });
     check("ledger: recordWrite marks writer as last reader", ledger.get(lPath)?.fullRead === true);
+    const written = ledger.get(lPath) as unknown as Record<string, unknown>;
+    check(
+      "ledger: retains the digest, never the text",
+      written.contentHash === hashFileContent("content\n") && !("content" in written),
+    );
+
+    // LRU: over the cap the least recently USED record goes — a get() counts as use.
+    const small = new FileFreshnessLedger(2);
+    const rec = { version: lVersion, fullRead: true, lineEndings: "LF" as const, encoding: "utf8" as const, readAt: 0 };
+    small.recordRead("/a", rec);
+    small.recordRead("/b", rec);
+    small.get("/a");
+    small.recordRead("/c", rec);
+    check("ledger LRU: evicts the least recently used", small.get("/b") === undefined && small.get("/a") !== undefined && small.get("/c") !== undefined);
+    check("ledger LRU: an evicted file reads as not-read", (await checkFreshness({ ledger: small, path: "/b", current: lVersion })).kind === "not-read");
+    check("ledger LRU: default cap matches LEDGER_MAX_ENTRIES", LEDGER_MAX_ENTRIES === 5000);
 
     // ── realpath ─────────────────────────────────────────────────────────────────
     const realDir = path.join(dir, "real");
@@ -252,7 +269,7 @@ async function main(): Promise<void> {
       const before = fileVersionFromInfo(await host.fileInfo(viaLink));
       await host.writeTextIfUnchanged(viaLink, "#!/bin/sh\necho new\n", {
         expected: before,
-        expectedContent: "#!/bin/sh\necho old\n",
+        expectedContentHash: hashFileContent("#!/bin/sh\necho old\n"),
       });
 
       // A rename onto the link would have replaced the LINK with a regular file and

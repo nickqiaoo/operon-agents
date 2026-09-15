@@ -55,7 +55,7 @@ export const globTool = defineTool({
         : ctx.machine.getcwd();
     return {
       accesses: ToolAccesses.searchTree(root),
-      display: { title: `Searching ${args.pattern}`, detail: `pattern: ${args.pattern}` },
+      display: { title: `Searching ${args.pattern}`, detail: `pattern: ${args.pattern}`, pattern: args.pattern, ...(args.path !== undefined ? { path: args.path } : {}) },
       ...globApproval("Glob", args.pattern),
       run: (runCtx) => execute(args, root, runCtx.machine, runCtx.signal),
     };
