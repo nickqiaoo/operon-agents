@@ -136,8 +136,12 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
     // an external writer landing in the gap between that read and this write is the
     // same window every backend but the local one has anyway (see Machine.writeText),
     // and the record below is what catches it on the NEXT edit.
-    await ctx.machine.writeText(safePath, materialized);
+    const result = await ctx.machine.writeText(safePath, materialized);
     ledger.recordWrite(safePath, {
+      // Present only where the backend knew it for free (local); elsewhere the record
+      // is decided by the digest below — which the next Edit compares against the text
+      // it has to read anyway.
+      ...(result.version !== undefined ? { version: result.version } : {}),
       content: normalizeForCompare(materialized),
       lineEndings: toLedgerLineEndings(modelView.lineEndingStyle),
       encoding: "utf8",

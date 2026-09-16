@@ -24,6 +24,7 @@ import {
   type Machine,
   type FileInfo,
   type FileKind,
+  type FileVersion,
   type OsKind,
 } from "./machine.ts";
 import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
@@ -218,6 +219,17 @@ export class LocalMachine extends BaseMachine {
 
   protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
     await writeFileAtomic(this.abs(path), data);
+  }
+
+  /** One stat syscall, no round trip — so the ledger keeps its mtime fast path locally. */
+  protected override async versionAfterWrite(path: string): Promise<FileVersion | undefined> {
+    try {
+      const s = await fsStat(this.abs(path));
+      return s.mtimeMs === 0 ? {} : { mtimeMs: s.mtimeMs };
+    } catch {
+      // The write succeeded; failing to re-stat it only costs the fast path.
+      return undefined;
+    }
   }
 
   async mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void> {

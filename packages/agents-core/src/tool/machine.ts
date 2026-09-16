@@ -132,6 +132,14 @@ export interface WriteTextOptions {
 
 export interface WriteTextResult {
   readonly bytesWritten: number;
+  /**
+   * The version this write produced — present ONLY when the backend already knew it
+   * (LocalMachine: one stat syscall). `undefined` everywhere a round trip would be
+   * needed to learn it, which is why it is optional rather than a promise: the caller
+   * records what it got, and a versionless record is decided by content instead
+   * (see FileFreshnessLedger). Never stat here just to fill it in.
+   */
+  readonly version?: FileVersion;
 }
 
 /**

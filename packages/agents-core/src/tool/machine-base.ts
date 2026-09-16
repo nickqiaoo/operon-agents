@@ -20,6 +20,7 @@ import {
   type Machine,
   type RunCommandOptions,
   type FileInfo,
+  type FileVersion,
   type WriteTextOptions,
   type WriteTextResult,
 } from "./machine.ts";
@@ -310,11 +311,22 @@ export abstract class BaseMachine implements Machine {
     return ["sh", "-c", `cd ${shellQuoteArg(cwd)} && ${quoted}`];
   }
 
+  /**
+   * The version the last write produced, for backends that can answer without a round
+   * trip. Default: nothing — a remote backend would have to stat for it, and paying that
+   * on every write to save a content comparison on the rare write-after-write is the
+   * wrong trade (see WriteTextResult.version).
+   */
+  protected async versionAfterWrite(_path: string): Promise<FileVersion | undefined> {
+    return undefined;
+  }
+
   async writeText(path: string, data: string, options: WriteTextOptions = {}): Promise<WriteTextResult> {
     const payload = options.lineEndings === "CRLF" ? data.replaceAll("\n", "\r\n") : data;
     const buf = Buffer.from(payload, options.encoding ?? "utf8");
     await this.writeBytesRaw(path, buf);
-    return { bytesWritten: buf.byteLength };
+    const version = await this.versionAfterWrite(path);
+    return { bytesWritten: buf.byteLength, ...(version !== undefined ? { version } : {}) };
   }
 
   /** Exact bytes through the same primitive `writeText` uses — no encoding, no CRLF rewrite. */

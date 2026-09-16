@@ -15,6 +15,7 @@ import {
   LocalMachine,
   readTool,
   writeTool,
+  type ByteRange,
   type Tool,
   type ToolResult,
 } from "../index.ts";
@@ -268,6 +269,45 @@ async function main(): Promise<void> {
     const create = await runTool(writeTool, { path: created, content: "hello\n" }, ctx);
     const editCreated = await runTool(editTool, { path: created, old_string: "hello", new_string: "hi" }, ctx);
     check("write: successful write records writer as reader", !create.isError && !editCreated.isError && readFileSync(created, "utf8") === "hi\n");
+
+    // ── Chunked writes (the documented way to write a large file: overwrite, then
+    //    append, append…) must read the file ONCE per chunk. The append already reads
+    //    it to concatenate; the freshness check reuses that text instead of taking a
+    //    read of its own. Exercised on a machine that reports no post-write version —
+    //    the remote shape, where the check cannot fall back on an mtime. ──────────
+    {
+      class RemoteShapedMachine extends LocalMachine {
+        reads = 0;
+        override async readBytes(p: string, range?: ByteRange): Promise<Buffer> {
+          this.reads++;
+          return await super.readBytes(p, range);
+        }
+        /** A sandbox/SSH backend would need a round trip for this, so it reports none. */
+        protected override async versionAfterWrite(): Promise<undefined> {
+          return undefined;
+        }
+      }
+
+      const remote = new RemoteShapedMachine(dir);
+      const chunkedCtx = makeCtx(remote, new FileFreshnessLedger());
+      const chunked = path.join(dir, "chunked.txt");
+
+      await runTool(writeTool, { path: chunked, content: "a\n" }, chunkedCtx);
+      remote.reads = 0;
+      const appended = await runTool(writeTool, { path: chunked, content: "b\n", mode: "append" }, chunkedCtx);
+      check("write append: one read per chunk — the freshness check reuses the append's read", remote.reads === 1 && !appended.isError);
+
+      await runTool(writeTool, { path: chunked, content: "c\n", mode: "append" }, chunkedCtx);
+      check("write append: chunks accumulate in order", readFileSync(chunked, "utf8") === "a\nb\nc\n");
+
+      // The reuse must not blunt the check: a real external change still stops the write.
+      await writeFile(chunked, "someone else\n");
+      const clobber = await runTool(writeTool, { path: chunked, content: "d\n", mode: "append" }, chunkedCtx);
+      check(
+        "write append: an external change is still caught (reuse is not a bypass)",
+        clobber.isError === true && readFileSync(chunked, "utf8") === "someone else\n",
+      );
+    }
 
     const bashPlan = await bashTool.resolve({ command: "git add . && git commit -m x" }, ctx);
     check("bash-rule: plan exposes compound matcher", bashPlan.matchesRule?.("git:*") === true);

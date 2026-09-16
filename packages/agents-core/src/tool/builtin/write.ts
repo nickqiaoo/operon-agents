@@ -66,10 +66,13 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
     // version the freshness check needs. The three separate stats this replaced each
     // cost a round trip on a remote backend to re-learn what this one already knows.
     const info = await statOrUndefined(machine, safePath);
-    if (info !== undefined) await validateWrite(safePath, info, ctx);
 
     let nextContent = args.content;
     let writtenContent = args.content;
+    // Append reads the file to concatenate onto it. Reading BEFORE the freshness check
+    // lets that one read serve both: chunked writes (overwrite, then append, append…)
+    // would otherwise read the whole file twice per chunk.
+    let priorText: string | undefined;
 
     if (mode === "append") {
       // Append composed from the core members: read-concat-write. Fine for the
@@ -77,6 +80,7 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       let prior = "";
       try {
         prior = (await machine.readBytes(safePath)).toString("utf8");
+        priorText = prior;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -88,13 +92,18 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       nextContent = prior + writtenContent;
     }
 
+    if (info !== undefined) await validateWrite(safePath, info, ctx, priorText);
+
     // Unconditional: `validateWrite` above already decided this write is allowed against
     // the file as the stat found it. A file appearing (or changing) between that check
     // and this write is the gap documented on Machine.writeText — the record below is
     // what surfaces it to the next Read/Write.
-    await machine.writeText(safePath, nextContent);
+    const result = await machine.writeText(safePath, nextContent);
 
     ctx.fileLedger?.recordWrite(safePath, {
+      // Present only where the backend knew it for free (local); elsewhere the record
+      // is decided by the digest below.
+      ...(result.version !== undefined ? { version: result.version } : {}),
       content: normalizeForCompare(nextContent),
       lineEndings: toLedgerLineEndings(detectLineEndingStyle(nextContent)),
       encoding: "utf8",
@@ -129,7 +138,12 @@ async function statOrUndefined(machine: Machine, path: string): Promise<FileInfo
   }
 }
 
-async function validateWrite(path: string, info: FileInfo, ctx: ToolResolveContext | ToolRunContext): Promise<void> {
+async function validateWrite(
+  path: string,
+  info: FileInfo,
+  ctx: ToolResolveContext | ToolRunContext,
+  knownContent?: string,
+): Promise<void> {
   const ledger = requireLedger(ctx);
   // "Has this agent seen the file", not "did it see all of it" — see the same gate in
   // edit.ts. Overwriting a file the model only paged through DOES discard the part it
@@ -143,6 +157,9 @@ async function validateWrite(path: string, info: FileInfo, ctx: ToolResolveConte
     path,
     current: fileVersionFromInfo(info),
     currentContent: async () => {
+      // The caller already has the text (append) — re-reading it would double the
+      // I/O of every chunk in a chunked write.
+      if (knownContent !== undefined) return normalizeForCompare(knownContent);
       try {
         return normalizeForCompare((await ctx.machine.readBytes(path)).toString(record.encoding));
       } catch {

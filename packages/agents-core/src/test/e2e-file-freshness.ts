@@ -136,8 +136,16 @@ async function main(): Promise<void> {
 
     // The derived default composition writes through the same primitive.
     const bareOut = path.join(dir, "bare-out.txt");
-    await bare.writeText(bareOut, "composed\n");
+    const bareRes = await bare.writeText(bareOut, "composed\n");
     check("writeText: default composition writes", (await host.readBytes(bareOut)).toString("utf8") === "composed\n");
+
+    // `version` is reported only where the backend already knew it. Local stats (one
+    // syscall, no round trip); a backend that would need a round trip reports nothing
+    // rather than paying for it on every write.
+    const versioned = await host.writeText(path.join(dir, "versioned.txt"), "x\n");
+    const statted = fileVersionFromInfo(await host.fileInfo(path.join(dir, "versioned.txt")));
+    check("writeText: local reports the version it just produced", versioned.version?.mtimeMs === statted.mtimeMs);
+    check("writeText: a backend without a free version reports none", bareRes.version === undefined);
 
     // ── FileFreshnessLedger + checkFreshness ─────────────────────────────────────
     const ledger = new FileFreshnessLedger();
