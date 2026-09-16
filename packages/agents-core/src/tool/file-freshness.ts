@@ -58,6 +58,14 @@ export type RecordReadInput = Omit<FileReadRecord, "contentHash"> & {
 };
 
 export interface RecordWriteOptions {
+  /**
+   * Post-write version, when the caller happens to have one. Omitted by the write
+   * path on purpose: a stat after every write costs a round trip on remote backends
+   * to record an mtime the next check does not need — a versionless record is
+   * decided by {@link RecordWriteOptions.content}'s digest, which Edit compares for
+   * free against the text it must read anyway.
+   */
+  readonly version?: FileVersion;
   /** The written text (LF-normalized, BOM-stripped) — hashed, not retained. */
   readonly content?: string;
   readonly lineEndings?: LineEndings;
@@ -80,9 +88,12 @@ export class FileFreshnessLedger {
   }
 
   /** A successful write makes the writer the last reader. */
-  recordWrite(path: string, version: FileVersion, options: RecordWriteOptions = {}): void {
+  recordWrite(path: string, options: RecordWriteOptions = {}): void {
     this.put(path, {
-      version,
+      // No version: "the backend has no mtime for this" and "we did not spend a stat
+      // to learn it" reach the freshness check as the same thing — unverifiable by
+      // mtime, decided by content. One rule, not two.
+      version: options.version ?? {},
       fullRead: true,
       lineEndings: options.lineEndings ?? "LF",
       encoding: options.encoding ?? "utf8",

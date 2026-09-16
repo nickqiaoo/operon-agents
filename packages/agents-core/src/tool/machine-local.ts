@@ -1,11 +1,22 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync, type Dirent, type Stats } from "node:fs";
-import { lstat as fsLstat, mkdir as fsMkdir, open as fsOpen, opendir, readFile, realpath as fsRealpath, stat as fsStat, writeFile } from "node:fs/promises";
+import { existsSync, type Dirent, type Stats } from "node:fs";
+import {
+  chmod as fsChmod,
+  lstat as fsLstat,
+  mkdir as fsMkdir,
+  open as fsOpen,
+  opendir,
+  readFile,
+  readlink as fsReadlink,
+  realpath as fsRealpath,
+  rename as fsRename,
+  stat as fsStat,
+  unlink as fsUnlink,
+  writeFile,
+} from "node:fs/promises";
 import { arch, homedir, release } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import {
-  FileExistsError,
-  StaleFileError,
   type DecodeErrors,
   type DirEntry,
   type Environment,
@@ -13,13 +24,9 @@ import {
   type Machine,
   type FileInfo,
   type FileKind,
-  type FileVersion,
   type OsKind,
-  type WriteFileResult,
-  type WriteTextIfUnchangedOptions,
 } from "./machine.ts";
 import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
-import { fileVersionsMatch, hashFileContent, normalizeForCompare } from "./support/machine-ops.ts";
 
 function fileKindFromStats(s: Stats): FileKind {
   if (s.isFile()) return "file";
@@ -36,16 +43,6 @@ function fileKindFromDirent(entry: Dirent): FileKind {
   return "other";
 }
 
-function fileVersionFromStats(s: Stats): FileVersion {
-  return s.mtimeMs === 0 ? {} : { mtimeMs: s.mtimeMs };
-}
-
-function isMissingError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const code = (error as { code?: unknown })["code"];
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
 function isExistsError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   return (error as { code?: unknown })["code"] === "EEXIST";
@@ -53,11 +50,11 @@ function isExistsError(error: unknown): boolean {
 
 /**
  * Write `payload` so a reader sees the old file or the new one, never a half-written one:
- * write a sibling temp file, then rename it over the target. Synchronous throughout — this
- * runs inside `writeTextIfUnchanged`'s critical section, and a single `await` in here would
- * forfeit the atomicity that section exists for.
+ * write a sibling temp file, then rename it over the target. This is what makes EVERY local
+ * write all-or-nothing; remote backends write straight to the target instead, because there
+ * the same staging costs round trips on every write (see Machine.writeText).
  *
- * Three details are load-bearing, all of them things a plain `writeFileSync` gets for free
+ * Three details are load-bearing, all of them things a plain `writeFile` gets for free
  * and a rename does not:
  *
  * - A symlink is written THROUGH, not replaced. `renameSync` onto a symlink would clobber
@@ -72,10 +69,10 @@ function isExistsError(error: unknown): boolean {
  * file is the lesser evil against no write at all, and it is what happened before this
  * function existed.
  */
-function writeFileAtomicSync(target: string, payload: string, encoding: BufferEncoding): void {
+async function writeFileAtomic(target: string, payload: Buffer): Promise<void> {
   let realTarget = target;
   try {
-    const link = readlinkSync(target);
+    const link = await fsReadlink(target);
     realTarget = isAbsolute(link) ? link : resolve(dirname(target), link);
   } catch {
     // ENOENT (no such file) or EINVAL (not a symlink) — the target is its own real path.
@@ -83,23 +80,23 @@ function writeFileAtomicSync(target: string, payload: string, encoding: BufferEn
 
   let mode: number | undefined;
   try {
-    mode = statSync(realTarget).mode;
+    mode = (await fsStat(realTarget)).mode;
   } catch {
-    // New file: let the umask decide, exactly as writeFileSync would.
+    // New file: let the umask decide, exactly as writeFile would.
   }
 
   const temp = `${realTarget}.tmp.${String(process.pid)}.${String(Date.now())}`;
   try {
-    writeFileSync(temp, payload, { encoding, flush: true });
-    if (mode !== undefined) chmodSync(temp, mode);
-    renameSync(temp, realTarget);
+    await writeFile(temp, payload, { flush: true });
+    if (mode !== undefined) await fsChmod(temp, mode);
+    await fsRename(temp, realTarget);
   } catch {
     try {
-      unlinkSync(temp);
+      await fsUnlink(temp);
     } catch {
       /* never created, or already gone */
     }
-    writeFileSync(realTarget, payload, { encoding, flush: true });
+    await writeFile(realTarget, payload, { flush: true });
   }
 }
 
@@ -220,7 +217,7 @@ export class LocalMachine extends BaseMachine {
   }
 
   protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
-    await writeFile(this.abs(path), data);
+    await writeFileAtomic(this.abs(path), data);
   }
 
   async mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void> {
@@ -240,48 +237,6 @@ export class LocalMachine extends BaseMachine {
 
   override async realpath(path: string): Promise<string> {
     return await fsRealpath(this.abs(path));
-  }
-
-  override async writeTextIfUnchanged(path: string, data: string, options: WriteTextIfUnchangedOptions): Promise<WriteFileResult> {
-    const target = this.abs(path);
-    const encoding = options.encoding ?? "utf8";
-    const payload = options.lineEndings === "CRLF" ? data.replaceAll("\n", "\r\n") : data;
-
-    // Sync critical section: no awaits between the staleness check and the write, so
-    // no other tool call in this process can interleave (event-loop atomicity,
-    // which edit/write rely on).
-    let st: Stats | undefined;
-    try {
-      st = statSync(target);
-    } catch (error) {
-      if (!isMissingError(error)) throw error;
-    }
-
-    if (options.expected === "must-not-exist") {
-      if (st !== undefined) throw new FileExistsError();
-    } else {
-      if (st === undefined) throw new StaleFileError("File no longer exists. Read it again before attempting to write it.");
-      if (!fileVersionsMatch(options.expected, fileVersionFromStats(st))) {
-        if (options.expectedContentHash !== undefined) {
-          let confirmedUnchanged = false;
-          try {
-            confirmedUnchanged =
-              hashFileContent(normalizeForCompare(readFileSync(target).toString(encoding))) === options.expectedContentHash;
-          } catch {
-            confirmedUnchanged = false;
-          }
-          if (!confirmedUnchanged) throw new StaleFileError();
-        } else {
-          throw new StaleFileError();
-        }
-      }
-    }
-
-    writeFileAtomicSync(target, payload, encoding);
-    const after = statSync(target);
-    // End of critical section.
-
-    return { bytesWritten: Buffer.byteLength(payload, encoding), version: fileVersionFromStats(after) };
   }
 
   protected override spawn(argv: readonly string[], env?: Record<string, string>): Promise<SpawnedProcess> {

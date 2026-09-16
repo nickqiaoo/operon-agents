@@ -9,7 +9,6 @@ export type {
   OsKind,
   ShellName,
 } from "./machine.ts";
-export { StaleFileError, FileExistsError } from "./machine.ts";
 export type {
   ByteRange,
   RunCommandResult,
@@ -22,8 +21,6 @@ export type {
   LineEndings,
   WriteTextOptions,
   WriteTextResult,
-  WriteTextIfUnchangedOptions,
-  WriteFileResult,
 } from "./machine.ts";
 // ── Writing a Machine backend ────────────────────────────────────────────────
 // Everything above is the CALLER's surface: `Machine` and the shapes its methods take and

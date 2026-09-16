@@ -1,11 +1,9 @@
-import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { posix } from "node:path";
 import * as ssh2 from "ssh2";
 import type { AnyAuthMethod, Client, ClientChannel, ConnectConfig, OpenMode, SFTPWrapper, Stats as SFTPStats } from "ssh2";
 import {
-  FileExistsError,
   type Environment,
   type OsKind,
   type ShellName,
@@ -14,11 +12,8 @@ import {
   type DirEntry,
   type FileInfo,
   type FileKind,
-  type WriteFileResult,
-  type WriteTextIfUnchangedOptions,
 } from "./machine.ts";
 import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
-import { fileVersionFromInfo } from "./support/machine-ops.ts";
 import { proxyEnv } from "./shell-env.ts";
 
 const FALLBACK_SFTP_STATUS = {
@@ -202,10 +197,6 @@ function sftpMkdir(sftp: SFTPWrapper, path: string): Promise<void> {
   });
 }
 
-function sftpExists(sftp: SFTPWrapper, path: string): Promise<boolean> {
-  return new Promise((resolve) => sftp.exists(path, (exists) => resolve(exists)));
-}
-
 /** Occupant kind probe for mkdir: `exists` alone can't tell a file from a directory, and
  *  mkdir's `existOk`/`parents` semantics only tolerate DIRECTORY occupants. */
 async function sftpKindOf(sftp: SFTPWrapper, path: string): Promise<"dir" | "other" | undefined> {
@@ -251,64 +242,6 @@ function sftpReadHandle(sftp: SFTPWrapper, handle: Buffer, offset: number, lengt
 
 function sftpClose(sftp: SFTPWrapper, handle: Buffer): Promise<void> {
   return new Promise((resolve) => sftp.close(handle, () => resolve()));
-}
-
-function sftpWriteHandle(sftp: SFTPWrapper, handle: Buffer, data: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    // ssh2 chunks writes beyond the server's max packet size internally.
-    sftp.write(handle, data, 0, data.byteLength, 0, (err) => (err ? reject(mapSftpError("write", err)) : resolve()));
-  });
-}
-
-function sftpCloseHandle(sftp: SFTPWrapper, handle: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sftp.close(handle, (err) => (err ? reject(mapSftpError("close", err)) : resolve()));
-  });
-}
-
-function sftpUnlink(sftp: SFTPWrapper, path: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sftp.unlink(path, (err) => (err ? reject(mapSftpError("unlink", err)) : resolve()));
-  });
-}
-
-function sftpRename(sftp: SFTPWrapper, src: string, dst: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sftp.rename(src, dst, (err) => (err ? reject(mapSftpError("rename", err)) : resolve()));
-  });
-}
-
-function sftpSetstat(sftp: SFTPWrapper, path: string, attrs: { mode: number }): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sftp.setstat(path, attrs, (err) => (err ? reject(mapSftpError("setstat", err)) : resolve()));
-  });
-}
-
-/**
- * Atomic overwriting rename: posix-rename@openssh.com when the server offers it.
- * ONLY the unsupported-extension error falls back to unlink+rename (which has a tiny
- * no-file window between the two calls) — any real failure propagates untouched,
- * because unlinking the destination after e.g. a permission error would delete the
- * target with no replacement guaranteed.
- */
-async function sftpAtomicRename(sftp: SFTPWrapper, src: string, dst: string): Promise<void> {
-  try {
-    await new Promise<void>((resolve, reject) => {
-      // ssh2 throws synchronously when the server lacks the extension; the
-      // executor converts that throw into a rejection.
-      sftp.ext_openssh_rename(src, dst, (err) => (err ? reject(mapSftpError("rename", err)) : resolve()));
-    });
-    return;
-  } catch (error) {
-    const unsupported = error instanceof Error && /does not support this extended request/i.test(error.message);
-    if (!unsupported) throw error;
-  }
-  try {
-    await sftpUnlink(sftp, dst);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await sftpRename(sftp, src, dst); // SFTP v3 rename refuses to overwrite — dst is gone by now
 }
 
 function buildAuthHandler(
@@ -517,7 +450,6 @@ export class SshMachine extends BaseMachine {
       name: this.name,
       injectedEnv: this.injectedEnv,
     });
-    clone.pathLocks = this.pathLocks; // one connection, one file namespace — clones share write locks
     return clone;
   }
 
@@ -542,56 +474,6 @@ export class SshMachine extends BaseMachine {
    *  LocalMachine's streaming path — replaces the whole-file BaseMachine composition. */
   protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
     await sftpWriteFile(this.sftp, this.resolvePath(path), data);
-  }
-
-  /** Same file → same lock across path spellings: resolve against cwd like every SFTP call does. */
-  protected override lockKeyFor(path: string): string {
-    return this.resolvePath(path);
-  }
-
-  override async writeTextIfUnchanged(path: string, data: string, options: WriteTextIfUnchangedOptions): Promise<WriteFileResult> {
-    return await this.withPathLock(path, async () => {
-      const encoding = options.encoding ?? "utf8";
-      const resolved = this.resolvePath(path);
-      const payload = options.lineEndings === "CRLF" ? data.replaceAll("\n", "\r\n") : data;
-      const buf = Buffer.from(payload, encoding);
-
-      if (options.expected === "must-not-exist") {
-        let handle: Buffer;
-        try {
-          handle = await sftpOpen(this.sftp, resolved, "wx");
-        } catch (error) {
-          // SFTP v3 has no EEXIST status (servers report a generic FAILURE) — disambiguate by stat.
-          if (await sftpExists(this.sftp, resolved)) throw new FileExistsError();
-          throw error;
-        }
-        try {
-          await sftpWriteHandle(this.sftp, handle, buf);
-        } catch (error) {
-          // The EXCL open created the file; don't leave a torn one behind.
-          await sftpCloseHandle(this.sftp, handle).catch(() => undefined);
-          await sftpUnlink(this.sftp, resolved).catch(() => undefined);
-          throw error;
-        }
-        await sftpCloseHandle(this.sftp, handle);
-      } else {
-        // Check before the upload — a stale file shouldn't cost the whole transfer.
-        await this.assertUnchanged(path, options, encoding);
-        const tmp = posix.join(posix.dirname(resolved), `.${posix.basename(resolved)}.tmp-${randomBytes(6).toString("hex")}`);
-        try {
-          await sftpWriteFile(this.sftp, tmp, buf);
-          const target = await sftpStat(this.sftp, resolved).catch(() => undefined);
-          if (target !== undefined) await sftpSetstat(this.sftp, tmp, { mode: target.mode & 0o7777 });
-          await this.assertUnchanged(path, options, encoding); // re-check right before the swap
-          await sftpAtomicRename(this.sftp, tmp, resolved);
-        } catch (error) {
-          await sftpUnlink(this.sftp, tmp).catch(() => undefined);
-          throw error;
-        }
-      }
-      const after = await this.fileInfo(path); // still inside the lock — the version is THIS write's
-      return { bytesWritten: buf.byteLength, version: fileVersionFromInfo(after) };
-    });
   }
 
   /** SFTP has a native canonicalizer — exact, no readlink dependency. */

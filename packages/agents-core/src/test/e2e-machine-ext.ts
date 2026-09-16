@@ -4,11 +4,9 @@ import { mkdir, rm } from "node:fs/promises";
 import { PassThrough, type Readable } from "node:stream";
 import {
   BaseMachine,
-  FileExistsError,
   LocalMachine,
   NullMachine,
   SshMachine,
-  StaleFileError,
   collectGitContext,
   detectEnvironment,
   nonInteractiveShellEnv,
@@ -20,9 +18,8 @@ import {
   type SpawnedProcess,
   type RunCommandOptions,
   type RunCommandResult,
-  type WriteFileResult,
 } from "../index.ts";
-import { SshProcess, buildSshExecCommand, fileVersionFromInfo, hashFileContent, readTextFile, sshShellQuote } from "../internal.ts";
+import { SshProcess, buildSshExecCommand, readTextFile, sshShellQuote } from "../internal.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -90,7 +87,7 @@ function makeFakeSftp(seedFiles: Record<string, string>, seedDirs: string[]) {
 
   const fake = {
     // Test toggles/hooks: simulate a server without posix-rename, and an external
-    // writer landing at a chosen point in the CAS sequence.
+    // writer landing at a chosen point in a write sequence.
     posixRenameSupported: true,
     afterWriteFile: undefined as ((p: string) => void) | undefined,
 
@@ -366,82 +363,31 @@ async function main(): Promise<void> {
   check("ssh-machine: readBytes({offset}) reads to EOF", (await machine.readBytes("/work/lines.txt", { offset: 9 })).toString("utf8") === "l4\nl5\n");
   check("ssh-machine: readBytes() with no range reads the whole file", (await machine.readBytes("/work/lines.txt")).byteLength === 15);
 
-  // ── writeTextIfUnchanged: SFTP-native CAS (EXCL create + tmp/atomic-rename) ──
+  // ── writeText: SFTP writes land straight on the target. There is no tmp staging
+  //    any more — the CAS that needed it is gone, and a swap costs round trips on
+  //    every write to narrow a window the tool path does not rely on. ──
   {
-    const casPath = "/work/cas.txt";
-    const noTmp = () => [...sftp._files.keys()].every((k) => !k.includes(".tmp-"));
+    const wPath = "/work/write.txt";
+    const noTmp = (): boolean => [...sftp._files.keys()].every((k) => !k.includes(".tmp-"));
 
-    const w1 = await machine.writeTextIfUnchanged(casPath, "v1", { expected: "must-not-exist" });
-    check("ssh-cas: must-not-exist creates via EXCL open", w1.bytesWritten === 2 && (await readTextFile(machine, casPath)) === "v1");
+    const w1 = await machine.writeText(wPath, "v1");
+    check("ssh-write: creates the file", w1.bytesWritten === 2 && (await readTextFile(machine, wPath)) === "v1");
+    check("ssh-write: no temp file is staged beside the target", noTmp());
 
-    let existsErr = false;
-    try {
-      await machine.writeTextIfUnchanged(casPath, "clobber", { expected: "must-not-exist" });
-    } catch (error) {
-      existsErr = error instanceof FileExistsError;
-    }
-    check("ssh-cas: must-not-exist on an existing file throws FileExistsError", existsErr && (await readTextFile(machine, casPath)) === "v1");
+    await machine.writeText(wPath, "v2");
+    check("ssh-write: overwrites unconditionally", (await readTextFile(machine, wPath)) === "v2" && noTmp());
 
-    const w2 = await machine.writeTextIfUnchanged(casPath, "v2", { expected: w1.version });
-    check("ssh-cas: version-matched write swaps in via tmp+rename, no residue", (await readTextFile(machine, casPath)) === "v2" && noTmp());
-    check("ssh-cas: returned version reflects the new write", w2.version.mtimeMs !== w1.version.mtimeMs);
+    // Writing INTO the existing file (rather than renaming a new inode over it) is
+    // what keeps the target's permission bits without a setstat round trip.
+    sftp._modes.set(wPath, S_IFREG | 0o600);
+    await machine.writeText(wPath, "v3");
+    check("ssh-write: the target's mode survives a write", (sftp._modes.get(wPath)! & 0o7777) === 0o600 && (await readTextFile(machine, wPath)) === "v3");
 
-    let stale = false;
-    try {
-      await machine.writeTextIfUnchanged(casPath, "v3", { expected: w1.version }); // w1.version is stale now
-    } catch (error) {
-      stale = error instanceof StaleFileError;
-    }
-    check("ssh-cas: stale version throws StaleFileError, target untouched", stale && (await readTextFile(machine, casPath)) === "v2" && noTmp());
-
-    // External writer lands between the tmp upload and the pre-swap re-check.
-    sftp.afterWriteFile = (p) => {
-      if (p.includes(".tmp-")) {
-        sftp._mtimes.set(casPath, 9_999);
-        sftp.afterWriteFile = undefined;
-      }
-    };
-    let raced = false;
-    try {
-      await machine.writeTextIfUnchanged(casPath, "v3", { expected: w2.version });
-    } catch (error) {
-      raced = error instanceof StaleFileError;
-    }
-    check("ssh-cas: external write between upload and swap → StaleFileError, tmp cleaned", raced && (await readTextFile(machine, casPath)) === "v2" && noTmp());
-
-    // mtime moved but content unchanged (a linter touch) → digest review passes.
-    const touchedContent = await readTextFile(machine, casPath);
-    const touchedVersion = fileVersionFromInfo(await machine.fileInfo(casPath));
-    sftp._mtimes.set(casPath, 12_345);
-    const w4 = await machine.writeTextIfUnchanged(casPath, "v4", { expected: touchedVersion, expectedContentHash: hashFileContent(touchedContent) });
-    check("ssh-cas: mtime moved but content digest matches → write proceeds", w4.bytesWritten === 2 && (await readTextFile(machine, casPath)) === "v4");
-
-    // The swap preserves the target's permission bits.
-    sftp._modes.set(casPath, S_IFREG | 0o600);
-    const w5 = await machine.writeTextIfUnchanged(casPath, "v5", { expected: w4.version });
-    check("ssh-cas: swap preserves the target's mode", (sftp._modes.get(casPath)! & 0o7777) === 0o600 && (await readTextFile(machine, casPath)) === "v5");
-
-    // Concurrent same-version writers: the path lock serializes; one wins, one detects it.
-    const race = await Promise.allSettled([
-      machine.writeTextIfUnchanged(casPath, "winner", { expected: w5.version }),
-      machine.writeTextIfUnchanged(casPath, "loser", { expected: w5.version }),
-    ]);
-    const fulfilled = race.filter((r) => r.status === "fulfilled").length;
-    const staleLosers = race.filter((r) => r.status === "rejected" && r.reason instanceof StaleFileError).length;
-    check(
-      "ssh-cas: concurrent writers serialize — one wins, the other gets StaleFileError",
-      fulfilled === 1 && staleLosers === 1 && (await readTextFile(machine, casPath)) === "winner" && noTmp(),
-    );
-
-    // Server without posix-rename@openssh.com → unlink+rename fallback.
-    sftp.posixRenameSupported = false;
-    const cur = fileVersionFromInfo(await machine.fileInfo(casPath));
-    await machine.writeTextIfUnchanged(casPath, "fallback", { expected: cur });
-    check("ssh-cas: posix-rename unsupported degrades to unlink+rename", (await readTextFile(machine, casPath)) === "fallback" && noTmp());
-    sftp.posixRenameSupported = true;
+    await machine.writeBytes("/work/raw.bin", Buffer.from([0x00, 0xff]));
+    check("ssh-write: writeBytes is byte-exact", (await machine.readBytes("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
   }
 
-  // ── BaseMachine composition: per-path lock + error taxonomy (in-memory backend) ──
+  // ── BaseMachine composition: writeText/writeBytes over the raw write primitive ──
   {
     class InMemMachine extends NullMachine {
       readonly files = new Map<string, Buffer>();
@@ -453,7 +399,7 @@ async function main(): Promise<void> {
         this.mtimes.set(p, ++this.clock);
       }
       override async fileInfo(p: string): Promise<FileInfo> {
-        await new Promise((r) => setImmediate(r)); // widen the stat→write gap the lock must cover
+        await new Promise((r) => setImmediate(r));
         const f = this.files.get(p);
         if (f === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
         return { kind: "file", size: f.byteLength, ...(this.withMtime ? { mtimeMs: this.mtimes.get(p)! * 1000 } : {}) };
@@ -470,46 +416,20 @@ async function main(): Promise<void> {
       }
     }
 
-    // Without the base path lock, both writers would pass the version check before
-    // either write lands — a silent lost update. With it, the loser sees the winner.
     const mem = new InMemMachine();
     mem.seed("/f.txt", "seed");
-    const v0 = { mtimeMs: mem.mtimes.get("/f.txt")! * 1000 };
-    const race = await Promise.allSettled([
-      mem.writeTextIfUnchanged("/f.txt", "AAAA", { expected: v0 }),
-      mem.writeTextIfUnchanged("/f.txt", "BBBB", { expected: v0 }),
-    ]);
-    const okCount = race.filter((r) => r.status === "fulfilled").length;
-    const staleCount = race.filter((r) => r.status === "rejected" && r.reason instanceof StaleFileError).length;
-    const winner = race.find((r): r is PromiseFulfilledResult<WriteFileResult> => r.status === "fulfilled");
-    check(
-      "base-cas: path lock serializes in-process writers — no lost update",
-      okCount === 1 && staleCount === 1 && mem.files.get("/f.txt")!.toString() === "AAAA",
-    );
-    check(
-      "base-cas: returned version is the winner's own write (stamped inside the lock)",
-      winner !== undefined && winner.value.version.mtimeMs === mem.mtimes.get("/f.txt")! * 1000,
-    );
+    const res = await mem.writeText("/f.txt", "a\nb\n", { lineEndings: "CRLF" });
+    check("base-write: the CRLF contract is applied by the composition", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n" && res.bytesWritten === 6);
 
-    // An mtime-less backend can never establish "unchanged" from the version alone —
-    // no size to fall back on, so the write is REFUSED rather than waved through.
-    const memNoM = new InMemMachine();
-    memNoM.withMtime = false;
-    memNoM.seed("/g.txt", "abcd");
-    let refused = false;
-    try {
-      await memNoM.writeTextIfUnchanged("/g.txt", "next", { expected: {} });
-    } catch (error) {
-      refused = error instanceof StaleFileError;
-    }
-    check("base-cas: mtime-less + no content digest → StaleFileError (unverifiable is refused)", refused);
-    check("base-cas: the refused write left the file untouched", memNoM.files.get("/g.txt")!.toString() === "abcd");
+    await mem.writeBytes("/f.txt", Buffer.from([0x01, 0x02]));
+    check("base-write: writeBytes reaches the primitive untouched", mem.files.get("/f.txt")!.equals(Buffer.from([0x01, 0x02])));
 
-    const okByContent = await memNoM.writeTextIfUnchanged("/g.txt", "next", { expected: {}, expectedContentHash: hashFileContent("abcd") });
-    check(
-      "base-cas: mtime-less + matching content digest → write proceeds",
-      okByContent.bytesWritten === 4 && memNoM.files.get("/g.txt")!.toString() === "next",
-    );
+    // No per-path lock any more: two writers of the same file both complete and the
+    // last one wins. Deliberate — conflicting tool calls are serialized a layer up by
+    // the tool scheduler (ToolAccesses.conflict), and the ledger, not the write member,
+    // is what tells an agent the file changed under it.
+    await Promise.all([mem.writeText("/h.txt", "AAAA"), mem.writeText("/h.txt", "BBBB")]);
+    check("base-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.files.get("/h.txt")!.toString()));
   }
 
   // ── BaseMachine.realpath: a HUNG readlink times out (throws) instead of silently

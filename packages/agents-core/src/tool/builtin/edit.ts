@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import { StaleFileError, type FileInfo } from "../machine.ts";
+import type { FileInfo } from "../machine.ts";
 import { checkFreshness, FILE_MODIFIED_MESSAGE, FILE_NOT_READ_MESSAGE, type FileFreshnessLedger } from "../file-freshness.ts";
-import { fileVersionFromInfo, hashFileContent, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
+import { fileVersionFromInfo, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
 import type { ToolResolveContext, ToolResult, ToolRunContext } from "../types.ts";
 import { materializeModelText, toModelTextView, type LineEndingStyle } from "./line-endings.ts";
@@ -42,8 +42,8 @@ const EDIT_DESCRIPTION = [
   "- To modify a file, always use Edit; do not run a Bash `sed` command for edits.",
   "- Read the file first so Edit can use the latest text view and verify the file has not changed before writing.",
   "- If the file changed on disk after your Read (a formatter, a script, the user) but old_string still matches exactly once, the edit applies and the result says the file holds other changes; otherwise Edit asks you to Read again. replace_all edits always require a fresh Read.",
-  "- When making several independent changes, issue multiple Edit calls in parallel within a single response; edits to the same file are serialized automatically by a write lock.",
-  "- When several parallel Edit calls target the same file, a write lock serializes them; they apply in the order the calls appear in your response. An edit fails with `old_string not found` if its old_string was taken from text an earlier edit already replaced — base every old_string on the latest Read view and order dependent edits accordingly.",
+  "- When making several independent changes, issue multiple Edit calls in parallel within a single response; edits to the same file are serialized automatically.",
+  "- When several parallel Edit calls target the same file, they are serialized and apply in the order the calls appear in your response. An edit fails with `old_string not found` if its old_string was taken from text an earlier edit already replaced — base every old_string on the latest Read view and order dependent edits accordingly.",
   "- For pure CRLF files, Read shows LF and Edit.old_string/new_string should use LF; Edit writes the file back with CRLF preserved.",
   "- For mixed line endings or lone carriage returns, Read displays carriage returns as \\r; include actual \\r escapes in old_string/new_string for those positions.",
 ].join("\n");
@@ -87,7 +87,8 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
     if (ledger.get(safePath) === undefined) return errorResult(FILE_NOT_READ_MESSAGE);
 
     // Stat BEFORE reading: a change landing between the two then leaves the version
-    // older than the text, so the CAS below catches it instead of blessing it.
+    // older than the text, so the freshness check below sees the conflict instead of
+    // blessing it.
     const info: FileInfo = await ctx.machine.fileInfo(safePath);
     const observed = fileVersionFromInfo(info);
     const raw = await readTextFile(ctx.machine, safePath);
@@ -130,14 +131,13 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
       : replaceOnceLiteral(content, args.old_string, args.new_string);
     const materialized = materializeModelText(newContent, modelView.lineEndingStyle);
 
-    // The CAS guards the gap between THIS read and the write, so it expects what was
-    // just observed — not the ledger's record, which a recovered edit is by definition
-    // past.
-    const result = await ctx.machine.writeTextIfUnchanged(safePath, materialized, {
-      expected: observed,
-      expectedContentHash: hashFileContent(normalized),
-    });
-    ledger.recordWrite(safePath, result.version, {
+    // Everything this edit is allowed to assume was settled by the freshness check
+    // above, against the text read a few statements ago. The write is unconditional:
+    // an external writer landing in the gap between that read and this write is the
+    // same window every backend but the local one has anyway (see Machine.writeText),
+    // and the record below is what catches it on the NEXT edit.
+    await ctx.machine.writeText(safePath, materialized);
+    ledger.recordWrite(safePath, {
       content: normalizeForCompare(materialized),
       lineEndings: toLedgerLineEndings(modelView.lineEndingStyle),
       encoding: "utf8",
@@ -148,7 +148,6 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
       : `Replaced 1 occurrence in ${args.path}`;
     return textResult(stale ? `${summary}${STALE_RECOVERED_NOTE}` : summary);
   } catch (error) {
-    if (error instanceof StaleFileError) return errorResult(FILE_MODIFIED_MESSAGE);
     const code = (error as { code?: unknown } | null)?.code;
     if (code === "EISDIR") {
       return errorResult(`${args.path} is not a file.`);

@@ -2,23 +2,20 @@
  * E2E for the Machine high-level ops + FileFreshnessLedger. Covers:
  *  - readBytes: whole-file / prefix / window reads, byte-exactness, and default
  *    composition parity with the native local implementation
- *  - writeTextIfUnchanged: must-not-exist, mtime-fresh write, stale detection,
- *    mtime false-positive review via expectedContentHash
- *  - writeText: unconditional overwrite, CRLF restore, bytesWritten
+ *  - writeText: unconditional overwrite, CRLF restore, bytesWritten, and the local
+ *    backend's atomic temp+rename landing (symlink and mode preserved)
  *  - FileFreshnessLedger + checkFreshness verdicts (mtime-first, content fallback)
  *  - realpath: native local + `readlink -f` default composition
  */
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, realpath as nodeRealpath, readdir, readFile, rm, stat as nodeStat, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath as nodeRealpath, readdir, readFile, rm, stat as nodeStat, symlink, writeFile } from "node:fs/promises";
 import {
   BaseMachine,
   checkFreshness,
-  FileExistsError,
   FileFreshnessLedger,
   LEDGER_MAX_ENTRIES,
   LocalMachine,
-  StaleFileError,
   type DirEntry,
   type Machine,
   type ByteRange,
@@ -120,58 +117,27 @@ async function main(): Promise<void> {
     await writeFile(bin, Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x42]));
     check("readBytes: binary window is byte-exact", (await host.readBytes(bin, { offset: 1, length: 2 })).equals(Buffer.from([0xff, 0xfe])));
 
-    // ── writeTextIfUnchanged ─────────────────────────────────────────────────────
+    // ── writeText: the one write contract ────────────────────────────────────────
     const target = path.join(dir, "write.txt");
-    const created = await host.writeTextIfUnchanged(target, "v1\n", { expected: "must-not-exist" });
-    check("writeTextIfUnchanged: must-not-exist creates", created.version.mtimeMs !== undefined && created.bytesWritten === 3);
+    const created = await host.writeText(target, "v1\n");
+    check("writeText: creates a missing file", created.bytesWritten === 3 && (await host.readBytes(target)).toString("utf8") === "v1\n");
 
-    let existsErr = false;
-    try {
-      await host.writeTextIfUnchanged(target, "v1b\n", { expected: "must-not-exist" });
-    } catch (error) {
-      existsErr = error instanceof FileExistsError;
-    }
-    check("writeTextIfUnchanged: must-not-exist on existing → FileExistsError", existsErr);
-
-    const v2 = await host.writeTextIfUnchanged(target, "v2\n", { expected: created.version });
-    check("writeTextIfUnchanged: matching version writes", v2.version.mtimeMs !== undefined);
-
+    // Unconditional by design: no expectation, no staleness check. What keeps an edit
+    // from clobbering a file someone else changed is the ledger verdict below, taken
+    // BEFORE the write — not the write member.
     await writeFile(target, "external\n");
-    let stale = false;
-    try {
-      await host.writeTextIfUnchanged(target, "v3\n", { expected: v2.version });
-    } catch (error) {
-      stale = error instanceof StaleFileError;
-    }
-    check("writeTextIfUnchanged: external modification → StaleFileError", stale);
-
-    // mtime false positive: same content, mtime bumped → content-digest review passes.
-    const fp = path.join(dir, "fp.txt");
-    const fpV = await host.writeTextIfUnchanged(fp, "same\n", { expected: "must-not-exist" });
-    await utimes(fp, new Date(), new Date(Date.now() + 5_000));
-    const fpWrite = await host
-      .writeTextIfUnchanged(fp, "next\n", { expected: fpV.version, expectedContentHash: hashFileContent("same\n") })
-      .then(() => true)
-      .catch(() => false);
-    check("writeTextIfUnchanged: mtime moved + content unchanged → digest review passes", fpWrite);
+    await host.writeText(target, "v2\n");
+    check("writeText: overwrites unconditionally", (await host.readBytes(target)).toString("utf8") === "v2\n");
 
     const crlfOut = path.join(dir, "crlf-out.txt");
     const crlfRes = await host.writeText(crlfOut, "a\nb\n", { lineEndings: "CRLF" });
     const crlfBytes = await host.readBytes(crlfOut);
     check("writeText: CRLF restored on write", crlfBytes.toString("utf8") === "a\r\nb\r\n" && crlfRes.bytesWritten === 6);
 
-    // writeText is unconditional: overwrites a stale file without any expectation.
-    await host.writeText(crlfOut, "plain\n");
-    check("writeText: unconditional overwrite", (await host.readBytes(crlfOut)).toString("utf8") === "plain\n");
-
-    // default composition (BareHost) staleness path
-    let composedStale = false;
-    try {
-      await bare.writeTextIfUnchanged(target, "v4\n", { expected: v2.version });
-    } catch (error) {
-      composedStale = error instanceof StaleFileError;
-    }
-    check("ops default writeTextIfUnchanged: stale detection matches", composedStale);
+    // The derived default composition writes through the same primitive.
+    const bareOut = path.join(dir, "bare-out.txt");
+    await bare.writeText(bareOut, "composed\n");
+    check("writeText: default composition writes", (await host.readBytes(bareOut)).toString("utf8") === "composed\n");
 
     // ── FileFreshnessLedger + checkFreshness ─────────────────────────────────────
     const ledger = new FileFreshnessLedger();
@@ -228,8 +194,29 @@ async function main(): Promise<void> {
     });
     check("checkFreshness: partial read never passes content review", partialStale.kind === "stale");
 
-    ledger.recordWrite(lPath, lVersion, { content: "content\n" });
+    ledger.recordWrite(lPath, { version: lVersion, content: "content\n" });
     check("ledger: recordWrite marks writer as last reader", ledger.get(lPath)?.fullRead === true);
+
+    // The write path records no version (a stat after every write is a round trip on
+    // remote backends). Such a record is decided by content: unchanged text reads as
+    // fresh, an external rewrite as stale — the same verdicts the mtime would give.
+    ledger.recordWrite(lPath, { content: "content\n" });
+    check("ledger: a versionless write record keeps the digest", ledger.get(lPath)?.version.mtimeMs === undefined);
+    const afterWriteFresh = await checkFreshness({
+      ledger,
+      path: lPath,
+      current: lVersion,
+      currentContent: () => Promise.resolve("content\n"),
+    });
+    check("checkFreshness: versionless record + unchanged content → fresh", afterWriteFresh.kind === "fresh");
+    ledger.recordWrite(lPath, { content: "content\n" });
+    const afterWriteStale = await checkFreshness({
+      ledger,
+      path: lPath,
+      current: lVersion,
+      currentContent: () => Promise.resolve("someone else\n"),
+    });
+    check("checkFreshness: versionless record + changed content → stale", afterWriteStale.kind === "stale");
     const written = ledger.get(lPath) as unknown as Record<string, unknown>;
     check(
       "ledger: retains the digest, never the text",
@@ -258,36 +245,33 @@ async function main(): Promise<void> {
     check("realpath: native local resolves symlink", (await host.realpath(link)) === expected);
     check("realpath: exec-derived default composition resolves symlink", (await bare.realpath(link)) === expected);
 
-    // ── local CAS lands atomically (temp + rename), without the two things a bare
-    //    rename would break: the symlink it lands on, and the target's mode. ──────
+    // ── the local backend lands EVERY write atomically (temp + rename), without the
+    //    two things a bare rename would break: the symlink it lands on, and the
+    //    target's mode. Remote backends deliberately write straight to the target. ──
     {
       const linkTarget = path.join(realDir, "script.sh");
       await writeFile(linkTarget, "#!/bin/sh\necho old\n", { mode: 0o755 });
       const viaLink = path.join(dir, "script-link.sh");
       await symlink(linkTarget, viaLink);
 
-      const before = fileVersionFromInfo(await host.fileInfo(viaLink));
-      await host.writeTextIfUnchanged(viaLink, "#!/bin/sh\necho new\n", {
-        expected: before,
-        expectedContentHash: hashFileContent("#!/bin/sh\necho old\n"),
-      });
+      await host.writeText(viaLink, "#!/bin/sh\necho new\n");
 
       // A rename onto the link would have replaced the LINK with a regular file and
       // left the real script untouched — silently breaking every other path to it.
       const linkInfo = await host.fileInfo(viaLink, { followSymlinks: false });
-      check("local CAS: writes THROUGH the symlink, does not replace it", linkInfo.kind === "symlink");
-      check("local CAS: the real file received the write", (await readFile(linkTarget, "utf8")).includes("echo new"));
+      check("local writeText: writes THROUGH the symlink, does not replace it", linkInfo.kind === "symlink");
+      check("local writeText: the real file received the write", (await readFile(linkTarget, "utf8")).includes("echo new"));
       // A fresh temp inode is born with the umask; without the chmod the +x is lost.
-      check("local CAS: target's mode survives the swap", ((await nodeStat(linkTarget)).mode & 0o777) === 0o755);
+      check("local writeText: target's mode survives the swap", ((await nodeStat(linkTarget)).mode & 0o777) === 0o755);
 
       // No residue: a leftover .tmp.* beside the target is litter in the user's workspace.
       const residue = (await readdir(realDir)).filter((n) => n.includes(".tmp."));
-      check("local CAS: no temp file left behind", residue.length === 0);
+      check("local writeText: no temp file left behind", residue.length === 0);
 
-      // The unconditional path is deliberately NOT atomic — only CAS pays for the swap.
-      const plain = path.join(realDir, "plain.txt");
-      await host.writeText(plain, "direct\n");
-      check("local writeText: unconditional write still lands", (await readFile(plain, "utf8")) === "direct\n");
+      // Binary writes ride the same primitive, so they land the same way.
+      const binOut = path.join(realDir, "raw-out.bin");
+      await host.writeBytes(binOut, Buffer.from([0x00, 0xff]));
+      check("local writeBytes: lands byte-exact", (await host.readBytes(binOut)).equals(Buffer.from([0x00, 0xff])));
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -297,7 +281,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ FILE-FRESHNESS E2E PASS — readBytes + writeTextIfUnchanged + ledger + realpath");
+    console.log("✅ FILE-FRESHNESS E2E PASS — readBytes + writeText + ledger + realpath");
   } else {
     console.log("❌ FILE-FRESHNESS E2E FAIL");
     process.exit(1);

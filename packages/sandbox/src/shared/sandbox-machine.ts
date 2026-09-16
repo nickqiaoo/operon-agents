@@ -3,13 +3,12 @@
  *
  * The two transports differ in almost everything — one has a native process handle, the
  * other an HTTP API; one takes bytes, the other base64 — but they agree on the one shape
- * that matters here: a file API that writes DIRECTLY to the target path, plus a shell to
- * run `mv` in. That combination determines the CAS write identically for both, so it is
- * stated once here instead of twice in the backends.
+ * that matters here: no stat API, so file metadata comes from `stat(1)` through the shell.
+ * That derivation is identical for both, so it is stated once here instead of twice in the
+ * backends.
  */
 import { BaseMachine } from "operon-agents-core";
 import type { FileInfo, FileKind } from "operon-agents-core";
-import { writeViaTempSwap } from "./remote-file-ops.ts";
 
 function codedError(message: string, code: string): NodeJS.ErrnoException {
   const error = new Error(message) as NodeJS.ErrnoException;
@@ -55,11 +54,6 @@ export abstract class SandboxMachine extends BaseMachine {
    */
   protected abstract resolve(path: string): string;
 
-  /** Same file → same lock across path spellings: key on the resolved path. */
-  protected override lockKeyFor(path: string): string {
-    return this.resolve(path);
-  }
-
   /**
    * Neither vendor exposes a stat API, so this costs one `stat(1)`. `-L` follows the
    * symlink; without it the link itself is described, which is what `DirEntry` wants.
@@ -82,21 +76,5 @@ export abstract class SandboxMachine extends BaseMachine {
     // mtime 0 means "the backend has no clock for this file" — report it as absent
     // rather than as 1970, so the freshness check falls back to content comparison.
     return { kind: statKind(kindRaw), size, ...(mtimeSec === 0 ? {} : { mtimeMs: mtimeSec * 1000 }) };
-  }
-
-  /**
-   * Both vendors' file APIs land on the target directly, so the CAS path swaps through a
-   * sibling temp file instead — otherwise a failure mid-upload (a crashed sandbox, a dropped
-   * request) leaves a truncated file where the caller was just promised all-or-nothing.
-   *
-   * Falls back to the direct write when the swap could not be completed — an image without
-   * `mv`. Torn state is the lesser risk against not writing at all, and `writeViaTempSwap`
-   * has already cleaned up after itself by then.
-   */
-  protected override async writeBytesSwap(path: string, data: Buffer): Promise<void> {
-    const target = this.resolve(path);
-    // `name` tags the temp file with the backend that left it, should one ever survive.
-    const swapped = await writeViaTempSwap(this, target, data, (p, d) => this.writeBytesRaw(p, d), this.name);
-    if (!swapped) await this.writeBytesRaw(target, data);
   }
 }

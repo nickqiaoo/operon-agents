@@ -105,11 +105,11 @@ export interface DirEntry {
 }
 
 /**
- * Version stamp for optimistic-concurrency writes. mtime and nothing else
- * (local-first): on hosts with a reliable mtime the check is free; hosts
- * without one (some sandbox vendors) leave `mtimeMs` undefined, and every
- * check there falls back to content comparison (see FileFreshnessLedger),
- * done on a digest (`hashFileContent`) so neither side retains the text.
+ * Version stamp for the session's read-state record (see FileFreshnessLedger).
+ * mtime and nothing else (local-first): on hosts with a reliable mtime the check
+ * is free; hosts without one (some sandbox vendors) leave `mtimeMs` undefined,
+ * and every check there falls back to content comparison, done on a digest
+ * (`hashFileContent`) so neither side retains the text.
  *
  * Size deliberately plays no part. It only ever ruled on cases the mtime had
  * already decided, except for one it decided WRONG: an mtime-less backend
@@ -130,46 +130,8 @@ export interface WriteTextOptions {
   readonly lineEndings?: "LF" | "CRLF";
 }
 
-export interface WriteTextIfUnchangedOptions extends WriteTextOptions {
-  /**
-   * Expected pre-write state (REQUIRED — the name must not lie; an unconditional
-   * write is {@link Machine.writeText}):
-   * - FileVersion: file must still match (mtime-first); mismatch throws StaleFileError.
-   * - "must-not-exist": create-new semantics; an existing file throws FileExistsError.
-   */
-  readonly expected: FileVersion | "must-not-exist";
-  /**
-   * `hashFileContent` of the prior full content (LF-normalized, BOM-stripped), for
-   * false-positive review when the mtime moved or is unavailable. Omit to treat any
-   * mtime change as a conflict.
-   */
-  readonly expectedContentHash?: string;
-}
-
 export interface WriteTextResult {
   readonly bytesWritten: number;
-}
-
-export interface WriteFileResult {
-  readonly bytesWritten: number;
-  /** Post-write version, for the caller to record in its ledger. */
-  readonly version: FileVersion;
-}
-
-export class StaleFileError extends Error {
-  readonly code = "FILE_MODIFIED_SINCE_READ";
-  constructor(message = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.") {
-    super(message);
-    this.name = "StaleFileError";
-  }
-}
-
-export class FileExistsError extends Error {
-  readonly code = "FILE_ALREADY_EXISTS";
-  constructor(message = "Cannot create new file - file already exists.") {
-    super(message);
-    this.name = "FileExistsError";
-  }
 }
 
 /**
@@ -183,11 +145,12 @@ export class FileExistsError extends Error {
  * - `run` is the universal primitive — the single way anything executes, from a
  *   one-shot `git status` to a background build. Search-shaped operations (grep,
  *   glob) run a uniform binary through it rather than getting their own member.
- * - File I/O is three members: `readBytes` (every read, whole file or a byte
- *   window), and two write contracts that are deliberately separate so each
- *   name is honest: `writeText` ("just write" — no staleness check, no stats,
- *   no version) and `writeTextIfUnchanged` (compare-and-swap for the
- *   read-before-write tool path; `expected` is required by the type).
+ * - File I/O is `readBytes` (every read, whole file or a byte window) plus two
+ *   unconditional writes, `writeText` and `writeBytes`. There is deliberately NO
+ *   compare-and-swap write: the read-before-write safety the tools need is decided
+ *   against the session's read-state record (FileFreshnessLedger) BEFORE the write,
+ *   and no backend but the local one can make the compare and the write one step
+ *   anyway — a CAS member could only have promised what it does not deliver.
  * - `realpath` exists for symlink anti-bypass: path-access
  *   checks canonicalize before prefix-matching. The threat model is the tool
  *   call escaping the workspace, not the backend lying — so a `readlink -f` run
@@ -303,31 +266,16 @@ export interface Machine {
    * through a shell.
    */
   writeBytes(path: string, data: Buffer): Promise<void>;
-  /** Unconditional text write — no staleness check, no stat round trips, no version stamp. */
-  writeText(path: string, data: string, options?: WriteTextOptions): Promise<WriteTextResult>;
   /**
-   * Compare-and-swap text write for the read-before-write tool path (Edit/Write + ledger).
+   * Unconditional text write — no staleness check, no stat round trips, no version stamp.
    *
-   * What "if unchanged" guarantees is TIERED — this is optimistic concurrency over
-   * backends without a CAS primitive, not an atomic instruction:
-   * - Same-process writers: fully serialized per file (BaseMachine's path lock;
-   *   LocalMachine's synchronous critical section). Two concurrent calls cannot
-   *   interleave their compare and write, and the returned `version` is the one
-   *   this write produced, not a later sibling's.
-   * - External writers (other processes, remote users): the compare and the write
-   *   are separate operations. LocalMachine's gap is sub-millisecond; remote
-   *   backends' is ~1 round trip (SFTP and sandbox file APIs have no CAS). An
-   *   external write landing inside that window is silently overwritten — the
-   *   protocol ceiling, documented rather than papered over.
-   * - `expected: "must-not-exist"` on SshMachine is the exception: strictly atomic
-   *   (server-enforced SFTP EXCL create), even against external writers.
-   *
-   * Errors: {@link StaleFileError} — the file changed, OR the backend could not
-   * establish that it hadn't (no mtime and no `expectedContentHash` to review against;
-   * unverifiable is refused, not waved through); {@link FileExistsError} —
-   * "must-not-exist" violated.
+   * Whether the file lands all-at-once is a BACKEND property, not a promise of this
+   * contract: LocalMachine swaps a sibling temp file into place (free there, and it
+   * keeps symlink/mode semantics), remote backends write straight to the target
+   * because staging a temp file and renaming it costs round trips on every write to
+   * narrow a window nothing in the tool path depends on.
    */
-  writeTextIfUnchanged(path: string, data: string, options: WriteTextIfUnchangedOptions): Promise<WriteFileResult>;
+  writeText(path: string, data: string, options?: WriteTextOptions): Promise<WriteTextResult>;
 
   /**
    * Canonicalize symlinks (security: path-access checks must canonicalize before

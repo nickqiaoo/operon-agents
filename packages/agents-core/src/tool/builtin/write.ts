@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import { FileExistsError, StaleFileError, type Machine, type FileInfo } from "../machine.ts";
+import type { Machine, FileInfo } from "../machine.ts";
 import { checkFreshness, FILE_MODIFIED_MESSAGE, FILE_NOT_READ_MESSAGE, type FileFreshnessLedger } from "../file-freshness.ts";
 import { fileVersionFromInfo, normalizeForCompare } from "../support/machine-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
@@ -62,11 +62,12 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
 
   try {
     const mode = args.mode ?? "overwrite";
+    // ONE stat for the whole call: it answers "does this file exist" and supplies the
+    // version the freshness check needs. The three separate stats this replaced each
+    // cost a round trip on a remote backend to re-learn what this one already knows.
     const info = await statOrUndefined(machine, safePath);
-    if (info !== undefined) await validateWrite(safePath, ctx);
+    if (info !== undefined) await validateWrite(safePath, info, ctx);
 
-    const ledger = ctx.fileLedger;
-    const record = info !== undefined ? ledger?.get(safePath) : undefined;
     let nextContent = args.content;
     let writtenContent = args.content;
 
@@ -87,14 +88,13 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       nextContent = prior + writtenContent;
     }
 
-    const result = await machine.writeTextIfUnchanged(safePath, nextContent, {
-      expected: info !== undefined ? record!.version : "must-not-exist",
-      // Only a full read's digest can be compared against the whole file; a paged
-      // record's would differ from it by definition and read as a conflict.
-      ...(record?.fullRead === true && record.contentHash !== undefined ? { expectedContentHash: record.contentHash } : {}),
-    });
+    // Unconditional: `validateWrite` above already decided this write is allowed against
+    // the file as the stat found it. A file appearing (or changing) between that check
+    // and this write is the gap documented on Machine.writeText — the record below is
+    // what surfaces it to the next Read/Write.
+    await machine.writeText(safePath, nextContent);
 
-    ledger?.recordWrite(safePath, result.version, {
+    ctx.fileLedger?.recordWrite(safePath, {
       content: normalizeForCompare(nextContent),
       lineEndings: toLedgerLineEndings(detectLineEndingStyle(nextContent)),
       encoding: "utf8",
@@ -104,7 +104,6 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
     const bytesWritten = Buffer.byteLength(writtenContent, "utf8");
     return textResult(`${mode === "append" ? "Appended" : "Wrote"} ${String(bytesWritten)} bytes to ${args.path}`);
   } catch (error) {
-    if (error instanceof StaleFileError || error instanceof FileExistsError) return errorResult(FILE_MODIFIED_MESSAGE);
     const code = (error as { code?: unknown } | null)?.code;
     if (code === "ENOENT") {
       return errorResult(`Failed to write ${args.path}: parent directory does not exist.`);
@@ -130,10 +129,7 @@ async function statOrUndefined(machine: Machine, path: string): Promise<FileInfo
   }
 }
 
-async function validateWrite(path: string, ctx: ToolResolveContext | ToolRunContext): Promise<void> {
-  const info = await statOrUndefined(ctx.machine, path);
-  if (info === undefined) return;
-
+async function validateWrite(path: string, info: FileInfo, ctx: ToolResolveContext | ToolRunContext): Promise<void> {
   const ledger = requireLedger(ctx);
   // "Has this agent seen the file", not "did it see all of it" — see the same gate in
   // edit.ts. Overwriting a file the model only paged through DOES discard the part it

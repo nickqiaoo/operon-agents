@@ -240,27 +240,18 @@ async function testPrefixReadPushdown(): Promise<void> {
 }
 
 /**
- * The CAS write must land all-or-nothing. `files.write` alone cannot promise that, so the
- * bytes go to a sibling temp path and `mv` swaps them in — the rename is the atomic step.
+ * Writes go STRAIGHT to the target: one vendor call, no temp path and no `mv`. The swap
+ * this replaced bought atomicity that only mattered to the CAS write, and charged two
+ * extra round trips for it on every write.
  */
-async function testAtomicCasSwap(): Promise<void> {
-  const sandbox = new FakeSandbox((cmd) =>
-    cmd.includes("stat")
-      ? { chunks: [{ stream: "stdout", data: "regular file|3|1700000000\n" }], exitCode: 0 }
-      : { exitCode: 0 },
-  );
+async function testDirectWrite(): Promise<void> {
+  const sandbox = new FakeSandbox(() => ({ exitCode: 0 }));
   const machine = new E2BMachine(() => sandbox, { cwd: "/work" });
 
-  await machine.writeTextIfUnchanged("/work/f.txt", "new", { expected: { mtimeMs: 1700000000000 } });
-  const tempWrite = [...sandbox.writtenPaths()].find((p) => p.includes(".tmp"));
-  check("CAS write: bytes went to a temp path first", tempWrite !== undefined);
-  check("CAS write: temp file is a SIBLING (a cross-device mv would not be atomic)", tempWrite?.startsWith("/work/") === true);
-  check("CAS write: swapped in with mv", sandbox.commandLog.some((c) => c.includes("mv") && c.includes(".tmp")));
-
-  // Unconditional writes stay a single round trip — the temp+swap cost is only for CAS.
-  const plain = new FakeSandbox(() => ({ exitCode: 0 }));
-  await new E2BMachine(() => plain, { cwd: "/work" }).writeText("/work/g.txt", "x");
-  check("plain writeText: no temp file, no mv", plain.commandLog.length === 0 && plain.written("/work/g.txt") === "x");
+  await machine.writeText("/work/f.txt", "new");
+  check("write: lands on the target itself", sandbox.written("/work/f.txt") === "new");
+  check("write: no temp path is staged", [...sandbox.writtenPaths()].every((p) => !p.includes(".tmp")));
+  check("write: no shell command — a write is one vendor call", sandbox.commandLog.length === 0);
 }
 
 /**
@@ -358,7 +349,7 @@ await testRunIntents();
 await testFilesAndListing();
 await testStatParsing();
 await testPrefixReadPushdown();
-await testAtomicCasSwap();
+await testDirectWrite();
 await testSnapshotSwap();
 await testWorkspaceSpec();
 

@@ -4,11 +4,7 @@
  * A backend writes only the dumb primitives (the abstract SPI below); this
  * class derives the high-level operations from them:
  *
- * - `writeTextIfUnchanged`: per-path lock → fileInfo compare → content review →
- *   write → version stamp, all inside the lock. The lock is the same-process
- *   floor of the contract (see Machine docs); the residual gap versus EXTERNAL
- *   writers is backend-dependent and can't be closed here. Hosts override for
- *   stronger swaps (local: sync critical section; SSH: EXCL create + tmp/rename).
+ * - `run`: spawn → cap both streams → escalating kill on timeout/abort.
  * - `realpath`: `readlink -f` via `run` on posix, normpath on win32. Hosts with
  *   a native resolver (fs.realpath, SFTP realpath) override for exactness.
  */
@@ -16,8 +12,6 @@ import type { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { posix, win32 } from "node:path";
 import {
-  FileExistsError,
-  StaleFileError,
   type RunCommandResult,
   type DecodeErrors,
   type DirEntry,
@@ -26,12 +20,9 @@ import {
   type Machine,
   type RunCommandOptions,
   type FileInfo,
-  type WriteFileResult,
-  type WriteTextIfUnchangedOptions,
   type WriteTextOptions,
   type WriteTextResult,
 } from "./machine.ts";
-import { fileVersionFromInfo, fileVersionsMatch, hashFileContent, normalizeForCompare } from "./support/machine-ops.ts";
 
 /** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
@@ -127,12 +118,6 @@ async function readCapped(
   return { text: Buffer.concat(chunks).toString("utf8"), truncated };
 }
 
-function isFileMissingError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const code = (error as { code?: unknown })["code"];
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
 async function collectStream(stream: NodeJS.ReadableStream): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {
@@ -176,20 +161,6 @@ export abstract class BaseMachine implements Machine {
   abstract readBytes(path: string, range?: ByteRange): Promise<Buffer>;
   /** Raw unconditional whole-file write — the single write primitive everything else derives from. */
   protected abstract writeBytesRaw(path: string, data: Buffer): Promise<void>;
-
-  /**
-   * The write half of the compare-and-swap in `writeTextIfUnchanged`. Default: the same raw
-   * write as anywhere else — correct, but a reader racing it can observe a half-written file,
-   * and a crash mid-write leaves one behind.
-   *
-   * Backends that can swap a complete file into place in one indivisible step (write to a
-   * sibling temp path, then rename over the target on the same filesystem) override this. It
-   * is separate from `writeBytesRaw` because the extra round trip only earns its cost where
-   * torn state is observable — which is the CAS path, not every write.
-   */
-  protected async writeBytesSwap(path: string, data: Buffer): Promise<void> {
-    await this.writeBytesRaw(path, data);
-  }
 
   /** Decode with the shared contract: strict UTF-8 throws on invalid bytes (binary detection). */
   protected decodeText(data: Buffer, options?: { encoding?: BufferEncoding; errors?: DecodeErrors }): string {
@@ -349,90 +320,6 @@ export abstract class BaseMachine implements Machine {
   /** Exact bytes through the same primitive `writeText` uses — no encoding, no CRLF rewrite. */
   async writeBytes(path: string, data: Buffer): Promise<void> {
     await this.writeBytesRaw(path, data);
-  }
-
-  // ── Per-path write serialization ──
-  // The same-process floor of the writeTextIfUnchanged contract: compare, write and
-  // version stamp happen under the file's lock, so two in-process writers cannot
-  // interleave. Clones sharing a backend (withCwd) must share this map — backends
-  // assign `clone.pathLocks = this.pathLocks` when cloning.
-  protected pathLocks = new Map<string, Promise<void>>();
-
-  /** Key identifying "the same file" for the write lock. Backends with real path
-   *  resolution override so relative and absolute spellings share one lock. */
-  protected lockKeyFor(path: string): string {
-    return this.normpath(path);
-  }
-
-  protected async withPathLock<T>(path: string, body: () => Promise<T>): Promise<T> {
-    const key = this.lockKeyFor(path);
-    const prev = this.pathLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    this.pathLocks.set(key, gate);
-    await prev;
-    try {
-      return await body();
-    } finally {
-      release();
-      // Drop the entry once no later writer has queued behind us (bounds the map).
-      if (this.pathLocks.get(key) === gate) this.pathLocks.delete(key);
-    }
-  }
-
-  /**
-   * The compare half of writeTextIfUnchanged: throws unless the file still matches
-   * `options.expected`. Shared by the base composition and by backend overrides
-   * that re-check right before an atomic swap (SshMachine).
-   */
-  protected async assertUnchanged(path: string, options: WriteTextIfUnchangedOptions, encoding: BufferEncoding): Promise<void> {
-    let info: FileInfo | undefined;
-    try {
-      info = await this.fileInfo(path);
-    } catch (error) {
-      if (!isFileMissingError(error)) throw error;
-    }
-
-    if (options.expected === "must-not-exist") {
-      if (info !== undefined) throw new FileExistsError();
-      return;
-    }
-    if (info === undefined) {
-      throw new StaleFileError("File no longer exists. Read it again before attempting to write it.");
-    }
-    if (fileVersionsMatch(options.expected, fileVersionFromInfo(info))) return;
-
-    // mtime moved or is unavailable — review against the prior content (the
-    // Windows false-positive fallback, also the only check on mtime-less
-    // sandbox backends).
-    if (options.expectedContentHash !== undefined) {
-      let confirmedUnchanged = false;
-      try {
-        const text = this.decodeText(await this.readBytes(path), { encoding, errors: "strict" });
-        confirmedUnchanged = hashFileContent(normalizeForCompare(text)) === options.expectedContentHash;
-      } catch {
-        confirmedUnchanged = false;
-      }
-      if (!confirmedUnchanged) throw new StaleFileError();
-      return;
-    }
-    // The mtime moved, or one side never had one, and there is no content to review
-    // against. Either way the file cannot be established as unchanged — refuse.
-    throw new StaleFileError();
-  }
-
-  async writeTextIfUnchanged(path: string, data: string, options: WriteTextIfUnchangedOptions): Promise<WriteFileResult> {
-    return await this.withPathLock(path, async () => {
-      const encoding = options.encoding ?? "utf8";
-      await this.assertUnchanged(path, options, encoding);
-      const payload = options.lineEndings === "CRLF" ? data.replaceAll("\n", "\r\n") : data;
-      const buf = Buffer.from(payload, encoding);
-      await this.writeBytesSwap(path, buf);
-      // Still inside the lock: the returned version must be THIS write's, not a
-      // concurrent sibling's that landed after ours.
-      const after = await this.fileInfo(path);
-      return { bytesWritten: buf.byteLength, version: fileVersionFromInfo(after) };
-    });
   }
 
   /** Deadline for the readlink fallback; a test/backend subclass may shorten it. */

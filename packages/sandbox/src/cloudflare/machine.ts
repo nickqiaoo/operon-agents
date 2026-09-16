@@ -92,8 +92,6 @@ export class CloudflareMachine extends SandboxMachine {
       shellPath: this.osEnv.shellPath,
       ...(this.defaultTimeoutMs !== undefined ? { defaultTimeoutMs: this.defaultTimeoutMs } : {}),
     });
-    // One sandbox, one file namespace — clones must share write locks.
-    clone.pathLocks = this.pathLocks;
     return clone;
   }
 
