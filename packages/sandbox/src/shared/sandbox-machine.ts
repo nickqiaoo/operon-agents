@@ -2,10 +2,10 @@
  * Shared base for the vendor sandbox Machines (E2B, Cloudflare).
  *
  * The two transports differ in almost everything — one has a native process handle, the
- * other an HTTP API; one takes bytes, the other base64 — but they agree on the one shape
- * that matters here: no stat API, so file metadata comes from `stat(1)` through the shell.
- * That derivation is identical for both, so it is stated once here instead of twice in the
- * backends.
+ * other an HTTP API; one takes bytes, the other base64 — but they share one fallback: file
+ * metadata from `stat(1)` through the shell. Cloudflare has no stat API at all; E2B has one and
+ * uses it, falling back here only where it is ambiguous (symlinks). The derivation is identical
+ * for both, so it is stated once here instead of twice in the backends.
  */
 import { BaseMachine } from "operon-agents-core";
 import type { FileInfo, FileKind } from "operon-agents-core";
@@ -55,7 +55,7 @@ export abstract class SandboxMachine extends BaseMachine {
   protected abstract resolve(path: string): string;
 
   /**
-   * Neither vendor exposes a stat API, so this costs one `stat(1)`. `-L` follows the
+   * One `stat(1)` command. `-L` follows the
    * symlink; without it the link itself is described, which is what `DirEntry` wants.
    */
   async fileInfo(path: string, options?: { followSymlinks?: boolean }): Promise<FileInfo> {
@@ -75,6 +75,8 @@ export abstract class SandboxMachine extends BaseMachine {
     }
     // mtime 0 means "the backend has no clock for this file" — report it as absent
     // rather than as 1970, so the freshness check falls back to content comparison.
-    return { kind: statKind(kindRaw), size, ...(mtimeSec === 0 ? {} : { mtimeMs: mtimeSec * 1000 }) };
+    // Rounded: `1726480000.123 * 1000` is not always an exact integer in floating point, and an
+    // mtime that is off by a hair never equals the same instant read from a native API.
+    return { kind: statKind(kindRaw), size, ...(mtimeSec === 0 ? {} : { mtimeMs: Math.round(mtimeSec * 1000) }) };
   }
 }

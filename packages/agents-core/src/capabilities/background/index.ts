@@ -11,9 +11,11 @@ export { BackgroundManager } from "./manager.ts";
 export type {
   BackgroundManagerOptions,
   BackgroundManagerRuntime,
+  OutputFollowTiming,
   BackgroundTaskOutputDelta,
   BackgroundTaskOutputSnapshot,
 } from "./manager.ts";
+export type { StallWatchdogTiming } from "./stall-watchdog.ts";
 export { CommandBackgroundTask } from "./command-task.ts";
 export type { CommandBackgroundTaskInfo } from "./command-task.ts";
 export { AgentBackgroundTask } from "./agent-task.ts";

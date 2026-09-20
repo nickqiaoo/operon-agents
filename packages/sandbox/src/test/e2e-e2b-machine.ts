@@ -23,6 +23,16 @@ interface FakeCommand {
   /** Never settles on its own — only a kill ends it. */
   readonly hang?: boolean;
   readonly delayMs?: number;
+  /** Reads stdin to EOF before exiting, like `cat` or a hook piping its input through `jq`. */
+  readonly readsStdin?: boolean;
+}
+
+/** The SDK's `CommandExitError`: what `wait()` rejects with for every nonzero exit. */
+function commandExitError(result: { exitCode: number; error?: string }): Error {
+  return Object.assign(new Error(result.error ?? `exit status ${String(result.exitCode)}`), {
+    name: "CommandExitError",
+    result: { stdout: "", stderr: "", ...result },
+  });
 }
 
 class FakeSandbox implements E2BSandbox {
@@ -32,6 +42,13 @@ class FakeSandbox implements E2BSandbox {
   readonly killedPids: number[] = [];
   readonly stdinLog: { pid: number; data: string }[] = [];
   lastRunOpts: E2BRunOpts | undefined;
+  readonly closedStdinPids: number[] = [];
+  /**
+   * The deadline the SDK applies when `timeoutMs` is omitted — 60 000 in the real SDK, scaled
+   * down here. When it passes, the event stream fails and `wait()` rejects; nothing is killed.
+   */
+  sdkDefaultTimeoutMs = 60_000;
+  private readonly stdinClosers = new Map<number, () => void>();
   private nextPid = 100;
   private readonly script: (cmd: string) => FakeCommand;
   private readonly tree: Map<string, readonly E2BEntryInfo[]>;
@@ -48,28 +65,50 @@ class FakeSandbox implements E2BSandbox {
       this.lastRunOpts = opts;
       const spec = this.script(command);
       const pid = this.nextPid++;
-      let settle!: (r: { exitCode: number | null }) => void;
-      const settled = new Promise<{ exitCode: number | null }>((resolve) => (settle = resolve));
-      const killedFlag = { value: false };
+      type Ending = { exitCode: number; error?: string } | { streamError: Error };
+      let settle!: (ending: Ending) => void;
+      let ended = false;
+      const settled = new Promise<Ending>((resolve) => (settle = resolve));
+      const end = (ending: Ending): void => {
+        if (ended) return;
+        ended = true;
+        settle(ending);
+      };
+
+      // `timeoutMs` omitted = the SDK default deadline; `0` = none (connect-web drops it).
+      const deadline = opts?.timeoutMs === undefined ? this.sdkDefaultTimeoutMs : opts.timeoutMs;
+      if (deadline > 0) {
+        setTimeout(() => end({ streamError: new Error("[deadline_exceeded] the operation timed out") }), deadline).unref();
+      }
+      const stdinClosed =
+        spec.readsStdin === true && opts?.stdin === true
+          ? new Promise<void>((resolve) => this.stdinClosers.set(pid, resolve))
+          : Promise.resolve();
 
       void (async () => {
         for (const chunk of spec.chunks ?? []) {
-          if (killedFlag.value) return;
+          if (ended) return;
           if (chunk.stream === "stdout") await opts?.onStdout?.(chunk.data);
           else await opts?.onStderr?.(chunk.data);
         }
         if (spec.hang === true) return; // only a kill can end it
+        await stdinClosed;
         if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs));
-        if (!killedFlag.value) settle({ exitCode: spec.exitCode ?? 0 });
+        end({ exitCode: spec.exitCode ?? 0 });
       })();
 
       return {
         pid,
-        wait: () => settled,
+        wait: async () => {
+          const ending = await settled;
+          if ("streamError" in ending) throw ending.streamError;
+          if (ending.exitCode !== 0) throw commandExitError(ending);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
         kill: async () => {
-          killedFlag.value = true;
           this.killedPids.push(pid);
-          settle({ exitCode: null });
+          // SIGKILL: the process ends with -1 and "signal: killed", which wait() rejects on.
+          end({ exitCode: -1, error: "signal: killed" });
           return true;
         },
       };
@@ -81,13 +120,32 @@ class FakeSandbox implements E2BSandbox {
     sendStdin: async (pid: number, data: string): Promise<void> => {
       this.stdinLog.push({ pid, data });
     },
+    closeStdin: async (pid: number): Promise<void> => {
+      this.closedStdinPids.push(pid);
+      this.stdinClosers.get(pid)?.();
+    },
   };
 
   readWholeFileCount = 0;
+  getInfoCount = 0;
+  private clock = 1_700_000_000_000;
+  private readonly mtimes = new Map<string, Date>();
+  private readonly dirs = new Set<string>();
+  private readonly symlinks = new Map<string, string>();
 
   /** Seed a file so a whole-file read has something to return (fallback-path tests). */
   seedFile(path: string, data: Buffer): void {
     this.fileData.set(path, data);
+    this.mtimes.set(path, new Date((this.clock += 7)));
+  }
+
+  seedSymlink(path: string, target: string): void {
+    this.symlinks.set(path, target);
+  }
+
+  /** The SDK's FileNotFoundError: a name, no errno code. */
+  private notFound(path: string): Error {
+    return Object.assign(new Error(`path '${path}' does not exist`), { name: "FileNotFoundError" });
   }
 
   writtenPaths(): readonly string[] {
@@ -98,7 +156,19 @@ class FakeSandbox implements E2BSandbox {
     list: async (path: string): Promise<readonly E2BEntryInfo[]> => this.tree.get(path) ?? [],
     read: async (path: string): Promise<Uint8Array> => {
       this.readWholeFileCount++;
-      return this.fileData.get(path) ?? Buffer.alloc(0);
+      const data = this.fileData.get(path);
+      if (data === undefined) throw this.notFound(path);
+      return data;
+    },
+    getInfo: async (path: string): Promise<E2BEntryInfo> => {
+      this.getInfoCount++;
+      const name = path.split("/").pop() ?? path;
+      const link = this.symlinks.get(path);
+      if (link !== undefined) return { name, path, type: "file", size: 999, modifiedTime: new Date(1), symlinkTarget: link };
+      const data = this.fileData.get(path);
+      if (data !== undefined) return { name, path, type: "file", size: data.byteLength, modifiedTime: this.mtimes.get(path)! };
+      if (this.dirs.has(path) || this.tree.has(path)) return { name, path, type: "dir", size: 4096, modifiedTime: new Date(this.clock) };
+      throw this.notFound(path);
     },
     // Mirrors the SDK exactly: it accepts `string | ArrayBuffer | Blob | ReadableStream` and
     // NOT a Uint8Array. Rejecting one here is the point — a Buffer handed straight through
@@ -108,9 +178,15 @@ class FakeSandbox implements E2BSandbox {
         throw new TypeError(`E2B files.write takes string | ArrayBuffer, got ${Object.prototype.toString.call(data)}`);
       }
       this.fileData.set(path, typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data));
+      this.mtimes.set(path, new Date((this.clock += 7)));
       return undefined;
     },
-    makeDir: async (): Promise<boolean> => true,
+    // Like the SDK: creates the parents too, and reports an existing path as `false`.
+    makeDir: async (path: string): Promise<boolean> => {
+      if (this.dirs.has(path) || this.fileData.has(path)) return false;
+      this.dirs.add(path);
+      return true;
+    },
   };
 
   written(path: string): string | undefined {
@@ -132,16 +208,27 @@ async function testRunIntents(): Promise<void> {
       return { chunks: Array.from({ length: 10 }, () => ({ stream: "stdout" as const, data: "0123456789" })) };
     }
     if (cmd.startsWith("fail")) return { chunks: [{ stream: "stderr", data: "boom" }], exitCode: 3 };
+    if (cmd.startsWith("slow")) return { chunks: [{ stream: "stdout", data: "built\n" }], delayMs: 150 };
+    if (cmd.startsWith("cat")) return { readsStdin: true };
     return { chunks: [{ stream: "stdout", data: "hello\n" }], exitCode: 0 };
   });
+  sandbox.sdkDefaultTimeoutMs = 60; // the SDK's 60 s default, scaled to test time
   const machine = new E2BMachine(() => sandbox, { cwd: "/work" });
 
   const ok = await machine.run(["echo", "hello"]);
   check("run: stdout captured, exit 0", ok.stdout === "hello\n" && ok.exitCode === 0);
   check("run: not timed out / not truncated", !ok.timedOut && !ok.truncated);
 
+  // The SDK rejects wait() for a nonzero exit; for run() that is an outcome, not an error.
   const failed = await machine.run(["fail"]);
   check("run: nonzero exit surfaced", failed.exitCode === 3 && failed.stderr === "boom");
+
+  // No caller timeout = no deadline. Left to the SDK default, a command outliving it failed.
+  const slow = await machine.run(["slow"]);
+  check("run: a command outliving the SDK's default deadline still completes", slow.exitCode === 0 && slow.stdout === "built\n");
+  check("run: the SDK deadline is disabled — ours is enforced with a real kill", sandbox.lastRunOpts?.timeoutMs === 0);
+  const slowCapped = await new E2BMachine(() => sandbox, { cwd: "/work", defaultTimeoutMs: 40 }).run(["slow"]);
+  check("run: defaultTimeoutMs is enforced by our own timer", slowCapped.timedOut && slowCapped.terminated);
 
   // Incremental delivery — the thing a buffered backend cannot do.
   const seen: string[] = [];
@@ -149,9 +236,10 @@ async function testRunIntents(): Promise<void> {
   check("run: onOutput received chunks incrementally", seen.length === 1 && seen[0] === "hello\n");
 
   // Timeout must actually kill and must NOT report a fabricated exit code.
+  const killsBefore = sandbox.killedPids.length;
   const timed = await machine.run(["hang"], { timeoutMs: 50 });
   check("run: timeout reported", timed.timedOut);
-  check("run: timeout actually terminated the process", timed.terminated && sandbox.killedPids.length === 1);
+  check("run: timeout actually terminated the process", timed.terminated && sandbox.killedPids.length === killsBefore + 1);
   check("run: exitCode is undefined, not a fabricated 0", timed.exitCode === undefined);
   check("run: partial output before the kill is kept", timed.stdout === "partial");
 
@@ -175,6 +263,8 @@ async function testRunIntents(): Promise<void> {
   await machine.run(["cat"], { stdin: "fed-in" });
   check("run: stdin opened the vendor's stdin channel", sandbox.lastRunOpts?.stdin === true);
   check("run: stdin payload reached sendStdin", sandbox.stdinLog.length === 1 && sandbox.stdinLog[0]?.data === "fed-in");
+  // `cat` exits only at EOF — this run returning at all is the proof stdin was closed.
+  check("run: stdin is closed after the payload, so a reader sees EOF", sandbox.closedStdinPids.length === 1);
 
   // An SDK build without sendStdin must REFUSE, not silently drop the input.
   const noStdin = new FakeSandbox(() => ({ exitCode: 0 }));
@@ -262,10 +352,14 @@ async function testDirectWrite(): Promise<void> {
  * `stat` produced one, and ignored, not trusted, when it did not.
  */
 async function testStatParsing(): Promise<void> {
-  const statting = (line: string): FakeSandbox =>
-    new FakeSandbox((cmd) =>
+  // The `stat(1)` path, as taken by an SDK build without getInfo (and by symlinks, and Cloudflare).
+  const statting = (line: string): FakeSandbox => {
+    const sandbox = new FakeSandbox((cmd) =>
       cmd.includes("stat") ? { chunks: [{ stream: "stdout", data: `${line}\n` }], exitCode: 0 } : { exitCode: 1 },
     );
+    delete (sandbox.files as { getInfo?: unknown }).getInfo;
+    return sandbox;
+  };
   const infoFrom = async (line: string) => await new E2BMachine(() => statting(line), { cwd: "/work" }).fileInfo("/work/a.ts");
 
   const precise = await infoFrom("regular file|1234|1700000000|1700000000.456");
@@ -345,8 +439,71 @@ async function testWorkspaceSpec(): Promise<void> {
   check("workspace-spec: path escaping the root is refused", escaped);
 }
 
+/**
+ * File metadata is one envd RPC, not a command. Every Read, Edit and Write stats its file, and
+ * each `stat(1)` used to be a whole process start through a login shell — the largest per-call
+ * cost on this backend. A write reports the version it produced, so the read-state record keeps
+ * its mtime fast path instead of re-downloading the file to compare contents.
+ */
+async function testNativeMetadata(): Promise<void> {
+  const sandbox = new FakeSandbox(() => ({ exitCode: 1 }));
+  const machine = new E2BMachine(() => sandbox, { cwd: "/work" });
+  sandbox.seedFile("/work/a.ts", Buffer.from("hello"));
+
+  const info = await machine.fileInfo("/work/a.ts");
+  check("fileInfo: kind, size and mtime from getInfo", info.kind === "file" && info.size === 5 && typeof info.mtimeMs === "number");
+  check("fileInfo: no command was started", sandbox.commandLog.length === 0);
+
+  let missingCode: unknown;
+  try {
+    await machine.fileInfo("/work/nope.ts");
+  } catch (error) {
+    missingCode = (error as NodeJS.ErrnoException).code;
+  }
+  check("fileInfo: a missing path is ENOENT, still without a command", missingCode === "ENOENT" && sandbox.commandLog.length === 0);
+
+  let readCode: unknown;
+  try {
+    await machine.readBytes("/work/nope.ts");
+  } catch (error) {
+    readCode = (error as NodeJS.ErrnoException).code;
+  }
+  check("readBytes: a missing file is ENOENT (append-to-new-file depends on it)", readCode === "ENOENT");
+
+  const written = await machine.writeText("/work/a.ts", "changed");
+  const after = await machine.fileInfo("/work/a.ts");
+  check("writeText: reports the version it produced", written.version?.mtimeMs !== undefined && written.version.mtimeMs === after.mtimeMs);
+  check("writeText: and that version moved", written.version?.mtimeMs !== info.mtimeMs);
+
+  sandbox.seedSymlink("/work/link.ts", "/work/a.ts");
+  const statsBefore = sandbox.commandLog.filter((c) => c.includes("stat")).length;
+  await machine.fileInfo("/work/link.ts").catch(() => undefined);
+  check("fileInfo: a symlink goes to stat(1), whose follow semantics are exact", sandbox.commandLog.filter((c) => c.includes("stat")).length === statsBefore + 1);
+  const linkWrite = await machine.writeText("/work/link.ts", "via link");
+  check("writeText: through a symlink reports no version (a different source than its fileInfo)", linkWrite.version === undefined);
+
+  await machine.mkdir("/work/deep/nested/dir", { parents: true });
+  await machine.mkdir("/work/deep/nested/dir", { parents: true });
+  check("mkdir -p: native makeDir, no command, idempotent", sandbox.commandLog.filter((c) => c.includes("mkdir")).length === 0);
+  let fileInTheWay: unknown;
+  try {
+    await machine.mkdir("/work/a.ts", { parents: true });
+  } catch (error) {
+    fileInTheWay = (error as NodeJS.ErrnoException).code;
+  }
+  check("mkdir -p: a file in the way is still an error", fileInTheWay === "EEXIST");
+
+  const listing = new FakeSandbox(() => ({ exitCode: 0 }), new Map([["/work", [
+    { name: "real.ts", path: "/work/real.ts", type: "file" as const },
+    { name: "alias.ts", path: "/work/alias.ts", type: "file" as const, symlinkTarget: "/work/real.ts" },
+  ]]]));
+  const kinds = (await new E2BMachine(() => listing, { cwd: "/work" }).listDir("/work")).map((e) => `${e.name}:${e.kind}`).join(",");
+  check("listDir: a symlink is reported as a symlink (lstat semantics)", kinds === "real.ts:file,alias.ts:symlink");
+}
+
 await testRunIntents();
 await testFilesAndListing();
+await testNativeMetadata();
 await testStatParsing();
 await testPrefixReadPushdown();
 await testDirectWrite();

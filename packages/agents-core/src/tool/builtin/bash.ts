@@ -60,6 +60,7 @@ const BASH_DESCRIPTION = [
   "**Guidelines for safety and security:**",
   "- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.",
   `- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For possibly long-running foreground commands, set the \`timeout\` argument in seconds. Foreground commands default to ${String(DEFAULT_TIMEOUT_S)}s and allow up to ${String(MAX_TIMEOUT_S)}s.`,
+  "- Commands get no terminal and stdin is empty, so nothing can answer a prompt. Never use interactive flags such as `git rebase -i` or `git add -i`; pass input up front instead (`--yes`/`-y`, `printf 'y\\n' | command`).",
   "- Avoid using `..` to access files or directories outside of the working directory.",
   "- Avoid modifying files outside of the working directory unless explicitly instructed to do so.",
   "- Never run commands that require superuser privileges unless explicitly instructed to do so.",
@@ -337,13 +338,16 @@ async function execute(
     logPath !== undefined && builder.truncated
       ? `\nThe untruncated output was also written to ${logPath} — Read that file to see what was dropped.`
       : "";
+  // Said plainly when the backend could not confirm the stop: the model must not assume a
+  // server or build it just "killed" is gone and start another on the same port or files.
+  const survivor = outcome.stillRunning === true ? ". The command could not be confirmed stopped and may still be running." : "";
   switch (outcome.status) {
     case "completed":
       return builder.ok(`Command executed successfully.${overflow}`);
     case "timed_out":
-      return builder.error(`Command killed by timeout (${label})${overflow}`, { brief: `Killed by timeout (${label})` });
+      return builder.error(`Command killed by timeout (${label})${survivor}${overflow}`, { brief: `Killed by timeout (${label})` });
     case "killed":
-      return builder.error(`Interrupted by user${overflow}`, { brief: "Interrupted by user" });
+      return builder.error(`Interrupted by user${survivor}${overflow}`, { brief: "Interrupted by user" });
     case "failed": {
       const code = outcome.exitCode === null ? "unknown" : String(outcome.exitCode);
       if (builder.nChars === 0) builder.write(`Process exited with code ${code}`);
@@ -363,6 +367,18 @@ function backgroundLogPath(machine: Machine): string | undefined {
   return dir === undefined ? undefined : `${dir}/bash-${randomBytes(4).toString("hex")}.log`;
 }
 
+/**
+ * Task-log directories already created on a given machine. The directory is the same for every
+ * command of a session, so creating it once is enough — and on a remote machine that mkdir is a
+ * round trip (a whole command on some backends) paid by EVERY Bash call. Keyed by Machine and
+ * weak, so a machine that goes away takes its entry with it.
+ *
+ * Only ever an optimization: the entry is dropped the moment the log write fails, and the next
+ * call recreates the directory. So a directory removed mid-session (a `rm -rf`, a tmp reaper)
+ * costs one retry, not a broken session.
+ */
+const preparedLogDirs = new WeakMap<Machine, Set<string>>();
+
 /** Allocate the canonical command log before the user's process starts. The shell only owns
  * appending command output; directory/file setup failures therefore fail the tool cleanly
  * instead of escaping through an uncaptured outer stderr stream. */
@@ -372,8 +388,29 @@ export async function prepareBackgroundLog(machine: Machine): Promise<string> {
   if (logPath === undefined) {
     throw new Error("Background Bash execution requires a durable output log, but this machine has no safe task-log directory.");
   }
-  await machine.mkdir(posixDirname(logPath), { parents: true });
-  await machine.writeText(logPath, "");
+  const dir = posixDirname(logPath);
+  let known = preparedLogDirs.get(machine);
+  if (known === undefined) {
+    known = new Set<string>();
+    preparedLogDirs.set(machine, known);
+  }
+
+  if (!known.has(dir)) {
+    await machine.mkdir(dir, { parents: true });
+    known.add(dir);
+  }
+  try {
+    await machine.writeText(logPath, "");
+  } catch (error) {
+    // The directory we believed in is gone (or was never writable). Re-create it and try once
+    // more, so the cache can never turn a transient state into a hard failure.
+    known.delete(dir);
+    await machine.mkdir(dir, { parents: true });
+    known.add(dir);
+    await machine.writeText(logPath, "").catch(() => {
+      throw error;
+    });
+  }
   return logPath;
 }
 

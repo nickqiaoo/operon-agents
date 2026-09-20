@@ -4,7 +4,7 @@ import { defineTool } from "../define.ts";
 import { FILE_UNCHANGED_STUB } from "../file-freshness.ts";
 import { detectFileType, MEDIA_SNIFF_BYTES } from "../support/file-type.ts";
 import { compressImageForModel } from "../support/image-compress.ts";
-import { fileVersionFromInfo, fileVersionsMatch, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
+import { decodeText, fileVersionFromInfo, fileVersionsMatch, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
 import type { FileInfo, LineEndings, Machine } from "../machine.ts";
 import type { ToolResult, ToolRunContext } from "../types.ts";
@@ -251,21 +251,29 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
     }
     if (info.kind !== "file") return err(`"${args.path}" is not a file.`);
 
-    const header = await machine.readBytes(safePath, { length: MEDIA_SNIFF_BYTES });
-    const fileType = detectFileType(safePath, header);
-    if (fileType.kind === "image") return readImageFile(args, safePath, info, machine, fileType.mimeType);
-    if (fileType.kind === "unknown") return err(notReadableFileOutput(args.path));
-
     const lineOffset = args.line_offset ?? 1;
     // No `n_lines` means to the end of the file — the byte ceiling is what bounds it.
     const requestedLines = args.n_lines ?? Number.POSITIVE_INFINITY;
     const range = rangeKeyForArgs(args);
 
+    // Dedup before anything is read: an unchanged file answers from the stat alone. A record
+    // with a range only ever comes from a successful TEXT read, so skipping the type sniff for
+    // it cannot serve the stub for an image.
     const record = ctx.fileLedger?.get(safePath);
     if (record?.range && rangesEqual(record.range, range)) {
       const current = fileVersionFromInfo(info);
       if (fileVersionsMatch(record.version, current)) return ok(FILE_UNCHANGED_STUB);
     }
+
+    // A file small enough to read whole is read ONCE, and its type sniffed off the front of those
+    // same bytes. Sniffing first meant two reads of every text file — free locally, but a second
+    // round trip (on a sandbox, a whole extra command) on every remote Read. A large file still
+    // gets the sniff alone first, so a binary is refused without pulling all of it across.
+    const whole = info.size <= MAX_UNPAGED_FILE_BYTES ? await machine.readBytes(safePath) : undefined;
+    const header = whole?.subarray(0, MEDIA_SNIFF_BYTES) ?? (await machine.readBytes(safePath, { length: MEDIA_SNIFF_BYTES }));
+    const fileType = detectFileType(safePath, header);
+    if (fileType.kind === "image") return readImageFile(args, safePath, info, machine, fileType.mimeType, whole);
+    if (fileType.kind === "unknown") return err(notReadableFileOutput(args.path));
 
     // After the dedup stub: an unchanged file answers for free no matter how large it is.
     if (args.line_offset === undefined && args.n_lines === undefined && info.size > MAX_UNPAGED_FILE_BYTES) {
@@ -275,7 +283,7 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
       );
     }
 
-    const rawText = await readTextFile(machine, safePath, { errors: "strict" });
+    const rawText = whole !== undefined ? decodeText(whole, { errors: "strict" }) : await readTextFile(machine, safePath, { errors: "strict" });
 
     const outcome =
       lineOffset < 0
@@ -307,6 +315,8 @@ async function readImageFile(
   info: FileInfo,
   machine: Machine,
   mimeType: string,
+  /** The file's bytes when the caller already read them whole. */
+  preloaded?: Buffer,
 ): Promise<ToolResult> {
   if (args.line_offset !== undefined || args.n_lines !== undefined) {
     return err("line_offset and n_lines are only supported for text files.");
@@ -320,7 +330,7 @@ async function readImageFile(
     );
   }
 
-  const data = await machine.readBytes(safePath);
+  const data = preloaded ?? (await machine.readBytes(safePath));
   // Downsample/re-encode oversized images before sending to the model (best
   // effort; the original bytes are returned unchanged on any failure).
   const compressed = await compressImageForModel(data, mimeType);

@@ -254,21 +254,30 @@ export class LocalMachine extends BaseMachine {
   protected override spawn(argv: readonly string[], env?: Record<string, string>): Promise<SpawnedProcess> {
     const [command, ...rest] = argv;
     if (command === undefined) return Promise.reject(new Error("spawn requires at least one argument"));
+    // POSIX: the command leads its own process group (setsid), so a stop can signal the whole
+    // tree — the shell AND what it started. It also leaves the command without a controlling
+    // terminal, so `sudo`/`ssh` fail fast instead of reading the host's keyboard. Windows has no
+    // process groups to target; there the direct child is all we can signal.
+    const group = process.platform !== "win32";
     // Cross-machine contract: `env` is a set of OVERRIDES layered over the ambient
     // environment, not a replacement — so PATH/proxy/etc. are preserved.
     const child = spawn(command, rest, {
       cwd: this.cwd,
       env: env ? { ...(process.env as Record<string, string>), ...env } : (process.env as Record<string, string>),
       stdio: ["pipe", "pipe", "pipe"],
+      detached: group,
     });
-    return Promise.resolve(new LocalProcess(child));
+    return Promise.resolve(new LocalProcess(child, group));
   }
 }
 
 class LocalProcess implements SpawnedProcess {
   private readonly child: ChildProcess;
-  constructor(child: ChildProcess) {
+  /** The child leads a process group whose id is its pid (see LocalMachine.spawn). */
+  private readonly group: boolean;
+  constructor(child: ChildProcess, group: boolean) {
     this.child = child;
+    this.group = group;
   }
 
   get stdin() {
@@ -296,6 +305,29 @@ class LocalProcess implements SpawnedProcess {
   }
 
   async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+    const pid = this.child.pid;
+    if (this.group && pid !== undefined) {
+      try {
+        // Negative pid = the whole group. It still reaches the children after the shell that
+        // led the group has exited, which is exactly the SIGKILL-after-SIGTERM case.
+        process.kill(-pid, signal);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return; // nothing left in the group
+      }
+    }
     this.child.kill(signal);
+  }
+
+  survivors(): boolean {
+    const pid = this.child.pid;
+    if (!this.group || pid === undefined) return false;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM: a member exists but belongs to someone else (it changed uid) — still alive.
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
   }
 }

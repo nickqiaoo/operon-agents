@@ -3,6 +3,10 @@ import type { CommandStarter, ProcessSpawnOptions } from "../../tool/background.
 import type { Machine } from "../../tool/machine.ts";
 import type { BackgroundTask, BackgroundTaskInfoBase, BackgroundTaskSink, TaskOutputLocation } from "./task.ts";
 
+/** Why a command task that was asked to stop settled as failed rather than killed. */
+export const COMMAND_NOT_STOPPED_REASON =
+  "a stop was requested, but the command could not be confirmed stopped and may still be running";
+
 export interface CommandBackgroundTaskInfo extends BackgroundTaskInfoBase {
   /** Wire value kept as "process" — persisted task records use it. */
   readonly kind: "process";
@@ -21,7 +25,8 @@ export interface CommandBackgroundTaskInfo extends BackgroundTaskInfoBase {
  * whose `kill()` did nothing.
  *
  * No `forceStop`: SIGTERM → grace → SIGKILL escalation belongs to the Machine layer, which
- * is where killing is real. Aborting the signal is the whole stop protocol.
+ * is where killing is real. Aborting the signal is the whole stop protocol — and the result's
+ * `terminated` is the answer: only a confirmed stop settles as `killed`.
  */
 export class CommandBackgroundTask implements BackgroundTask {
   readonly kind = "process" as const;
@@ -38,6 +43,7 @@ export class CommandBackgroundTask implements BackgroundTask {
   readonly parentAddress?: string;
   readonly toolCallId?: string;
   private exitCodeValue: number | null = null;
+  private stopUnconfirmedValue = false;
 
   constructor(start: CommandStarter, command: string, description: string, options: ProcessSpawnOptions = {}) {
     this.start_ = start;
@@ -52,6 +58,12 @@ export class CommandBackgroundTask implements BackgroundTask {
   /** Latest known exit status; null until the command settles, or when it reported none. */
   get exitCode(): number | null {
     return this.exitCodeValue;
+  }
+
+  /** A stop was requested and the backend could not confirm the command ended — it may still
+   *  be running. Only meaningful once the task has settled. */
+  get stopUnconfirmed(): boolean {
+    return this.stopUnconfirmedValue;
   }
 
   async start(sink: BackgroundTaskSink): Promise<void> {
@@ -72,6 +84,13 @@ export class CommandBackgroundTask implements BackgroundTask {
         signal: controller.signal,
       });
       this.exitCodeValue = result.exitCode ?? null;
+      if (sink.signal.aborted && !result.terminated) {
+        // The backend walked away rather than stopped it. "killed" would tell the model and the
+        // user the command is gone when it may well still be running.
+        this.stopUnconfirmedValue = true;
+        await sink.settle({ status: "failed", stopReason: COMMAND_NOT_STOPPED_REASON });
+        return;
+      }
       await sink.settle({
         status: sink.signal.aborted ? "killed" : result.exitCode === 0 ? "completed" : "failed",
       });

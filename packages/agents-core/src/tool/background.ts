@@ -91,9 +91,15 @@ export async function runCommandInline(start: CommandStarter, options: AttachedR
       onOutput: (chunk) => options.onLive?.(chunk),
     });
     // `run` reports its OWN timeout too; either route means the same thing to the caller.
+    const stopped = timedOut || result.timedOut || options.foregroundSignal.aborted;
     const status: AttachedSettleStatus =
       timedOut || result.timedOut ? "timed_out" : options.foregroundSignal.aborted ? "killed" : result.exitCode === 0 ? "completed" : "failed";
-    return { kind: "settled", status, exitCode: result.exitCode ?? null };
+    return {
+      kind: "settled",
+      status,
+      exitCode: result.exitCode ?? null,
+      ...(stopped && !result.terminated ? { stillRunning: true } : {}),
+    };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     options.foregroundSignal.removeEventListener("abort", onAbort);
@@ -102,7 +108,14 @@ export async function runCommandInline(start: CommandStarter, options: AttachedR
 
 /** Result of an attached run: it either settled in the foreground or was detached. */
 export type AttachedOutcome =
-  | { readonly kind: "settled"; readonly status: AttachedSettleStatus; readonly exitCode: number | null }
+  | {
+      readonly kind: "settled";
+      readonly status: AttachedSettleStatus;
+      readonly exitCode: number | null;
+      /** The run was stopped (timeout or abort) but the backend could not confirm the command
+       *  ended — it may still be running. Absent when the stop was confirmed or never needed. */
+      readonly stillRunning?: boolean;
+    }
   | { readonly kind: "detached"; readonly taskId: string };
 
 export interface BackgroundSpawner {

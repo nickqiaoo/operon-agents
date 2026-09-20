@@ -23,6 +23,10 @@ export function nonInteractiveShellEnv(options: NonInteractiveEnvOptions): Recor
     NO_COLOR: "1",
     TERM: "dumb",
     GIT_TERMINAL_PROMPT: base["GIT_TERMINAL_PROMPT"] ?? "0",
+    // `git commit` without -m, `rebase --continue`, a merge commit — each opens an editor nobody
+    // can type into, and the command sits there until the timeout kills it. `true` accepts the
+    // message git prepared, which is what a non-interactive caller wants.
+    GIT_EDITOR: "true",
     SHELL: options.shellPath,
   };
   if (options.extra) Object.assign(env, options.extra);

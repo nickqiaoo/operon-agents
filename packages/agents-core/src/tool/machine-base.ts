@@ -28,6 +28,9 @@ import {
 /** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
 
+/** How often a stop checks whether a killed process's children have gone too. */
+const SURVIVOR_POLL_MS = 50;
+
 /**
  * A live OS process, normalized. IMPLEMENTER-SIDE ONLY — this is what {@link BaseMachine.spawn}
  * hands back so ONE copy of `run`'s read/cap/decode/kill-escalate logic can serve backends
@@ -45,7 +48,18 @@ export interface SpawnedProcess {
   /** null while running. Read after a kill to tell "it stopped" from "it ignored us". */
   readonly exitCode: number | null;
   wait(): Promise<number>;
+  /**
+   * Signal the process AND everything it started. A command reaches us as `sh -c '…'`, so the
+   * process we hold is usually just the shell — signalling only it leaves the real command
+   * running as an orphan while `run` reports it stopped.
+   */
   kill(signal?: NodeJS.Signals): Promise<void>;
+  /**
+   * Whether anything the process started is still alive, asked only after the process itself
+   * has exited. Optional: a backend that cannot tell omits it, and termination is then judged
+   * by the process alone.
+   */
+  survivors?(): boolean | Promise<boolean>;
 }
 
 function codedError(message: string, code: string): NodeJS.ErrnoException {
@@ -282,11 +296,12 @@ export abstract class BaseMachine implements Machine {
     }
   }
 
-  /** SIGTERM, then SIGKILL if it does not exit. Returns whether the process actually stopped. */
   /** How long SIGTERM gets before SIGKILL, and SIGKILL before we give up. Overridable so a
    *  backend (or a test) can tighten it; the default matches the shell's own convention. */
   protected sigtermGraceMs = 5_000;
 
+  /** SIGTERM, then SIGKILL if it does not stop. Returns whether the process — and everything it
+   *  started, where the backend can tell — actually stopped. */
   private async escalatingKill(proc: SpawnedProcess, graceMs = this.sigtermGraceMs): Promise<boolean> {
     try {
       await proc.kill("SIGTERM");
@@ -294,14 +309,29 @@ export abstract class BaseMachine implements Machine {
       /* already gone */
     }
     const exited = proc.wait().then(() => true, () => true);
-    const inTime = await Promise.race([exited, sleep(graceMs).then(() => false)]);
-    if (inTime) return true;
+    if (await this.stoppedBy(proc, exited, Date.now() + graceMs)) return true;
     try {
       await proc.kill("SIGKILL");
     } catch {
-      return proc.exitCode !== null;
+      return proc.exitCode !== null && !(await proc.survivors?.());
     }
-    return await Promise.race([exited, sleep(graceMs).then(() => false)]);
+    return await this.stoppedBy(proc, exited, Date.now() + graceMs);
+  }
+
+  /**
+   * The process exited AND left nothing running, before `deadline`. A shell exits on SIGTERM
+   * straight away while a child that traps the signal keeps going — judging by the shell alone
+   * would skip the SIGKILL that child needs and report it stopped.
+   */
+  private async stoppedBy(proc: SpawnedProcess, exited: Promise<boolean>, deadline: number): Promise<boolean> {
+    const leaderExited = await Promise.race([exited, sleep(Math.max(0, deadline - Date.now())).then(() => false)]);
+    if (!leaderExited) return false;
+    while (await proc.survivors?.()) {
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      await sleep(Math.min(SURVIVOR_POLL_MS, left));
+    }
+    return true;
   }
 
   /** `spawn` has no cwd parameter; a backend without a native one runs through a subshell. */

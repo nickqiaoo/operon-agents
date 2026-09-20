@@ -1,7 +1,8 @@
+import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, rm } from "node:fs/promises";
-import { PassThrough, type Readable } from "node:stream";
+import { Duplex, PassThrough, type Readable } from "node:stream";
 import {
   BaseMachine,
   LocalMachine,
@@ -235,9 +236,60 @@ class FakeChannel extends PassThrough {
   }
 }
 
+/**
+ * An ssh2 client whose exec requests run on THIS host the way sshd runs them: `$SHELL -c` in a
+ * new session, the channel signal delivered to that shell alone. Real shells and real process
+ * groups, so the process-group handling is exercised end to end without a reachable sshd.
+ */
+function localSshdClient(): unknown {
+  return {
+    once: () => {},
+    end: () => {},
+    exec(command: string, callback: (error: Error | undefined, channel: unknown) => void): void {
+      const child = spawn(process.env["SHELL"] ?? "/bin/sh", ["-c", command], { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdin.on("error", () => {});
+      // Not auto-destroyed: a Duplex would emit its own code-less 'close', which the channel
+      // contract reserves for the command's exit.
+      const channel = new Duplex({
+        autoDestroy: false,
+        emitClose: false,
+        read() {},
+        write(chunk, _encoding, done) {
+          child.stdin.write(chunk, done);
+        },
+        final(done) {
+          child.stdin.end();
+          done();
+        },
+      }) as Duplex & { stderr: Readable; signal(name: string): void };
+      child.stdout.on("data", (data: Buffer) => channel.push(data));
+      child.stdout.on("end", () => channel.push(null));
+      channel.stderr = child.stderr;
+      channel.signal = (name) => {
+        try {
+          process.kill(child.pid!, `SIG${name}` as NodeJS.Signals);
+        } catch {
+          /* already gone */
+        }
+      };
+      child.on("exit", (code) => channel.emit("exit", code));
+      child.on("close", (code) => channel.emit("close", code));
+      callback(undefined, channel);
+    },
+  };
+}
+
+function pgrepMatches(marker: string): string {
+  try {
+    return execFileSync("pgrep", ["-f", marker]).toString().trim();
+  } catch {
+    return "";
+  }
+}
+
 async function main(): Promise<void> {
   const env = nonInteractiveShellEnv({ shellPath: "/bin/zsh" });
-  check("shell-env: non-interactive overrides", env["NO_COLOR"] === "1" && env["TERM"] === "dumb" && env["SHELL"] === "/bin/zsh" && env["GIT_TERMINAL_PROMPT"] === "0");
+  check("shell-env: non-interactive overrides", env["NO_COLOR"] === "1" && env["TERM"] === "dumb" && env["SHELL"] === "/bin/zsh" && env["GIT_TERMINAL_PROMPT"] === "0" && env["GIT_EDITOR"] === "true");
 
   const proxy = proxyEnv({ HTTPS_PROXY: "http://p:8080", NO_PROXY: "localhost", IRRELEVANT: "x" } as NodeJS.ProcessEnv);
   check("shell-env: proxyEnv picks only proxy vars", proxy["HTTPS_PROXY"] === "http://p:8080" && proxy["NO_PROXY"] === "localhost" && !("IRRELEVANT" in proxy));
@@ -483,6 +535,44 @@ async function main(): Promise<void> {
     const result = await new UnkillableMachine().run(["sleep", "forever"], { timeoutMs: 20 });
     check("base-machine: run returns even when the killed process never closes its pipes", result.timedOut);
     check("base-machine: an unkillable process is reported as NOT terminated", !result.terminated);
+  }
+
+  // ── SshMachine: a stop reaches the whole remote process group, not just the login shell sshd
+  //    signals. Run against a local sshd emulation (see localSshdClient). ──
+  if (process.platform !== "win32") {
+    const marker = `operon-ssh-tree-${String(process.pid)}`;
+    const sshTree = SshMachine.fromConnection({
+      client: localSshdClient() as never,
+      sftp: makeFakeSftp({}, ["/tmp"]) as never,
+      home: "/tmp",
+      osEnv: { ...FAKE_ENV, osKind: process.platform === "darwin" ? "Darwin" : "Linux" },
+      name: "ssh:local-sshd",
+    });
+    (sshTree as unknown as { sigtermGraceMs: number }).sigtermGraceMs = 300;
+
+    const plain = await sshTree.run(["sh", "-c", "echo out; echo err >&2; exit 3"]);
+    check("ssh-tree: the group report is stripped from stderr", plain.stderr === "err\n" && plain.stdout === "out\n");
+    check("ssh-tree: the command's own exit code comes through", plain.exitCode === 3);
+
+    const wrapped = await sshTree.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
+      timeoutMs: 300,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    check("ssh-tree: timeout reports the command stopped", wrapped.timedOut && wrapped.terminated);
+    check("ssh-tree: the command under the login shell does not survive the stop", pgrepMatches(`${marker}-a`) === "");
+
+    const stubborn = await sshTree.run(["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`], {
+      timeoutMs: 200,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    check("ssh-tree: a child that ignores SIGTERM is escalated to SIGKILL", pgrepMatches(`${marker}-b`) === "");
+    check("ssh-tree: and the stop is reported as real", stubborn.terminated);
+
+    try {
+      execFileSync("pkill", ["-KILL", "-f", marker]);
+    } catch {
+      /* nothing left */
+    }
   }
 
   const passed = checks.filter(([, ok]) => ok).length;

@@ -7,11 +7,27 @@
  *  - run() wrote to the child's stdin with no 'error' listener on the stream. A child that
  *    exits without reading it fails that write with EPIPE, delivered as an event rather than a
  *    throw, so the try/catch around end() never saw it and node killed the whole process.
+ *  - Stopping a command signalled only the shell it ran under. `sh -c 'cd … && cmd'` exits on
+ *    SIGTERM while `cmd` keeps running as an orphan — and run() reported it terminated.
  */
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalMachine } from "../index.ts";
+
+/** Processes whose command line carries `marker`, via pgrep; empty when none are left. */
+function processesMatching(marker: string): string {
+  try {
+    return execFileSync("pgrep", ["-f", marker]).toString().trim();
+  } catch {
+    return ""; // pgrep exits 1 when nothing matches
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -55,6 +71,45 @@ async function stdinToADeafChild(): Promise<void> {
   // Same shape, but the child writes something — the result must survive the broken pipe intact.
   const echoed = await machine.run(["sh", "-c", "echo done; exit 0"], { stdin: big });
   check("stdin: output is unaffected by the unread stdin", echoed.stdout.trim() === "done");
+}
+
+/**
+ * A stop reaches the command, not just the shell around it. Both shapes are the ones Bash
+ * produces: a `cd … && { cmd\n} > log` wrapper that forks the real command, and a child that
+ * ignores SIGTERM after the shell has already died of it — which needs the SIGKILL that
+ * judging by the shell alone would have skipped.
+ */
+async function stopReachesTheWholeTree(): Promise<void> {
+  if (process.platform === "win32") return;
+  const marker = `operon-tree-${String(process.pid)}`;
+
+  const machine = new LocalMachine();
+  const wrapped = await machine.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
+    timeoutMs: 300,
+  });
+  await sleepMs(100);
+  check("tree: timeout reports the command stopped", wrapped.timedOut && wrapped.terminated);
+  check("tree: the command under the shell does not survive the stop", processesMatching(`${marker}-a`) === "");
+
+  class QuickGraceMachine extends LocalMachine {
+    protected override sigtermGraceMs = 300;
+  }
+  const started = Date.now();
+  const stubborn = await new QuickGraceMachine().run(
+    ["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`],
+    { timeoutMs: 200 },
+  );
+  await sleepMs(100);
+  check("tree: a child that ignores SIGTERM is escalated to SIGKILL", processesMatching(`${marker}-b`) === "");
+  check("tree: escalation waited out the grace period first", Date.now() - started >= 200 + 300);
+  check("tree: and the stop is reported as real", stubborn.terminated);
+
+  // Leave nothing behind even if an assertion above failed.
+  try {
+    execFileSync("pkill", ["-KILL", "-f", marker]);
+  } catch {
+    /* nothing to clean */
+  }
 }
 
 async function main(): Promise<void> {
@@ -130,6 +185,7 @@ async function main(): Promise<void> {
   await rm(root, { recursive: true, force: true });
 
   await stdinToADeafChild();
+  await stopReachesTheWholeTree();
 
   const failed = checks.filter(([, passed]) => !passed);
   console.log(`\n${String(checks.length - failed.length)}/${String(checks.length)} checks passed`);
@@ -137,7 +193,7 @@ async function main(): Promise<void> {
     console.log("❌ FAILED:", failed.map(([label]) => label).join(", "));
     process.exit(1);
   }
-  console.log("✅ E2E PASS — LocalMachine mkdir(existOk) + windowed readBytes + unread stdin");
+  console.log("✅ E2E PASS — LocalMachine mkdir(existOk) + windowed readBytes + unread stdin + process-tree stop");
 }
 
 main().catch((error) => {

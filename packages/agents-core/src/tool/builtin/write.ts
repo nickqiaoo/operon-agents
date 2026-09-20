@@ -57,15 +57,24 @@ export const writeTool = defineTool({
 
 async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext): Promise<ToolResult> {
   const machine = ctx.machine;
-  const parentError = await checkParentDirectory(safePath, machine);
-  if (parentError !== undefined) return errorResult(parentError);
-
+  let info: FileInfo | undefined;
   try {
-    const mode = args.mode ?? "overwrite";
     // ONE stat for the whole call: it answers "does this file exist" and supplies the
     // version the freshness check needs. The three separate stats this replaced each
     // cost a round trip on a remote backend to re-learn what this one already knows.
-    const info = await statOrUndefined(machine, safePath);
+    info = await statOrUndefined(machine, safePath);
+  } catch (error) {
+    return errorResult(error instanceof Error ? error.message : String(error));
+  }
+  // An existing file already proves its parent directory exists; only a new file needs the
+  // parent checked — which is the one case the helpful "create it first" message is for.
+  if (info === undefined) {
+    const parentError = await checkParentDirectory(safePath, machine);
+    if (parentError !== undefined) return errorResult(parentError);
+  }
+
+  try {
+    const mode = args.mode ?? "overwrite";
 
     let nextContent = args.content;
     let writtenContent = args.content;

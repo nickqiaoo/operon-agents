@@ -6,6 +6,7 @@ import type { AgentEvent, EventSink } from "../../events/index.ts";
 import type { SteerBus } from "../../loop/steer.ts";
 import { reduceHistory, type AgentRecord, type SessionStore } from "../../store/index.ts";
 import type { Message, TextContent } from "../../protocol/index.ts";
+import { STALL_THRESHOLD_MS, startStallWatchdog, type StallWatchdogTiming } from "./stall-watchdog.ts";
 import type { AttachedOutcome, AttachedRunOptions, AttachedSettleStatus, BackgroundSpawner, CommandStarter, ProcessSpawnOptions, QuestionSpawnOptions } from "../../tool/background.ts";
 import type { ToolResult } from "../../tool/types.ts";
 import { CommandBackgroundTask } from "./command-task.ts";
@@ -198,6 +199,9 @@ async function tailFileSnapshot(file: { machine: TaskFileLocation["machine"]; pa
  *  attached with a live tap; a detached task nobody is looking at costs nothing. */
 const FOLLOW_INTERVAL_MS = 1_000;
 
+/** Longest a WATCHED file waits between checks once its output has gone quiet. */
+const FOLLOW_QUIET_MAX_INTERVAL_MS = 5_000;
+
 /** How long a foreground run must last before the user is offered "move to background". */
 const DETACHABLE_AFTER_MS = 2_000;
 
@@ -207,62 +211,120 @@ interface OutputFollower {
   stop(): void;
 }
 
+/** Cadence of the live output tail (see {@link followOutputFile}). */
+export interface OutputFollowTiming {
+  /** Between checks while output is flowing. */
+  readonly intervalMs?: number;
+  /** Ceiling the interval backs off to while output is quiet. */
+  readonly quietMaxIntervalMs?: number;
+}
+
 /**
  * Tail an output file for a watcher, reading only what was appended since the last tick — so
  * a tick costs what was WRITTEN, not what the file has accumulated. A decoder spans ticks
  * because a multi-byte character can straddle two reads.
+ *
+ * A tick is not free on a remote machine: no vendor file API takes a byte range, so reading an
+ * increment means running `tail -c +N | base64` over there — a whole process tree per tick, even
+ * for the ticks that find nothing. So once the output goes quiet the follower stops reading and
+ * starts ASKING (one `fileInfo`, which the sandbox backends answer with a metadata call rather
+ * than a command), at an interval that backs off while the silence lasts. Output that is
+ * actually flowing is read straight away at the base interval — the probe would be pure
+ * overhead there, and the watcher is a human waiting to see the next line.
  */
-function followOutputFile(file: { machine: TaskFileLocation["machine"]; path: string }, emit: (chunk: string) => void): OutputFollower {
+function followOutputFile(
+  file: { machine: TaskFileLocation["machine"]; path: string },
+  emit: (chunk: string) => void,
+  timing: OutputFollowTiming = {},
+): OutputFollower {
+  const baseIntervalMs = timing.intervalMs ?? FOLLOW_INTERVAL_MS;
+  const maxIntervalMs = Math.max(baseIntervalMs, timing.quietMaxIntervalMs ?? FOLLOW_QUIET_MAX_INTERVAL_MS);
   const decoder = new StringDecoder("utf8");
   let offset = 0;
-  let inFlight: Promise<void> | undefined;
   let stopped = false;
+  /** Set by the last pass that came back empty-handed: the next one probes before reading. */
+  let quiet = false;
+  let intervalMs = baseIntervalMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const pump = async (): Promise<void> => {
-    // Serialize: a slow read must not let the next tick re-read the same bytes.
-    if (inFlight !== undefined) return await inFlight;
-    inFlight = (async () => {
-      try {
-        const bytes = await file.machine.readBytes(file.path, { offset });
-        if (bytes.byteLength > 0) {
-          offset += bytes.byteLength;
-          const text = decoder.write(bytes);
-          if (text.length > 0) emit(text);
-        }
-      } catch {
-        // Not created yet (the redirect is part of the command) or gone after a kill. The
-        // live tap is best-effort; the command's own result is what settles the task.
-      }
-    })();
+  /** Nothing new: wait longer before looking again, up to the ceiling. */
+  const backOff = (): void => {
+    quiet = true;
+    intervalMs = Math.min(intervalMs * 2, maxIntervalMs);
+  };
+
+  const pass = async (probe: boolean): Promise<void> => {
     try {
-      await inFlight;
-    } finally {
-      inFlight = undefined;
+      if (probe) {
+        // Not created yet, or no bigger than what we have already consumed — either way there
+        // is nothing to read, and the expensive part never runs.
+        const { size } = await file.machine.fileInfo(file.path);
+        if (size <= offset) {
+          backOff();
+          return;
+        }
+      }
+      const bytes = await file.machine.readBytes(file.path, { offset });
+      if (bytes.byteLength === 0) {
+        backOff();
+        return;
+      }
+      offset += bytes.byteLength;
+      quiet = false;
+      intervalMs = baseIntervalMs;
+      const text = decoder.write(bytes);
+      if (text.length > 0) emit(text);
+    } catch {
+      // Not created yet (the redirect is part of the command) or gone after a kill. The
+      // live tap is best-effort; the command's own result is what settles the task.
+      backOff();
     }
   };
 
-  const timer = setInterval(() => void pump(), FOLLOW_INTERVAL_MS);
-  if (typeof timer.unref === "function") timer.unref();
+  // One pass at a time, in order: two overlapping reads would take the same bytes twice, and
+  // the drain must see everything the passes before it left. `pass` never rejects.
+  let queue: Promise<void> = Promise.resolve();
+  const pump = (probe: boolean): Promise<void> => {
+    queue = queue.then(() => pass(probe));
+    return queue;
+  };
+
+  const schedule = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void pump(quiet).finally(schedule);
+    }, intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+  };
+  schedule();
+
+  const halt = (): void => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  };
 
   return {
     async drain(): Promise<void> {
       if (stopped) return;
-      stopped = true;
-      clearInterval(timer);
-      await pump();
+      halt();
+      // Read outright: the command has ended, so a probe would only add a round trip before
+      // the read that has to happen anyway.
+      await pump(false);
       const tail = decoder.end();
       if (tail.length > 0) emit(tail);
     },
-    stop(): void {
-      stopped = true;
-      clearInterval(timer);
-    },
+    stop: halt,
   };
 }
 
 export interface BackgroundManagerOptions {
   readonly maxRunningTasks?: number;
   readonly now?: () => number;
+  /** Timing of the stuck-on-a-prompt check for command tasks (see stall-watchdog.ts). */
+  readonly stallDetection?: StallWatchdogTiming;
+  /** Cadence of the live output tail while a run is attached (see followOutputFile). */
+  readonly outputFollow?: OutputFollowTiming;
 }
 
 export interface BackgroundManagerRuntime {
@@ -295,6 +357,8 @@ interface ManagedTask {
   revision: number;
   readonly abortController: AbortController;
   lifecyclePromise: Promise<void>;
+  /** Stops the stuck-on-a-prompt watch; set while a command task is running in the background. */
+  stopStallWatch?: (() => void) | undefined;
 }
 
 export class BackgroundManager implements BackgroundSpawner {
@@ -323,10 +387,14 @@ export class BackgroundManager implements BackgroundSpawner {
   private unsubscribeConsumption?: () => void;
   /** Serialize the whole task store, including the KV backend's shared task index. */
   private persistenceChain: Promise<void> = Promise.resolve();
+  private readonly stallDetection: StallWatchdogTiming;
+  private readonly outputFollow: OutputFollowTiming;
 
   constructor(options: BackgroundManagerOptions = {}) {
     this.maxRunningTasks = options.maxRunningTasks;
     this.now = options.now ?? Date.now;
+    this.stallDetection = options.stallDetection ?? {};
+    this.outputFollow = options.outputFollow ?? {};
   }
 
   attach(runtime: BackgroundManagerRuntime): void {
@@ -460,6 +528,7 @@ export class BackgroundManager implements BackgroundSpawner {
       onLive: options.onLive,
       onDetachable: options.onDetachable,
       getExitCode: () => task.exitCode,
+      stopUnconfirmed: () => task.stopUnconfirmed,
     });
   }
 
@@ -479,6 +548,7 @@ export class BackgroundManager implements BackgroundSpawner {
       readonly onLive?: (chunk: string) => void;
       readonly onDetachable?: () => void;
       readonly getExitCode?: () => number | null;
+      readonly stopUnconfirmed?: () => boolean;
     },
   ): Promise<AttachedOutcome> {
     // BackgroundManager's attached driver always requires canonical durable output, even when
@@ -506,9 +576,13 @@ export class BackgroundManager implements BackgroundSpawner {
     // Nobody watching → not a single read, which is the whole reason the file is the store.
     const follow =
       task.outputLocation?.kind === "file" && opts.onLive !== undefined
-        ? followOutputFile(task.outputLocation, (chunk) => {
-            if (!detached) opts.onLive?.(chunk);
-          })
+        ? followOutputFile(
+            task.outputLocation,
+            (chunk) => {
+              if (!detached) opts.onLive?.(chunk);
+            },
+            this.outputFollow,
+          )
         : undefined;
 
     sink.setDownstream({
@@ -581,9 +655,13 @@ export class BackgroundManager implements BackgroundSpawner {
         return { kind: "detached", taskId: outcome.taskId };
       }
       let status: AttachedSettleStatus = outcome.settlement.status === "paused" ? "failed" : outcome.settlement.status;
+      // A stop the backend could not confirm settles the TASK as failed; to the foreground caller
+      // it is still the timeout or interrupt it asked for, flagged as possibly still running.
+      const stillRunning = cause !== undefined && opts.stopUnconfirmed?.() === true;
+      if (stillRunning) status = "killed";
       // The task reports a plain "killed" on abort; distinguish a foreground timeout.
       if (status === "killed" && cause === "timeout") status = "timed_out";
-      return { kind: "settled", status, exitCode: opts.getExitCode?.() ?? null };
+      return { kind: "settled", status, exitCode: opts.getExitCode?.() ?? null, ...(stillRunning ? { stillRunning: true } : {}) };
     } finally {
       follow?.stop();
       if (detachableTimer !== undefined) clearTimeout(detachableTimer);
@@ -627,6 +705,7 @@ export class BackgroundManager implements BackgroundSpawner {
     });
     this.emitStarted(this.toInfo(entry));
     void this.persistLive(entry);
+    this.watchForStall(entry);
     return taskId;
   }
 
@@ -669,7 +748,44 @@ export class BackgroundManager implements BackgroundSpawner {
       });
 
     this.emitStarted(this.toInfo(entry));
+    this.watchForStall(entry);
     return taskId;
+  }
+
+  /**
+   * Background commands only: a foreground one has a timeout and a watching user, and other
+   * kinds have no terminal prompt to get stuck on. Started once the task is in the background —
+   * a detached run starts watching at the moment it detaches.
+   */
+  private watchForStall(entry: ManagedTask): void {
+    const location = entry.task.outputLocation;
+    if (entry.task.kind !== "process" || location?.kind !== "file" || TERMINAL_STATUSES.has(entry.status)) return;
+    entry.stopStallWatch = startStallWatchdog(location, (tail) => this.steerStalled(entry, tail), this.stallDetection);
+  }
+
+  /**
+   * Tell the model a background command looks stuck on a prompt. Not a settle — the task is
+   * still running — so it goes out as a plain notice rather than a `background_done`, which the
+   * settle-notification ledger and the UI would read as the task having ended.
+   */
+  private steerStalled(entry: ManagedTask, tail: string): void {
+    if (this.steer === undefined || TERMINAL_STATUSES.has(entry.status)) return;
+    const quietSeconds = Math.round((this.stallDetection.thresholdMs ?? STALL_THRESHOLD_MS) / 1000);
+    const body = [
+      "[system: automated event, NOT a message from the user. The output below is the command's, not the user's.]",
+      `Background task ${entry.taskId} ("${entry.task.description}") appears to be waiting for interactive input: its output has not changed for ${String(quietSeconds)}s and the last line looks like a prompt.`,
+      "",
+      "Last output:",
+      tail,
+      "",
+      "Commands get no terminal and an empty stdin, so nothing can answer the prompt. Stop this task with BackgroundStop and re-run the command with its input supplied up front (e.g. `printf 'y\\n' | command`) or a non-interactive flag if one exists.",
+    ].join("\n");
+    this.steer.steer(body, {
+      kind: "extension",
+      extensionId: "background",
+      metadata: { taskId: entry.taskId, event: "waiting_for_input" },
+      channel: "follow_up",
+    });
   }
 
   /** The durable projection of a task. The output's address comes from the task itself and is
@@ -990,6 +1106,8 @@ export class BackgroundManager implements BackgroundSpawner {
   }
 
   private async settleTask(entry: ManagedTask, settlement: BackgroundTaskSettlement): Promise<boolean> {
+    entry.stopStallWatch?.();
+    entry.stopStallWatch = undefined;
     if (TERMINAL_STATUSES.has(entry.status)) {
       if (entry.status === "killed" && settlement.status === "killed") {
         entry.endedAt = Math.max(this.now(), (entry.endedAt ?? 0) + 1);

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough, Transform, type Readable, type TransformCallback, type Writable } from "node:stream";
 import { posix } from "node:path";
 import * as ssh2 from "ssh2";
 import type { AnyAuthMethod, Client, ClientChannel, ConnectConfig, OpenMode, SFTPWrapper, Stats as SFTPStats } from "ssh2";
@@ -94,6 +94,65 @@ function fileKindFromSftpStats(attrs: SFTPStats): FileKind {
   return "other";
 }
 
+/** First stderr line of every posix command: the process group the command runs in. */
+const PGID_MARKER = "__OPERON_PGID__=";
+
+/**
+ * Prefix that makes a remote command report its process group before it runs.
+ *
+ * sshd starts an exec request as `$SHELL -c '<command>'` in a new session, so that shell leads
+ * the process group everything the command starts belongs to — and its pid is the group id. A
+ * child `sh` reads it back as `$PPID`: the login shell may not be POSIX (fish has no `$$`), but
+ * `sh -c '…'` parses the same everywhere.
+ */
+export const SSH_PGID_REPORT = `sh -c 'printf "%s%s\\n" ${PGID_MARKER} "$PPID"' >&2; `;
+
+/**
+ * Strips the {@link SSH_PGID_REPORT} line off the front of stderr and hands over the group id.
+ * Anything that is not the marker passes through untouched, so a server that ignored the
+ * prefix costs nothing but the ability to signal the group.
+ */
+class PgidMarkerStripper extends Transform {
+  private pending: Buffer | undefined = Buffer.alloc(0);
+  private readonly onPgid: (pgid: number) => void;
+
+  constructor(onPgid: (pgid: number) => void) {
+    super();
+    this.onPgid = onPgid;
+  }
+
+  override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+    if (this.pending === undefined) {
+      callback(null, chunk);
+      return;
+    }
+    const buffered = Buffer.concat([this.pending, chunk]);
+    const newline = buffered.indexOf(0x0a);
+    if (newline === -1 && buffered.length < 256) {
+      this.pending = buffered;
+      callback();
+      return;
+    }
+    this.pending = undefined;
+    const line = newline === -1 ? "" : buffered.subarray(0, newline).toString("utf8");
+    const match = line.startsWith(PGID_MARKER) ? /^(\d+)$/.exec(line.slice(PGID_MARKER.length)) : null;
+    if (match === null) {
+      callback(null, buffered);
+      return;
+    }
+    this.onPgid(Number(match[1]));
+    const rest = buffered.subarray(newline + 1);
+    callback(null, rest.length > 0 ? rest : undefined);
+  }
+
+  override _flush(callback: TransformCallback): void {
+    callback(null, this.pending !== undefined && this.pending.length > 0 ? this.pending : undefined);
+  }
+}
+
+/** A short side command on the same connection, resolving with its exit code. */
+export type SshSideExec = (command: string) => Promise<number>;
+
 export class SshProcess implements SpawnedProcess {
   readonly stdin: Writable;
   readonly stdout: Readable;
@@ -102,17 +161,29 @@ export class SshProcess implements SpawnedProcess {
   private _exitCode: number | null = null;
   private readonly _exit: Promise<number>;
   private readonly channel: ClientChannel;
+  private readonly sideExec: SshSideExec | undefined;
+  private pgid: number | undefined;
 
-  constructor(channel: ClientChannel) {
+  /**
+   * `sideExec` present = the command was started behind {@link SSH_PGID_REPORT}: stderr carries
+   * the group id, and a stop signals the whole group through a second exec on the connection.
+   * Without it only the channel is signalled, which sshd delivers to the login shell alone.
+   */
+  constructor(channel: ClientChannel, sideExec?: SshSideExec) {
     this.channel = channel;
+    this.sideExec = sideExec;
     this.stdin = channel;
     // Buffer through PassThroughs so output emitted before a consumer attaches isn't dropped.
     const out = new PassThrough();
-    const err = new PassThrough();
     channel.pipe(out);
-    channel.stderr.pipe(err);
     this.stdout = out;
-    this.stderr = err;
+    if (sideExec === undefined) {
+      const err = new PassThrough();
+      channel.stderr.pipe(err);
+      this.stderr = err;
+    } else {
+      this.stderr = channel.stderr.pipe(new PgidMarkerStripper((pgid) => (this.pgid = pgid)));
+    }
 
     this._exit = new Promise<number>((resolve) => {
       // Resolve on 'close' (all buffered output flushed); 'exit' carries the code on some backends.
@@ -134,10 +205,22 @@ export class SshProcess implements SpawnedProcess {
     return this._exit;
   }
 
-  kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+  async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     const sshSignal = signal.startsWith("SIG") ? signal.slice(3) : signal;
+    if (this.sideExec !== undefined && this.pgid !== undefined) {
+      // The group first, the lone pid if it is not a group leader after all (a server that did
+      // not start a new session). Either way the channel signal below still goes out.
+      const pgid = String(this.pgid);
+      await this.sideExec(`kill -s ${sshSignal} -- -${pgid} 2>/dev/null || kill -s ${sshSignal} ${pgid} 2>/dev/null`).catch(() => undefined);
+    }
     this.channel.signal(sshSignal);
-    return Promise.resolve();
+  }
+
+  async survivors(): Promise<boolean> {
+    if (this.sideExec === undefined || this.pgid === undefined) return false;
+    // A dropped connection answers "none left": nothing more can be done about them from here.
+    const code = await this.sideExec(`kill -s 0 -- -${String(this.pgid)} 2>/dev/null`).catch(() => 1);
+    return code === 0;
   }
 }
 
@@ -159,6 +242,20 @@ function getSftp(client: Client): Promise<SFTPWrapper> {
 function clientExec(client: Client, command: string): Promise<ClientChannel> {
   return new Promise<ClientChannel>((resolve, reject) => {
     client.exec(command, (err, channel) => (err ? reject(err) : resolve(channel)));
+  });
+}
+
+/** Run a command for its exit status alone: output is drained and discarded. */
+async function execForExitCode(client: Client, command: string): Promise<number> {
+  const channel = await clientExec(client, command);
+  return await new Promise<number>((resolve) => {
+    let code: number | null = null;
+    channel.on("exit", (exitCode: number | null) => {
+      code = exitCode;
+    });
+    channel.on("close", () => resolve(code ?? 1));
+    channel.resume();
+    channel.stderr.resume();
   });
 }
 
@@ -517,8 +614,10 @@ export class SshMachine extends BaseMachine {
     // Layer proxy forwarding under the caller's overrides (caller wins on conflict).
     const merged = { ...this.injectedEnv, ...(env ?? {}) };
     const command = buildSshExecCommand(argv, this.cwd, Object.keys(merged).length > 0 ? merged : undefined);
-    const channel = await clientExec(this.client, command);
-    return new SshProcess(channel);
+    // A Windows server's shell has no process groups (or `sh`) to report — signal the channel.
+    if (this.osEnv.osKind === "Windows") return new SshProcess(await clientExec(this.client, command));
+    const channel = await clientExec(this.client, SSH_PGID_REPORT + command);
+    return new SshProcess(channel, (side) => execForExitCode(this.client, side));
   }
 
   close(): Promise<void> {

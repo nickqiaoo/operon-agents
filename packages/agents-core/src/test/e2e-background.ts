@@ -27,7 +27,12 @@ import {
   type Message,
   type SteerMessage,
   type ToolResult,
+  type CommandStarter,
 } from "../index.ts";
+import { CommandBackgroundTask } from "../capabilities/background/index.ts";
+import { runCommandInline } from "../tool/background.ts";
+import { prepareBackgroundLog } from "../tool/index.ts";
+import { looksLikePrompt } from "../capabilities/background/stall-watchdog.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -52,6 +57,13 @@ async function runTool(tool: ReturnType<typeof backgroundListTool>, args: unknow
 }
 
 let MACHINE: LocalMachine;
+
+async function mkdtempDir(): Promise<string> {
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  return await mkdtemp(join(tmpdir(), "operon-bg-stall-"));
+}
 
 function scriptedTask(opts: {
   idPrefix: string;
@@ -853,6 +865,224 @@ async function testBlockingReadIsInterruptible(): Promise<void> {
   await mgr.stopAll("test done");
 }
 
+/**
+ * A stop the backend could not confirm is not reported as a kill. The starter below does what
+ * a backend does when its kill escalation gives up: returns once asked to stop, with
+ * `terminated: false`. Recording that as "killed" told the model a server or build was gone
+ * while it kept running.
+ */
+async function testUnconfirmedStopIsNotAKill(): Promise<void> {
+  const walksAway: CommandStarter = ({ signal }) =>
+    new Promise((resolve) => {
+      const settle = (): void => resolve({ stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: false });
+      if (signal.aborted) settle();
+      else signal.addEventListener("abort", settle, { once: true });
+    });
+  const stops: CommandStarter = ({ signal }) =>
+    new Promise((resolve) => {
+      const settle = (): void => resolve({ stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: true });
+      if (signal.aborted) settle();
+      else signal.addEventListener("abort", settle, { once: true });
+    });
+  const logPath = "/tmp/operon-background-test-unconfirmed.log";
+
+  // BackgroundStop on a detached command.
+  const mgr = new BackgroundManager();
+  mgr.attach({});
+  const stubborn = mgr.registerTask(new CommandBackgroundTask(walksAway, "npm run dev", "bash: npm run dev", { logPath, machine: MACHINE }));
+  const stubbornInfo = await mgr.stop(stubborn, undefined);
+  check("unconfirmed stop: a command that may still run is not recorded as killed", stubbornInfo?.status === "failed");
+  check("unconfirmed stop: and says why", stubbornInfo?.stopReason?.includes("may still be running") === true);
+  const confirmed = mgr.registerTask(new CommandBackgroundTask(stops, "npm test", "bash: npm test", { logPath, machine: MACHINE }));
+  check("unconfirmed stop: a confirmed stop is still a kill", (await mgr.stop(confirmed, undefined))?.status === "killed");
+
+  // Foreground, through the manager's attached driver.
+  const attached = await mgr.runCommandAttached(walksAway, "npm run dev", "bash: npm run dev", {
+    foregroundSignal: new AbortController().signal,
+    foregroundTimeoutMs: 20,
+    logPath,
+    machine: MACHINE,
+  });
+  check(
+    "unconfirmed stop: attached timeout stays a timeout, flagged as possibly running",
+    attached.kind === "settled" && attached.status === "timed_out" && attached.stillRunning === true,
+  );
+  const attachedOk = await mgr.runCommandAttached(stops, "npm test", "bash: npm test", {
+    foregroundSignal: new AbortController().signal,
+    foregroundTimeoutMs: 20,
+    logPath,
+    machine: MACHINE,
+  });
+  check("unconfirmed stop: a confirmed attached stop carries no flag", attachedOk.kind === "settled" && attachedOk.stillRunning === undefined);
+
+  // Foreground with no task system.
+  const inline = await runCommandInline(walksAway, { foregroundSignal: new AbortController().signal, foregroundTimeoutMs: 20 });
+  check("unconfirmed stop: inline timeout is flagged as possibly running", inline.kind === "settled" && inline.status === "timed_out" && inline.stillRunning === true);
+}
+
+/**
+ * A background command stuck on a prompt is pointed out to the model. Commands get no terminal
+ * and an empty stdin, so a `(y/n)` can never be answered; without this the task just sits there.
+ * A command that is only quiet — a long build — must NOT trigger it.
+ */
+async function testStuckOnAPromptIsReported(): Promise<void> {
+  check("stall: a (y/N) prompt line reads as a prompt", looksLikePrompt("Installing...\nProceed? (y/N) "));
+  check("stall: Press Enter reads as a prompt", looksLikePrompt("Press Enter to continue"));
+  check("stall: npx's install prompt reads as a prompt", looksLikePrompt("Need to install create-vite@5\nOk to proceed? (y) "));
+  check("stall: an ordinary progress line does not", !looksLikePrompt("Compiling 42 of 380 modules"));
+  check("stall: only the LAST line counts", !looksLikePrompt("Continue? (y/n) y\nDone, 3 files written"));
+
+  const bus = new SteerBus();
+  const mgr = new BackgroundManager({ stallDetection: { checkIntervalMs: 20, thresholdMs: 120 } });
+  mgr.attach({ steer: bus });
+  const dir = await mkdtempDir();
+  // Writes its output, then blocks the way a command waiting on stdin does: until stopped.
+  const writesThenBlocks = (logPath: string, output: string): CommandStarter => async ({ signal }) => {
+    await MACHINE.writeText(logPath, output);
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) resolve();
+      else signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    return { stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: true };
+  };
+  const notices = (): SteerMessage[] =>
+    bus.drainFollowUps().filter((m) => m.origin.kind === "extension" && (m.origin as { extensionId: string }).extensionId === "background");
+
+  const promptLog = `${dir}/prompt.log`;
+  const stuck = mgr.registerTask(
+    new CommandBackgroundTask(writesThenBlocks(promptLog, "Scaffolding project...\nOk to proceed? (y) "), "npm create vite", "bash: npm create vite", { logPath: promptLog, machine: MACHINE }),
+  );
+  const quietLog = `${dir}/quiet.log`;
+  const quiet = mgr.registerTask(
+    new CommandBackgroundTask(writesThenBlocks(quietLog, "Compiling 42 of 380 modules\n"), "npm run build", "bash: npm run build", { logPath: quietLog, machine: MACHINE }),
+  );
+  await tick(600);
+  const seen = notices();
+  const text = (m: SteerMessage | undefined): string => (m?.message.content ?? []).map((p) => (p.type === "text" ? p.text : "")).join("");
+  const stuckNotice = seen.find((m) => text(m).includes(stuck));
+  check("stall: a command stuck on a prompt is reported once", seen.filter((m) => text(m).includes(stuck)).length === 1);
+  check("stall: the notice carries the prompt the command printed", text(stuckNotice).includes("Ok to proceed? (y)"));
+  check("stall: and tells the model what to do instead", text(stuckNotice).includes("BackgroundStop"));
+  check("stall: it is not framed as the user speaking", text(stuckNotice).includes("NOT a message from the user"));
+  check("stall: it is not a settle — the task is still running", mgr.getTask(stuck)?.status === "running");
+  check("stall: a command that is merely quiet is not reported", !seen.some((m) => text(m).includes(quiet)));
+
+  await mgr.stop(stuck, undefined);
+  await mgr.stop(quiet, undefined);
+  await tick(300);
+  check("stall: nothing more once the tasks ended", notices().length === 0);
+}
+
+/**
+ * The live tail is the only thing reading a foreground command's output — its pipes are empty
+ * by construction — but a read is a whole remote command on a sandbox, so a log that has gone
+ * quiet must be ASKED about (one fileInfo) rather than read, at a backing-off interval.
+ */
+async function testQuietOutputIsProbedNotRead(): Promise<void> {
+  const { appendFile, writeFile } = await import("node:fs/promises");
+  const counts = { reads: 0, stats: 0 };
+  const counted = new Proxy(MACHINE, {
+    get(target, prop, receiver: unknown) {
+      if (prop === "readBytes") {
+        return (...args: Parameters<LocalMachine["readBytes"]>) => {
+          counts.reads += 1;
+          return target.readBytes(...args);
+        };
+      }
+      if (prop === "fileInfo") {
+        return (...args: Parameters<LocalMachine["fileInfo"]>) => {
+          counts.stats += 1;
+          return target.fileInfo(...args);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+
+  const mgr = new BackgroundManager({ outputFollow: { intervalMs: 20, quietMaxIntervalMs: 80 } });
+  mgr.attach({});
+  const dir = await mkdtempDir();
+  const logPath = `${dir}/follow.log`;
+  await writeFile(logPath, "");
+
+  const foreground = new AbortController();
+  let live = "";
+  const run = mgr.runCommandAttached(
+    async ({ signal }) => {
+      await appendFile(logPath, "one\n");
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: true };
+    },
+    "slow-command",
+    "bash: slow-command",
+    { foregroundSignal: foreground.signal, logPath, machine: counted as unknown as LocalMachine, onLive: (chunk) => (live += chunk) },
+  );
+
+  await tick(300);
+  check("follow: the first bytes reach the watcher", live === "one\n");
+  // Two reads: the one that took "one\n", and the one that found nothing after it. Every pass
+  // since has been a probe.
+  const readsWhileQuiet = counts.reads;
+  const statsWhileQuiet = counts.stats;
+  check("follow: a quiet log is probed instead of read", readsWhileQuiet === 2 && statsWhileQuiet >= 2);
+
+  await tick(200);
+  check("follow: and stays unread for as long as it is quiet", counts.reads === readsWhileQuiet);
+  check("follow: while the probe keeps looking", counts.stats > statsWhileQuiet);
+
+  await appendFile(logPath, "two\n");
+  await tick(200);
+  check("follow: output that resumes is picked up again", live === "one\ntwo\n");
+  // Two reads, as at the start: the one that took the new bytes, and the one that found the
+  // log quiet again and put the follower back on probes.
+  check("follow: at the cost of two reads, then quiet again", counts.reads === readsWhileQuiet + 2);
+
+  await appendFile(logPath, "three\n");
+  foreground.abort();
+  const outcome = await run;
+  check("follow: the settling drain does not miss the last write", live === "one\ntwo\nthree\n");
+  check("follow: and the run still settles", outcome.kind === "settled");
+}
+
+
+/**
+ * The task-log directory is the same for every command of a session, and creating it is a round
+ * trip — a whole command on some backends — that every Bash call used to pay. It is created once
+ * per machine, and a directory that disappears underneath us still heals on the next call.
+ */
+async function testLogDirIsPreparedOnce(): Promise<void> {
+  const { rm, stat } = await import("node:fs/promises");
+  let mkdirs = 0;
+  const counted = new Proxy(MACHINE, {
+    get(target, prop, receiver: unknown) {
+      if (prop === "mkdir") {
+        return (...args: Parameters<LocalMachine["mkdir"]>) => {
+          mkdirs += 1;
+          return target.mkdir(...args);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  }) as unknown as LocalMachine;
+
+  const first = await prepareBackgroundLog(counted);
+  const second = await prepareBackgroundLog(counted);
+  check("log dir: two commands get two logs", first !== second);
+  check("log dir: both exist", (await stat(first)).isFile() && (await stat(second)).isFile());
+  check("log dir: the directory was created once, not per command", mkdirs === 1);
+
+  // The directory disappears the way a tmp reaper or a `rm -rf` would take it.
+  await rm(first.slice(0, first.lastIndexOf("/")), { recursive: true, force: true });
+  const third = await prepareBackgroundLog(counted);
+  check("log dir: a directory removed underneath us is recreated", (await stat(third)).isFile());
+  check("log dir: which cost exactly one more mkdir", mkdirs === 2);
+}
+
 async function main(): Promise<void> {
   MACHINE = new LocalMachine(process.cwd());
   await testBashBackground();
@@ -871,6 +1101,10 @@ async function main(): Promise<void> {
   await testStorelessBackgroundAgentIsRejected();
   await testBackgroundBashWithoutDurableLogIsRejected();
   await testBlockingReadIsInterruptible();
+  await testUnconfirmedStopIsNotAKill();
+  await testStuckOnAPromptIsReported();
+  await testQuietOutputIsProbedNotRead();
+  await testLogDirIsPreparedOnce();
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;
