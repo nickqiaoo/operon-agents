@@ -216,12 +216,6 @@ export class SshProcess implements SpawnedProcess {
     this.channel.signal(sshSignal);
   }
 
-  async survivors(): Promise<boolean> {
-    if (this.sideExec === undefined || this.pgid === undefined) return false;
-    // A dropped connection answers "none left": nothing more can be done about them from here.
-    const code = await this.sideExec(`kill -s 0 -- -${String(this.pgid)} 2>/dev/null`).catch(() => 1);
-    return code === 0;
-  }
 }
 
 function connectClient(config: ConnectConfig): Promise<Client> {

@@ -28,9 +28,6 @@ import {
 /** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
 
-/** How often a stop checks whether a killed process's children have gone too. */
-const SURVIVOR_POLL_MS = 50;
-
 /**
  * A live OS process, normalized. IMPLEMENTER-SIDE ONLY — this is what {@link BaseMachine.spawn}
  * hands back so ONE copy of `run`'s read/cap/decode/kill-escalate logic can serve backends
@@ -54,12 +51,6 @@ export interface SpawnedProcess {
    * running as an orphan while `run` reports it stopped.
    */
   kill(signal?: NodeJS.Signals): Promise<void>;
-  /**
-   * Whether anything the process started is still alive, asked only after the process itself
-   * has exited. Optional: a backend that cannot tell omits it, and termination is then judged
-   * by the process alone.
-   */
-  survivors?(): boolean | Promise<boolean>;
 }
 
 function codedError(message: string, code: string): NodeJS.ErrnoException {
@@ -300,8 +291,22 @@ export abstract class BaseMachine implements Machine {
    *  backend (or a test) can tighten it; the default matches the shell's own convention. */
   protected sigtermGraceMs = 5_000;
 
-  /** SIGTERM, then SIGKILL if it does not stop. Returns whether the process — and everything it
-   *  started, where the backend can tell — actually stopped. */
+  /**
+   * SIGTERM, then SIGKILL. Returns whether the process stopped within its grace.
+   *
+   * The SIGKILL is UNCONDITIONAL, including on the path where the process exited politely, and
+   * that is the whole trick. A command arrives as `sh -c '…'`, so what exits on SIGTERM is
+   * usually just the shell; anything it started that trapped the signal keeps running, and a
+   * stop that judged by the shell alone would report success over a live orphan.
+   *
+   * Sending it anyway costs nothing — the signal goes to the process GROUP, and a group with
+   * nothing left in it is an ESRCH we ignore. And it costs no TIME, which is the point: a
+   * survivor check could tell us whether the second signal is needed, but the answer only ever
+   * saves a syscall, while asking it needs a poll loop. Waiting out the grace before killing
+   * would cost real time, so we do not do that either: a child still alive after its parent
+   * died of SIGTERM has already declined to go quietly, and giving it another five seconds to
+   * reconsider is five seconds of a stopped command still holding its port.
+   */
   private async escalatingKill(proc: SpawnedProcess, graceMs = this.sigtermGraceMs): Promise<boolean> {
     try {
       await proc.kill("SIGTERM");
@@ -309,29 +314,17 @@ export abstract class BaseMachine implements Machine {
       /* already gone */
     }
     const exited = proc.wait().then(() => true, () => true);
-    if (await this.stoppedBy(proc, exited, Date.now() + graceMs)) return true;
+    const stopped = await Promise.race([exited, sleep(graceMs).then(() => false)]);
+
     try {
       await proc.kill("SIGKILL");
     } catch {
-      return proc.exitCode !== null && !(await proc.survivors?.());
+      /* nothing left to signal */
     }
-    return await this.stoppedBy(proc, exited, Date.now() + graceMs);
-  }
+    if (stopped) return true;
 
-  /**
-   * The process exited AND left nothing running, before `deadline`. A shell exits on SIGTERM
-   * straight away while a child that traps the signal keeps going — judging by the shell alone
-   * would skip the SIGKILL that child needs and report it stopped.
-   */
-  private async stoppedBy(proc: SpawnedProcess, exited: Promise<boolean>, deadline: number): Promise<boolean> {
-    const leaderExited = await Promise.race([exited, sleep(Math.max(0, deadline - Date.now())).then(() => false)]);
-    if (!leaderExited) return false;
-    while (await proc.survivors?.()) {
-      const left = deadline - Date.now();
-      if (left <= 0) return false;
-      await sleep(Math.min(SURVIVOR_POLL_MS, left));
-    }
-    return true;
+    // It outlived SIGTERM, so give SIGKILL the same grace to land before giving up on it.
+    return await Promise.race([exited, sleep(graceMs).then(() => false)]);
   }
 
   /** `spawn` has no cwd parameter; a backend without a native one runs through a subshell. */

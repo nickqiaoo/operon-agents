@@ -319,15 +319,4 @@ class LocalProcess implements SpawnedProcess {
     this.child.kill(signal);
   }
 
-  survivors(): boolean {
-    const pid = this.child.pid;
-    if (!this.group || pid === undefined) return false;
-    try {
-      process.kill(-pid, 0);
-      return true;
-    } catch (error) {
-      // EPERM: a member exists but belongs to someone else (it changed uid) — still alive.
-      return (error as NodeJS.ErrnoException).code === "EPERM";
-    }
-  }
 }

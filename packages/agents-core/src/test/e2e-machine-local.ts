@@ -8,7 +8,9 @@
  *    exits without reading it fails that write with EPIPE, delivered as an event rather than a
  *    throw, so the try/catch around end() never saw it and node killed the whole process.
  *  - Stopping a command signalled only the shell it ran under. `sh -c 'cd … && cmd'` exits on
- *    SIGTERM while `cmd` keeps running as an orphan — and run() reported it terminated.
+ *    SIGTERM while `cmd` keeps running as an orphan — and run() reported it terminated. The fix
+ *    is two parts: signal the process GROUP, and send SIGKILL unconditionally afterwards, since
+ *    the shell exiting says nothing about what it started.
  */
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -101,7 +103,11 @@ async function stopReachesTheWholeTree(): Promise<void> {
   );
   await sleepMs(100);
   check("tree: a child that ignores SIGTERM is escalated to SIGKILL", processesMatching(`${marker}-b`) === "");
-  check("tree: escalation waited out the grace period first", Date.now() - started >= 200 + 300);
+  // The shell died of SIGTERM straight away, so the grace it was given is already over for
+  // anything still running: a child that outlived its parent has declined to go quietly, and
+  // waiting the full grace again before SIGKILL would just be a stopped command holding its
+  // port for longer. The stop costs the timeout, not the timeout plus the grace.
+  check("tree: SIGKILL did not wait out a grace the shell had already used", Date.now() - started < 200 + 300);
   check("tree: and the stop is reported as real", stubborn.terminated);
 
   // Leave nothing behind even if an assertion above failed.
