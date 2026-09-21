@@ -7,6 +7,23 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **MCP transport admission** (`operon-agents-core`, `operon-agents`). A host now states which MCP
+  transports it is willing to run: `createMcpServers`, `mcpServersCapability` and
+  `mcpSessionCapability` take `allowedTransports`, and `defaultCapabilities` takes
+  `allowedMcpTransports`. Anything else is refused with `McpTransportNotPermittedError` while the
+  server set is being BUILT, rather than when the connection is attempted — `attempt()` turns a
+  failure into a `failed` status and a warning, which is right for "the server is down" and wrong
+  for "this host will not run that". A server host should pass `["http"]`: an stdio server is a
+  child process of the harness, so it does not follow the session's machine into a sandbox, does
+  not survive the replica model a server is deployed under, and carries its secrets in process
+  environment. Omitting the option keeps both transports, so nothing changes for a local host, and
+  servers disabled with `enabled: false` are exempt. See `docs/architecture.md` §6.3 for which
+  capabilities follow the machine and which stay with the host.
+
 ## [0.1.0-alpha.8] — 2026-09-16
 
 ### Added

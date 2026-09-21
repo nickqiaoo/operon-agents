@@ -444,6 +444,53 @@ never ended early by an older turn's `turn.ended` arriving in the backfill.
 > framework-level invariant, and making every consumer implement
 > leases and fencing outsources exactly the part that is easiest to get wrong and hardest to test.
 
+### 6.3 What follows the machine, and what stays with the host
+
+A host that runs its sessions in a sandbox writes `new Harness({ machine: workspace.machine })`:
+the harness is a process here, the machine is a handle to somewhere else. Capabilities then split
+themselves along one line — whether they reach the world through `Machine` or through the host
+process — and the split is worth stating, because it is invisible in the capability list.
+
+| | Where it runs | Why |
+|---|---|---|
+| Built-in tools, `background`, `user-hooks`, the skill scan | **Follow the machine** | All of them reach the world through `Machine` (`machine.run`, `machine.readBytes`), so pointing the machine at a sandbox moves them with it, with no capability aware that anything changed |
+| **MCP connections** | **Stay with the host** | `mcp/server.ts` does not mention `Machine` at all. An http server is a network call from the harness process; an stdio server is a **child process of it**. Neither follows the session's machine |
+| `todo`, `plan`, `goal`, `task`, `compaction` | Either — it makes no difference | Pure state over `T.Store`; nothing touches the world |
+
+That MCP stays host-side is the **right default, not an oversight**. Most MCP servers are API
+clients (Linear, Notion, GitHub), and for those, host-side is where they belong: credentials never
+enter the sandbox, `McpOAuthService` and its swappable credential store keep working, and
+`T.McpServers` reuses one set of connections across every session of a working directory. Servers
+that genuinely need the workspace's files — filesystem, shell — are the case MCP is the wrong tool
+for; the built-in tools already run there.
+
+**Therefore stdio is a local-host transport.** It is fine, and normal, on a laptop or a
+single-tenant self-deployment. On a server host it is four separate problems: the child process
+does not follow the machine into the sandbox, so it reads the *host's* disk instead of the
+workspace; `T.McpServers`'s "one set of connections per working directory" stops holding across
+replicas and rolling restarts; a crashing `npx`-launched server takes down a process carrying every
+tenant's sessions; and stdio secrets travel in `config.env`, which has no tenant boundary. A server
+host therefore states its transports once, where it assembles capabilities:
+
+```ts
+defaultCapabilities({ ..., allowedMcpTransports: ["http"] })
+```
+
+`createMcpServers` refuses anything else **while the set is being built** — not where the transport
+is constructed, because that runs inside `attempt()`, whose job is to turn a failure into a
+`failed` status and a warning. "This host will not run that" is a startup error the deployer must
+not be able to miss, so `McpTransportNotPermittedError` names the offending server before a single
+controller exists. A server switched off with `enabled: false` is exempt: it spawns nothing, and
+that is how one config file serves both a laptop and a server.
+
+Stating it is the host's call rather than the kernel's, which is Invariant 7 again — the same shape
+as cron being local-only. And the default matters: `transport` defaults to `"stdio"`, so a server
+host that states nothing will spawn a process for a config that merely forgot the field.
+
+> **The path not taken**: making stdio follow the machine (running the child *inside* the sandbox)
+> needs a stdin handle on `Machine`, which was deliberately not built. stdio MCP does not get
+> remoted; it is local-host-only, and that is the end of it.
+
 ---
 
 ## 7 · The journey of one prompt (threading all six rings)

@@ -83,6 +83,7 @@ import {
   userHooksCapability,
   type HookDef,
   type McpServerConfig,
+  type McpTransportKind,
   type PluginManager,
   type ApprovalRequestOptions,
   type Machine,
@@ -201,6 +202,19 @@ export interface DefaultCapabilitiesOptions {
    * server. Only consulted when an MCP capability is built.
    */
   readonly oauthService?: McpOAuthService;
+  /**
+   * MCP transports this host will run. Omitted means both, which is right for a local host.
+   *
+   * A SERVER host should pass `["http"]`. An stdio server is a child process of the harness
+   * process, so it neither follows the session's machine into a sandbox nor survives the
+   * replica model a server is deployed under — and `transport` defaults to `"stdio"`, so
+   * leaving this unset means a config that merely forgot the field spawns a process on the
+   * server. `McpTransportNotPermittedError` names the offending server at startup.
+   *
+   * The same reasoning as Invariant 7 (cron is a local-only capability): what a host is willing
+   * to run is the host's statement, not the kernel's.
+   */
+  readonly allowedMcpTransports?: readonly McpTransportKind[];
 }
 
 /**
@@ -245,7 +259,10 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
   // MCP: the workspace's shared connections when it has them (a view per session), else
   // workspace servers + enabled plugin servers (namespaced, so they can't collide) per session.
   const sessionMcp = options.sessionMcpServers ?? {};
-  const mcpOptions = oauthService !== undefined ? { oauthService } : {};
+  const mcpOptions = {
+    ...(oauthService !== undefined ? { oauthService } : {}),
+    ...(options.allowedMcpTransports !== undefined ? { allowedTransports: options.allowedMcpTransports } : {}),
+  };
   if (sharedMcp) {
     capabilities.push(mcpSessionCapability(sessionMcp, mcpOptions));
   } else if (options.mcpServers !== undefined || manager !== undefined || Object.keys(sessionMcp).length > 0) {

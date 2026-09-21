@@ -14,6 +14,56 @@ import type { McpServerConfig } from "../config/schema.ts";
 
 export type McpServerStatus = "pending" | "connected" | "failed" | "disabled" | "needs-auth";
 
+/** How a server is reached. `stdio` is a CHILD PROCESS of the host; `http` is a network call. */
+export type McpTransportKind = "stdio" | "http";
+
+/**
+ * Raised when a configured server asks for a transport its host does not offer.
+ *
+ * The case this exists for is `stdio` on a server host. An stdio server is not reached over a
+ * wire at all: it is spawned as a child of whatever process holds the MCP client — the harness —
+ * and so it stays on THAT process's machine even when every tool the session runs has been
+ * pushed out to a sandbox. On a single-tenant local host that is exactly right. On a server it
+ * is four problems at once:
+ *
+ *  - LIFECYCLE. `T.McpServers` is "one set of connections per working directory", which holds
+ *    inside one process and stops holding the moment the server runs as more than one replica:
+ *    each replica spawns its own children, and a rolling restart takes them with it.
+ *  - FAULT DOMAIN. A leaking or crashing `npx`-launched server takes down a process that is
+ *    carrying every other tenant's sessions.
+ *  - CREDENTIALS. stdio secrets travel in `config.env` — process environment, which has no
+ *    tenant boundary. The http path has `McpOAuthService` and a swappable credential store
+ *    precisely because it was designed for that boundary; stdio has no counterpart.
+ *  - ISOLATION. A host that moved execution into a sandbox did so to contain it. An stdio
+ *    server reopens an unsandboxed execution surface beside it, one that reads the HOST's disk
+ *    rather than the workspace the agent's own tools operate on.
+ *
+ * So this is a host-declared admission rule, not a kernel prohibition. A single-tenant
+ * self-deployment is a legitimate case, and there stdio is no worse than it is in a CLI. The
+ * host states which transports it is willing to run; core refuses the rest, by name.
+ */
+export class McpTransportNotPermittedError extends Error {
+  readonly serverName: string;
+  readonly transport: McpTransportKind;
+  readonly allowed: readonly McpTransportKind[];
+
+  constructor(serverName: string, transport: McpTransportKind, allowed: readonly McpTransportKind[]) {
+    super(
+      `MCP server "${serverName}" asks for the "${transport}" transport, which this host does not ` +
+        `run (allowed: ${allowed.join(", ")}). ` +
+        (transport === "stdio"
+          ? `An stdio server is spawned as a child of this process, on this machine — and "stdio" ` +
+            `is also what a config with no \`transport\` field defaults to. Point it at an http ` +
+            `server, disable it with \`enabled: false\`, or leave it out of this host's configuration.`
+          : `Configure it with one of the allowed transports.`),
+    );
+    this.name = "McpTransportNotPermittedError";
+    this.serverName = serverName;
+    this.transport = transport;
+    this.allowed = allowed;
+  }
+}
+
 /** The `ToolProvider.id` a server's provider carries — `mcp:<server name>`, unsanitized. */
 function mcpProviderId(serverName: string): string {
   return `mcp:${serverName}`;
@@ -21,7 +71,7 @@ function mcpProviderId(serverName: string): string {
 
 export interface McpServerView {
   readonly name: string;
-  readonly transport: "stdio" | "http";
+  readonly transport: McpTransportKind;
   readonly status: McpServerStatus;
   readonly error?: string;
 }
@@ -417,6 +467,12 @@ class McpServerController {
 
 export interface McpServersCapabilityOptions {
   readonly oauthService?: McpOAuthService;
+  /**
+   * Transports this host is willing to run. Omitted means both — the local default, and what
+   * every existing caller gets. A server host passes `["http"]`; see
+   * {@link McpTransportNotPermittedError} for why that is the host's call rather than core's.
+   */
+  readonly allowedTransports?: readonly McpTransportKind[];
   readonly cacheToolsList?: boolean;
   readonly transportFactory?: McpTransportFactory;
   readonly reconnectPolicy?: ReconnectPolicy;
@@ -458,14 +514,42 @@ function keepAliveOptions(
 }
 
 /**
+ * Refuse, up front, any server this host does not offer a transport for.
+ *
+ * A server switched off in configuration is none of this rule's business: `enabled: false` is
+ * how one configuration file serves both a laptop and a server, and rejecting it would take
+ * that away for no gain — a disabled server spawns nothing.
+ */
+function assertTransportsPermitted(
+  configs: Record<string, McpServerConfig>,
+  allowed: readonly McpTransportKind[] | undefined,
+): void {
+  if (allowed === undefined) return;
+  for (const [name, config] of Object.entries(configs)) {
+    if (config.enabled === false) continue;
+    if (!allowed.includes(config.transport)) {
+      throw new McpTransportNotPermittedError(name, config.transport, allowed);
+    }
+  }
+}
+
+/**
  * The controller set behind a group of configured servers — buildable on its own so a WORKSPACE
  * can hold one set of connections for every session under it (`T.McpServers`), or a session can
  * own a private set (`mcpServersCapability`). Nothing connects until `handle.connect()`.
+ *
+ * Transport admission is checked HERE, while the set is being built, and not where the
+ * transport is actually constructed. That is deliberate: `transportFromConfig` runs inside
+ * `attempt()`, whose whole job is to be fault-isolated — it turns a throw into a `failed`
+ * status and a warning, which is right for "the server is down" and wrong for "this host will
+ * not run that". A misconfiguration should be a startup error the deployer cannot miss, not one
+ * more warning in a stream, so it is raised before a single controller exists.
  */
 export function createMcpServers(
   configs: Record<string, McpServerConfig>,
   options: McpServersCapabilityOptions = {},
 ): McpServersHandle {
+  assertTransportsPermitted(configs, options.allowedTransports);
   const listeners = new Set<McpStatusListener>();
   const notify: McpStatusListener = (view) => {
     for (const listener of listeners) listener(view);
