@@ -10,7 +10,7 @@ import {
   buildAgentFromProfile,
   CompactionService,
   DEFAULT_AGENT_PROFILES,
-  LocalMachine,
+  LocalEnvironment,
   readTool,
   resolveAgentProfiles,
   Session,
@@ -90,14 +90,14 @@ async function main(): Promise<void> {
     check("builtin: coder prompt carries its subagent role + inherited env section", coderPrompt.includes("subagent") && coderPrompt.includes("/repo"));
   }
 
-  // ── D: build a runnable Agent — system prompt renders from a live machine ──
+  // ── D: build a runnable Agent — system prompt renders from a live environment ──
   {
     const dir = mkdtempSync(join(tmpdir(), "agent-fw-profiles-"));
     try {
-      class CountingLocalMachine extends LocalMachine {
+      class CountingLocalEnvironment extends LocalEnvironment {
         readCount = 0;
         listCount = 0;
-        override async readBytes(path: string, range?: Parameters<LocalMachine["readBytes"]>[1]) {
+        override async readBytes(path: string, range?: Parameters<LocalEnvironment["readBytes"]>[1]) {
           this.readCount += 1;
           return super.readBytes(path, range);
         }
@@ -108,9 +108,9 @@ async function main(): Promise<void> {
       }
 
       writeFileSync(join(dir, "AGENTS.md"), "initial project instruction");
-      const machine = new CountingLocalMachine(dir);
+      const environment = new CountingLocalEnvironment(dir);
       const compaction = new CompactionService();
-      const session = await openTestSession({ machine, capabilities: [{ name: "compaction", provides: [{ token: T.Compaction, create: () => compaction }] }] });
+      const session = await openTestSession({ environment, capabilities: [{ name: "compaction", provides: [{ token: T.Compaction, create: () => compaction }] }] });
       const unknown: string[] = [];
       const agent = await buildAgentFromProfile(DEFAULT_AGENT_PROFILES["coder"]!, {
         tools: { Read: readTool, Write: writeTool }, // only these resolve; the rest are skipped
@@ -122,46 +122,46 @@ async function main(): Promise<void> {
         sessionId: "t",
         address: "main",
         signal: new AbortController().signal,
-        machine,
-        resolveSystemPromptContext: () => session.resolveSystemPromptContext(machine),
+        environment,
+        resolveSystemPromptContext: () => session.resolveSystemPromptContext(environment),
       };
       const text = (await agent.resolveInstructions(runtimeContext)) ?? "";
-      const readsAfterFirst = machine.readCount;
+      const readsAfterFirst = environment.readCount;
       const second = (await agent.resolveInstructions(runtimeContext)) ?? "";
       check("build: rendered prompt includes the live cwd", text.includes(dir));
       check("build: rendered prompt includes AGENTS.md", text.includes("initial project instruction"));
       check("build: rendered prompt includes the subagent role", text.includes("subagent"));
-      check("cache: ordinary turns reuse an identical prompt without filesystem reads", second === text && machine.readCount === readsAfterFirst);
-      check("cache: cwdListing was removed (listDir is never called)", machine.listCount === 0 && !text.includes("Working directory contents"));
+      check("cache: ordinary turns reuse an identical prompt without filesystem reads", second === text && environment.readCount === readsAfterFirst);
+      check("cache: cwdListing was removed (listDir is never called)", environment.listCount === 0 && !text.includes("Working directory contents"));
       check("cache: Session date is calendar-only", /- Date: \d{4}-\d{2}-\d{2}(?:\n|$)/.test(text) && !/- Date: .*T/.test(text));
       check("skills: profile prompt has no duplicate skills section", !text.includes("## Available skills"));
 
       compaction.recordCompleted();
       const afterCompact = (await agent.resolveInstructions(runtimeContext)) ?? "";
-      check("cache: full-compaction revision rereads but preserves stable output", machine.readCount > readsAfterFirst && afterCompact === text);
+      check("cache: full-compaction revision rereads but preserves stable output", environment.readCount > readsAfterFirst && afterCompact === text);
 
-      const readsBeforeEdit = machine.readCount;
+      const readsBeforeEdit = environment.readCount;
       writeFileSync(join(dir, "AGENTS.md"), "updated project instruction");
       const afterEdit = (await agent.resolveInstructions(runtimeContext)) ?? "";
       check("cache: later turns reuse the Session AGENTS.md snapshot after an external edit",
-        machine.readCount === readsBeforeEdit && afterEdit === afterCompact && !afterEdit.includes("updated project instruction"));
+        environment.readCount === readsBeforeEdit && afterEdit === afterCompact && !afterEdit.includes("updated project instruction"));
 
       const subdir = join(dir, "worktree");
       mkdirSync(subdir);
       writeFileSync(join(subdir, "AGENTS.md"), "worktree instruction");
-      const worktree = machine.withCwd(subdir);
+      const worktree = environment.withCwd(subdir);
       const worktreePrompt = (await agent.resolveInstructions({
         ...runtimeContext,
-        machine: worktree,
+        environment: worktree,
         resolveSystemPromptContext: () => session.resolveSystemPromptContext(worktree),
       })) ?? "";
-      check("runtime: shared profile Agent renders the current worktree machine+cwd", worktreePrompt.includes(subdir) && worktreePrompt.includes("worktree instruction"));
+      check("runtime: shared profile Agent renders the current worktree environment+cwd", worktreePrompt.includes(subdir) && worktreePrompt.includes("worktree instruction"));
 
       await session.close();
-      const readsBeforeResume = machine.readCount;
-      const resumed = await openTestSession({ machine });
-      await resumed.resolveSystemPromptContext(machine);
-      check("resume: a newly opened Session rereads prompt context", machine.readCount > readsBeforeResume);
+      const readsBeforeResume = environment.readCount;
+      const resumed = await openTestSession({ environment });
+      await resumed.resolveSystemPromptContext(environment);
+      check("resume: a newly opened Session rereads prompt context", environment.readCount > readsBeforeResume);
       await resumed.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

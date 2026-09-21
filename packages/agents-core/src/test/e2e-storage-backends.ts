@@ -1,5 +1,5 @@
 // Every storage backend is the same LINEAR session log over a tiny physical
-// machine (append log + KV + blobs). This runs ONE shared suite against each: memory always
+// environment (append log + KV + blobs). This runs ONE shared suite against each: memory always
 // (which covers the LogSessionStore base — append/read, blob offload, wire-version), pg/redis only
 // when a real server is reachable (DATABASE_URL / REDIS_URL), since core ships no driver.
 import { memoryStorage, pgStorage, redisStorage } from "../index.ts";

@@ -1,6 +1,6 @@
 import { expandSkillParameters, skillArgumentNames } from "./parser.ts";
 import { discoverSkills, type DiscoverSkillsOptions } from "./scanner.ts";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { SkillCatalog, SkillDefinition, SkillRoot, SkillSource, SkippedSkill } from "./types.ts";
 import { isFlowSkillType, isInlineSkillType, normalizeSkillName } from "./types.ts";
 
@@ -29,11 +29,11 @@ export class SkillRegistry implements SkillCatalog {
     this.onWarning = options.onWarning ?? (() => {});
   }
 
-  async loadRoots(machine: Machine, roots: readonly SkillRoot[]): Promise<void> {
+  async loadRoots(environment: Environment, roots: readonly SkillRoot[]): Promise<void> {
     for (const root of roots) {
       if (!this.roots.includes(root.path)) this.roots.push(root.path);
     }
-    const skills = await discoverSkills(machine, {
+    const skills = await discoverSkills(environment, {
       roots,
       onWarning: this.onWarning,
       onSkippedByPolicy: (skill) => this.skipped.push(skill),

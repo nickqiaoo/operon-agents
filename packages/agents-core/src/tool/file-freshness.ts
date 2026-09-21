@@ -19,10 +19,10 @@
  * files forgets the least recently used, which then reads as "not read yet" — the
  * conservative direction.
  */
-import type { FileVersion, LineEndings } from "./machine.ts";
-// Same predicate the Machine-side check uses (BaseMachine.assertUnchanged) — the two
+import type { FileVersion, LineEndings } from "./environment.ts";
+// Same predicate the Environment-side check uses (BaseEnvironment.assertUnchanged) — the two
 // run at different moments and must never disagree about what "unchanged" means.
-import { fileVersionsMatch, hashFileContent } from "./support/machine-ops.ts";
+import { fileVersionsMatch, hashFileContent } from "./support/environment-ops.ts";
 
 /** Default record cap of a {@link FileFreshnessLedger}. */
 export const LEDGER_MAX_ENTRIES = 5000;

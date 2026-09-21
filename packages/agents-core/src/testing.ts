@@ -9,7 +9,7 @@ import { Scope } from "./scope/scope.ts";
 import { T } from "./scope/tokens.ts";
 import { Runner, type RunnerConfig } from "./agent/runner.ts";
 import { Session, type SessionOpenOptions } from "./agent/session.ts";
-import type { Machine, MachineFactory } from "./tool/machine.ts";
+import type { Environment, EnvironmentFactory } from "./tool/environment.ts";
 import type { SessionStore, AgentRecord } from "./store/index.ts";
 import { ListenerSink, type EventSink, type EventPublicationMode } from "./events/index.ts";
 import type { TracingProcessor } from "./tracing/index.ts";
@@ -21,11 +21,11 @@ import { readLog } from "./capabilities/capability-state.ts";
 import { SteerBus } from "./loop/steer.ts";
 import type { BackgroundSpawner } from "./tool/background.ts";
 import type { Logger } from "./logging/index.ts";
-import { NullMachine } from "./tool/machine-null.ts";
+import { NullEnvironment } from "./tool/environment-null.ts";
 
 
 export interface TestSessionWiring {
-  readonly machine?: Machine | MachineFactory;
+  readonly environment?: Environment | EnvironmentFactory;
   readonly store?: SessionStore;
   readonly events?: EventSink;
   readonly tracing?: TracingProcessor;
@@ -43,7 +43,7 @@ export type TestRunnerOptions<TContext = unknown> = TestSessionWiring & RunnerCo
 /** A harness scope carrying the harness-tier parts of a wiring bag. */
 export function testHarnessScope(wiring: TestSessionWiring = {}): Scope<"harness"> {
   const harness = new Scope("harness");
-  if (wiring.machine !== undefined) harness.register(T.MachineFactory, wiring.machine, { owned: false });
+  if (wiring.environment !== undefined) harness.register(T.EnvironmentFactory, wiring.environment, { owned: false });
   if (wiring.tracing !== undefined) harness.register(T.Tracing, wiring.tracing, { owned: false });
   if (wiring.logger !== undefined) harness.register(T.Logger, wiring.logger, { owned: false });
   if (wiring.eventPublication !== undefined) harness.register(T.EventPublication, wiring.eventPublication);
@@ -62,8 +62,8 @@ export function wireTestSession(scope: Scope<"session">, wiring: TestSessionWiri
 
 /** `new Runner(...)` for tests: the wiring bag becomes a harness scope + a per-session hook. */
 export function testRunner<TContext = unknown>(options: TestRunnerOptions<TContext> = {}): Runner<TContext> {
-  const { machine, store, events, tracing, responder, permission, capabilities, steer, background, eventPublication, logger, session, ...config } = options;
-  const wiring: TestSessionWiring = { machine, store, events, tracing, responder, permission, capabilities, steer, background, eventPublication, logger };
+  const { environment, store, events, tracing, responder, permission, capabilities, steer, background, eventPublication, logger, session, ...config } = options;
+  const wiring: TestSessionWiring = { environment, store, events, tracing, responder, permission, capabilities, steer, background, eventPublication, logger };
   return new Runner<TContext>(testHarnessScope(wiring), {
     ...config,
     session: async (scope, ctx) => {
@@ -112,11 +112,11 @@ export function testSessionScope(wiring: TestSessionWiring = {}): Scope<"session
   scope.provide(T.Events, () => new ListenerSink());
   scope.provide(T.Steer, () => new SteerBus());
   scope.provide(T.SessionSignal, () => new AbortController().signal);
-  if (!scope.hasLocal(T.Machine)) {
-    const factory = scope.get(T.MachineFactory);
-    if (factory !== undefined && typeof factory !== "function") scope.register(T.Machine, factory, { owned: false });
+  if (!scope.hasLocal(T.Environment)) {
+    const factory = scope.get(T.EnvironmentFactory);
+    if (factory !== undefined && typeof factory !== "function") scope.register(T.Environment, factory, { owned: false });
   }
-  scope.provide(T.Machine, () => new NullMachine());
+  scope.provide(T.Environment, () => new NullEnvironment());
   scope.provide(T.SessionLog, (s) => () => readLog(s.get(T.Store) ?? s.get(T.StoreBackend)));
   return scope;
 }

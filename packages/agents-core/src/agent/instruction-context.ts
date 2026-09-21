@@ -1,6 +1,6 @@
 import { dirname, join } from "pathe";
-import type { Machine } from "../tool/machine.ts";
-import { readTextFile } from "../tool/support/machine-ops.ts";
+import type { Environment } from "../tool/environment.ts";
+import { readTextFile } from "../tool/support/environment-ops.ts";
 
 const AGENTS_MD_MAX_CHARS = 32 * 1024;
 
@@ -25,20 +25,20 @@ export function formatSystemPromptDate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-/** Build the environment portion of a profile prompt from the active runtime machine. */
+/** Build the environment portion of a profile prompt from the active runtime environment. */
 export async function prepareSystemPromptContext(
-  machine: Machine,
+  environment: Environment,
   now = formatSystemPromptDate(new Date()),
-  cwd = machine.normpath(machine.getcwd()),
+  cwd = environment.normpath(environment.getcwd()),
 ): Promise<SystemPromptContext> {
   return {
-    osKind: machine.osEnv.osKind,
-    osArch: machine.osEnv.osArch,
-    osVersion: machine.osEnv.osVersion,
-    shell: `${machine.osEnv.shellName} (${machine.osEnv.shellPath})`,
+    osKind: environment.osInfo.osKind,
+    osArch: environment.osInfo.osArch,
+    osVersion: environment.osInfo.osVersion,
+    shell: `${environment.osInfo.shellName} (${environment.osInfo.shellPath})`,
     now,
     cwd,
-    agentsMd: await loadAgentsMd(machine, cwd),
+    agentsMd: await loadAgentsMd(environment, cwd),
   };
 }
 
@@ -50,30 +50,30 @@ interface CacheEntry {
 /**
  * Live-Session cache for system-prompt environment data.
  *
- * Machine object identity separates independent local/remote/worktree runtimes; normalized cwd
- * separates differently rooted frames backed by the same machine. Promise values also coalesce
+ * Environment object identity separates independent local/remote/worktree runtimes; normalized cwd
+ * separates differently rooted frames backed by the same environment. Promise values also coalesce
  * concurrent root/subagent reads. Nothing here is persisted, timed, or checked every turn.
  */
 export class SystemPromptContextCache {
   private readonly sessionDate: string;
-  private readonly entries = new Map<Machine, Map<string, CacheEntry>>();
+  private readonly entries = new Map<Environment, Map<string, CacheEntry>>();
 
   constructor(createdAt = new Date()) {
     this.sessionDate = formatSystemPromptDate(createdAt);
   }
 
-  resolve(machine: Machine, revision = 0): Promise<SystemPromptContext> {
-    const cwd = machine.normpath(machine.getcwd());
-    let byCwd = this.entries.get(machine);
+  resolve(environment: Environment, revision = 0): Promise<SystemPromptContext> {
+    const cwd = environment.normpath(environment.getcwd());
+    let byCwd = this.entries.get(environment);
     if (byCwd === undefined) {
       byCwd = new Map();
-      this.entries.set(machine, byCwd);
+      this.entries.set(environment, byCwd);
     }
 
     const cached = byCwd.get(cwd);
     if (cached?.revision === revision) return cached.value;
 
-    const value = prepareSystemPromptContext(machine, this.sessionDate, cwd).catch((error: unknown) => {
+    const value = prepareSystemPromptContext(environment, this.sessionDate, cwd).catch((error: unknown) => {
       if (byCwd?.get(cwd)?.value === value) byCwd.delete(cwd);
       throw error;
     });
@@ -89,13 +89,13 @@ export class SystemPromptContextCache {
 }
 
 /** Collect AGENTS.md from the user dir then filesystem root→cwd (nearest appended last). */
-async function loadAgentsMd(machine: Machine, cwd: string): Promise<string> {
-  const paths = agentsMdPaths(machine, cwd);
+async function loadAgentsMd(environment: Environment, cwd: string): Promise<string> {
+  const paths = agentsMdPaths(environment, cwd);
   // Reads are independent. Keep result order deterministic while avoiding a serial RPC walk on
-  // remote machines.
+  // remote environments.
   const files = await Promise.all(paths.map(async (path): Promise<{ path: string; text: string } | undefined> => {
     try {
-      const text = (await readTextFile(machine, path)).slice(0, AGENTS_MD_MAX_CHARS).trim();
+      const text = (await readTextFile(environment, path)).slice(0, AGENTS_MD_MAX_CHARS).trim();
       return text.length > 0 ? { path, text } : undefined;
     } catch {
       return undefined;
@@ -107,10 +107,10 @@ async function loadAgentsMd(machine: Machine, cwd: string): Promise<string> {
     .join("\n\n");
 }
 
-function agentsMdPaths(machine: Machine, cwd: string): string[] {
-  const candidates = [join(machine.gethome(), ".agents", "AGENTS.md")];
+function agentsMdPaths(environment: Environment, cwd: string): string[] {
+  const candidates = [join(environment.gethome(), ".agents", "AGENTS.md")];
   const dirs: string[] = [];
-  let current = machine.normpath(cwd);
+  let current = environment.normpath(cwd);
   for (;;) {
     dirs.unshift(current);
     const parent = dirname(current);
@@ -121,7 +121,7 @@ function agentsMdPaths(machine: Machine, cwd: string): string[] {
 
   const seen = new Set<string>();
   return candidates.filter((path) => {
-    const key = machine.normpath(path);
+    const key = environment.normpath(path);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

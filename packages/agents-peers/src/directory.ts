@@ -16,7 +16,7 @@
  * host (or an extension) opens it, and closing it only puts it to sleep.
  *
  * `subagent` — one delegation inside a session. It SHARES the parent's store, capabilities,
- * permissions and machine; only its conversation shard and its frame are its own, and its
+ * permissions and environment; only its conversation shard and its frame are its own, and its
  * lifetime is the parent run's. That is the right shape for "go do this for me", and the wrong
  * shape for a durable teammate — which is why the two are not unified.
  */

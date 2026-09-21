@@ -14,7 +14,7 @@ import {
   defineAgent,
   defineTool,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   INTERRUPTION_STATE_KEY,
@@ -65,7 +65,7 @@ function makePickTool(counters: { resolves: number; searches: number; books: num
   });
 }
 
-async function testSuspendResume(machine: LocalMachine): Promise<void> {
+async function testSuspendResume(environment: LocalEnvironment): Promise<void> {
   const counters = { resolves: 0, searches: 0, books: 0 };
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -79,7 +79,7 @@ async function testSuspendResume(machine: LocalMachine): Promise<void> {
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = testRunner({ machine, store, events, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, events, permission: { mode: "yolo" } });
 
   const first = await runner.run(agent, "book me a flight");
   check("suspend: first run interrupts", first.status === "interrupted");
@@ -134,7 +134,7 @@ async function testSuspendResume(machine: LocalMachine): Promise<void> {
   check("suspend: completed resume consumes interruption state", (await store.getState(INTERRUPTION_STATE_KEY)) === null);
 }
 
-async function testMixedBatchSiblingNotRerun(machine: LocalMachine): Promise<void> {
+async function testMixedBatchSiblingNotRerun(environment: LocalEnvironment): Promise<void> {
   const counters = { resolves: 0, searches: 0, books: 0 };
   let echoRuns = 0;
   const echoTool = defineTool({
@@ -162,7 +162,7 @@ async function testMixedBatchSiblingNotRerun(machine: LocalMachine): Promise<voi
   const agent = defineAgent({ name: "mixed", model, instructions: "x", tools: [echoTool, makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "echo and pick");
   check("mixed: run interrupts on the suspending call", first.status === "interrupted");
   check("mixed: only the suspended call is pending", first.interruptions?.length === 1 && first.interruptions[0]!.toolName === "pick");
@@ -180,7 +180,7 @@ async function testMixedBatchSiblingNotRerun(machine: LocalMachine): Promise<voi
   check("mixed: suspended call finished with its answer", counters.books === 1);
 }
 
-async function testPartialAnswerAutoRepark(machine: LocalMachine): Promise<void> {
+async function testPartialAnswerAutoRepark(environment: LocalEnvironment): Promise<void> {
   const counters = { resolves: 0, searches: 0, books: 0 };
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -194,7 +194,7 @@ async function testPartialAnswerAutoRepark(machine: LocalMachine): Promise<void>
   const agent = defineAgent({ name: "partial", model, instructions: "x", tools: [makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "pick car and bike");
   check("repark: both suspensions surfaced", first.interruptions?.length === 2);
   check("repark: both ran their search phase", counters.searches === 2);
@@ -230,7 +230,7 @@ async function testPartialAnswerAutoRepark(machine: LocalMachine): Promise<void>
   check("repark: both calls eventually booked", counters.books === 2);
 }
 
-async function testMultiRoundSuspend(machine: LocalMachine): Promise<void> {
+async function testMultiRoundSuspend(environment: LocalEnvironment): Promise<void> {
   const rounds: string[] = [];
   const wizardTool = defineTool({
     name: "wizard",
@@ -261,7 +261,7 @@ async function testMultiRoundSuspend(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "wiz", model, instructions: "x", tools: [wizardTool] });
 
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "run the wizard");
   check("rounds: round 1 pauses", first.status === "interrupted");
 
@@ -292,7 +292,7 @@ async function testMultiRoundSuspend(machine: LocalMachine): Promise<void> {
   check("rounds: each round saw ITS answer (one-shot, no stale replay)", JSON.stringify(rounds) === '["round1:A1","round2:A2"]');
 }
 
-async function testSuspendMisuseAndBadState(machine: LocalMachine): Promise<void> {
+async function testSuspendMisuseAndBadState(environment: LocalEnvironment): Promise<void> {
   const badStateTool = defineTool({
     name: "bad_state",
     description: "suspends with unserializable state",
@@ -327,7 +327,7 @@ async function testSuspendMisuseAndBadState(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = testRunner({ machine, events, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, events, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -340,7 +340,7 @@ async function testSuspendMisuseAndBadState(machine: LocalMachine): Promise<void
   check("misuse: suspend during resolve → descriptive error result", resultTextFor("suspend_in_resolve").includes("only available during tool execution"));
 }
 
-async function testAskUserQuestionDurable(machine: LocalMachine): Promise<void> {
+async function testAskUserQuestionDurable(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(
@@ -357,7 +357,7 @@ async function testAskUserQuestionDurable(machine: LocalMachine): Promise<void> 
   const store = new MemoryStore();
   // No responder anywhere → the question suspends durably instead of soft-failing.
   // manual mode: AskUserQuestion is on the default-approve list (yolo would deny it outright).
-  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ environment, store, permission: { mode: "manual" } });
   const first = await runner.run(agent, "ask me about deploy");
   check("askuser: no responder → durable suspension", first.status === "interrupted");
   const pending = first.interruptions?.[0];
@@ -379,7 +379,7 @@ async function testAskUserQuestionDurable(machine: LocalMachine): Promise<void> 
   check("askuser: tool result contains the answers JSON", answered);
 }
 
-async function testAskUserReentryGuard(machine: LocalMachine): Promise<void> {
+async function testAskUserReentryGuard(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("double_ask", {}), { stopReason: "toolUse" }),
@@ -407,7 +407,7 @@ async function testAskUserReentryGuard(machine: LocalMachine): Promise<void> {
     requestApproval: async () => ({ decision: "approved" as const }),
     requestQuestion: async () => ({ answers: { "Q1?": "a" } }),
   };
-  const runner = testRunner({ machine, responder, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, responder, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
   const tr = result.messages.find((m) => m.role === "toolResult");
@@ -436,7 +436,7 @@ async function testSuspendNeverGuard(): Promise<void> {
   check("suspend contract: a suspend() that returns fails loudly, not a phantom undefined answer", loud);
 }
 
-async function testAnswerKindValidation(machine: LocalMachine): Promise<void> {
+async function testAnswerKindValidation(environment: LocalEnvironment): Promise<void> {
   const counters = { resolves: 0, searches: 0, books: 0 };
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -447,7 +447,7 @@ async function testAnswerKindValidation(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "kinds", model, instructions: "x", tools: [makePickTool(counters)] });
 
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, permission: { mode: "yolo" } });
   const first = await runner.run(agent, "pick a seat");
   const persisted = parseInterruptionState(await store.getState(INTERRUPTION_STATE_KEY));
 
@@ -469,17 +469,17 @@ async function testAnswerKindValidation(machine: LocalMachine): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "operon-suspend-"));
-  const machine = new LocalMachine({ cwd: dir });
+  const environment = new LocalEnvironment({ cwd: dir });
   try {
-    await testSuspendResume(machine);
-    await testMixedBatchSiblingNotRerun(machine);
-    await testPartialAnswerAutoRepark(machine);
-    await testMultiRoundSuspend(machine);
-    await testSuspendMisuseAndBadState(machine);
-    await testAskUserQuestionDurable(machine);
-    await testAskUserReentryGuard(machine); // was defined but never registered — checks silently didn't run
+    await testSuspendResume(environment);
+    await testMixedBatchSiblingNotRerun(environment);
+    await testPartialAnswerAutoRepark(environment);
+    await testMultiRoundSuspend(environment);
+    await testSuspendMisuseAndBadState(environment);
+    await testAskUserQuestionDurable(environment);
+    await testAskUserReentryGuard(environment); // was defined but never registered — checks silently didn't run
     await testSuspendNeverGuard();
-    await testAnswerKindValidation(machine);
+    await testAnswerKindValidation(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

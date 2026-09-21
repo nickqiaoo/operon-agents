@@ -19,7 +19,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type Context,
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashTool, defineAgent, defineModel, LocalMachine, Runner, type AutoApprover, type Message } from "../index.ts";
+import { bashTool, defineAgent, defineModel, LocalEnvironment, Runner, type AutoApprover, type Message } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   };
 
   const runner = testRunner({
-    machine: new LocalMachine(dir),
+    environment: new LocalEnvironment(dir),
     permission: { mode: "auto", autoApprover },
   });
   const result = await runner.run(main_, "SPAWN_BOTH workers now", {});

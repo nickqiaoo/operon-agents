@@ -37,7 +37,7 @@ export {
   fileVersionFromInfo,
   normalizeForCompare,
   hashFileContent,
-} from "./tool/support/machine-ops.ts";
+} from "./tool/support/environment-ops.ts";
 export {
   matchesBashRule,
   matchWildcardPattern,
@@ -46,7 +46,7 @@ export {
   singleCommandMatchesRule,
   stripSafeEnvPrefix,
 } from "./tool/support/bash-rule-match.ts";
-export { SshProcess, buildSshExecCommand, sshShellQuote } from "./tool/machine-ssh.ts";
+export { SshProcess, buildSshExecCommand, sshShellQuote } from "./tool/environment-ssh.ts";
 
 // ── agent: test-only hooks ────────────────────────────────────────────────────
 export { setSessionCloseTimeoutsForTest } from "./agent/session.ts";

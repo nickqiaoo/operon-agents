@@ -10,7 +10,7 @@
  * Mirrors Claude Code's background-shell watchdog (same threshold, same patterns, plus npx's
  * install prompt).
  */
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 
 /**
  * How often a watched log is checked for growth.
@@ -56,7 +56,7 @@ export interface StallWatchdogTiming {
  * is read only after the threshold passes, and only once per quiet period.
  */
 export function startStallWatchdog(
-  file: { readonly machine: Machine; readonly path: string },
+  file: { readonly environment: Environment; readonly path: string },
   onStall: (tail: string) => void,
   timing: StallWatchdogTiming = {},
 ): () => void {
@@ -68,7 +68,7 @@ export function startStallWatchdog(
   let checking = false;
 
   const check = async (): Promise<void> => {
-    const { size } = await file.machine.fileInfo(file.path);
+    const { size } = await file.environment.fileInfo(file.path);
     if (size !== lastSize) {
       lastSize = size;
       lastGrowth = Date.now();
@@ -76,7 +76,7 @@ export function startStallWatchdog(
     }
     if (Date.now() - lastGrowth < thresholdMs || size === 0) return;
     const offset = Math.max(0, size - STALL_TAIL_BYTES);
-    const tail = (await file.machine.readBytes(file.path, { offset, length: size - offset })).toString("utf8");
+    const tail = (await file.environment.readBytes(file.path, { offset, length: size - offset })).toString("utf8");
     if (stopped) return;
     if (!looksLikePrompt(tail)) {
       // Quiet but not asking anything: look again after another full threshold, not every tick.
@@ -93,7 +93,7 @@ export function startStallWatchdog(
     checking = true;
     check()
       .catch(() => {
-        /* the log not created yet, or its machine briefly unreachable — try again next tick */
+        /* the log not created yet, or its environment briefly unreachable — try again next tick */
       })
       .finally(() => {
         checking = false;

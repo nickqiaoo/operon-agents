@@ -12,7 +12,7 @@
  *  - duplicate capability names are rejected with a diagnostic, not a silent overwrite.
  *  - listTools() isolates a failing toolProvider from the others.
  */
-import { NullMachine, type Tool } from "../index.ts";
+import { NullEnvironment, type Tool } from "../index.ts";
 import { assembleCapabilities, type AssembleCapabilitiesOptions } from "../internal.ts";
 import type { Capability, RunContext } from "../capabilities/capability.ts";
 import { testRunContext } from "./faux.ts";
@@ -25,7 +25,7 @@ function check(label: string, ok: boolean): void {
 }
 
 function baseCtx(): RunContext {
-  return testRunContext({ machine: new NullMachine() });
+  return testRunContext({ environment: new NullEnvironment() });
 }
 
 function fakeTool(name: string): Tool {

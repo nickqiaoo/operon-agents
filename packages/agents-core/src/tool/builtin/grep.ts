@@ -7,7 +7,7 @@ import { resolveRgCommand, rgUnavailableMessage } from "../support/rg-locator.ts
 import { runRipgrep, stillRunningNote, type RipgrepRunOutcome, type RipgrepRunResult } from "../support/ripgrep-run.ts";
 import { ToolResultBuilder } from "../support/result-builder.ts";
 import { globApproval, resolveToolPath, SEARCH_ACCESS_POLICY } from "../support/tool-path.ts";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 import type { ToolResult } from "../types.ts";
 
 type PathClass = "posix" | "win32";
@@ -131,12 +131,12 @@ export const grepTool = defineTool({
   async resolve(args, ctx) {
     const searchPath =
       args.path !== undefined
-        ? await resolveToolPath(args.path, ctx.machine, "search", SEARCH_ACCESS_POLICY)
-        : ctx.machine.getcwd();
+        ? await resolveToolPath(args.path, ctx.environment, "search", SEARCH_ACCESS_POLICY)
+        : ctx.environment.getcwd();
     return {
       display: { title: `Searching for '${args.pattern}' in ${args.path ?? "."}`, pattern: args.pattern, ...(args.path !== undefined ? { path: args.path } : {}) },
       ...globApproval("Grep", args.pattern),
-      run: (runCtx) => execution(args, runCtx.signal, [searchPath], runCtx.machine),
+      run: (runCtx) => execution(args, runCtx.signal, [searchPath], runCtx.environment),
     };
   },
 });
@@ -163,27 +163,27 @@ async function execution(
   args: GrepInput,
   signal: AbortSignal,
   searchPaths: string[],
-  machine: Machine,
+  environment: Environment,
 ): Promise<ToolResult> {
   if (signal.aborted) return errResult("Aborted before search started");
 
-  const pathClass = machine.pathClass();
-  const workspaceDir = machine.getcwd();
+  const pathClass = environment.pathClass();
+  const workspaceDir = environment.getcwd();
   let rgPath: string;
   try {
-    rgPath = await resolveRgCommand(machine, { signal });
+    rgPath = await resolveRgCommand(environment, { signal });
   } catch (error) {
     if (isAbortError(error)) return errResult("Grep aborted");
     return errResult(rgUnavailableMessage(error));
   }
 
   const runOptions = { timeoutMs: DEFAULT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES };
-  let outcome = await runRipgrep(machine, buildRgArgs(rgPath, args, searchPaths), signal, runOptions);
+  let outcome = await runRipgrep(environment, buildRgArgs(rgPath, args, searchPaths), signal, runOptions);
   const earlyExit = mapNonResult(outcome);
   if (earlyExit) return earlyExit;
   let runResult = (outcome as Extract<RipgrepRunOutcome, { kind: "result" }>).result;
   if (shouldRetryRipgrepEagain(runResult)) {
-    outcome = await runRipgrep(machine, buildRgArgs(rgPath, args, searchPaths, true), signal, runOptions);
+    outcome = await runRipgrep(environment, buildRgArgs(rgPath, args, searchPaths, true), signal, runOptions);
     const retryExit = mapNonResult(outcome);
     if (retryExit) return retryExit;
     runResult = (outcome as Extract<RipgrepRunOutcome, { kind: "result" }>).result;
@@ -215,7 +215,7 @@ async function execution(
   try {
     orderedLines =
       mode === "files_with_matches" && !timedOut
-        ? await sortFilesWithMatchesByMtime(keptLines, machine, signal)
+        ? await sortFilesWithMatchesByMtime(keptLines, environment, signal)
         : keptLines;
   } catch (error) {
     if (error instanceof GrepAbortedError) return errResult("Grep aborted");
@@ -305,7 +305,7 @@ function isEagainRipgrepError(stderr: string): boolean {
 
 async function sortFilesWithMatchesByMtime(
   lines: readonly ParsedGrepLine[],
-  machine: Machine,
+  environment: Environment,
   signal: AbortSignal,
 ): Promise<ParsedGrepLine[]> {
   const entries = await mapWithConcurrency(lines, MTIME_STAT_CONCURRENCY, signal, async (line, index) => {
@@ -313,7 +313,7 @@ async function sortFilesWithMatchesByMtime(
     let mtime = 0;
     if (path !== undefined) {
       try {
-        mtime = (await machine.fileInfo(path)).mtimeMs ?? 0;
+        mtime = (await environment.fileInfo(path)).mtimeMs ?? 0;
       } catch {
         /* mtime=0 → sort after known files */
       }

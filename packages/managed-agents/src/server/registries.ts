@@ -2,8 +2,8 @@ import type {
   Agent,
   CreateSessionOptions,
   Harness,
-  Machine,
-  MachineFactory,
+  Environment,
+  EnvironmentFactory,
   ResumeSessionOptions,
 } from "operon-agents";
 import type { AgentRef, EnvironmentRef } from "../protocol/types.ts";
@@ -37,7 +37,7 @@ export interface EnvironmentResolution {
   /** Durable working directory recorded by the SessionRepository. */
   readonly workDir: string;
   /** Optional per-session execution backend. Lifecycle remains provider-owned. */
-  readonly machine?: Machine | MachineFactory;
+  readonly environment?: Environment | EnvironmentFactory;
 }
 
 export interface ManagedEnvironmentRegistry {
@@ -58,12 +58,12 @@ export class StaticEnvironmentRegistry implements ManagedEnvironmentRegistry {
   }
 }
 
-/** Convenience composition for a server that owns the Harness. Machine/sandbox lifecycle
+/** Convenience composition for a server that owns the Harness. Environment/sandbox lifecycle
  *  remains with the host; this merely makes that explicit at the managed-server boundary. */
 export interface ManagedHarnessOptions<TContext = unknown> {
   readonly harness: Harness<TContext>;
   readonly agents?: ManagedAgentRegistry<TContext>;
   readonly environments: ManagedEnvironmentRegistry;
   readonly defaultAgentId?: string;
-  readonly machine?: Machine | MachineFactory;
+  readonly environment?: Environment | EnvironmentFactory;
 }

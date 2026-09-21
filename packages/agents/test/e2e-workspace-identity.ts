@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, LocalMachine, MemorySessionRepository, T } from "../src/index.ts";
+import { createHarness, LocalEnvironment, MemorySessionRepository, T } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -61,10 +61,10 @@ async function main(): Promise<void> {
     const plain = await harness.createSession();
     check("default: a session without a key gets the directory's workspace", composed.at(-1) === `dir::${work}`);
     await plain.close();
-    const own = await harness.createSession({ machine: new LocalMachine(work) });
-    check("default: a session bringing its own machine instance gets a private workspace", composed.at(-1) === `private::${own.id}`);
+    const own = await harness.createSession({ environment: new LocalEnvironment(work) });
+    check("default: a session bringing its own environment instance gets a private workspace", composed.at(-1) === `private::${own.id}`);
     await own.close();
-    const ownAgain = await harness.resumeSession(own.id, { machine: new LocalMachine(work) });
+    const ownAgain = await harness.resumeSession(own.id, { environment: new LocalEnvironment(work) });
     check("default: derived keys are not persisted — the same open derives the same private key", composed.at(-1) === `private::${own.id}`);
     await ownAgain.close();
 

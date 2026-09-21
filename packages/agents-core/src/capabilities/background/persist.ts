@@ -103,7 +103,7 @@ function isValidOutputRef(value: unknown): value is TaskOutputRef | undefined {
 // ── SessionStore KV backend ──────────────────────────────────────────────────
 //
 // Works on every SessionStore backend (disk/pg/redis/memory): status lives in KV state,
-// mirroring how cron persists its registry (`cron/persist.ts`). Kept off the Machine
+// mirroring how cron persists its registry (`cron/persist.ts`). Kept off the Environment
 // for the same reason cron is — bookkeeping must be readable with no workspace attached and
 // must sit outside the space agent-run code can touch. One index key + one key per task
 // (tasks carry a large output tail elsewhere, so unlike cron they are not one whole blob).

@@ -10,8 +10,8 @@ import { defineTool } from "../../tool/define.ts";
 import { ToolAccesses } from "../../tool/access.ts";
 import type { Tool, ToolResult } from "../../tool/types.ts";
 import { resolveToolPath } from "../../tool/support/tool-path.ts";
-import { readTextFile, writeTextFile } from "../../tool/support/machine-ops.ts";
-import type { Machine } from "../../tool/machine.ts";
+import { readTextFile, writeTextFile } from "../../tool/support/environment-ops.ts";
+import type { Environment } from "../../tool/environment.ts";
 import { joinAddress } from "../../events/index.ts";
 import { WorkflowBackgroundTask } from "../../capabilities/background/workflow-task.ts";
 import type { BackgroundTaskSink } from "../../capabilities/background/task.ts";
@@ -68,7 +68,7 @@ export function buildWorkflowTool<TContext>(
       concurrency: Math.min(16, Math.max(2, os.cpus().length - 2)),
       abortSignal,
       budget: { total: tokenBudget, getTurnSpent: () => baseline },
-      resolveWorkflowScript: (name) => readNamedWorkflow(parent.machine, name),
+      resolveWorkflowScript: (name) => readNamedWorkflow(parent.environment, name),
       emitProgress,
       runAgent: async ({ prompt, agentType, schema, isolation, signal, onStart }) => {
         const sub = await spawner.resolve(agentType ?? spawner.defaultType);
@@ -82,16 +82,16 @@ export function buildWorkflowTool<TContext>(
         onStart({ agentId, address });
 
         // Optional worktree isolation — degrade (with a log, never silently) if unsupported.
-        let runMachine = parent.machine;
+        let runEnvironment = parent.environment;
         let cleanupWorktree: (() => Promise<void>) | undefined;
         if (isolation === "worktree") {
-          const wt = await createWorktree(parent.machine, { label: agentId });
+          const wt = await createWorktree(parent.environment, { label: agentId });
           if (wt) {
-            runMachine = wt.machine;
+            runEnvironment = wt.environment;
             cleanupWorktree = wt.cleanup;
             emitProgress({ type: "log", message: `🌳 ${agentId}: isolated worktree at ${wt.cwd}` });
           } else {
-            emitProgress({ type: "log", message: `isolation:'worktree' unavailable on machine '${parent.machine.name}' — running in the shared workspace` });
+            emitProgress({ type: "log", message: `isolation:'worktree' unavailable on environment '${parent.environment.name}' — running in the shared workspace` });
           }
         }
 
@@ -105,7 +105,7 @@ export function buildWorkflowTool<TContext>(
         // Each concurrent subagent gets its OWN SteerBus: the parent's tracks a
         // single activeTurnId, so sharing it across parallel agents would corrupt
         // the parent turn's steering state. Subagents are ephemeral and take no steers.
-        const childState = spawner.derive({ address, machine: runMachine, signal: controller.signal, steer: new SteerBus(), parentToolCallId });
+        const childState = spawner.derive({ address, environment: runEnvironment, signal: controller.signal, steer: new SteerBus(), parentToolCallId });
         const childContext = new ConversationContext({
           store: parent.store,
           address,
@@ -199,7 +199,7 @@ export function buildWorkflowTool<TContext>(
         // The journal entry is what makes a resume self-contained. Every other source is a
         // path into the workspace — a file the model may have edited since, that a later run
         // of the same workflow may have replaced, and that does not exist at all if the
-        // machine is a sandbox that has since been rebuilt. Resuming against a DIFFERENT
+        // environment is a sandbox that has since been rebuilt. Resuming against a DIFFERENT
         // script is worse than failing: the journal keys are chained hashes of each agent's
         // prompt, so one changed prompt misses every cache entry after it and silently
         // re-runs the whole workflow for real money.
@@ -221,15 +221,15 @@ export function buildWorkflowTool<TContext>(
           script = recorded;
         } else if (args.scriptPath !== undefined && args.scriptPath.length > 0) {
           try {
-            const safePath = await resolveToolPath(args.scriptPath, ctx.machine, "read");
-            script = await readTextFile(ctx.machine, safePath);
+            const safePath = await resolveToolPath(args.scriptPath, ctx.environment, "read");
+            script = await readTextFile(ctx.environment, safePath);
           } catch (err) {
             return errResult(`Could not read scriptPath: ${err instanceof Error ? err.message : String(err)}`);
           }
         } else if (args.script !== undefined && args.script.trim().length > 0) {
           script = args.script;
         } else if (args.name !== undefined && args.name.length > 0) {
-          script = await readNamedWorkflow(ctx.machine, args.name);
+          script = await readNamedWorkflow(ctx.environment, args.name);
           if (script === null) return errResult(`No saved workflow named "${args.name}" in the workspace .agents/workflows/.`);
         } else {
           return errResult("Provide one of: `scriptPath` (workspace file), `script` (inline), `name` (saved workflow), or `resumeFromRunId` alone to replay a recorded run.");
@@ -243,9 +243,9 @@ export function buildWorkflowTool<TContext>(
         const tokenBudget = args.tokenBudget ?? null;
         // Persist the resolved script to the workspace and hand back its path, so the
         // model can Write/Edit it and re-run via `scriptPath` instead of re-sending the whole
-        // script. Goes through the Machine → on a server it lands in the sandbox, never the
+        // script. Goes through the Environment → on a server it lands in the sandbox, never the
         // host disk. Best-effort: a persist failure never fails the run (path is left undefined).
-        const persistedScriptPath = await persistRunScript(ctx.machine, meta.name, runId, script);
+        const persistedScriptPath = await persistRunScript(ctx.environment, meta.name, runId, script);
         // Resume journals come from the session port: the workflow capability's manager, or
         // the in-memory fallback Session.open provides when no capability is attached — either
         // way bound to the session's store. Discovery needs no writes: the tool results below
@@ -524,14 +524,14 @@ const WORKFLOW_RUNS_DIR = ".agents/runs";
 
 /**
  * Persist the resolved script to `.agents/workflows/runs/<name>.js` in the workspace (via the
- * Machine — sandbox on a server, never the host disk) and return that path.
+ * Environment — sandbox on a server, never the host disk) and return that path.
  * Every invocation drops an editable copy so the model can Write/Edit it and re-run via
  * `scriptPath`. Best-effort — returns undefined (never throws) if the write fails, so persistence
  * never blocks a run. Keyed by workflow name (stable across iterations of the "same" workflow);
  * curated named workflows live one level up in `.agents/workflows/`, so `runs/` never shadows them.
  */
 async function persistRunScript(
-  machine: Machine,
+  environment: Environment,
   name: string,
   runId: string,
   script: string,
@@ -543,8 +543,8 @@ async function persistRunScript(
   const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^\.+/, "") || "workflow";
   const rel = `${WORKFLOW_RUNS_DIR}/${safeName}.${runId}.js`;
   try {
-    await machine.mkdir(await resolveToolPath(WORKFLOW_RUNS_DIR, machine, "write"), { parents: true, existOk: true });
-    await writeTextFile(machine, await resolveToolPath(rel, machine, "write"), script);
+    await environment.mkdir(await resolveToolPath(WORKFLOW_RUNS_DIR, environment, "write"), { parents: true, existOk: true });
+    await writeTextFile(environment, await resolveToolPath(rel, environment, "write"), script);
     return rel;
   } catch {
     return undefined;
@@ -553,16 +553,16 @@ async function persistRunScript(
 
 /**
  * Read a saved workflow by name from the workspace `.agents/workflows/` dir, VIA the
- * machine — so it resolves inside the sandbox workspace, never the host
+ * environment — so it resolves inside the sandbox workspace, never the host
  * filesystem (the model writes these with Write; it reads them back from the same
  * place). Tries `<name>`, `<name>.js`, `<name>.mjs`; returns null if none exist.
  */
-async function readNamedWorkflow(machine: Machine, name: string): Promise<string | null> {
+async function readNamedWorkflow(environment: Environment, name: string): Promise<string | null> {
   if (!/^[a-zA-Z0-9._-]+$/.test(name) || name.includes("..")) return null;
   for (const ext of ["", ".js", ".mjs"]) {
     try {
-      const safePath = await resolveToolPath(`${WORKFLOW_DIR}/${name}${ext}`, machine, "read");
-      return await readTextFile(machine, safePath);
+      const safePath = await resolveToolPath(`${WORKFLOW_DIR}/${name}${ext}`, environment, "read");
+      return await readTextFile(environment, safePath);
     } catch {
       // not found / not this extension — try the next
     }

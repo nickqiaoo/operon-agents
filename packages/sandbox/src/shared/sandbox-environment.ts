@@ -1,5 +1,5 @@
 /**
- * Shared base for the vendor sandbox Machines (E2B, Cloudflare).
+ * Shared base for the vendor sandbox Environments (E2B, Cloudflare).
  *
  * The two transports differ in almost everything — one has a native process handle, the
  * other an HTTP API; one takes bytes, the other base64 — but they share one fallback: file
@@ -7,7 +7,7 @@
  * uses it, falling back here only where it is ambiguous (symlinks). The derivation is identical
  * for both, so it is stated once here instead of twice in the backends.
  */
-import { BaseMachine } from "operon-agents-core";
+import { BaseEnvironment } from "operon-agents-core";
 import type { FileInfo, FileKind } from "operon-agents-core";
 
 function codedError(message: string, code: string): NodeJS.ErrnoException {
@@ -47,7 +47,7 @@ function parseMtimeSeconds(wholeRaw: string, fractionalRaw: string): number | un
   return whole;
 }
 
-export abstract class SandboxMachine extends BaseMachine {
+export abstract class SandboxEnvironment extends BaseEnvironment {
   /**
    * Absolutize against the sandbox cwd. Both backends resolve identically; it is abstract
    * only because the cwd is a subclass constructor argument, not because the rule differs.

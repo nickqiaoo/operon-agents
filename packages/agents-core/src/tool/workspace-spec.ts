@@ -7,10 +7,10 @@
  * secret-store environment references, and cross-language serialization compatibility. Those
  * are where nearly all the size of such formats goes. Add one only when a real need appears.
  *
- * Written against `Machine`, so it works on local, SSH and sandbox backends alike rather than
+ * Written against `Environment`, so it works on local, SSH and sandbox backends alike rather than
  * being reimplemented per vendor.
  */
-import type { Machine } from "./machine.ts";
+import type { Environment } from "./environment.ts";
 
 export type WorkspaceEntry =
   | { readonly type: "dir"; readonly children?: Readonly<Record<string, WorkspaceEntry>> }
@@ -46,7 +46,7 @@ export interface HostReader {
   listFiles(dir: string): Promise<readonly string[]>;
 }
 
-/** Concurrent host→machine file writes. Latency-bound work, so this is well above CPU count. */
+/** Concurrent host→environment file writes. Latency-bound work, so this is well above CPU count. */
 const HOST_DIR_CONCURRENCY = 8;
 
 /** Run `body` over every item, at most `limit` in flight. The first rejection propagates. */
@@ -77,17 +77,17 @@ export class WorkspaceMaterializeError extends Error {
  * later entry may depend on an earlier one (config written into a freshly cloned repo).
  */
 export async function materializeWorkspace(
-  machine: Machine,
+  environment: Environment,
   spec: WorkspaceSpec,
   options: MaterializeOptions = {},
 ): Promise<void> {
-  const root = machine.normpath(spec.root);
-  await machine.mkdir(root, { parents: true });
-  await materializeEntries(machine, root, root, spec.entries, options);
+  const root = environment.normpath(spec.root);
+  await environment.mkdir(root, { parents: true });
+  await materializeEntries(environment, root, root, spec.entries, options);
 }
 
 async function materializeEntries(
-  machine: Machine,
+  environment: Environment,
   root: string,
   base: string,
   entries: Readonly<Record<string, WorkspaceEntry>>,
@@ -95,13 +95,13 @@ async function materializeEntries(
 ): Promise<void> {
   for (const [relative, entry] of Object.entries(entries)) {
     options.signal?.throwIfAborted();
-    const target = safeJoin(machine, root, base, relative);
-    await materializeEntry(machine, root, target, entry, options);
+    const target = safeJoin(environment, root, base, relative);
+    await materializeEntry(environment, root, target, entry, options);
   }
 }
 
 async function materializeEntry(
-  machine: Machine,
+  environment: Environment,
   root: string,
   target: string,
   entry: WorkspaceEntry,
@@ -109,46 +109,46 @@ async function materializeEntry(
 ): Promise<void> {
   switch (entry.type) {
     case "dir": {
-      await machine.mkdir(target, { parents: true });
+      await environment.mkdir(target, { parents: true });
       if (entry.children !== undefined) {
-        await materializeEntries(machine, root, target, entry.children, options);
+        await materializeEntries(environment, root, target, entry.children, options);
       }
       return;
     }
     case "file": {
-      await machine.mkdir(parentOf(machine, target), { parents: true });
-      await machine.writeText(target, entry.content, {
+      await environment.mkdir(parentOf(environment, target), { parents: true });
+      await environment.writeText(target, entry.content, {
         ...(entry.lineEndings !== undefined ? { lineEndings: entry.lineEndings } : {}),
       });
       return;
     }
     case "host_file": {
       const reader = requireReader(options, target);
-      await machine.mkdir(parentOf(machine, target), { parents: true });
+      await environment.mkdir(parentOf(environment, target), { parents: true });
       // writeBytes, not writeText: a host file may be an image, a binary, or text in an
       // encoding we have no business guessing at. Decoding to UTF-8 here corrupted every
       // one of those, silently.
-      await machine.writeBytes(target, await reader.readFile(entry.src));
+      await environment.writeBytes(target, await reader.readFile(entry.src));
       return;
     }
     case "host_dir": {
       const reader = requireReader(options, target);
-      await machine.mkdir(target, { parents: true });
+      await environment.mkdir(target, { parents: true });
       const files = (await reader.listFiles(entry.src)).map((relative) => ({
         relative,
-        dest: safeJoin(machine, root, target, relative),
+        dest: safeJoin(environment, root, target, relative),
       }));
       // Create each parent directory once rather than once per file it holds.
-      for (const dir of new Set(files.map(({ dest }) => parentOf(machine, dest)))) {
+      for (const dir of new Set(files.map(({ dest }) => parentOf(environment, dest)))) {
         options.signal?.throwIfAborted();
-        await machine.mkdir(dir, { parents: true });
+        await environment.mkdir(dir, { parents: true });
       }
       // Copy with bounded concurrency. Serially, every file cost a full round trip, so on a
-      // remote machine a directory of any size was seconds of pure latency; the cap keeps a
+      // remote environment a directory of any size was seconds of pure latency; the cap keeps a
       // large tree from opening an unbounded number of writes at once.
       await inParallel(files, HOST_DIR_CONCURRENCY, async ({ relative, dest }) => {
         options.signal?.throwIfAborted();
-        await machine.writeBytes(dest, await reader.readFile(`${entry.src}/${relative}`));
+        await environment.writeBytes(dest, await reader.readFile(`${entry.src}/${relative}`));
       });
       return;
     }
@@ -157,7 +157,7 @@ async function materializeEntry(
       if (entry.depth !== 0) argv.push("--depth", String(entry.depth ?? 1));
       if (entry.ref !== undefined) argv.push("--branch", entry.ref);
       argv.push("--", entry.repo, target);
-      const result = await machine.run(argv, {
+      const result = await environment.run(argv, {
         ...(options.gitTimeoutMs !== undefined ? { timeoutMs: options.gitTimeoutMs } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       });
@@ -231,8 +231,8 @@ function requireReader(options: MaterializeOptions, path: string): HostReader {
   return options.hostReader;
 }
 
-function parentOf(machine: Machine, path: string): string {
-  const sep = machine.pathClass() === "win32" ? "\\" : "/";
+function parentOf(environment: Environment, path: string): string {
+  const sep = environment.pathClass() === "win32" ? "\\" : "/";
   const cut = path.lastIndexOf(sep);
   return cut <= 0 ? path : path.slice(0, cut);
 }
@@ -241,9 +241,9 @@ function parentOf(machine: Machine, path: string): string {
  * Join and verify the result stays under `root`. Entry paths often come from user config, so
  * `../` escaping the workspace must be refused rather than normalized away silently.
  */
-function safeJoin(machine: Machine, root: string, base: string, relative: string): string {
-  const sep = machine.pathClass() === "win32" ? "\\" : "/";
-  const joined = machine.normpath(`${base}${sep}${relative}`);
+function safeJoin(environment: Environment, root: string, base: string, relative: string): string {
+  const sep = environment.pathClass() === "win32" ? "\\" : "/";
+  const joined = environment.normpath(`${base}${sep}${relative}`);
   const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
   if (joined !== root && !joined.startsWith(prefix)) {
     throw new WorkspaceMaterializeError(`entry path escapes the workspace root: ${relative}`, joined);

@@ -1,7 +1,7 @@
 import path from "node:path";
-import type { Machine } from "../index.ts";
+import type { Environment } from "../index.ts";
 import type { PluginCapabilityState, PluginGithubMetadata, PluginSource } from "./types.ts";
-import { readTextFile, writeTextFile } from "../tool/support/machine-ops.ts";
+import { readTextFile, writeTextFile } from "../tool/support/environment-ops.ts";
 
 export interface InstalledRecord {
   readonly id: string;
@@ -26,10 +26,10 @@ function installedPath(homeDir: string): string {
   return path.join(homeDir, "plugins", "installed.json");
 }
 
-export async function readInstalled(machine: Machine, homeDir: string): Promise<InstalledFile> {
+export async function readInstalled(environment: Environment, homeDir: string): Promise<InstalledFile> {
   let text: string;
   try {
-    text = await readTextFile(machine, installedPath(homeDir));
+    text = await readTextFile(environment, installedPath(homeDir));
   } catch {
     return EMPTY; // missing file → empty registry
   }
@@ -44,7 +44,7 @@ export async function readInstalled(machine: Machine, homeDir: string): Promise<
   }
 }
 
-export async function writeInstalled(machine: Machine, homeDir: string, data: InstalledFile): Promise<void> {
-  await machine.mkdir(path.join(homeDir, "plugins"), { parents: true, existOk: true });
-  await writeTextFile(machine, installedPath(homeDir), JSON.stringify(data, null, 2));
+export async function writeInstalled(environment: Environment, homeDir: string, data: InstalledFile): Promise<void> {
+  await environment.mkdir(path.join(homeDir, "plugins"), { parents: true, existOk: true });
+  await writeTextFile(environment, installedPath(homeDir), JSON.stringify(data, null, 2));
 }

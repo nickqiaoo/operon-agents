@@ -11,7 +11,7 @@
  *
  * The program runs in QuickJS compiled to WebAssembly: it can reach nothing but `tools.*`, and
  * every `tools.X(args)` is a nested tool call the engine runs through its own pipeline —
- * permissions, hooks and the Machine apply exactly as for a direct call. See the README.
+ * permissions, hooks and the Environment apply exactly as for a direct call. See the README.
  */
 export { codeMode, CODE_MODE_EXTENSION_ID, DEFAULT_DIRECT_TOOLS } from "./extension.ts";
 export type { CodeModeMode, CodeModeOptions } from "./extension.ts";

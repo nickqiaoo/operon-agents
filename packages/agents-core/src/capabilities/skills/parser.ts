@@ -1,8 +1,8 @@
 import path from "pathe";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { SkillDefinition, SkillMetadata, SkillSource } from "./types.ts";
 import { isSupportedSkillType } from "./types.ts";
-import { readTextFile } from "../../tool/support/machine-ops.ts";
+import { readTextFile } from "../../tool/support/environment-ops.ts";
 
 export class FrontmatterError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -59,10 +59,10 @@ const METADATA_ALIASES: Readonly<Record<string, string>> = {
   disable_model_invocation: "disableModelInvocation",
 };
 
-export async function parseSkillFromMachine(machine: Machine, options: ParseSkillOptions): Promise<SkillDefinition> {
+export async function parseSkillFromEnvironment(environment: Environment, options: ParseSkillOptions): Promise<SkillDefinition> {
   let text: string;
   try {
-    text = await readTextFile(machine, options.skillMdPath);
+    text = await readTextFile(environment, options.skillMdPath);
   } catch (error) {
     throw new SkillParseError(`Failed to read ${options.skillMdPath}`, error);
   }

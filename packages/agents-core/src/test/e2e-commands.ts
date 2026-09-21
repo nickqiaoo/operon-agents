@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import {
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   Session,
   SteerBus,
@@ -23,7 +23,7 @@ import {
 } from "../index.ts";
 import { PluginManager, pluginsCapability } from "../plugins/index.ts";
 
-class TmpHomeMachine extends LocalMachine {
+class TmpHomeEnvironment extends LocalEnvironment {
   private readonly home: string;
   constructor(home: string) {
     super(home);
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   const tmp = path.join(os.tmpdir(), `agents-commands-e2e-${process.pid}`);
   const home = path.join(tmp, "home");
   const pluginRoot = path.join(tmp, "demo-plugin");
-  const machine = new TmpHomeMachine(tmp);
+  const environment = new TmpHomeEnvironment(tmp);
 
   try {
     const roots = await writeSkill(tmp);
@@ -86,9 +86,9 @@ async function main(): Promise<void> {
       if (event.type === "skill.activated") activated = event;
     });
 
-    const manager = new PluginManager({ machine, homeDir: home, now: () => 1_700_000_000_000 });
+    const manager = new PluginManager({ environment, homeDir: home, now: () => 1_700_000_000_000 });
     const session = await openTestSession({
-      machine,
+      environment,
       events,
       steer,
       capabilities: [

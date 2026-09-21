@@ -1,21 +1,21 @@
 import { posix } from "node:path";
 import type {
   DirEntry,
-  Environment,
+  OsInfo,
   FileInfo,
   FileVersion,
-  Machine,
+  Environment,
   ByteRange,
   RunCommandOptions,
   RunCommandResult,
 } from "operon-agents-core";
 import type { E2BCommandHandle, E2BCommandResult, E2BEntryInfo, E2BSandbox, SandboxRef } from "./e2b-api.ts";
 import { readWindowViaShell, sliceRange } from "../shared/remote-file-ops.ts";
-import { SandboxMachine } from "../shared/sandbox-machine.ts";
+import { SandboxEnvironment } from "../shared/sandbox-environment.ts";
 
 const DEFAULT_CWD = "/home/user";
 
-export interface E2BMachineOptions {
+export interface E2BEnvironmentOptions {
   readonly cwd?: string;
   /** Runs commands and file ops as this user (E2B `user` option). */
   readonly runAs?: string;
@@ -25,7 +25,7 @@ export interface E2BMachineOptions {
 }
 
 /**
- * A `Machine` backed directly by the E2B SDK.
+ * An `Environment` backed directly by the E2B SDK.
  *
  * Direct on purpose: E2B natively provides exactly what tool execution needs — `timeoutMs`,
  * incremental `onStdout`/`onStderr`, and a real `commands.kill(pid)`. Routing through a
@@ -38,23 +38,23 @@ export interface E2BMachineOptions {
  * - `files.getInfo` does not say whether a symlink's size/mtime are its own or its target's, so
  *   symlinks still cost one `stat(1)` command (see `fileInfo`); everything else is one RPC.
  */
-export class E2BMachine extends SandboxMachine {
+export class E2BEnvironment extends SandboxEnvironment {
   readonly name = "e2b";
-  readonly osEnv: Environment;
+  readonly osInfo: OsInfo;
 
   private readonly sandboxRef: SandboxRef;
   private readonly cwd: string;
   private readonly runAs: string | undefined;
   private readonly defaultTimeoutMs: number | undefined;
 
-  constructor(sandbox: SandboxRef | E2BSandbox, options: E2BMachineOptions = {}) {
+  constructor(sandbox: SandboxRef | E2BSandbox, options: E2BEnvironmentOptions = {}) {
     super();
     this.sandboxRef = typeof sandbox === "function" ? sandbox : () => sandbox;
     this.cwd = normalizeAbs(options.cwd ?? DEFAULT_CWD);
     this.runAs = options.runAs;
     this.defaultTimeoutMs = options.defaultTimeoutMs;
     const shellPath = options.shellPath ?? "/bin/bash";
-    this.osEnv = {
+    this.osInfo = {
       osKind: "Linux",
       osArch: "unknown",
       osVersion: "unknown",
@@ -81,11 +81,11 @@ export class E2BMachine extends SandboxMachine {
   getcwd(): string {
     return this.cwd;
   }
-  withCwd(cwd: string): Machine {
-    const clone = new E2BMachine(this.sandboxRef, {
+  withCwd(cwd: string): Environment {
+    const clone = new E2BEnvironment(this.sandboxRef, {
       cwd: this.resolve(cwd),
       ...(this.runAs !== undefined ? { runAs: this.runAs } : {}),
-      shellPath: this.osEnv.shellPath,
+      shellPath: this.osInfo.shellPath,
       ...(this.defaultTimeoutMs !== undefined ? { defaultTimeoutMs: this.defaultTimeoutMs } : {}),
     });
     return clone;
@@ -128,7 +128,7 @@ export class E2BMachine extends SandboxMachine {
     // Refuse stdin we cannot deliver instead of dropping it: a hook or a filter fed no input
     // would silently see EOF and "succeed" on empty data.
     if (options.stdin !== undefined && sandbox.commands.sendStdin === undefined) {
-      throw new Error("E2BMachine: this SDK build exposes no commands.sendStdin, so run({ stdin }) cannot be honored.");
+      throw new Error("E2BEnvironment: this SDK build exposes no commands.sendStdin, so run({ stdin }) cannot be honored.");
     }
 
     // Our own deadline, not the SDK's. Left unset, the SDK applies a 60-second deadline to every
@@ -223,7 +223,7 @@ export class E2BMachine extends SandboxMachine {
   /**
    * One `files.getInfo` RPC — no command, no shell. A symlink is the exception: the SDK marks one
    * with `symlinkTarget` but does not say whether the size and mtime it reports are the link's or
-   * the target's, so the follow/no-follow distinction goes to `stat(1)` (SandboxMachine), which
+   * the target's, so the follow/no-follow distinction goes to `stat(1)` (SandboxEnvironment), which
    * states it exactly. An SDK build without `getInfo` takes that path for everything.
    */
   override async fileInfo(path: string, options?: { followSymlinks?: boolean }): Promise<FileInfo> {
@@ -370,7 +370,7 @@ function mtimeOf(entry: E2BEntryInfo): { mtimeMs?: number } {
   return ms === undefined || !Number.isFinite(ms) || ms === 0 ? {} : { mtimeMs: ms };
 }
 
-/** The SDK's not-found error, given the ENOENT code every Machine caller branches on. */
+/** The SDK's not-found error, given the ENOENT code every Environment caller branches on. */
 function asErrnoError(error: unknown, path: string): unknown {
   const name = (error as { name?: unknown } | null)?.name;
   if (name === "FileNotFoundError" || name === "NotFoundError") {

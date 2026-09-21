@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  LocalMachine,
+  LocalEnvironment,
   loadMarketplace,
   loadMarketplaceEntryDetails,
   parseGithubMarketplaceSource,
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   check("cached repo: name→id + local source → abs path in repo", entry !== undefined && entry.source === plug);
 
   // 2. Install the Codex plugin from the local path: manifest parsed, skill + MCP picked up.
-  const pm = new PluginManager({ machine: new LocalMachine(home), homeDir: home });
+  const pm = new PluginManager({ environment: new LocalEnvironment(home), homeDir: home });
   const rec = await pm.install(entry!.source);
   check("install: .codex-plugin/plugin.json parsed, state ok", rec.state === "ok" && rec.id === "linear");
   check("install: skill dir resolved from string `skills` path", pm.skillRoots().some((r) => r.plugin?.id === "linear"));

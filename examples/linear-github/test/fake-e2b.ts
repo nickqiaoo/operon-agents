@@ -1,5 +1,5 @@
 // A stand-in for the `e2b` SDK's `Sandbox` that runs commands on this host, so the E2B path --
-// E2BWorkspace → E2BMachine → the checkout, the marker, the push, pause on close, reconnect on
+// E2BWorkspace → E2BEnvironment → the checkout, the marker, the push, pause on close, reconnect on
 // the next open -- is exercised end to end without an account. It mimics only what the adapter
 // calls (see operon-sandbox's e2b-api.ts): background commands with a pid, streamed output, a
 // real kill, and the files API. `stat` is emulated because the adapter speaks GNU stat and

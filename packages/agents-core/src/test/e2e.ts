@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineModel, LocalMachine, ConversationContext, writeTool, editTool, readTool, globTool, bashTool, grepTool } from "../index.ts";
+import { defineModel, LocalEnvironment, ConversationContext, writeTool, editTool, readTool, globTool, bashTool, grepTool } from "../index.ts";
 import { runTurn } from "../internal.ts";
 import type { Message, ToolResultMessage } from "../index.ts";
 
@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   ]);
 
   const model = faux.getChatModel()!;
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   const context = new ConversationContext();
   context.seed([{ role: "user", content: [{ type: "text", text: "create, edit, read, then glob" }], timestamp: Date.now() }]);
   const messages = context.messages; // live array the loop appends to
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     turnId: "t1",
     signal: new AbortController().signal,
     model,
-    machine,
+    environment,
     context,
     tools: [writeTool, editTool, readTool, globTool, bashTool, grepTool],
     maxSteps: 12,

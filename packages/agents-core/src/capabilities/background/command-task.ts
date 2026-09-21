@@ -1,6 +1,6 @@
 import { errorMessage } from "../../loop/errors.ts";
 import type { CommandStarter, ProcessSpawnOptions } from "../../tool/background.ts";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { BackgroundTask, BackgroundTaskInfoBase, BackgroundTaskSink, TaskOutputLocation } from "./task.ts";
 
 /** Why a command task that was asked to stop settled as failed rather than killed. */
@@ -24,7 +24,7 @@ export interface CommandBackgroundTaskInfo extends BackgroundTaskInfoBase {
  * sandbox transports cannot provide honestly, which is what used to force a fake handle
  * whose `kill()` did nothing.
  *
- * No `forceStop`: SIGTERM → grace → SIGKILL escalation belongs to the Machine layer, which
+ * No `forceStop`: SIGTERM → grace → SIGKILL escalation belongs to the Environment layer, which
  * is where killing is real. Aborting the signal is the whole stop protocol — and the result's
  * `terminated` is the answer: only a confirmed stop settles as `killed`.
  */
@@ -51,8 +51,8 @@ export class CommandBackgroundTask implements BackgroundTask {
     this.description = description;
     this.parentAddress = options.parentAddress;
     this.toolCallId = options.toolCallId;
-    const { logPath, machine } = options;
-    if (logPath !== undefined && machine !== undefined) this.outputLocation = { kind: "file", machine, path: logPath };
+    const { logPath, environment } = options;
+    if (logPath !== undefined && environment !== undefined) this.outputLocation = { kind: "file", environment, path: logPath };
   }
 
   /** Latest known exit status; null until the command settles, or when it reported none. */
@@ -74,7 +74,7 @@ export class CommandBackgroundTask implements BackgroundTask {
     if (sink.signal.aborted) requestStop();
     else sink.signal.addEventListener("abort", requestStop, { once: true });
 
-    // The command's output was redirected ON THE MACHINE before this starts. That file IS the
+    // The command's output was redirected ON THE ENVIRONMENT before this starts. That file IS the
     // output; readers open a window on it only when somebody asks. No pipe tap or in-memory
     // mirror exists on the background path.
     try {

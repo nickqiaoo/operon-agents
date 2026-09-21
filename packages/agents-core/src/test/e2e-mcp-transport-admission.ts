@@ -2,7 +2,7 @@
  * A host says which MCP transports it will run, and core refuses the rest by name.
  *
  * The rule exists for one case: `stdio` on a server host. An stdio server is spawned as a child
- * of the process holding the MCP client, so it stays on the harness's machine even when every
+ * of the process holding the MCP client, so it stays on the harness's environment even when every
  * tool the session runs has been pushed into a sandbox — and `transport` DEFAULTS to `"stdio"`,
  * so a config that merely omits the field asks a server to spawn a process. The checks below
  * pin both halves: the refusal, and the places it must not fire.

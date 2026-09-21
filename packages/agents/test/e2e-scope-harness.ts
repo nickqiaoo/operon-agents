@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, T, LocalMachine, MemorySessionRepository, type ExtensionDefinition, type Logger } from "../src/index.ts";
+import { createHarness, T, LocalEnvironment, MemorySessionRepository, type ExtensionDefinition, type Logger } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -21,8 +21,8 @@ async function main(): Promise<void> {
     const faux = registerFauxProvider();
     faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
     const model = faux.getChatModel()!;
-    const harnessMachine = new LocalMachine(work);
-    const sessionMachine = new LocalMachine(work);
+    const harnessEnvironment = new LocalEnvironment(work);
+    const sessionEnvironment = new LocalEnvironment(work);
     const repo = new MemorySessionRepository();
     const lines: string[] = [];
     const logger: Logger = { log: (level, message) => lines.push(`${level}:${message}`) };
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
       permission: { mode: "yolo" },
       harness: (scope) => {
         scope.register(T.SessionRepository, repo, { owned: false });
-        scope.register(T.MachineFactory, harnessMachine, { owned: false });
+        scope.register(T.EnvironmentFactory, harnessEnvironment, { owned: false });
         scope.register(T.Logger, logger, { owned: false });
       },
       extensions: [shapes],
@@ -49,14 +49,14 @@ async function main(): Promise<void> {
     check("harness: an extension harness() result is registered by id in the harness scope", harness.services.has("shapes") && harness.services.handle<{ render(): string }>("shapes").render() === "v1");
 
     const a = await harness.createSession();
-    check("session: the harness-level machine applies when the session gives none", a.core.machine === harnessMachine);
+    check("session: the harness-level environment applies when the session gives none", a.core.environment === harnessEnvironment);
     check("session: the session scope hangs under a workspace scope, which hangs under the harness scope", a.core.scope.kind === "session" && a.core.scope.parent?.kind === "workspace" && a.core.scope.parent.parent === harness.scope);
     check("session: a session reads harness-tier services through its own scope", a.core.get(T.Logger) === logger && a.core.get(T.SessionRepository) === repo);
     check("session: the store backend and the publishing store are both registered", a.core.get(T.StoreBackend) !== undefined && a.core.get(T.Store) === a.core.store);
     check("session: the permission options came through the scope", a.core.get(T.PermissionOptions)?.mode === "yolo");
 
-    const b = await harness.createSession({ machine: sessionMachine, permission: { mode: "manual" } });
-    check("session: createSession({ machine }) overrides the harness-level machine", b.core.machine === sessionMachine);
+    const b = await harness.createSession({ environment: sessionEnvironment, permission: { mode: "manual" } });
+    check("session: createSession({ environment }) overrides the harness-level environment", b.core.environment === sessionEnvironment);
     check("session: createSession({ permission }) overrides the harness-level policy", b.core.get(T.PermissionOptions)?.mode === "manual");
 
     const result = await a.prompt("hi");

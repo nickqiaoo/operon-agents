@@ -9,7 +9,7 @@
  * that. Every unresolvable case yields NO access entry, which lands exactly on today's
  * behaviour — the policies skip what they cannot see, and the permission chain's fallback ask
  * still stands behind them. So this raises the cost of an accidental out-of-workspace write; it
- * is not a boundary. The boundary is the Machine (sandbox / SSH), which bounds what the command
+ * is not a boundary. The boundary is the Environment (sandbox / SSH), which bounds what the command
  * can reach no matter how the path was spelled.
  *
  * Over-declaring is the failure mode worth avoiding: a bogus path means a permission prompt for

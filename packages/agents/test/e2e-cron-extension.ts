@@ -15,7 +15,7 @@ import {
   CronManager,
   computeNextCronRun,
   DEFAULT_CRON_JITTER_CONFIG,
-  LocalMachine,
+  LocalEnvironment,
   mutableClock,
   parseCronExpression,
   type AgentEvent,
@@ -38,7 +38,7 @@ function check(label: string, ok: boolean): void {
 const NO_JITTER = { ...DEFAULT_CRON_JITTER_CONFIG, noJitter: true };
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
-let MACHINE: LocalMachine;
+let ENVIRONMENT: LocalEnvironment;
 
 interface Fired {
   readonly prompt: string;
@@ -75,8 +75,8 @@ function mgrWith(clock: ClockSources, runtime: CronManagerRuntime): CronManager 
 
 async function runTool(tool: Tool, args: unknown): Promise<ToolResult> {
   const sig = new AbortController().signal;
-  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
-  return plan.run({ turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
+  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: sig, environment: ENVIRONMENT });
+  return plan.run({ turnId: "t", toolCallId: "c", signal: sig, environment: ENVIRONMENT });
 }
 
 function testCronExpr(): void {
@@ -237,7 +237,7 @@ async function testSeamTeardown(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  MACHINE = new LocalMachine(process.cwd());
+  ENVIRONMENT = new LocalEnvironment(process.cwd());
   testCronExpr();
   await testTools();
   testFireIdleGateAndMetadata();

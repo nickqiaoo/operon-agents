@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import type { FileInfo } from "../machine.ts";
+import type { FileInfo } from "../environment.ts";
 import { checkFreshness, FILE_MODIFIED_MESSAGE, FILE_NOT_READ_MESSAGE, type FileFreshnessLedger } from "../file-freshness.ts";
-import { fileVersionFromInfo, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
+import { fileVersionFromInfo, normalizeForCompare, readTextFile } from "../support/environment-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
 import type { ToolResolveContext, ToolResult, ToolRunContext } from "../types.ts";
 import { materializeModelText, toModelTextView, type LineEndingStyle } from "./line-endings.ts";
@@ -61,11 +61,11 @@ export const editTool = defineTool({
   // The replacement text is what lands in the file — that's the security-relevant part.
   toAutoApprovalInput: (args) => `${args.path}: ${args.new_string}`,
   async resolve(args, ctx) {
-    const path = await resolveToolPath(args.path, ctx.machine, "write");
+    const path = await resolveToolPath(args.path, ctx.environment, "write");
     return {
       accesses: ToolAccesses.readWriteFile(path),
       display: { title: `Editing ${args.path}`, path: args.path, before: args.old_string, after: args.new_string },
-      ...pathApproval("Edit", ctx.machine, path),
+      ...pathApproval("Edit", ctx.environment, path),
       run: (runCtx) => execute(args, path, runCtx),
     };
   },
@@ -89,9 +89,9 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
     // Stat BEFORE reading: a change landing between the two then leaves the version
     // older than the text, so the freshness check below sees the conflict instead of
     // blessing it.
-    const info: FileInfo = await ctx.machine.fileInfo(safePath);
+    const info: FileInfo = await ctx.environment.fileInfo(safePath);
     const observed = fileVersionFromInfo(info);
-    const raw = await readTextFile(ctx.machine, safePath);
+    const raw = await readTextFile(ctx.environment, safePath);
     const normalized = normalizeForCompare(raw);
     const verdict = await checkFreshness({
       ledger,
@@ -134,9 +134,9 @@ async function execute(args: EditInput, safePath: string, ctx: ToolRunContext): 
     // Everything this edit is allowed to assume was settled by the freshness check
     // above, against the text read a few statements ago. The write is unconditional:
     // an external writer landing in the gap between that read and this write is the
-    // same window every backend but the local one has anyway (see Machine.writeText),
+    // same window every backend but the local one has anyway (see Environment.writeText),
     // and the record below is what catches it on the NEXT edit.
-    const result = await ctx.machine.writeText(safePath, materialized);
+    const result = await ctx.environment.writeText(safePath, materialized);
     ledger.recordWrite(safePath, {
       // Present only where the backend knew it for free (local); elsewhere the record
       // is decided by the digest below — which the next Edit compares against the text

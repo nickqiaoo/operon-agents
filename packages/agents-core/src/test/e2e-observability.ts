@@ -1,7 +1,7 @@
 import { testRunner, openTestSession } from "./faux.ts";
 import { token } from "../index.ts";
 import {
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   RedactingSessionStore,
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     name: "boom",
     provides: [{ token: token("boom", "session"), create: async () => { throw new Error("kapow"); } }],
   };
-  const session = await openTestSession({ machine: new LocalMachine(process.cwd()), events: new ListenerSink(), logger: wiringLogger, capabilities: [boom] });
+  const session = await openTestSession({ environment: new LocalEnvironment(process.cwd()), events: new ListenerSink(), logger: wiringLogger, capabilities: [boom] });
   await session.close();
   check("Session routes capability provision failure to the logger", captured.some((l) => l.startsWith("error:") && l.includes("boom")));
 

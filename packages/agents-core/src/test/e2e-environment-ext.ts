@@ -4,17 +4,17 @@ import path from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import { Duplex, PassThrough, type Readable } from "node:stream";
 import {
-  BaseMachine,
-  LocalMachine,
-  NullMachine,
-  SshMachine,
+  BaseEnvironment,
+  LocalEnvironment,
+  NullEnvironment,
+  SshEnvironment,
   collectGitContext,
-  detectEnvironment,
+  detectOsInfo,
   nonInteractiveShellEnv,
   parseProjectName,
   proxyEnv,
   sanitizeRemoteUrl,
-  type Environment,
+  type OsInfo,
   type FileInfo,
   type SpawnedProcess,
   type RunCommandOptions,
@@ -152,7 +152,7 @@ function makeFakeSftp(seedFiles: Record<string, string>, seedDirs: string[]) {
       cb(null, { path: p });
     },
     // Mirrors ssh2: reads at most `len` bytes from `pos`, and reports EOF as an error with
-    // bytesRead 0 — the shape SshMachine.readBytes has to tolerate.
+    // bytesRead 0 — the shape SshEnvironment.readBytes has to tolerate.
     read(handle: { path: string }, buf: Buffer, off: number, len: number, pos: number, cb: (err: unknown, bytesRead?: number) => void) {
       const data = files.get(handle.path);
       if (data === undefined) return cb(notFound());
@@ -220,7 +220,7 @@ function makeFakeSftp(seedFiles: Record<string, string>, seedDirs: string[]) {
   return fake;
 }
 
-const FAKE_ENV: Environment = {
+const FAKE_ENV: OsInfo = {
   osKind: "Linux",
   osArch: "x86_64",
   osVersion: "6.0",
@@ -294,19 +294,19 @@ async function main(): Promise<void> {
   const proxy = proxyEnv({ HTTPS_PROXY: "http://p:8080", NO_PROXY: "localhost", IRRELEVANT: "x" } as NodeJS.ProcessEnv);
   check("shell-env: proxyEnv picks only proxy vars", proxy["HTTPS_PROXY"] === "http://p:8080" && proxy["NO_PROXY"] === "localhost" && !("IRRELEVANT" in proxy));
 
-  const detected = detectEnvironment();
-  check("shell-env: detectEnvironment probes host", detected.shellPath.length > 0 && detected.osKind.length > 0 && detected.shellName.length > 0);
+  const detected = detectOsInfo();
+  check("shell-env: detectOsInfo probes host", detected.shellPath.length > 0 && detected.osKind.length > 0 && detected.shellName.length > 0);
 
-  const repoMachine = new LocalMachine(process.cwd());
-  const ctx = await collectGitContext(repoMachine, process.cwd());
+  const repoEnvironment = new LocalEnvironment(process.cwd());
+  const ctx = await collectGitContext(repoEnvironment, process.cwd());
   check("git-context: detects this repository", ctx.isRepo === true);
   check("git-context: reports a branch", typeof ctx.branch === "string" && ctx.branch!.length > 0);
   check("git-context: collects recent commits", ctx.recentCommits.length > 0);
 
-  const tmp = path.join(os.tmpdir(), `agents-machine-ext-${process.pid}`);
+  const tmp = path.join(os.tmpdir(), `agents-environment-ext-${process.pid}`);
   await mkdir(tmp, { recursive: true });
   try {
-    const nonRepo = await collectGitContext(new LocalMachine(tmp), tmp);
+    const nonRepo = await collectGitContext(new LocalEnvironment(tmp), tmp);
     check("git-context: non-repo dir → isRepo false", nonRepo.isRepo === false && nonRepo.recentCommits.length === 0);
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -350,51 +350,51 @@ async function main(): Promise<void> {
     ["/work", "/work/sub"],
   );
   const fakeClient = { once: () => {}, end: () => {} };
-  const machine = SshMachine.fromConnection({ client: fakeClient as never, sftp: sftp as never, home: "/work", osEnv: FAKE_ENV, name: "ssh:test" });
+  const environment = SshEnvironment.fromConnection({ client: fakeClient as never, sftp: sftp as never, home: "/work", osInfo: FAKE_ENV, name: "ssh:test" });
 
-  check("ssh-machine: name + posix path class", machine.name === "ssh:test" && machine.pathClass() === "posix" && machine.gethome() === "/work");
+  check("ssh-environment: name + posix path class", environment.name === "ssh:test" && environment.pathClass() === "posix" && environment.gethome() === "/work");
 
-  const infoA = await machine.fileInfo("/work/a.ts");
-  check("ssh-machine: fileInfo returns size + file kind", infoA.size === 3 && infoA.kind === "file");
+  const infoA = await environment.fileInfo("/work/a.ts");
+  check("ssh-environment: fileInfo returns size + file kind", infoA.size === 3 && infoA.kind === "file");
 
-  const readA = await readTextFile(machine, "a.ts"); // relative → resolved against cwd (/work)
-  check("ssh-machine: read resolves relative path", readA === "aaa");
+  const readA = await readTextFile(environment, "a.ts"); // relative → resolved against cwd (/work)
+  check("ssh-environment: read resolves relative path", readA === "aaa");
 
-  const wrote = await machine.writeText("/work/new.txt", "fresh");
-  const readNew = await readTextFile(machine, "/work/new.txt");
-  check("ssh-machine: write + read roundtrip", wrote.bytesWritten === 5 && readNew === "fresh");
+  const wrote = await environment.writeText("/work/new.txt", "fresh");
+  const readNew = await readTextFile(environment, "/work/new.txt");
+  check("ssh-environment: write + read roundtrip", wrote.bytesWritten === 5 && readNew === "fresh");
 
-  await machine.writeText("/work/new.txt", "fresh+more");
-  check("ssh-machine: overwrite", (await readTextFile(machine, "/work/new.txt")) === "fresh+more");
+  await environment.writeText("/work/new.txt", "fresh+more");
+  check("ssh-environment: overwrite", (await readTextFile(environment, "/work/new.txt")) === "fresh+more");
 
-  const entries = [...(await machine.listDir("/work"))].toSorted((a, b) => a.name.localeCompare(b.name));
-  check("ssh-machine: listDir yields basenames", entries.map((e) => e.name).join(",") === "a.ts,b.ts,new.txt,sub");
+  const entries = [...(await environment.listDir("/work"))].toSorted((a, b) => a.name.localeCompare(b.name));
+  check("ssh-environment: listDir yields basenames", entries.map((e) => e.name).join(",") === "a.ts,b.ts,new.txt,sub");
   // SFTP readdir carries attrs per entry, so kinds cost no extra round trip.
   check(
-    "ssh-machine: listDir yields kinds without extra stats",
+    "ssh-environment: listDir yields kinds without extra stats",
     entries.map((e) => `${e.name}:${e.kind}`).join(",") === "a.ts:file,b.ts:file,new.txt:file,sub:dir",
   );
 
-  const scoped = machine.withCwd("/work/sub");
-  check("ssh-machine: withCwd re-roots getcwd()", scoped.getcwd() === "/work/sub");
-  check("ssh-machine: withCwd shares the connection (reads via new cwd)", (await readTextFile(scoped, "c.ts")) === "ccccc");
-  check("ssh-machine: withCwd does not mutate the original machine", machine.getcwd() === "/work");
+  const scoped = environment.withCwd("/work/sub");
+  check("ssh-environment: withCwd re-roots getcwd()", scoped.getcwd() === "/work/sub");
+  check("ssh-environment: withCwd shares the connection (reads via new cwd)", (await readTextFile(scoped, "c.ts")) === "ccccc");
+  check("ssh-environment: withCwd does not mutate the original environment", environment.getcwd() === "/work");
 
-  await machine.mkdir("/work/x/y/z", { parents: true });
-  const infoZ = await machine.fileInfo("/work/x/y/z");
-  check("ssh-machine: mkdir parents creates nested dirs", infoZ.kind === "dir");
+  await environment.mkdir("/work/x/y/z", { parents: true });
+  const infoZ = await environment.fileInfo("/work/x/y/z");
+  check("ssh-environment: mkdir parents creates nested dirs", infoZ.kind === "dir");
 
   let enoent = false;
   try {
-    await machine.fileInfo("/work/missing");
+    await environment.fileInfo("/work/missing");
   } catch (error) {
     enoent = (error as NodeJS.ErrnoException).code === "ENOENT";
   }
-  check("ssh-machine: missing file maps to ENOENT", enoent);
+  check("ssh-environment: missing file maps to ENOENT", enoent);
 
-  // ── mkdir contract: existOk tolerates a DIRECTORY occupant only (Machine.mkdir doc) ──
-  await machine.mkdir("/work/sub", { existOk: true });
-  check("ssh-machine: mkdir existOk passes on a dir occupant", true);
+  // ── mkdir contract: existOk tolerates a DIRECTORY occupant only (Environment.mkdir doc) ──
+  await environment.mkdir("/work/sub", { existOk: true });
+  check("ssh-environment: mkdir existOk passes on a dir occupant", true);
   const eexistOf = async (fn: () => Promise<void>): Promise<boolean> => {
     try {
       await fn();
@@ -403,17 +403,17 @@ async function main(): Promise<void> {
       return (error as NodeJS.ErrnoException).code === "EEXIST";
     }
   };
-  check("ssh-machine: mkdir existOk on a FILE occupant throws EEXIST", await eexistOf(() => machine.mkdir("/work/a.ts", { existOk: true })));
-  check("ssh-machine: mkdir parents with a FILE at the final path throws EEXIST", await eexistOf(() => machine.mkdir("/work/a.ts", { parents: true })));
-  check("ssh-machine: mkdir parents with a FILE mid-path throws EEXIST", await eexistOf(() => machine.mkdir("/work/a.ts/deeper", { parents: true })));
+  check("ssh-environment: mkdir existOk on a FILE occupant throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts", { existOk: true })));
+  check("ssh-environment: mkdir parents with a FILE at the final path throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts", { parents: true })));
+  check("ssh-environment: mkdir parents with a FILE mid-path throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts/deeper", { parents: true })));
 
   // ── readBytes: a real SFTP byte window (open + bounded read at an offset), not a
-  //    whole-file transfer that gets sliced — same contract LocalMachine honours ──
-  await machine.writeText("/work/lines.txt", "l1\nl2\nl3\nl4\nl5\n");
-  check("ssh-machine: readBytes({length}) reads a prefix", (await machine.readBytes("/work/lines.txt", { length: 5 })).toString("utf8") === "l1\nl2");
-  check("ssh-machine: readBytes({offset,length}) reads a middle window", (await machine.readBytes("/work/lines.txt", { offset: 3, length: 2 })).toString("utf8") === "l2");
-  check("ssh-machine: readBytes({offset}) reads to EOF", (await machine.readBytes("/work/lines.txt", { offset: 9 })).toString("utf8") === "l4\nl5\n");
-  check("ssh-machine: readBytes() with no range reads the whole file", (await machine.readBytes("/work/lines.txt")).byteLength === 15);
+  //    whole-file transfer that gets sliced — same contract LocalEnvironment honours ──
+  await environment.writeText("/work/lines.txt", "l1\nl2\nl3\nl4\nl5\n");
+  check("ssh-environment: readBytes({length}) reads a prefix", (await environment.readBytes("/work/lines.txt", { length: 5 })).toString("utf8") === "l1\nl2");
+  check("ssh-environment: readBytes({offset,length}) reads a middle window", (await environment.readBytes("/work/lines.txt", { offset: 3, length: 2 })).toString("utf8") === "l2");
+  check("ssh-environment: readBytes({offset}) reads to EOF", (await environment.readBytes("/work/lines.txt", { offset: 9 })).toString("utf8") === "l4\nl5\n");
+  check("ssh-environment: readBytes() with no range reads the whole file", (await environment.readBytes("/work/lines.txt")).byteLength === 15);
 
   // ── writeText: SFTP writes land straight on the target. There is no tmp staging
   //    any more — the CAS that needed it is gone, and a swap costs round trips on
@@ -422,26 +422,26 @@ async function main(): Promise<void> {
     const wPath = "/work/write.txt";
     const noTmp = (): boolean => [...sftp._files.keys()].every((k) => !k.includes(".tmp-"));
 
-    const w1 = await machine.writeText(wPath, "v1");
-    check("ssh-write: creates the file", w1.bytesWritten === 2 && (await readTextFile(machine, wPath)) === "v1");
+    const w1 = await environment.writeText(wPath, "v1");
+    check("ssh-write: creates the file", w1.bytesWritten === 2 && (await readTextFile(environment, wPath)) === "v1");
     check("ssh-write: no temp file is staged beside the target", noTmp());
 
-    await machine.writeText(wPath, "v2");
-    check("ssh-write: overwrites unconditionally", (await readTextFile(machine, wPath)) === "v2" && noTmp());
+    await environment.writeText(wPath, "v2");
+    check("ssh-write: overwrites unconditionally", (await readTextFile(environment, wPath)) === "v2" && noTmp());
 
     // Writing INTO the existing file (rather than renaming a new inode over it) is
     // what keeps the target's permission bits without a setstat round trip.
     sftp._modes.set(wPath, S_IFREG | 0o600);
-    await machine.writeText(wPath, "v3");
-    check("ssh-write: the target's mode survives a write", (sftp._modes.get(wPath)! & 0o7777) === 0o600 && (await readTextFile(machine, wPath)) === "v3");
+    await environment.writeText(wPath, "v3");
+    check("ssh-write: the target's mode survives a write", (sftp._modes.get(wPath)! & 0o7777) === 0o600 && (await readTextFile(environment, wPath)) === "v3");
 
-    await machine.writeBytes("/work/raw.bin", Buffer.from([0x00, 0xff]));
-    check("ssh-write: writeBytes is byte-exact", (await machine.readBytes("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
+    await environment.writeBytes("/work/raw.bin", Buffer.from([0x00, 0xff]));
+    check("ssh-write: writeBytes is byte-exact", (await environment.readBytes("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
   }
 
-  // ── BaseMachine composition: writeText/writeBytes over the raw write primitive ──
+  // ── BaseEnvironment composition: writeText/writeBytes over the raw write primitive ──
   {
-    class InMemMachine extends NullMachine {
+    class InMemEnvironment extends NullEnvironment {
       readonly files = new Map<string, Buffer>();
       readonly mtimes = new Map<string, number>();
       withMtime = true;
@@ -468,7 +468,7 @@ async function main(): Promise<void> {
       }
     }
 
-    const mem = new InMemMachine();
+    const mem = new InMemEnvironment();
     mem.seed("/f.txt", "seed");
     const res = await mem.writeText("/f.txt", "a\nb\n", { lineEndings: "CRLF" });
     check("base-write: the CRLF contract is applied by the composition", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n" && res.bytesWritten === 6);
@@ -484,13 +484,13 @@ async function main(): Promise<void> {
     check("base-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.files.get("/h.txt")!.toString()));
   }
 
-  // ── BaseMachine.realpath: a HUNG readlink times out (throws) instead of silently
+  // ── BaseEnvironment.realpath: a HUNG readlink times out (throws) instead of silently
   //    degrading the path-access symlink guard to string matching. The deadline must fire
   //    PROMPTLY — it is raced outside `run`, so a backend that takes its time stopping the
   //    command cannot hold up the caller that path-access is blocking on. ──
   {
     let aborted = false;
-    class HangingRunMachine extends NullMachine {
+    class HangingRunEnvironment extends NullEnvironment {
       protected override realpathTimeoutMs = 50;
       override run(_argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
         options.signal?.addEventListener("abort", () => {
@@ -502,20 +502,20 @@ async function main(): Promise<void> {
     let timedOut = false;
     const startedAt = Date.now();
     try {
-      await new HangingRunMachine().realpath("/some/path");
+      await new HangingRunEnvironment().realpath("/some/path");
     } catch (error) {
       timedOut = (error as NodeJS.ErrnoException).code === "ETIMEDOUT";
     }
     const elapsed = Date.now() - startedAt;
-    check("base-machine: hung readlink realpath throws ETIMEDOUT (fail closed, no normpath degrade)", timedOut);
-    check("base-machine: the hung readlink run is aborted on timeout", aborted);
-    check("base-machine: realpath rejects at its own deadline, not after the backend stops", elapsed < 1_000);
+    check("base-environment: hung readlink realpath throws ETIMEDOUT (fail closed, no normpath degrade)", timedOut);
+    check("base-environment: the hung readlink run is aborted on timeout", aborted);
+    check("base-environment: realpath rejects at its own deadline, not after the backend stops", elapsed < 1_000);
   }
 
-  // ── BaseMachine.run: a process that survives the kill escalation must not hold the call
+  // ── BaseEnvironment.run: a process that survives the kill escalation must not hold the call
   //    open forever through pipes it never closes. ──
   {
-    class UnkillableMachine extends NullMachine {
+    class UnkillableEnvironment extends NullEnvironment {
       protected override spawn(): Promise<SpawnedProcess> {
         return Promise.resolve({
           stdin: new PassThrough(),
@@ -526,26 +526,26 @@ async function main(): Promise<void> {
           kill: async () => {}, // ignores every signal
         });
       }
-      // Re-expose the base derivation NullMachine refuses, so this exercises `run` itself.
+      // Re-expose the base derivation NullEnvironment refuses, so this exercises `run` itself.
       override run(argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
-        return BaseMachine.prototype.run.call(this, argv, options) as Promise<RunCommandResult>;
+        return BaseEnvironment.prototype.run.call(this, argv, options) as Promise<RunCommandResult>;
       }
       protected override sigtermGraceMs = 10;
     }
-    const result = await new UnkillableMachine().run(["sleep", "forever"], { timeoutMs: 20 });
-    check("base-machine: run returns even when the killed process never closes its pipes", result.timedOut);
-    check("base-machine: an unkillable process is reported as NOT terminated", !result.terminated);
+    const result = await new UnkillableEnvironment().run(["sleep", "forever"], { timeoutMs: 20 });
+    check("base-environment: run returns even when the killed process never closes its pipes", result.timedOut);
+    check("base-environment: an unkillable process is reported as NOT terminated", !result.terminated);
   }
 
-  // ── SshMachine: a stop reaches the whole remote process group, not just the login shell sshd
+  // ── SshEnvironment: a stop reaches the whole remote process group, not just the login shell sshd
   //    signals. Run against a local sshd emulation (see localSshdClient). ──
   if (process.platform !== "win32") {
     const marker = `operon-ssh-tree-${String(process.pid)}`;
-    const sshTree = SshMachine.fromConnection({
+    const sshTree = SshEnvironment.fromConnection({
       client: localSshdClient() as never,
       sftp: makeFakeSftp({}, ["/tmp"]) as never,
       home: "/tmp",
-      osEnv: { ...FAKE_ENV, osKind: process.platform === "darwin" ? "Darwin" : "Linux" },
+      osInfo: { ...FAKE_ENV, osKind: process.platform === "darwin" ? "Darwin" : "Linux" },
       name: "ssh:local-sshd",
     });
     (sshTree as unknown as { sigtermGraceMs: number }).sigtermGraceMs = 300;
@@ -579,14 +579,14 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ MACHINE-EXT E2E PASS — shell-env + git-context + SSH (builder/process/SFTP)");
+    console.log("✅ ENVIRONMENT-EXT E2E PASS — shell-env + git-context + SSH (builder/process/SFTP)");
   } else {
-    console.log("❌ MACHINE-EXT E2E FAIL");
+    console.log("❌ ENVIRONMENT-EXT E2E FAIL");
     process.exit(1);
   }
 }
 
 main().catch((error) => {
-  console.error("❌ MACHINE-EXT E2E ERROR:", error);
+  console.error("❌ ENVIRONMENT-EXT E2E ERROR:", error);
   process.exit(1);
 });

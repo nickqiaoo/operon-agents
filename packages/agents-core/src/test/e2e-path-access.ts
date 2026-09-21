@@ -14,7 +14,7 @@
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalMachine } from "../index.ts";
+import { LocalEnvironment } from "../index.ts";
 import {
   canonicalizePath,
   isWithinWorkspace,
@@ -144,36 +144,36 @@ async function main(): Promise<void> {
   await symlink(join(outsideDir, "id_rsa"), join(workspaceDir, "keylink"), "file");
   await symlink(join(workspaceDir, "realdir"), join(workspaceDir, "inner"), "dir");
 
-  const machine = new LocalMachine(workspaceDir);
+  const environment = new LocalEnvironment(workspaceDir);
 
   await throws(
     "resolveToolPath: symlinked dir escaping workspace is rejected",
-    () => resolveToolPath("escape/secret.txt", machine, "read"),
+    () => resolveToolPath("escape/secret.txt", environment, "read"),
     "PATH_OUTSIDE_WORKSPACE",
   );
 
   await throws(
     "resolveToolPath: symlink to a sensitive file outside workspace is rejected",
-    () => resolveToolPath("keylink", machine, "read"),
+    () => resolveToolPath("keylink", environment, "read"),
     "PATH_SENSITIVE",
   );
 
   await ok("resolveToolPath: symlink that stays inside workspace is allowed", () =>
-    resolveToolPath("inner/a.txt", machine, "read"),
+    resolveToolPath("inner/a.txt", environment, "read"),
   );
 
   await ok("resolveToolPath: brand-new file under an existing dir does not throw (no ENOENT from realpath)", () =>
-    resolveToolPath("newfile.txt", machine, "write"),
+    resolveToolPath("newfile.txt", environment, "write"),
   );
 
   await ok(
     "resolveToolPath: brand-new file under a brand-new nested dir does not throw (recursive walk-up)",
-    () => resolveToolPath("newdir/nested/newfile.txt", machine, "write"),
+    () => resolveToolPath("newdir/nested/newfile.txt", environment, "write"),
   );
 
   await ok(
-    "resolvePathAccessPath: absolute path outside workspace via symlink-free machine still resolves",
-    () => resolvePathAccessPath("realdir/a.txt", { machine, workspace: { workspaceDir, additionalDirs: [] }, operation: "read" }),
+    "resolvePathAccessPath: absolute path outside workspace via symlink-free environment still resolves",
+    () => resolvePathAccessPath("realdir/a.txt", { environment, workspace: { workspaceDir, additionalDirs: [] }, operation: "read" }),
   );
 
   // ── additionalDirs: extra roots resolve like the cwd tree ──
@@ -186,11 +186,11 @@ async function main(): Promise<void> {
     // The same symlink is an escape without the grant...
     await throws(
       "additionalDirs: symlink into an UNgranted outside dir is still rejected",
-      () => resolveToolPath("into-extra", machine, "read"),
+      () => resolveToolPath("into-extra", environment, "read"),
       "PATH_OUTSIDE_WORKSPACE",
     );
-    // ...and legitimate with it (the grant rides on the machine into resolveToolPath).
-    const granted = new LocalMachine({ cwd: workspaceDir, additionalDirs: [extraDir] });
+    // ...and legitimate with it (the grant rides on the environment into resolveToolPath).
+    const granted = new LocalEnvironment({ cwd: workspaceDir, additionalDirs: [extraDir] });
     await ok("additionalDirs: symlink into a granted dir is allowed", () =>
       resolveToolPath("into-extra", granted, "read"),
     );
@@ -208,9 +208,9 @@ async function main(): Promise<void> {
   // connection, EACCES, EIO) must propagate — never silently degrade the symlink guard
   // back to string-only matching. Only ENOENT/ENOTDIR trigger the new-file walk-up.
   {
-    const brokenMachine = {
-      pathClass: () => machine.pathClass(),
-      gethome: () => machine.gethome(),
+    const brokenEnvironment = {
+      pathClass: () => environment.pathClass(),
+      gethome: () => environment.gethome(),
       realpath: async (): Promise<string> => {
         const err = new Error("connection lost") as NodeJS.ErrnoException;
         err.code = "ECONNRESET";
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
     };
     let failedClosed = false;
     try {
-      await resolvePathAccessPath("realdir/a.txt", { machine: brokenMachine, workspace: { workspaceDir, additionalDirs: [] }, operation: "read" });
+      await resolvePathAccessPath("realdir/a.txt", { environment: brokenEnvironment, workspace: { workspaceDir, additionalDirs: [] }, operation: "read" });
     } catch (error) {
       failedClosed = !(error instanceof PathSecurityError) && /connection lost/.test(error instanceof Error ? error.message : "");
     }

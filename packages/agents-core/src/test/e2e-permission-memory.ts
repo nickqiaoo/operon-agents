@@ -14,7 +14,7 @@ import {
   defineTool,
   Runner,
   Session,
-  LocalMachine,
+  LocalEnvironment,
   MemoryStore,
   INTERRUPTION_STATE_KEY,
   parseInterruptionState,
@@ -41,7 +41,7 @@ function makeDeployTool(counter: { runs: number }) {
   });
 }
 
-async function testApproveForSessionAcrossRuns(machine: LocalMachine, store: MemoryStore): Promise<void> {
+async function testApproveForSessionAcrossRuns(environment: LocalEnvironment, store: MemoryStore): Promise<void> {
   const counter = { runs: 0 };
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -53,7 +53,7 @@ async function testApproveForSessionAcrossRuns(machine: LocalMachine, store: Mem
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "deployer", model, instructions: "x", tools: [makeDeployTool(counter)] });
 
-  const session = await openTestSession({ machine, store, permission: { mode: "manual" } });
+  const session = await openTestSession({ environment, store, permission: { mode: "manual" } });
   const runner = testRunner({});
 
   // Run 1: manual mode, no rule, no responder → durable interrupt on deploy.
@@ -79,7 +79,7 @@ async function testApproveForSessionAcrossRuns(machine: LocalMachine, store: Mem
   check("grant: second deploy executed", counter.runs === 2);
 }
 
-async function testGrantSurvivesColdReopen(machine: LocalMachine, store: MemoryStore): Promise<void> {
+async function testGrantSurvivesColdReopen(environment: LocalEnvironment, store: MemoryStore): Promise<void> {
   const counter = { runs: 0 };
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -90,7 +90,7 @@ async function testGrantSurvivesColdReopen(machine: LocalMachine, store: MemoryS
   const agent = defineAgent({ name: "deployer", model, instructions: "x", tools: [makeDeployTool(counter)] });
 
   // A brand-new Session over the same store: the grant folds back from the journal.
-  const reopened = await openTestSession({ machine, store, permission: { mode: "manual" } });
+  const reopened = await openTestSession({ environment, store, permission: { mode: "manual" } });
   const runner = testRunner({});
   const result = await runner.run(agent, "deploy once more", { session: reopened });
   faux.unregister();
@@ -98,9 +98,9 @@ async function testGrantSurvivesColdReopen(machine: LocalMachine, store: MemoryS
   check("cold-reopen: deploy executed", counter.runs === 1);
 }
 
-async function testStepLevelModeChange(machine: LocalMachine, store: MemoryStore): Promise<void> {
+async function testStepLevelModeChange(environment: LocalEnvironment, store: MemoryStore): Promise<void> {
   const counter = { runs: 0 };
-  const session = await openTestSession({ machine, store, permission: { mode: "manual" } });
+  const session = await openTestSession({ environment, store, permission: { mode: "manual" } });
 
   const switchTool = defineTool({
     name: "switch_yolo",
@@ -135,21 +135,21 @@ async function testStepLevelModeChange(machine: LocalMachine, store: MemoryStore
   check("step-mode: session reports the new mode", session.permissionModeSetting === "yolo");
 }
 
-async function testModeSurvivesColdReopen(machine: LocalMachine, store: MemoryStore): Promise<void> {
-  const reopened = await openTestSession({ machine, store, permission: { mode: "manual" } });
+async function testModeSurvivesColdReopen(environment: LocalEnvironment, store: MemoryStore): Promise<void> {
+  const reopened = await openTestSession({ environment, store, permission: { mode: "manual" } });
   check("mode-reopen: journaled set_mode wins over configured mode", reopened.permission.mode === "yolo");
 }
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "operon-perm-memory-"));
-  const machine = new LocalMachine({ cwd: dir });
+  const environment = new LocalEnvironment({ cwd: dir });
   try {
     const grantStore = new MemoryStore();
-    await testApproveForSessionAcrossRuns(machine, grantStore);
-    await testGrantSurvivesColdReopen(machine, grantStore);
+    await testApproveForSessionAcrossRuns(environment, grantStore);
+    await testGrantSurvivesColdReopen(environment, grantStore);
     const modeStore = new MemoryStore();
-    await testStepLevelModeChange(machine, modeStore);
-    await testModeSurvivesColdReopen(machine, modeStore);
+    await testStepLevelModeChange(environment, modeStore);
+    await testModeSurvivesColdReopen(environment, modeStore);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

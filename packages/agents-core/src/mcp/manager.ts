@@ -22,7 +22,7 @@ export type McpTransportKind = "stdio" | "http";
  *
  * The case this exists for is `stdio` on a server host. An stdio server is not reached over a
  * wire at all: it is spawned as a child of whatever process holds the MCP client — the harness —
- * and so it stays on THAT process's machine even when every tool the session runs has been
+ * and so it stays on THAT process's environment even when every tool the session runs has been
  * pushed out to a sandbox. On a single-tenant local host that is exactly right. On a server it
  * is four problems at once:
  *

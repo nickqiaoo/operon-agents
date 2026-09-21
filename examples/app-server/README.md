@@ -45,4 +45,4 @@ For in-process wiring (tests), `pairedTransports` connects an `AppServer` and an
 ## Next
 
 - The in-process HTTP control plane instead of stdio → [`../managed-agents`](../managed-agents)
-- Swap the machine for an E2B sandbox → [`../managed-agents`](../managed-agents)
+- Swap the environment for an E2B sandbox → [`../managed-agents`](../managed-agents)

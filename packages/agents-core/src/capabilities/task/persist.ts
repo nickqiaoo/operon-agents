@@ -58,7 +58,7 @@ export function isValidTask(value: unknown): value is Task {
 
 // ── SessionStore KV backend ──────────────────────────────────────────────────
 // One key per task + an index + the high-water-mark, mirroring the background task store's KV
-// backend. Kept off the Machine (agent bookkeeping, per the cron/background rule).
+// backend. Kept off the Environment (agent bookkeeping, per the cron/background rule).
 
 const INDEX_KEY: StateKey = "tasklist:index";
 const HWM_KEY: StateKey = "tasklist:hwm";

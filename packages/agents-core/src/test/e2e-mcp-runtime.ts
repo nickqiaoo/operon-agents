@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalMachine } from "../index.ts";
+import { LocalEnvironment } from "../index.ts";
 import {
   loadProjectMcpServers,
   TransportMCPServer,
@@ -17,7 +17,7 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-async function testLoader(machine: LocalMachine): Promise<void> {
+async function testLoader(environment: LocalEnvironment): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "af-mcp-proj-"));
   mkdirSync(join(root, ".git"));
   const sub = join(root, "packages", "x");
@@ -42,7 +42,7 @@ async function testLoader(machine: LocalMachine): Promise<void> {
   );
 
   // Loaded from a nested cwd → still finds the project root via `.git`.
-  const servers = await loadProjectMcpServers(machine, sub);
+  const servers = await loadProjectMcpServers(environment, sub);
   check("loader: servers loaded from project-root mcp.json + .mcp.json", Object.keys(servers).sort().join(",") === "api,base,fs");
   check("loader: .mcp.json overrides same-named mcp.json servers", servers["fs"]?.command === "mcp-fs");
   check("loader: `type` alias normalised to transport", servers["base"]?.transport === "http" && servers["base"]?.keepAliveIntervalMs === 1000);
@@ -50,7 +50,7 @@ async function testLoader(machine: LocalMachine): Promise<void> {
   check("loader: stdio cwd normalised to <root>/data", servers["fs"]?.cwd === join(root, "data"));
   check("loader: http fields preserved", servers["api"]?.transport === "http" && servers["api"]?.bearerTokenEnvVar === "API_TOKEN");
 
-  const empty = await loadProjectMcpServers(machine, mkdtempSync(join(tmpdir(), "af-mcp-none-")));
+  const empty = await loadProjectMcpServers(environment, mkdtempSync(join(tmpdir(), "af-mcp-none-")));
   check("loader: missing .mcp.json → {}", Object.keys(empty).length === 0);
 }
 
@@ -128,8 +128,8 @@ async function testUnexpectedClose(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
-  await testLoader(machine);
+  const environment = new LocalEnvironment(process.cwd());
+  await testLoader(environment);
   await testTimeout();
   await testUnexpectedClose();
 

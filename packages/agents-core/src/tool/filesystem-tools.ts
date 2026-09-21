@@ -15,7 +15,7 @@ export interface FilesystemToolsOptions {
 }
 
 /**
- * The standard machine-backed builtin tools as a single array — convenience
+ * The standard environment-backed builtin tools as a single array — convenience
  * sugar for assembling an agent's toolset (`tools: filesystemTools()`). It is
  * NOT a capability or a new mechanism: these are the same tools exported
  * individually from this package. Omit it entirely for a no-filesystem agent.

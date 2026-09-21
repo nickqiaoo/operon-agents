@@ -1,8 +1,8 @@
 /**
- * Machine-level smoke test for the real E2B integration (no LLM needed).
+ * Environment-level smoke test for the real E2B integration (no LLM needed).
  * Run:  E2B_API_KEY=... node --experimental-strip-types --no-warnings smoke-e2b.ts
  *
- * Proves: `Sandbox` (e2b SDK) → E2BWorkspace → E2BMachine → a live E2B sandbox, exercising
+ * Proves: `Sandbox` (e2b SDK) → E2BWorkspace → E2BEnvironment → a live E2B sandbox, exercising
  * run + write/read + listDir against the real backend. The package's own e2e covers the same
  * surface against a fake; this is the one that talks to the vendor.
  */
@@ -17,9 +17,9 @@ async function main(): Promise<void> {
     sandbox: Sandbox,
     ...(process.env.E2B_TEMPLATE !== undefined ? { template: process.env.E2B_TEMPLATE } : {}),
   });
-  const machine = workspace.machine;
+  const environment = workspace.environment;
   try {
-    console.log("  sandbox:", workspace.id, "| machine:", machine.name, "| cwd:", machine.getcwd());
+    console.log("  sandbox:", workspace.id, "| environment:", environment.name, "| cwd:", environment.getcwd());
 
     const probe = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
       try {
@@ -32,22 +32,22 @@ async function main(): Promise<void> {
 
     // `run()` is the intent-shaped entry point: it carries the timeout, the output cap and
     // the kill that a bare exec on this backend could not.
-    await probe("run (echo)", async () => (await machine.run(["echo", "hello-from-e2b"])).stdout.trim());
+    await probe("run (echo)", async () => (await environment.run(["echo", "hello-from-e2b"])).stdout.trim());
     await probe("writeText+readBytes roundtrip", async () => {
-      await machine.writeText("note.txt", "hi e2b 🚀");
-      const back = (await machine.readBytes("note.txt")).toString("utf8");
+      await environment.writeText("note.txt", "hi e2b 🚀");
+      const back = (await environment.readBytes("note.txt")).toString("utf8");
       return back === "hi e2b 🚀" ? "match" : `MISMATCH: ${back}`;
     });
     // A byte window is taken on the far side (tail/head/base64), so only these bytes travel.
-    await probe("readBytes window", async () => JSON.stringify((await machine.readBytes("note.txt", { offset: 3, length: 3 })).toString("utf8")));
-    await probe("listDir", async () => await machine.listDir("."));
-    await probe("fileInfo (stat)", async () => (await machine.fileInfo("note.txt")).size);
+    await probe("readBytes window", async () => JSON.stringify((await environment.readBytes("note.txt", { offset: 3, length: 3 })).toString("utf8")));
+    await probe("listDir", async () => await environment.listDir("."));
+    await probe("fileInfo (stat)", async () => (await environment.fileInfo("note.txt")).size);
     await probe("ripgrep present in base image", async () => {
-      const { stdout } = await machine.run(["sh", "-c", "command -v rg || echo NO"]);
+      const { stdout } = await environment.run(["sh", "-c", "command -v rg || echo NO"]);
       return stdout.trim();
     });
     await probe("timeout really kills", async () => {
-      const r = await machine.run(["sh", "-c", "sleep 30"], { timeoutMs: 2_000 });
+      const r = await environment.run(["sh", "-c", "sleep 30"], { timeoutMs: 2_000 });
       return r.timedOut ? "timed out as asked" : `NOT honoured (exit ${String(r.exitCode)})`;
     });
   } finally {

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 
 export interface RgResolution {
   readonly path: string;
@@ -27,18 +27,18 @@ export function ensureRgPath(_options: { signal?: AbortSignal } = {}): Promise<R
 }
 
 /**
- * Decide how to invoke ripgrep on a given machine.
- * - Local machine → the absolute path found on the orchestrator's PATH (the
+ * Decide how to invoke ripgrep on a given environment.
+ * - Local environment → the absolute path found on the orchestrator's PATH (the
  *   process runs here, so the resolved path is correct and avoids PATH ambiguity).
- * - Remote machines (ssh, sandbox) → the bare command name `rg`, resolved against
+ * - Remote environments (ssh, sandbox) → the bare command name `rg`, resolved against
  *   the REMOTE host's PATH when exec'd. The local absolute path would be meaningless
- *   there, so we never probe it for non-local machines.
+ *   there, so we never probe it for non-local environments.
  */
 export async function resolveRgCommand(
-  machine: Pick<Machine, "name">,
+  environment: Pick<Environment, "name">,
   options: { signal?: AbortSignal } = {},
 ): Promise<string> {
-  if (machine.name === "local") return (await ensureRgPath(options)).path;
+  if (environment.name === "local") return (await ensureRgPath(options)).path;
   return "rg";
 }
 

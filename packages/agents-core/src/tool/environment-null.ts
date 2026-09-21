@@ -1,21 +1,21 @@
-import type { ByteRange, DirEntry, Environment, Machine, FileInfo, RunCommandOptions, RunCommandResult } from "./machine.ts";
-import { BaseMachine } from "./machine-base.ts";
+import type { ByteRange, DirEntry, OsInfo, Environment, FileInfo, RunCommandOptions, RunCommandResult } from "./environment.ts";
+import { BaseEnvironment } from "./environment-base.ts";
 
 /**
- * An machine with no filesystem or process backing.
+ * An environment with no filesystem or process backing.
  *
- * Pure metadata (osEnv / path computation) returns neutral values so tools that
+ * Pure metadata (osInfo / path computation) returns neutral values so tools that
  * only inspect the environment don't crash; every actual I/O operation throws a
- * clear error. This is the default when a session is opened without an machine —
+ * clear error. This is the default when a session is opened without an environment —
  * a stateless server that forgets to omit a file tool fails LOUDLY instead of
  * silently reading the host disk.
  *
  * Note `realpath` resolves to `normpath` (pure computation, no I/O): the base
  * derivation's `readlink -f` attempt fails with the disabled error and falls back.
  */
-export class NullMachine extends BaseMachine {
+export class NullEnvironment extends BaseEnvironment {
   readonly name = "null";
-  readonly osEnv: Environment = {
+  readonly osInfo: OsInfo = {
     osKind: "Linux",
     osArch: "unknown",
     osVersion: "0",
@@ -25,7 +25,7 @@ export class NullMachine extends BaseMachine {
 
   private disabled(op: string): Error {
     return new Error(
-      `NullMachine: filesystem disabled — operation "${op}" requires an machine, but none was configured for this session.`,
+      `NullEnvironment: filesystem disabled — operation "${op}" requires an environment, but none was configured for this session.`,
     );
   }
 
@@ -42,7 +42,7 @@ export class NullMachine extends BaseMachine {
   getcwd(): string {
     return "/";
   }
-  withCwd(_cwd: string): Machine {
+  withCwd(_cwd: string): Environment {
     return this; // every operation is refused regardless of cwd
   }
 
@@ -64,7 +64,7 @@ export class NullMachine extends BaseMachine {
   }
 
   // Command execution — refused. Overridden rather than left to the base derivation so the
-  // error names this machine instead of reporting a missing process SPI.
+  // error names this environment instead of reporting a missing process SPI.
   override async run(_argv: readonly string[], _options?: RunCommandOptions): Promise<RunCommandResult> {
     throw this.disabled("run");
   }

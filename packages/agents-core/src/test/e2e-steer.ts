@@ -6,7 +6,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   SteerBus,
   renderSteerText,
@@ -77,7 +77,7 @@ function oneShotAfterStepCapability(origin: SteerOrigin, text: string): Capabili
   };
 }
 
-async function testIdleSteer(machine: LocalMachine): Promise<void> {
+async function testIdleSteer(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
@@ -85,7 +85,7 @@ async function testIdleSteer(machine: LocalMachine): Promise<void> {
 
   const bus = new SteerBus();
   const ret = bus.steer("remember: be brief", { kind: "user" }); // idle → wakes with a turn id
-  const runner = testRunner({ machine, steer: bus, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, steer: bus, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -94,7 +94,7 @@ async function testIdleSteer(machine: LocalMachine): Promise<void> {
   check("idle steer: drained into the first turn's transcript", userTexts(result.messages).includes("remember: be brief"));
 }
 
-async function testPrequeuedUserFollowUpWaitsForNextTurn(machine: LocalMachine): Promise<void> {
+async function testPrequeuedUserFollowUpWaitsForNextTurn(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("first answer", { stopReason: "stop" }),
@@ -111,7 +111,7 @@ async function testPrequeuedUserFollowUpWaitsForNextTurn(machine: LocalMachine):
 
   const bus = new SteerBus();
   bus.followUp("after that, summarize it");
-  const runner = testRunner({ machine, events, steer: bus, permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, steer: bus, permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "do the first task");
   faux.unregister();
 
@@ -126,7 +126,7 @@ async function testPrequeuedUserFollowUpWaitsForNextTurn(machine: LocalMachine):
   check("user follow-up: second turn produces the final output", result.output.includes("follow-up answer"));
 }
 
-async function testMidTurnSteer(machine: LocalMachine): Promise<void> {
+async function testMidTurnSteer(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("EnqueueSteer", { text: "actually, be concise" }), { stopReason: "toolUse" }),
@@ -143,7 +143,7 @@ async function testMidTurnSteer(machine: LocalMachine): Promise<void> {
 
   // A user steer enqueued during a tool_use step is drained at the next step boundary — same turn.
   const cap = steerToolCapability({ kind: "user" });
-  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "do the thing");
   faux.unregister();
 
@@ -153,7 +153,7 @@ async function testMidTurnSteer(machine: LocalMachine): Promise<void> {
   check("mid-turn steer: model responded after the injection", result.output.includes("acknowledged"));
 }
 
-async function testFinalStepSteerStaysInTurn(machine: LocalMachine): Promise<void> {
+async function testFinalStepSteerStaysInTurn(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("first answer", { stopReason: "stop" }), // end_turn; afterStep enqueues a user steer
@@ -172,7 +172,7 @@ async function testFinalStepSteerStaysInTurn(machine: LocalMachine): Promise<voi
   // The regression: a user steer that lands DURING the terminal step must be answered in the
   // same turn (runTurn re-drains before breaking), NOT bounced to a fresh turn like a follow-up.
   const cap = oneShotAfterStepCapability({ kind: "user" }, "late steer: one more thing");
-  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -181,7 +181,7 @@ async function testFinalStepSteerStaysInTurn(machine: LocalMachine): Promise<voi
   check("final-step steer: final output responds to the steer", result.output.includes("handled the late steer"));
 }
 
-async function testFollowUpDrain(machine: LocalMachine): Promise<void> {
+async function testFollowUpDrain(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("first response", { stopReason: "stop" }), // turn 1 ends; afterStep enqueues
@@ -198,7 +198,7 @@ async function testFollowUpDrain(machine: LocalMachine): Promise<void> {
   });
 
   const cap = oneShotAfterStepCapability({ kind: "background_done", taskId: "bg9", summary: "BG SUMMARY" }, "ignored-body");
-  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -207,7 +207,7 @@ async function testFollowUpDrain(machine: LocalMachine): Promise<void> {
   check("follow-up: final output is turn 2's response", result.output.includes("after bg"));
 }
 
-async function testSteerIdCorrelation(machine: LocalMachine): Promise<void> {
+async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("EnqueueSteer", { text: "steer me" }), { stopReason: "toolUse" }), // tool enqueues user steer; afterStep enqueues bg follow-up
@@ -264,7 +264,7 @@ async function testSteerIdCorrelation(machine: LocalMachine): Promise<void> {
     }
   });
 
-  const runner = testRunner({ machine, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   await runner.run(agent, "go");
   faux.unregister();
 
@@ -321,13 +321,13 @@ function testIdleGate(): void {
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
-  await testIdleSteer(machine);
-  await testPrequeuedUserFollowUpWaitsForNextTurn(machine);
-  await testMidTurnSteer(machine);
-  await testFinalStepSteerStaysInTurn(machine);
-  await testFollowUpDrain(machine);
-  await testSteerIdCorrelation(machine);
+  const environment = new LocalEnvironment(process.cwd());
+  await testIdleSteer(environment);
+  await testPrequeuedUserFollowUpWaitsForNextTurn(environment);
+  await testMidTurnSteer(environment);
+  await testFinalStepSteerStaysInTurn(environment);
+  await testFollowUpDrain(environment);
+  await testSteerIdCorrelation(environment);
   testOriginFraming();
   testIdleGate();
 

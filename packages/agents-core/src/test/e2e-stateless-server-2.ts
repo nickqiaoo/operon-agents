@@ -21,7 +21,7 @@ import {
   filesystemTools,
   getInterruptionState,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
   Runner,
 } from "../index.ts";
 import {
@@ -45,7 +45,7 @@ async function request<T>(id: string, fn: (runner: Runner, workDir: string) => P
     return await fn(
       testRunner({
         store: opened.store,
-        machine: new LocalMachine(opened.workDir),
+        environment: new LocalEnvironment(opened.workDir),
         permission: { mode: "yolo" },
       }),
       opened.workDir,
@@ -198,7 +198,7 @@ async function aLockSerializesTheSameRace(): Promise<void> {
     try {
       return await fn(testRunner({
         store: opened.store,
-        machine: new LocalMachine(opened.workDir),
+        environment: new LocalEnvironment(opened.workDir),
         permission: { mode: "yolo" },
         lock,
       }));

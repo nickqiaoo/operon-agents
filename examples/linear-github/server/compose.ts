@@ -4,7 +4,7 @@
 // Same composition as ../../managed-agents/server.ts. What is specific here: the builtin coding
 // profile plus SubmitPullRequest, the engineer's guidance appended to the profile's prompt, and
 // environments that are repositories: a session's environment id is `owner/name`, and its
-// machine is a clone of that repository (server/checkout.ts).
+// environment is a clone of that repository (server/checkout.ts).
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -98,7 +98,7 @@ export async function composeServer(options: ServerOptions) {
           },
         });
       }
-      return defaultCapabilities({ scope, ownMachine: ctx.ownMachine });
+      return defaultCapabilities({ scope, ownEnvironment: ctx.ownEnvironment });
     },
     workDir: options.work,
     // Everything inside the clone is approved; the safety floor (sensitive files, .git internals,
@@ -119,7 +119,7 @@ export async function composeServer(options: ServerOptions) {
       }
       return {
         workDir: options.work,
-        machine: ({ sessionId }) =>
+        environment: ({ sessionId }) =>
           sandboxes !== undefined ? sandboxes.openSession(sessionId, repo) : openLocalCheckout(join(options.work, sessionId), sessionId, repo, options.github),
       };
     },

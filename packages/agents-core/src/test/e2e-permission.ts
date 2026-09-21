@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type ToolCall } from "./faux.ts";
-import { bashTool, ConversationContext, defineModel, LocalMachine, PermissionManager, writeTool } from "../index.ts";
+import { bashTool, ConversationContext, defineModel, LocalEnvironment, PermissionManager, writeTool } from "../index.ts";
 import { runTurn } from "../internal.ts";
 import type { Message, PermissionRule, Responder, ToolResultMessage } from "../index.ts";
 
@@ -14,8 +14,8 @@ async function runScenario(
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-perm-"));
   const { gitInit, ...pmOpts } = opts;
   if (gitInit) mkdirSync(join(dir, ".git")); // a bare `.git` dir marks the work tree
-  // Machine lets the git-control / git-cwd-write policies probe the work-tree marker.
-  const pm = new PermissionManager({ ...pmOpts, cwd: dir, machine: new LocalMachine(dir) });
+  // Environment lets the git-control / git-cwd-write policies probe the work-tree marker.
+  const pm = new PermissionManager({ ...pmOpts, cwd: dir, environment: new LocalEnvironment(dir) });
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage(call, { stopReason: "toolUse" }), fauxAssistantMessage("done", { stopReason: "stop" })]);
   const context = new ConversationContext();
@@ -25,7 +25,7 @@ async function runScenario(
     turnId: "t",
     signal: new AbortController().signal,
     model: faux.getChatModel()!,
-    machine: new LocalMachine(dir),
+    environment: new LocalEnvironment(dir),
     context,
     tools,
     hooks: { authorizeToolExecution: pm.authorize },

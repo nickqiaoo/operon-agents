@@ -13,7 +13,7 @@ import { join } from "node:path";
 import {
   createHarness,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
   type AgentEvent,
 } from "operon-agents";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
@@ -43,7 +43,7 @@ function fixture(name: string, options: { readonly permission?: "yolo" | "manual
   const harness = createHarness({
     harness: (s) => {
       s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     permission: { mode: options.permission ?? "yolo" },

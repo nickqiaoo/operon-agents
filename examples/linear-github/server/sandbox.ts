@@ -14,8 +14,8 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import type { Machine } from "operon-agents";
-import { E2BWorkspace, type E2BMachineState, type E2BSandboxFactory } from "operon-sandbox";
+import type { Environment } from "operon-agents";
+import { E2BWorkspace, type E2BEnvironmentState, type E2BSandboxFactory } from "operon-sandbox";
 import { ensureCheckout } from "./checkout.ts";
 import type { GitHubApi, RepoRef } from "./github.ts";
 
@@ -47,17 +47,17 @@ export class E2BCheckouts {
     return join(this.work, sessionId, "sandbox.json");
   }
 
-  private readState(sessionId: string): E2BMachineState | undefined {
+  private readState(sessionId: string): E2BEnvironmentState | undefined {
     try {
-      const raw = JSON.parse(readFileSync(this.stateFile(sessionId), "utf8")) as Partial<E2BMachineState>;
+      const raw = JSON.parse(readFileSync(this.stateFile(sessionId), "utf8")) as Partial<E2BEnvironmentState>;
       return typeof raw.sandboxId === "string" ? { sandboxId: raw.sandboxId } : undefined;
     } catch {
       return undefined;
     }
   }
 
-  /** The session's machine, rooted in its clone of `repo` inside its sandbox. */
-  async openSession(sessionId: string, repo: RepoRef): Promise<Machine> {
+  /** The session's environment, rooted in its clone of `repo` inside its sandbox. */
+  async openSession(sessionId: string, repo: RepoRef): Promise<Environment> {
     const previous = this.readState(sessionId);
     const workspace = await E2BWorkspace.open(
       {
@@ -74,7 +74,7 @@ export class E2BCheckouts {
     }
     this.open.set(sessionId, workspace);
     const root = posix.join(this.options.workRoot ?? DEFAULT_WORK_ROOT, sessionId);
-    return ensureCheckout(workspace.machine, root, sessionId, repo, this.github);
+    return ensureCheckout(workspace.environment, root, sessionId, repo, this.github);
   }
 
   /** The session closed: pause its sandbox. False when the plan cannot pause (still running). */

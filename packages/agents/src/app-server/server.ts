@@ -1,7 +1,7 @@
 /**
  * AppServer — exposes a `Harness` over a `JsonRpcTransport` so an external
  * process (any language) can drive it. This is the fifth topology from the design
- * doc: LocalMachine + disk store + a stdout EventSink + a stdin reverse-RPC
+ * doc: LocalEnvironment + disk store + a stdout EventSink + a stdin reverse-RPC
  * Responder, with the controlling process living outside.
  *
  * The engine is untouched: the server only (1) forwards each session's events as

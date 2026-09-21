@@ -2,7 +2,7 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "../protocol/
 import { ToolAccesses } from "../tool/access.ts";
 import type { NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
 import type { ApprovalResponse } from "../permission/types.ts";
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import type { FileFreshnessLedger } from "../tool/file-freshness.ts";
@@ -35,7 +35,7 @@ export interface ToolCallStepContext {
   readonly address?: string;
   readonly signal: AbortSignal;
   readonly model: ChatModel;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly tools: ReadonlyMap<string, Tool>;
   /** Explains a call to a name absent from `tools` (e.g. an unloaded deferred tool). */
   readonly describeUnknownTool?: (name: string) => string | undefined;
@@ -236,7 +236,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       turnId: step.turnId,
       toolCallId: call.id,
       signal: step.signal,
-      machine: step.machine,
+      environment: step.environment,
       ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
     });
   } catch (error) {
@@ -287,7 +287,7 @@ async function runAndFinalize(
         turnId: step.turnId,
         toolCallId: call.id,
         signal: step.signal,
-        machine: step.machine,
+        environment: step.environment,
         ...(step.address !== undefined ? { address: step.address } : {}),
         background: step.background,
         dispatch: createNestedDispatcher(step, call),

@@ -13,7 +13,7 @@ import type { AgentEvent } from "operon-agents";
 import {
   createHarness,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
 } from "operon-agents";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 import { SessionService } from "../src/server/session-service.ts";
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   const harness = createHarness({
     harness: (s) => {
       s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
@@ -157,7 +157,7 @@ async function cursorAdvancesOnceTheInputIsInTheConversation(): Promise<void> {
   const harness = createHarness({
     harness: (s) => {
       s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     permission: { mode: "yolo" },

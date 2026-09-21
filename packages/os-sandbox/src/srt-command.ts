@@ -1,11 +1,11 @@
 /**
  * srt's wrap API takes a SHELL COMMAND STRING (plus the shell to run it with),
- * while Machine.run hands us an argv. This module converts losslessly between
+ * while Environment.run hands us an argv. This module converts losslessly between
  * the two shapes so the sandbox always sees the exact command that would have
  * run without it.
  */
 
-/** Single-quote for a POSIX shell (same contract as BaseMachine's internal helper). */
+/** Single-quote for a POSIX shell (same contract as BaseEnvironment's internal helper). */
 export function shellQuoteArg(value: string): string {
   if (/^[A-Za-z0-9_/@%+=:,.-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -26,9 +26,9 @@ export interface SrtInvocation {
 }
 
 /**
- * Two argv shapes reach a machine:
+ * Two argv shapes reach an environment:
  *
- * - `[shell, "-c", script]` — the bash tool, user hooks, and BaseMachine's own
+ * - `[shell, "-c", script]` — the bash tool, user hooks, and BaseEnvironment's own
  *   cwd fallback all build this. Pass `script` through VERBATIM with its own
  *   shell, so quoting inside the script survives untouched.
  * - anything else (a search binary and its args) — quote each argument into a

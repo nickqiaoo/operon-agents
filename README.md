@@ -33,7 +33,7 @@ over. Capabilities — permissions, compaction — are the opposite: always pres
 failure fails the run. The dividing question is whether skipping the logic once costs you a feature
 or causes an incident.
 
-**Where tools run is a seam, not a setting.** `Machine` expresses intent (timeout, output cap,
+**Where tools run is a seam, not a setting.** `Environment` expresses intent (timeout, output cap,
 streaming) and each backend honors it natively — local process, OS-level sandbox (macOS Seatbelt /
 Linux bubblewrap), or a vendor sandbox (E2B, Cloudflare). `RunCommandResult.exitCode` may be
 `undefined`, so callers must face "the backend could not confirm" instead of reading a fabricated
@@ -91,7 +91,7 @@ console.log(`\n${result.status} · ${result.usage.output} output tokens`);
 await session.close();
 ```
 
-`createLocalSession` is the local composition root: disk-persisted sessions, the local machine, and
+`createLocalSession` is the local composition root: disk-persisted sessions, the local environment, and
 cron, all wired for you. A server calls `createHarness` directly and injects its own backends —
 there is deliberately no server preset, because one would force every session to share a single
 credential store with no tenant dimension.
@@ -133,8 +133,8 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start
 | `operon-managed-agents` | Managed server and TypeScript client — a stateless API surface plus workers that claim sessions from a Postgres work table. |
 | `operon-agents-peers` | Peer discovery and messaging between agents, built entirely on the engine's public seams. |
 | `operon-code-mode` | Code Mode: the model writes a TypeScript program that calls its tools, run in a confined QuickJS (WebAssembly) runtime; every call goes through the engine's tool pipeline. |
-| `operon-sandbox` | Host-side sandbox lifecycle (E2B, Cloudflare), handing the framework a vendor-driven `Machine`. |
-| `operon-os-sandbox` | OS-level command sandboxing for the local machine, degrading to a plain local machine where unsupported. |
+| `operon-sandbox` | Host-side sandbox lifecycle (E2B, Cloudflare), handing the framework a vendor-driven `Environment`. |
+| `operon-os-sandbox` | OS-level command sandboxing for the local environment, degrading to a plain local environment where unsupported. |
 
 Two more packages are private, not published: `operon-agents-tui` (the terminal client — see its
 [README](./packages/agents-tui/README.md)) and `operon-pi-tui` (the terminal rendering layer it is
@@ -146,7 +146,7 @@ Six rings, with dependencies pointing inward only — the kernel never imports a
 not know its names:
 
 ```
-⑥ adapters      Machine impls · store backends · model vendors
+⑥ adapters      Environment impls · store backends · model vendors
 ⑤ hosts         local: app-server · TUI    server: managed-agents
 ④ extensions    tools · injection · commands · shared resources
 ③ harness       session fleet · service registry · loader · barrier
@@ -154,7 +154,7 @@ not know its names:
 ① kernel        Runner · Session · Engine · runTurn · executeStep · runCalls
 ```
 
-The kernel defines three ports and knows only the interfaces: `Machine` (where commands run),
+The kernel defines three ports and knows only the interfaces: `Environment` (where commands run),
 `SessionStore` (what is remembered), and `ChatModel` (which model answers).
 
 [`docs/architecture.md`](./docs/architecture.md) is the full map — the execution path, the composition

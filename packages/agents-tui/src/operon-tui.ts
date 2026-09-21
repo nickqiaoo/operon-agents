@@ -725,7 +725,7 @@ export class OperonTui {
   }
 
   /**
-   * A `!` command runs on the session's machine — the same place the agent's Bash tool runs, so
+   * A `!` command runs on the session's environment — the same place the agent's Bash tool runs, so
    * `!` and the agent see one filesystem and one shell. It is echoed locally and not journaled:
    * the user ran it, not the model.
    */
@@ -763,9 +763,9 @@ export class OperonTui {
     this.state.ui.requestRender();
 
     try {
-      // Same invocation shape the Bash tool uses: the machine's own shell, the session's cwd.
-      const machine = session.machine;
-      const result = await machine.run([machine.osEnv.shellPath, '-c', command], {
+      // Same invocation shape the Bash tool uses: the environment's own shell, the session's cwd.
+      const environment = session.environment;
+      const result = await environment.run([environment.osInfo.shellPath, '-c', command], {
         cwd: this.state.appState.workDir,
         signal: abort.signal,
         onOutput: (chunk) => {

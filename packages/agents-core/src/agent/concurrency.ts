@@ -41,7 +41,7 @@ export function defaultSpawnConcurrency(): number {
 
 /**
  * One limiter per session. Keyed off the session port (not the frame) because a run's frames come
- * and go while the session is what actually owns the machine's capacity; a session holds its run
+ * and go while the session is what actually owns the environment's capacity; a session holds its run
  * lock, so this bounds the whole tree beneath one prompt.
  */
 const perSession = new WeakMap<object, Semaphore>();

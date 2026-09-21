@@ -8,7 +8,7 @@ import {
   defineAgent,
   Runner,
   Session,
-  LocalMachine,
+  LocalEnvironment,
   SkillRegistry,
   SteerBus,
   ListenerSink,
@@ -66,9 +66,9 @@ function buildSkillTree(root: string): { roots: readonly SkillRoot[] } {
   return { roots: [{ path: projectSkills, source: "project" }, { path: userSkills, source: "user" }] };
 }
 
-async function testScanAndPrecedence(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testScanAndPrecedence(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const registry = new SkillRegistry();
-  await registry.loadRoots(machine, roots);
+  await registry.loadRoots(environment, roots);
 
   check("scan: greeter bundle discovered", registry.getSkill("greeter")?.description === "Greets a person by name.");
   check("scan: flat .md skill discovered", registry.getSkill("flatskill") !== undefined);
@@ -84,13 +84,13 @@ async function testScanAndPrecedence(machine: LocalMachine, roots: readonly Skil
   check("scan: renderSkillPrompt expands declared arg", rendered === "Greeting for World.");
 }
 
-async function testCatalogInjection(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testCatalogInjection(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -100,7 +100,7 @@ async function testCatalogInjection(machine: LocalMachine, roots: readonly Skill
   check("injector: user-only skill NOT listed", !reminder.includes("user-only"));
 }
 
-async function testSkillToolInline(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testSkillToolInline(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Skill", { skill: "greeter", args: "World" }), { stopReason: "toolUse" }),
@@ -109,7 +109,7 @@ async function testSkillToolInline(machine: LocalMachine, roots: readonly SkillR
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "use the greeter");
   faux.unregister();
 
@@ -118,7 +118,7 @@ async function testSkillToolInline(machine: LocalMachine, roots: readonly SkillR
   check("skill-tool: wrapped as <skill-loaded>", r.text.includes('<skill-loaded name="greeter" args="World">'));
 }
 
-async function testUserOnlyRefused(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testUserOnlyRefused(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Skill", { skill: "user-only" }), { stopReason: "toolUse" }),
@@ -127,7 +127,7 @@ async function testUserOnlyRefused(machine: LocalMachine, roots: readonly SkillR
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [skillsCapability({ roots })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "try the user-only skill");
   faux.unregister();
 
@@ -135,7 +135,7 @@ async function testUserOnlyRefused(machine: LocalMachine, roots: readonly SkillR
   check("skill-tool: refuses disableModelInvocation skill", r.isError && r.text.includes("can only be triggered by the user"));
 }
 
-async function testFlowSkillSubRunner(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testFlowSkillSubRunner(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("skill_summarizer", { input: "a very long passage to compress" }), { stopReason: "toolUse" }),
@@ -149,13 +149,13 @@ async function testFlowSkillSubRunner(machine: LocalMachine, roots: readonly Ski
   const flowExecutor = async (req: FlowSkillRequest): Promise<string> => {
     seenInstructions = req.instructions;
     const sub = defineAgent({ name: "summarizer", model, instructions: req.instructions });
-    const subRunner = testRunner({ machine, permission: { mode: "yolo" } });
+    const subRunner = testRunner({ environment, permission: { mode: "yolo" } });
     const res = await subRunner.run(sub, req.input, { signal: req.signal });
     return res.output;
   };
 
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const runner = testRunner({ machine, capabilities: [skillsCapability({ roots, flowExecutor })], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [skillsCapability({ roots, flowExecutor })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "summarize this");
   faux.unregister();
 
@@ -165,7 +165,7 @@ async function testFlowSkillSubRunner(machine: LocalMachine, roots: readonly Ski
   check("flow-skill: main relays the summary", result.output.includes("relayed the summary"));
 }
 
-async function testSessionSkillService(machine: LocalMachine, roots: readonly SkillRoot[]): Promise<void> {
+async function testSessionSkillService(environment: LocalEnvironment, roots: readonly SkillRoot[]): Promise<void> {
   const events = new ListenerSink();
   const steer = new SteerBus();
   let activated: AgentEvent | undefined;
@@ -174,7 +174,7 @@ async function testSessionSkillService(machine: LocalMachine, roots: readonly Sk
   });
 
   const session = await openTestSession({
-    machine,
+    environment,
     events,
     steer,
     capabilities: [skillsCapability({ roots })],
@@ -201,7 +201,7 @@ async function testSessionSkillService(machine: LocalMachine, roots: readonly Sk
  * Plugin skill dirs must ADD to the default project/user roots, never replace them: a host that
  * hands over one skill-bearing plugin used to silently hide every `.agents/skills` skill.
  */
-async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promise<void> {
+async function testDefaultRootsMerge(environment: LocalEnvironment, dir: string): Promise<void> {
   const projectDir = join(dir, "project");
   const userHomeDir = join(dir, "user");
   const pluginSkills = join(dir, "plugin", "skills");
@@ -210,27 +210,27 @@ async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promis
   writeSkill(join(pluginSkills, "dup"), "SKILL.md", "name: dup\ndescription: Plugin version of dup.", "plugin dup body");
   const pluginRoots: readonly SkillRoot[] = [{ path: pluginSkills, source: "extra", plugin: { id: "tracker-plugin" } }];
 
-  const replaced = await resolveSkillRoots(machine, { explicitRoots: pluginRoots, projectDir, userHomeDir });
+  const replaced = await resolveSkillRoots(environment, { explicitRoots: pluginRoots, projectDir, userHomeDir });
   check(
     "roots: explicit roots replace the defaults by default",
     JSON.stringify(replaced.map((r) => r.source)) === JSON.stringify(["extra"]),
   );
 
-  const merged = await resolveSkillRoots(machine, { explicitRoots: pluginRoots, projectDir, userHomeDir, includeDefaults: true });
+  const merged = await resolveSkillRoots(environment, { explicitRoots: pluginRoots, projectDir, userHomeDir, includeDefaults: true });
   check(
     "roots: includeDefaults keeps project + user roots ahead of the explicit ones",
     JSON.stringify(merged.map((r) => r.source)) === JSON.stringify(["project", "user", "extra"]),
   );
 
   const registry = new SkillRegistry();
-  await registry.loadRoots(machine, merged);
+  await registry.loadRoots(environment, merged);
   check("roots: merged scan sees both local and plugin skills", registry.getSkill("greeter") !== undefined && registry.getSkill("tracker") !== undefined);
   check("roots: local skill still shadows the same-named plugin skill", registry.getSkill("dup")?.source === "project");
   check("roots: plugin provenance preserved through the merge", registry.getSkill("tracker")?.plugin?.id === "tracker-plugin");
 
   // Same thing through the capability, which is how a harness actually wires plugin roots in.
   const session = await openTestSession({
-    machine,
+    environment,
     events: new ListenerSink(),
     steer: new SteerBus(),
     capabilities: [skillsCapability({ roots: pluginRoots, includeDefaultRoots: true, projectDir, userHomeDir })],
@@ -243,7 +243,7 @@ async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promis
   }
 
   const isolated = await openTestSession({
-    machine,
+    environment,
     events: new ListenerSink(),
     steer: new SteerBus(),
     capabilities: [skillsCapability({ roots: pluginRoots, projectDir, userHomeDir })],
@@ -258,16 +258,16 @@ async function testDefaultRootsMerge(machine: LocalMachine, dir: string): Promis
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-skills-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   const { roots } = buildSkillTree(dir);
   try {
-    await testScanAndPrecedence(machine, roots);
-    await testCatalogInjection(machine, roots);
-    await testSkillToolInline(machine, roots);
-    await testUserOnlyRefused(machine, roots);
-    await testFlowSkillSubRunner(machine, roots);
-    await testSessionSkillService(machine, roots);
-    await testDefaultRootsMerge(machine, dir);
+    await testScanAndPrecedence(environment, roots);
+    await testCatalogInjection(environment, roots);
+    await testSkillToolInline(environment, roots);
+    await testUserOnlyRefused(environment, roots);
+    await testFlowSkillSubRunner(environment, roots);
+    await testSessionSkillService(environment, roots);
+    await testDefaultRootsMerge(environment, dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

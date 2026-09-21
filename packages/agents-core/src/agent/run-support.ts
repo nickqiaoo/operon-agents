@@ -121,14 +121,14 @@ export function runCtxFor<TContext>(state: RunState<TContext>): AgentRunContext<
     address: state.address,
     signal: state.signal,
     context: state.context,
-    machine: state.machine,
-    resolveSystemPromptContext: () => state.session.resolveSystemPromptContext(state.machine),
+    environment: state.environment,
+    resolveSystemPromptContext: () => state.session.resolveSystemPromptContext(state.environment),
   };
 }
 
 /**
  * Fork a child runtime for a spawned sub-agent: fresh usage/turns ledger and a new
- * `address` shard, inheriting the parent's shared machine (session/store/permission/…)
+ * `address` shard, inheriting the parent's shared environment (session/store/permission/…)
  * unless an override is given. This is the single place child frames are minted — the
  * subagent, Agent, and Workflow tools all go through it.
  */
@@ -148,7 +148,7 @@ export function deriveChild<TContext>(parent: RunState<TContext>, opts: DeriveOp
     currentTurnId: frame?.turnId,
     parentToolCallId: opts.parentToolCallId,
     ...(opts.signal ? { signal: opts.signal } : {}),
-    ...(opts.machine ? { machine: opts.machine } : {}),
+    ...(opts.environment ? { environment: opts.environment } : {}),
     ...(opts.steer ? { steer: opts.steer } : {}),
   };
 }

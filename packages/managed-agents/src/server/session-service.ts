@@ -73,7 +73,7 @@ export interface SessionServiceOptions {
    * the same table the workers claim from.
    */
   readonly work: SessionWork;
-  /** Resolves an environment to the durable `workDir` a session is created under. The machine
+  /** Resolves an environment to the durable `workDir` a session is created under. The environment
    *  half of a resolution belongs to the worker; nothing here executes. */
   readonly environments: ManagedEnvironmentRegistry;
   readonly metadataStore?: ManagedSessionMetadataStore;

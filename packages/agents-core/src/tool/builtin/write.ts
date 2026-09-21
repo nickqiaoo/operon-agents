@@ -2,9 +2,9 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import type { Machine, FileInfo } from "../machine.ts";
+import type { Environment, FileInfo } from "../environment.ts";
 import { checkFreshness, FILE_MODIFIED_MESSAGE, FILE_NOT_READ_MESSAGE, type FileFreshnessLedger } from "../file-freshness.ts";
-import { fileVersionFromInfo, normalizeForCompare } from "../support/machine-ops.ts";
+import { fileVersionFromInfo, normalizeForCompare } from "../support/environment-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
 import type { ToolResolveContext, ToolResult, ToolRunContext } from "../types.ts";
 import { detectLineEndingStyle, materializeModelText, type LineEndingStyle } from "./line-endings.ts";
@@ -45,31 +45,31 @@ export const writeTool = defineTool({
   // payload, an SSH key), projected as `${file_path}: ${content}`.
   toAutoApprovalInput: (args) => `${args.path}: ${args.content}`,
   async resolve(args, ctx) {
-    const path = await resolveToolPath(args.path, ctx.machine, "write");
+    const path = await resolveToolPath(args.path, ctx.environment, "write");
     return {
       accesses: ToolAccesses.writeFile(path),
       display: { title: `Writing ${args.path}`, path: args.path, content: args.content },
-      ...pathApproval("Write", ctx.machine, path),
+      ...pathApproval("Write", ctx.environment, path),
       run: (runCtx) => execute(args, path, runCtx),
     };
   },
 });
 
 async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext): Promise<ToolResult> {
-  const machine = ctx.machine;
+  const environment = ctx.environment;
   let info: FileInfo | undefined;
   try {
     // ONE stat for the whole call: it answers "does this file exist" and supplies the
     // version the freshness check needs. The three separate stats this replaced each
     // cost a round trip on a remote backend to re-learn what this one already knows.
-    info = await statOrUndefined(machine, safePath);
+    info = await statOrUndefined(environment, safePath);
   } catch (error) {
     return errorResult(error instanceof Error ? error.message : String(error));
   }
   // An existing file already proves its parent directory exists; only a new file needs the
   // parent checked — which is the one case the helpful "create it first" message is for.
   if (info === undefined) {
-    const parentError = await checkParentDirectory(safePath, machine);
+    const parentError = await checkParentDirectory(safePath, environment);
     if (parentError !== undefined) return errorResult(parentError);
   }
 
@@ -88,7 +88,7 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       // tool's occasional appends; high-frequency log appends belong elsewhere.
       let prior = "";
       try {
-        prior = (await machine.readBytes(safePath)).toString("utf8");
+        prior = (await environment.readBytes(safePath)).toString("utf8");
         priorText = prior;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -105,9 +105,9 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
 
     // Unconditional: `validateWrite` above already decided this write is allowed against
     // the file as the stat found it. A file appearing (or changing) between that check
-    // and this write is the gap documented on Machine.writeText — the record below is
+    // and this write is the gap documented on Environment.writeText — the record below is
     // what surfaces it to the next Read/Write.
-    const result = await machine.writeText(safePath, nextContent);
+    const result = await environment.writeText(safePath, nextContent);
 
     ctx.fileLedger?.recordWrite(safePath, {
       // Present only where the backend knew it for free (local); elsewhere the record
@@ -137,9 +137,9 @@ function requireLedger(ctx: ToolResolveContext | ToolRunContext): FileFreshnessL
   return ctx.fileLedger;
 }
 
-async function statOrUndefined(machine: Machine, path: string): Promise<FileInfo | undefined> {
+async function statOrUndefined(environment: Environment, path: string): Promise<FileInfo | undefined> {
   try {
-    return await machine.fileInfo(path);
+    return await environment.fileInfo(path);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return undefined;
@@ -170,7 +170,7 @@ async function validateWrite(
       // I/O of every chunk in a chunked write.
       if (knownContent !== undefined) return normalizeForCompare(knownContent);
       try {
-        return normalizeForCompare((await ctx.machine.readBytes(path)).toString(record.encoding));
+        return normalizeForCompare((await ctx.environment.readBytes(path)).toString(record.encoding));
       } catch {
         return undefined;
       }
@@ -186,11 +186,11 @@ function toLedgerLineEndings(style: LineEndingStyle): "LF" | "CRLF" | "mixed" {
   return "LF";
 }
 
-async function checkParentDirectory(safePath: string, machine: Machine): Promise<string | undefined> {
+async function checkParentDirectory(safePath: string, environment: Environment): Promise<string | undefined> {
   const parent = dirname(safePath);
   let info;
   try {
-    info = await machine.fileInfo(parent);
+    info = await environment.fileInfo(parent);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return `Parent directory does not exist: ${parent}. Create it before writing this file.`;

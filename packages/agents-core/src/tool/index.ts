@@ -1,14 +1,14 @@
 export type * from "./types.ts";
 export { ToolAccesses } from "./access.ts";
 export type {
-  Machine,
-  MachineFactory,
-  MachineOpenContext,
-  DecodeErrors,
   Environment,
+  EnvironmentFactory,
+  EnvironmentOpenContext,
+  DecodeErrors,
+  OsInfo,
   OsKind,
   ShellName,
-} from "./machine.ts";
+} from "./environment.ts";
 export type {
   ByteRange,
   RunCommandResult,
@@ -21,17 +21,17 @@ export type {
   LineEndings,
   WriteTextOptions,
   WriteTextResult,
-} from "./machine.ts";
-// ── Writing a Machine backend ────────────────────────────────────────────────
-// Everything above is the CALLER's surface: `Machine` and the shapes its methods take and
+} from "./environment.ts";
+// ── Writing an Environment backend ────────────────────────────────────────────────
+// Everything above is the CALLER's surface: `Environment` and the shapes its methods take and
 // return. What follows is the IMPLEMENTER's, and only a backend author needs it.
 //
-// Extend `BaseMachine` and it derives the high-level operations for you. Its process SPI —
+// Extend `BaseEnvironment` and it derives the high-level operations for you. Its process SPI —
 // `spawn`, returning a `SpawnedProcess` — is what gets you `run` for free, and is optional:
 // a transport with no OS process (a sandbox HTTP API, as in `operon-sandbox`) omits it and
 // overrides `run` natively instead. Nothing outside the class hierarchy calls either one.
-export { BaseMachine } from "./machine-base.ts";
-export type { SpawnedProcess } from "./machine-base.ts";
+export { BaseEnvironment } from "./environment-base.ts";
+export type { SpawnedProcess } from "./environment-base.ts";
 export { materializeWorkspace, describeWorkspace, WorkspaceMaterializeError } from "./workspace-spec.ts";
 export type { HostReader, MaterializeOptions, WorkspaceEntry, WorkspaceSpec } from "./workspace-spec.ts";
 // Low-level file-op helpers (readTextFile / decodeText / …) are on
@@ -46,14 +46,14 @@ export {
 } from "./file-freshness.ts";
 export type { FileReadRecord, FreshnessVerdict, RecordReadInput, RecordWriteOptions, CheckFreshnessInput } from "./file-freshness.ts";
 // Bash permission-rule matching helpers are on `operon-agents-core/internal`.
-export { LocalMachine, detectEnvironment } from "./machine-local.ts";
-export { NullMachine } from "./machine-null.ts";
+export { LocalEnvironment, detectOsInfo } from "./environment-local.ts";
+export { NullEnvironment } from "./environment-null.ts";
 export { nonInteractiveShellEnv, proxyEnv, PROXY_ENV_VARS } from "./shell-env.ts";
 export type { NonInteractiveEnvOptions } from "./shell-env.ts";
 export { collectGitContext, formatGitContext, sanitizeRemoteUrl, parseProjectName } from "./git-context.ts";
 export type { GitContext, GitContextOptions } from "./git-context.ts";
-export { SshMachine } from "./machine-ssh.ts";
-export type { SshMachineOptions, SshMachineExtraOptions } from "./machine-ssh.ts";
+export { SshEnvironment } from "./environment-ssh.ts";
+export type { SshEnvironmentOptions, SshEnvironmentExtraOptions } from "./environment-ssh.ts";
 export type { BackgroundSpawner } from "./background.ts";
 export { askUser } from "./ask.ts";
 export { defineTool, tool } from "./define.ts";

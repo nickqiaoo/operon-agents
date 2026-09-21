@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { LocalMachine } from "../index.ts";
+import { LocalEnvironment } from "../index.ts";
 import { loadMcpServers } from "../mcp/index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -30,8 +30,8 @@ async function testLayering(root: string): Promise<void> {
     mcpServers: { common: { type: "http", url: "https://local-common" } },
   });
 
-  const machine = new LocalMachine(cwd);
-  const { servers, layers } = await loadMcpServers(machine, { appName: "agents", homeDir, cwd });
+  const environment = new LocalEnvironment(cwd);
+  const { servers, layers } = await loadMcpServers(environment, { appName: "agents", homeDir, cwd });
 
   check("layer: user-only server present", servers["shared"]?.url === "https://user-only");
   check("layer: project server present", servers["proj"] !== undefined);
@@ -47,8 +47,8 @@ async function testSparse(root: string): Promise<void> {
   mkdirSync(cwd, { recursive: true });
   writeJson(join(cwd, "mcp.json"), { mcpServers: { only: { type: "http", url: "https://only" } } });
 
-  const machine = new LocalMachine(cwd);
-  const { servers, layers } = await loadMcpServers(machine, { appName: "agents", homeDir, cwd });
+  const environment = new LocalEnvironment(cwd);
+  const { servers, layers } = await loadMcpServers(environment, { appName: "agents", homeDir, cwd });
   check("sparse: resolves with only the project tier", servers["only"]?.url === "https://only" && Object.keys(servers).length === 1);
   check("sparse: absent tiers reported not loaded", layers.filter((l) => !l.loaded).map((l) => l.tier).sort().join(",") === "local,user");
 }

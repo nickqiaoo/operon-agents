@@ -1,4 +1,4 @@
-import type { Machine } from "./machine.ts";
+import type { Environment } from "./environment.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_DIRTY_FILES = 20;
@@ -23,19 +23,19 @@ export interface GitContext {
   readonly recentCommits: readonly string[];
 }
 
-export async function collectGitContext(machine: Machine, cwd: string, options: GitContextOptions = {}): Promise<GitContext> {
+export async function collectGitContext(environment: Environment, cwd: string, options: GitContextOptions = {}): Promise<GitContext> {
   const maxDirty = options.maxDirtyFiles ?? DEFAULT_MAX_DIRTY_FILES;
   const nCommits = options.recentCommits ?? DEFAULT_RECENT_COMMITS;
 
-  if ((await runGit(machine, cwd, ["rev-parse", "--is-inside-work-tree"])) === null) {
+  if ((await runGit(environment, cwd, ["rev-parse", "--is-inside-work-tree"])) === null) {
     return { isRepo: false, cwd, dirtyFiles: [], dirtyCount: 0, recentCommits: [] };
   }
 
   const [remoteRaw, branchRaw, dirtyRaw, logRaw] = await Promise.all([
-    runGit(machine, cwd, ["remote", "get-url", "origin"]),
-    runGit(machine, cwd, ["branch", "--show-current"]),
-    runGit(machine, cwd, ["status", "--porcelain"]),
-    runGit(machine, cwd, ["log", `-${String(nCommits)}`, "--format=%h %s"]),
+    runGit(environment, cwd, ["remote", "get-url", "origin"]),
+    runGit(environment, cwd, ["branch", "--show-current"]),
+    runGit(environment, cwd, ["status", "--porcelain"]),
+    runGit(environment, cwd, ["log", `-${String(nCommits)}`, "--format=%h %s"]),
   ]);
 
   const remote = remoteRaw !== null ? (sanitizeRemoteUrl(remoteRaw) ?? undefined) : undefined;
@@ -130,8 +130,8 @@ function tryUrlPath(remoteUrl: string): string | null {
  * the backend enforces it with its own kill (and a backend that cannot reports `timedOut`
  * without pretending it stopped anything).
  */
-async function runGit(machine: Machine, cwd: string, args: readonly string[]): Promise<string | null> {
-  const result = await machine.run(["git", "-C", cwd, ...args], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
+async function runGit(environment: Environment, cwd: string, args: readonly string[]): Promise<string | null> {
+  const result = await environment.run(["git", "-C", cwd, ...args], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
   if (result === undefined || result.timedOut || result.exitCode !== 0) return null;
   return result.stdout.trim();
 }

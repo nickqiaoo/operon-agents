@@ -28,7 +28,7 @@ const harness = createHarness({
   workDir: WORK,
   appendSystemPrompt: "Use the tools; explain briefly what you do.",
   tools: [...filesystemTools(), bashTool],
-  permission: { mode: "workspace" }, // machine defaults to a LocalMachine at the session's workDir
+  permission: { mode: "workspace" }, // environment defaults to a LocalEnvironment at the session's workDir
 });
 
 const transport = nodeStreamTransport(process.stdin, process.stdout, {

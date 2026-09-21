@@ -14,7 +14,7 @@ import type { AgentEvent } from "operon-agents";
 import {
   createHarness,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
 } from "operon-agents";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import {
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   const harness = createHarness({
     harness: (s) => {
       s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     // `manual` with no approval handler registered anywhere is what makes a tool call pause

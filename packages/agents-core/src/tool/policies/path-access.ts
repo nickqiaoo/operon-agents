@@ -1,7 +1,7 @@
 import * as pathe from "pathe";
 import { isSensitiveFile } from "./sensitive.ts";
 import type { WorkspaceConfig } from "../support/workspace.ts";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 
 export type PathClass = "posix" | "win32";
 export type PathSecurityCode = "PATH_OUTSIDE_WORKSPACE" | "PATH_SENSITIVE" | "PATH_INVALID";
@@ -132,7 +132,7 @@ export interface ResolvePathAccessOptions {
 }
 
 export interface ResolvePathAccessPathOptions {
-  readonly machine: Pick<Machine, "pathClass" | "gethome" | "realpath">;
+  readonly environment: Pick<Environment, "pathClass" | "gethome" | "realpath">;
   readonly workspace: WorkspaceConfig;
   readonly operation: PathAccessOperation;
   readonly policy?: WorkspaceAccessPolicy;
@@ -142,7 +142,7 @@ export interface ResolvePathAccessPathOptions {
 /**
  * Symlink resolution for a path that may not fully exist yet (e.g. a file `Write`
  * is about to create). Backends disagree on whether `realpath` throws for a missing
- * leaf (LocalMachine does, the posix `readlink -f` fallback does not); walking up to the
+ * leaf (LocalEnvironment does, the posix `readlink -f` fallback does not); walking up to the
  * longest existing ancestor and rejoining the remainder normalizes that away so a
  * merely-missing path never throws ENOENT.
  *
@@ -151,14 +151,14 @@ export interface ResolvePathAccessPathOptions {
  * swallowing a transient backend failure would silently degrade the guard back to
  * string-only matching — fail closed instead.
  */
-async function resolveRealPath(machine: Pick<Machine, "realpath">, path: string): Promise<string> {
+async function resolveRealPath(environment: Pick<Environment, "realpath">, path: string): Promise<string> {
   try {
-    return await machine.realpath(path);
+    return await environment.realpath(path);
   } catch (error) {
     if (!isNotFoundError(error)) throw error;
     const parent = pathe.dirname(path);
     if (parent === path) return path;
-    const parentReal = await resolveRealPath(machine, parent);
+    const parentReal = await resolveRealPath(environment, parent);
     return pathe.join(parentReal, pathe.basename(path));
   }
 }
@@ -220,21 +220,21 @@ export function resolvePathAccess(
 /**
  * Resolve and symlink-check a user-supplied path against the workspace. Unlike
  * {@link resolvePathAccess} (pure string canonicalization), this also resolves
- * symlinks via the machine so a workspace-internal symlink that targets an
- * outside/sensitive path cannot be used to bypass the guard — see `Machine.realpath`.
+ * symlinks via the environment so a workspace-internal symlink that targets an
+ * outside/sensitive path cannot be used to bypass the guard — see `Environment.realpath`.
  */
 export async function resolvePathAccessPath(path: string, options: ResolvePathAccessPathOptions): Promise<string> {
-  const { machine, workspace, operation, policy, expandHome = true } = options;
-  const pathClass = machine.pathClass();
+  const { environment, workspace, operation, policy, expandHome = true } = options;
+  const pathClass = environment.pathClass();
   const effectivePolicy = policy ?? DEFAULT_WORKSPACE_ACCESS_POLICY;
   const access = resolvePathAccess(path, workspace.workspaceDir, workspace, {
     operation,
     policy,
     pathClass,
-    homeDir: expandHome ? machine.gethome() : undefined,
+    homeDir: expandHome ? environment.gethome() : undefined,
   });
 
-  const real = await resolveRealPath(machine, access.path);
+  const real = await resolveRealPath(environment, access.path);
   if (real !== access.path) {
     if (effectivePolicy.checkSensitive && isSensitiveFile(real)) {
       throw new PathSecurityError(
@@ -248,8 +248,8 @@ export async function resolvePathAccessPath(path: string, options: ResolvePathAc
     // /tmp -> /private/tmp), so compare against the *resolved* boundary — otherwise
     // every path would spuriously look like it escaped a workspace it never left.
     const realWorkspace = {
-      workspaceDir: await resolveRealPath(machine, workspace.workspaceDir),
-      additionalDirs: await Promise.all(workspace.additionalDirs.map((dir) => resolveRealPath(machine, dir))),
+      workspaceDir: await resolveRealPath(environment, workspace.workspaceDir),
+      additionalDirs: await Promise.all(workspace.additionalDirs.map((dir) => resolveRealPath(environment, dir))),
     };
     if (
       effectivePolicy.guardMode !== "disabled" &&

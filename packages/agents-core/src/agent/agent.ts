@@ -2,7 +2,7 @@ import type { ChatModel } from "../llm/define-model.ts";
 import type { ModelSettings } from "../llm/model.ts";
 import type { Message } from "../protocol/index.ts";
 import type { Tool } from "../tool/types.ts";
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { Handoff } from "./handoff.ts";
 import type { InputGuardrail, OutputGuardrail, ToolInputGuardrail, ToolOutputGuardrail } from "./guardrail.ts";
 import type { SystemPromptContext } from "./instruction-context.ts";
@@ -12,8 +12,8 @@ export interface AgentRunContext<TContext = unknown> {
   readonly address: string;
   readonly signal: AbortSignal;
   readonly context?: TContext;
-  /** Machine of the current runtime frame (root/subagent/worktree), never captured by Agent. */
-  readonly machine?: Machine;
+  /** Environment of the current runtime frame (root/subagent/worktree), never captured by Agent. */
+  readonly environment?: Environment;
   /** Lazily resolves Session-cached environment + AGENTS.md data for this runtime frame. */
   readonly resolveSystemPromptContext?: () => Promise<SystemPromptContext>;
 }

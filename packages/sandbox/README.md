@@ -1,7 +1,7 @@
 # operon-sandbox
 
 Host-side sandbox lifecycle for [operon-agents](https://github.com/nickqiaoo/operon-agents): create,
-snapshot, pause and destroy a vendor sandbox, and hand the framework a `Machine` driven by the
+snapshot, pause and destroy a vendor sandbox, and hand the framework an `Environment` driven by the
 vendor SDK directly — native per-command timeouts, incremental output, and a real kill.
 
 Supported vendors: **E2B** and **Cloudflare**.
@@ -11,12 +11,12 @@ import { Sandbox } from "e2b";
 import { createHarness } from "operon-agents";
 import { E2BWorkspace } from "operon-sandbox";
 
-// The host owns the sandbox lifecycle; the framework only ever sees a Machine.
+// The host owns the sandbox lifecycle; the framework only ever sees an Environment.
 const workspace = await E2BWorkspace.open({ sandbox: Sandbox, template: "node20" });
 
 const harness = createHarness({
   model,
-  machine: workspace.machine,   // tools now run inside the sandbox
+  environment: workspace.environment,   // tools now run inside the sandbox
 });
 
 // … run sessions …
@@ -37,7 +37,7 @@ Vendor SDKs are optional peer dependencies — install `e2b` or `@cloudflare/san
 actually use.
 
 Nothing else about the agent changes: sessions, events, permissions and tools are identical to a
-local run. That is the point of the `Machine` seam — where a command executes is an adapter choice,
+local run. That is the point of the `Environment` seam — where a command executes is an adapter choice,
 not a mode the engine knows about.
 
 The lifecycle deliberately stays with the host rather than the framework, because only the host

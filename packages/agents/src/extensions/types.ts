@@ -33,7 +33,7 @@ import type {
   ConversationContext,
   Injector,
   LlmRequest,
-  Machine,
+  Environment,
   Message,
   ModelRuntime,
   RunResult,
@@ -241,7 +241,7 @@ interface ExtensionContextBase {
   readonly extensionId: string;
   readonly sessionId: string;
   readonly signal: AbortSignal;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly store?: SessionStore;
   readonly state: ExtensionState;
   readonly actions: ExtensionActions;

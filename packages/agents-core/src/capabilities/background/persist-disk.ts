@@ -10,7 +10,7 @@ const ID_RE = /^[A-Za-z0-9_-]+$/;
 /**
  * Disk-directory task store: `<sessionDir>/tasks/<id>/state.json`, one directory per
  * task. Co-located under the SessionStore's own home (next to `agents/`
- * and `blobs/`), so it inherits the session's durability and stays off the Machine
+ * and `blobs/`), so it inherits the session's durability and stays off the Environment
  * sandbox. Writes are atomic (temp + rename) so a crash mid-write never leaves a torn file.
  */
 export class DiskBackgroundTaskPersistence implements BackgroundTaskPersistence {

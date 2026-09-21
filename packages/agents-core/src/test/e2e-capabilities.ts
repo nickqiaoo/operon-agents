@@ -7,7 +7,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   planCapability,
@@ -42,7 +42,7 @@ function toolResultText(messages: readonly Message[], name: string): { text: str
   return { text: m.content.map((c) => (c.type === "text" ? c.text : "")).join(""), isError: m.isError ?? false };
 }
 
-async function testPlanGuard(dir: string, machine: LocalMachine): Promise<void> {
+async function testPlanGuard(dir: string, environment: LocalEnvironment): Promise<void> {
   const target = join(dir, "should-not-write.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -54,7 +54,7 @@ async function testPlanGuard(dir: string, machine: LocalMachine): Promise<void> 
   const agent = defineAgent({ name: "planner", model, instructions: "x", tools: [writeTool] });
 
   // yolo mode: proves plan-mode-guard-deny (high in the chain) beats yolo-approve.
-  const runner = testRunner({ machine, capabilities: [planCapability()], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [planCapability()], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "investigate then write");
   faux.unregister();
 
@@ -64,12 +64,12 @@ async function testPlanGuard(dir: string, machine: LocalMachine): Promise<void> 
   check("plan guard: run completes", result.status === "completed");
 }
 
-async function testExitPlanReviewAsk(machine: LocalMachine): Promise<void> {
+async function testExitPlanReviewAsk(environment: LocalEnvironment): Promise<void> {
   // Pre-enter plan mode and write real plan content so ExitPlanMode has a plan to review.
   const planMode = new PlanMode();
-  planMode.attachMachine(machine);
+  planMode.attachEnvironment(environment);
   await planMode.enter();
-  await machine.writeText(planMode.planFilePath!, "## Plan\n1. Do X\n2. Do Y\n");
+  await environment.writeText(planMode.planFilePath!, "## Plan\n1. Do X\n2. Do Y\n");
 
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage(fauxToolCall("ExitPlanMode", {}), { stopReason: "toolUse" })]);
@@ -93,7 +93,7 @@ async function testExitPlanReviewAsk(machine: LocalMachine): Promise<void> {
     },
   });
   // No responder → the review ask reifies to a durable interrupt.
-  const runner = testRunner({ machine, store, capabilities: [planCapability(planMode)], permission: { mode: "manual" } });
+  const runner = testRunner({ environment, store, capabilities: [planCapability(planMode)], permission: { mode: "manual" } });
   const result = await runner.run(agent, "exit plan mode");
   faux.unregister();
 
@@ -102,7 +102,7 @@ async function testExitPlanReviewAsk(machine: LocalMachine): Promise<void> {
   check("plan exit: plan mode still active (not exited on ask)", planMode.isActive);
 }
 
-async function testGoalDriver(machine: LocalMachine): Promise<void> {
+async function testGoalDriver(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("UpdateGoal", { objective: "do the multi-step task", status: "active" }), { stopReason: "toolUse" }),
@@ -120,7 +120,7 @@ async function testGoalDriver(machine: LocalMachine): Promise<void> {
     if (e.type === "turn.started") turnStarts += 1;
   });
 
-  const runner = testRunner({ machine, events, capabilities: [goalCapability()], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, events, capabilities: [goalCapability()], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "achieve the goal");
   faux.unregister();
 
@@ -129,7 +129,7 @@ async function testGoalDriver(machine: LocalMachine): Promise<void> {
   check("goal driver: goal reminder injected at boundary", reminderText(result.messages).includes("active goal"));
 }
 
-async function testGoalBudget(machine: LocalMachine): Promise<void> {
+async function testGoalBudget(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("UpdateGoal", { objective: "never finishes", status: "active" }), { stopReason: "toolUse" }),
@@ -149,7 +149,7 @@ async function testGoalBudget(machine: LocalMachine): Promise<void> {
     if (e.type === "turn.started") turnStarts += 1;
   });
 
-  const runner = testRunner({ machine, events, capabilities: [goalCapability(store)], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, capabilities: [goalCapability(store)], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go forever");
   faux.unregister();
 
@@ -209,12 +209,12 @@ async function testPlanReminderRefresh(): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-cap-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
-    await testPlanGuard(dir, machine);
-    await testExitPlanReviewAsk(machine);
-    await testGoalDriver(machine);
-    await testGoalBudget(machine);
+    await testPlanGuard(dir, environment);
+    await testExitPlanReviewAsk(environment);
+    await testGoalDriver(environment);
+    await testGoalBudget(environment);
     await testPlanReminderRefresh();
   } finally {
     rmSync(dir, { recursive: true, force: true });

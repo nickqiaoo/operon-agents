@@ -18,11 +18,43 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server set is being BUILT, rather than when the connection is attempted — `attempt()` turns a
   failure into a `failed` status and a warning, which is right for "the server is down" and wrong
   for "this host will not run that". A server host should pass `["http"]`: an stdio server is a
-  child process of the harness, so it does not follow the session's machine into a sandbox, does
+  child process of the harness, so it does not follow the session's environment into a sandbox, does
   not survive the replica model a server is deployed under, and carries its secrets in process
   environment. Omitting the option keeps both transports, so nothing changes for a local host, and
   servers disabled with `enabled: false` are exempt. See `docs/architecture.md` §6.3 for which
-  capabilities follow the machine and which stay with the host.
+  capabilities follow the environment and which stay with the host.
+
+### Changed
+
+- **`Machine` is now `Environment`** (all seven packages). The type that says WHERE a session's
+  tools run — its commands, its file I/O, the cwd paths resolve against — was called `Machine`,
+  which reads as a host or a box. What a session is actually handed is an execution environment: a
+  local process tree, an SSH connection, a vendor sandbox, a git worktree rooted in a copy. The
+  rename is mechanical and complete, and ships with NO compatibility aliases — an alpha is where
+  that is cheap. What to substitute:
+
+  - `Machine` → `Environment`, `MachineFactory` → `EnvironmentFactory`, and every backend with them:
+    `BaseMachine`, `LocalMachine`, `NullMachine`, `SshMachine` (+`SshMachineOptions`,
+    `SshMachineExtraOptions`), `SandboxMachine`, `SandboxedLocalMachine`, `GitWorkTreeMachine`,
+    `E2BMachine` (+`E2BMachineOptions`, `E2BMachineState`), `CloudflareMachine`
+    (+`CloudflareMachineOptions`) — each `Machine` becomes `Environment`.
+  - Tokens: `T.Machine`, `T.MachineFactory`, `T.WorkspaceMachineFactory`, `T.SessionMachineFactory`
+    → `T.Environment`, `T.EnvironmentFactory`, `T.WorkspaceEnvironmentFactory`,
+    `T.SessionEnvironmentFactory`.
+  - The option, field and parameter spelled `machine` is now `environment`:
+    `createSession({ machine })`, `new Harness({ machine })`, `HarnessSession.machine`,
+    `ToolRunContext.machine`, `E2BWorkspace.machine`, `EnvironmentResolution.machine` (managed
+    hosts), and the `SessionStore` state key `"machine"`.
+  - Source files follow: `tool/machine*.ts` → `tool/environment*.ts`, `tool/support/machine-ops.ts`
+    → `environment-ops.ts`, `{e2b,cloudflare}/machine.ts` → `environment.ts`, and
+    `shared/sandbox-machine.ts` → `shared/sandbox-environment.ts`.
+
+  One name had to move out of the way. The interface describing the OS and shell a backend runs on
+  (`osKind`, `osArch`, `osVersion`, `shellName`, `shellPath`) was itself called `Environment`, held
+  by a field named `osEnv`. It is now **`OsInfo`** on **`osInfo`**, and `detectEnvironment` is
+  `detectOsInfo`. That is what it always described — platform facts about a backend, not the
+  environment a session's tools run in — so the collision resolved in the direction it should have
+  been named in the first place.
 
 ## [0.1.0-alpha.8] — 2026-09-16
 

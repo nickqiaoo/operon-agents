@@ -15,7 +15,7 @@ import { join } from "node:path";
  */
 export const OPERON_HOME_DIRNAME = ".operon";
 
-/** `~/.operon` on the machine this process runs on. */
+/** `~/.operon` on the environment this process runs on. */
 export function operonHomeDir(): string {
   return join(homedir(), OPERON_HOME_DIRNAME);
 }

@@ -12,13 +12,13 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start "count the lines in package.json"
 ## What it shows
 
 - `createLocalSession(...)` — the **local composition root**. It bundles the
-  local-deployment backends (disk sessions, local machine, cron on) so you
+  local-deployment backends (disk sessions, local environment, cron on) so you
   don't wire them by hand. One call gets you a session ready to `prompt()`.
 - **Streaming**: `session.promptStream(task)` is async-iterable over `AgentEvent`s
   (`assistant.delta`, `tool.call.started`, `tool.result`, …) and exposes `.completed`
   for the final `RunResult`.
 - **Permission**: `{ mode: "workspace" }` auto-approves tool calls that stay inside
-  the workspace — the safe default when tools run on your own machine (vs `yolo`,
+  the workspace — the safe default when tools run on your own environment (vs `yolo`,
   which only makes sense behind a sandbox).
 
 ## Next

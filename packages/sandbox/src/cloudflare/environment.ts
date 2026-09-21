@@ -1,9 +1,9 @@
 import { posix } from "node:path";
 import type {
   DirEntry,
-  Environment,
+  OsInfo,
   FileKind,
-  Machine,
+  Environment,
   ByteRange,
   RunCommandOptions,
   RunCommandResult,
@@ -14,13 +14,13 @@ import type {
   CloudflareSandboxClient,
 } from "./cf-api.ts";
 import { readWindowViaShell, sliceRange } from "../shared/remote-file-ops.ts";
-import { SandboxMachine } from "../shared/sandbox-machine.ts";
+import { SandboxEnvironment } from "../shared/sandbox-environment.ts";
 
 const DEFAULT_CWD = "/workspace";
 
-export interface CloudflareMachineOptions {
+export interface CloudflareEnvironmentOptions {
   readonly cwd?: string;
-  /** Cloudflare scopes every call to a session id; one machine, one session. */
+  /** Cloudflare scopes every call to a session id; one environment, one session. */
   readonly sessionId?: string;
   readonly shellPath?: string;
   /** Applied when `RunCommandOptions.timeoutMs` is absent. */
@@ -28,7 +28,7 @@ export interface CloudflareMachineOptions {
 }
 
 /**
- * A `Machine` backed directly by `@cloudflare/sandbox`'s route-transport client.
+ * An `Environment` backed directly by `@cloudflare/sandbox`'s route-transport client.
  *
  * Direct rather than through a general sandbox abstraction for the same reason as the E2B
  * adapter: the vendor natively provides a per-command timeout, incremental output and a real
@@ -42,23 +42,23 @@ export interface CloudflareMachineOptions {
  * - No stat API, so `fileInfo` costs one `stat(1)` command.
  * - Bytes move as base64: the transport takes a string, and `writeFileStream` is RPC-only.
  */
-export class CloudflareMachine extends SandboxMachine {
+export class CloudflareEnvironment extends SandboxEnvironment {
   readonly name = "cloudflare";
-  readonly osEnv: Environment;
+  readonly osInfo: OsInfo;
 
   private readonly clientRef: CloudflareClientRef;
   private readonly cwd: string;
   private readonly sessionId: string;
   private readonly defaultTimeoutMs: number | undefined;
 
-  constructor(client: CloudflareClientRef | CloudflareSandboxClient, options: CloudflareMachineOptions = {}) {
+  constructor(client: CloudflareClientRef | CloudflareSandboxClient, options: CloudflareEnvironmentOptions = {}) {
     super();
     this.clientRef = typeof client === "function" ? client : () => client;
     this.cwd = normalizeAbs(options.cwd ?? DEFAULT_CWD);
     this.sessionId = options.sessionId ?? "default";
     this.defaultTimeoutMs = options.defaultTimeoutMs;
     const shellPath = options.shellPath ?? "/bin/bash";
-    this.osEnv = {
+    this.osInfo = {
       osKind: "Linux",
       osArch: "unknown",
       osVersion: "unknown",
@@ -85,11 +85,11 @@ export class CloudflareMachine extends SandboxMachine {
   getcwd(): string {
     return this.cwd;
   }
-  withCwd(cwd: string): Machine {
-    const clone = new CloudflareMachine(this.clientRef, {
+  withCwd(cwd: string): Environment {
+    const clone = new CloudflareEnvironment(this.clientRef, {
       cwd: this.resolve(cwd),
       sessionId: this.sessionId,
-      shellPath: this.osEnv.shellPath,
+      shellPath: this.osInfo.shellPath,
       ...(this.defaultTimeoutMs !== undefined ? { defaultTimeoutMs: this.defaultTimeoutMs } : {}),
     });
     return clone;
@@ -118,7 +118,7 @@ export class CloudflareMachine extends SandboxMachine {
     // `processes.startProcess` accepts one. Refuse rather than drop it: a command fed no
     // input would see EOF and "succeed" on empty data.
     if (options.stdin !== undefined) {
-      throw new Error("CloudflareMachine: this transport has no stdin channel, so run({ stdin }) cannot be honored.");
+      throw new Error("CloudflareEnvironment: this transport has no stdin channel, so run({ stdin }) cannot be honored.");
     }
     const needsHandle =
       options.onOutput !== undefined || options.signal !== undefined || options.maxOutputBytes !== undefined;
@@ -242,7 +242,7 @@ export class CloudflareMachine extends SandboxMachine {
 
   // ---- files & metadata ----
 
-  // `fileInfo` comes from SandboxMachine: no stat API here either, so it costs one `stat(1)`.
+  // `fileInfo` comes from SandboxEnvironment: no stat API here either, so it costs one `stat(1)`.
 
   /**
    * One `listFiles` round trip — the vendor listing already says directory-or-not, so no

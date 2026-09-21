@@ -1,13 +1,13 @@
 /**
  * The workspace tier: one scope per workspace key, composed once by the `workspace` hook and
  * shared by every session under it — MCP connections included — and closed when the last
- * session leaves. A session that brings its own machine instance gets a private workspace.
+ * session leaves. A session that brings its own environment instance gets a private workspace.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, createMcpServers, defaultCapabilities, T, LocalMachine } from "../src/index.ts";
+import { createHarness, createMcpServers, defaultCapabilities, T, LocalEnvironment } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -65,8 +65,8 @@ async function main(): Promise<void> {
     const s3 = await harness.createSession({ workDir: dirB });
     check("isolate: another directory gets its own workspace", composed === 2 && connects === 2 && s3.core.get(T.McpServers) !== s1.core.get(T.McpServers));
 
-    const s4 = await harness.createSession({ workDir: dirA, machine: new LocalMachine(dirA) });
-    check("isolate: a session with its own machine instance gets a private workspace", composed === 3 && keys[2] === `private::${s4.id}`);
+    const s4 = await harness.createSession({ workDir: dirA, environment: new LocalEnvironment(dirA) });
+    check("isolate: a session with its own environment instance gets a private workspace", composed === 3 && keys[2] === `private::${s4.id}`);
 
     const s5 = await harness.createSession({ workDir: dirB, workspaceKey: "tenant-1" });
     const s6 = await harness.createSession({ workDir: dirA, workspaceKey: "tenant-1" });

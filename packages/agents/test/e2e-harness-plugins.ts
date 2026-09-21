@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "./faux.ts";
-import { defineModel, LocalMachine, PluginManager } from "operon-agents-core";
+import { defineModel, LocalEnvironment, PluginManager } from "operon-agents-core";
 import { createHarness, defaultCapabilities } from "../src/index.ts";
 
 // Verifies the framework "self-drives" from a PluginManager: pass it to defaultCapabilities and a
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   const pluginRoot = join(work, "demo-plugin");
   writePlugin(pluginRoot);
 
-  const pm = new PluginManager({ machine: new LocalMachine(home), homeDir: home });
+  const pm = new PluginManager({ environment: new LocalEnvironment(home), homeDir: home });
   await pm.install(pluginRoot);
 
   const faux = registerFauxProvider();

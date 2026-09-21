@@ -12,7 +12,7 @@ import {
   bashTool,
   editTool,
   FileFreshnessLedger,
-  LocalMachine,
+  LocalEnvironment,
   readTool,
   writeTool,
   type ByteRange,
@@ -28,12 +28,12 @@ function check(label: string, okFlag: boolean): void {
   console.log(`${okFlag ? "PASS" : "FAIL"} ${label}`);
 }
 
-function makeCtx(host: LocalMachine, ledger?: FileFreshnessLedger) {
+function makeCtx(host: LocalEnvironment, ledger?: FileFreshnessLedger) {
   return {
     turnId: "t1",
     toolCallId: "c1",
     signal: new AbortController().signal,
-    machine: host,
+    environment: host,
     ...(ledger ? { fileLedger: ledger } : {}),
   };
 }
@@ -53,7 +53,7 @@ async function bumpMtime(file: string): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "operon-filesystem-safety-"));
-  const host = new LocalMachine(dir);
+  const host = new LocalEnvironment(dir);
   const ledger = new FileFreshnessLedger();
   const ctx = makeCtx(host, ledger);
 
@@ -273,10 +273,10 @@ async function main(): Promise<void> {
     // ── Chunked writes (the documented way to write a large file: overwrite, then
     //    append, append…) must read the file ONCE per chunk. The append already reads
     //    it to concatenate; the freshness check reuses that text instead of taking a
-    //    read of its own. Exercised on a machine that reports no post-write version —
+    //    read of its own. Exercised on an environment that reports no post-write version —
     //    the remote shape, where the check cannot fall back on an mtime. ──────────
     {
-      class RemoteShapedMachine extends LocalMachine {
+      class RemoteShapedEnvironment extends LocalEnvironment {
         reads = 0;
         override async readBytes(p: string, range?: ByteRange): Promise<Buffer> {
           this.reads++;
@@ -288,7 +288,7 @@ async function main(): Promise<void> {
         }
       }
 
-      const remote = new RemoteShapedMachine(dir);
+      const remote = new RemoteShapedEnvironment(dir);
       const chunkedCtx = makeCtx(remote, new FileFreshnessLedger());
       const chunked = path.join(dir, "chunked.txt");
 

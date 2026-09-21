@@ -1,4 +1,4 @@
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { ThinkingLevel } from "../llm/model.ts";
@@ -6,7 +6,7 @@ import type { PermissionMode, PermissionPolicy, Responder } from "../permission/
 import { PermissionManager } from "../permission/manager.ts";
 import { STAGED_POLICY_SLOTS } from "../permission/policies.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
-import { NullMachine } from "../tool/machine-null.ts";
+import { NullEnvironment } from "../tool/environment-null.ts";
 import type {
   BackgroundTaskInfo,
   BackgroundTaskOutputDelta,
@@ -60,7 +60,7 @@ export function newSessionId(): string {
 }
 
 /**
- * What `Session.open` takes besides the scope. Everything with a lifetime — machine, store,
+ * What `Session.open` takes besides the scope. Everything with a lifetime — environment, store,
  * events, steer, responder, logger, permission options — is READ FROM THE SCOPE, registered
  * there by whoever opened it (the harness, a runner, a test). `open` only fills the gaps with
  * defaults (`provide`), never overrides what the creator registered.
@@ -142,7 +142,7 @@ export interface SessionPort {
    *  capability's manager, or the session's in-memory fallback) — all the kernel's `Workflow`
    *  tool needs; the manager itself stays behind `session.workflow`. */
   newWorkflowJournal(runId: string, parentToolCallId?: string): WorkflowJournal;
-  resolveSystemPromptContext(machine: Machine): Promise<SystemPromptContext>;
+  resolveSystemPromptContext(environment: Environment): Promise<SystemPromptContext>;
   recordContextBreakdown(breakdown: ContextBreakdown): void;
   flushEvents(): Promise<void>;
   setLiveContext(address: string, ctx: ConversationContext): void;
@@ -169,7 +169,7 @@ export class Session implements SessionPort {
   readonly id: string;
   /** The session-tier scope: every session-lived object, registered by the opener or by `open`. */
   readonly scope: Scope<"session">;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly store?: SessionStore;
   readonly events: EventSink;
   private readonly eventPublisher: SessionEventPublisher;
@@ -184,7 +184,7 @@ export class Session implements SessionPort {
   private readonly unsubscribeTelemetry?: () => void;
 
   private readonly allCapabilities: readonly Capability[];
-  // Runtime prompt data is live-Session state, not Agent state: machine identity + cwd isolate
+  // Runtime prompt data is live-Session state, not Agent state: environment identity + cwd isolate
   // root/subagent/worktree frames, and the date stays fixed for the Session's lifetime.
   private readonly systemPromptContexts = new SystemPromptContextCache();
   // Live in-memory conversation context per address, kept across turns so a long-lived session
@@ -219,7 +219,7 @@ export class Session implements SessionPort {
     this.id = id;
     this.signal = signal;
     this.ownController = ownController;
-    this.machine = scope.require(T.Machine);
+    this.environment = scope.require(T.Environment);
     this.eventPublisher = scope.require(T.EventPublisher);
     // The publishing wrapper around `T.Store`: record-backed events surface on `events` when
     // the append commits, so everything in the session writes through THIS store.
@@ -261,7 +261,7 @@ export class Session implements SessionPort {
   }
 
   /**
-   * Open a session on a session-tier scope. The opener registers what it decides (`T.Machine`,
+   * Open a session on a session-tier scope. The opener registers what it decides (`T.Environment`,
    * `T.Store`, `T.Events`, `T.Responder`, `T.PermissionOptions`, `T.HostSignal`, `T.SessionId`, …);
    * `open` provides the defaults for whatever is missing, builds the session's own objects
    * (signal, event publisher, log reader, controls), runs every capability's provisions in
@@ -280,19 +280,19 @@ export class Session implements SessionPort {
     scope.register(T.SessionSignal, signal);
     scope.provide(T.Events, () => new ListenerSink());
     scope.provide(T.Steer, () => new SteerBus());
-    // Machine: the opener's registration wins; else a workspace- or harness-level factory
+    // Environment: the opener's registration wins; else a workspace- or harness-level factory
     // (resolved here because it needs the session id + signal, and `provide` is sync); else a
-    // NullMachine — a stateless session with no filesystem, where any file tool that slips
+    // NullEnvironment — a stateless session with no filesystem, where any file tool that slips
     // through fails loudly instead of touching the host disk. The session only OPERATES the
-    // machine — disposal stays with whoever created it (`owned: false`).
-    if (!scope.hasLocal(T.Machine)) {
-      const factory = scope.get(T.SessionMachineFactory) ?? scope.get(T.WorkspaceMachineFactory) ?? scope.get(T.MachineFactory);
+    // environment — disposal stays with whoever created it (`owned: false`).
+    if (!scope.hasLocal(T.Environment)) {
+      const factory = scope.get(T.SessionEnvironmentFactory) ?? scope.get(T.WorkspaceEnvironmentFactory) ?? scope.get(T.EnvironmentFactory);
       if (factory !== undefined) {
-        const machine = typeof factory === "function" ? await factory({ sessionId: id, signal }) : factory;
-        scope.register(T.Machine, machine, { owned: false });
+        const environment = typeof factory === "function" ? await factory({ sessionId: id, signal }) : factory;
+        scope.register(T.Environment, environment, { owned: false });
       }
     }
-    scope.provide(T.Machine, () => new NullMachine());
+    scope.provide(T.Environment, () => new NullEnvironment());
     scope.provide(T.EventPublisher, (s) =>
       new SessionEventPublisher(id, s.require(T.Events), s.get(T.StoreBackend), s.get(T.SessionEventPublication) ?? s.get(T.EventPublication) ?? "immediate"),
     );
@@ -416,9 +416,9 @@ export class Session implements SessionPort {
       // The Runner-driven path answers approvals via interrupt/resume (or the live responder
       // in onInterrupt) — never inline through the manager, so it gets no responder here.
       responder: undefined,
-      cwd: options?.cwd ?? safeCwd(this.machine),
-      pathClass: options?.pathClass ?? this.machine.pathClass(),
-      machine: options?.machine ?? this.machine,
+      cwd: options?.cwd ?? safeCwd(this.environment),
+      pathClass: options?.pathClass ?? this.environment.pathClass(),
+      environment: options?.environment ?? this.environment,
       policyOverrides: overrides,
       logger: this.logger,
     });
@@ -629,8 +629,8 @@ export class Session implements SessionPort {
   }
 
   /** Resolve environment + AGENTS.md for the active runtime frame, cached for this Session. */
-  resolveSystemPromptContext(machine: Machine): Promise<SystemPromptContext> {
-    return this.systemPromptContexts.resolve(machine, this.get(T.Compaction)?.revision ?? 0);
+  resolveSystemPromptContext(environment: Environment): Promise<SystemPromptContext> {
+    return this.systemPromptContexts.resolve(environment, this.get(T.Compaction)?.revision ?? 0);
   }
 
   /** A bounded view of the task's authoritative output, with explicit size/truncation metadata. */
@@ -954,9 +954,9 @@ export class Session implements SessionPort {
       this.logger.log("warn", "store flush failed/timed out", { capability: "store", phase: "stop", error: messageOf(error) });
     }
     // Provisions (MCP connections, the background manager's subscription, …) go down in
-    // reverse registration order, each dispose under CLOSE_TIMEOUT_MS. The machine is NOT
+    // reverse registration order, each dispose under CLOSE_TIMEOUT_MS. The environment is NOT
     // closed here unless this session registered it as owned: its lifetime belongs to whoever
-    // created it (see `MachineFactory`) — a sandbox usually outlives any one session, so
+    // created it (see `EnvironmentFactory`) — a sandbox usually outlives any one session, so
     // closing it on session.close would pull the workspace out from under other sessions.
     await this.scope.close({ disposeTimeoutMs: CLOSE_TIMEOUT_MS, onDisposeError: (name, error) => {
       this.pendingDiagnostics.push({ capability: name, phase: "stop", level: "warn", message: `dispose failed/timed out: ${messageOf(error)}` });
@@ -964,9 +964,9 @@ export class Session implements SessionPort {
     } });
   }
 
-  /** Public URL for a port inside the machine, or undefined when the backend can't expose one. */
+  /** Public URL for a port inside the environment, or undefined when the backend can't expose one. */
   async resolveExposedPort(port: number): Promise<string | undefined> {
-    return await this.machine.exposedPortUrl?.(port);
+    return await this.environment.exposedPortUrl?.(port);
   }
 }
 
@@ -994,9 +994,9 @@ function positiveInt(name: string, value: number): number {
   return value;
 }
 
-function safeCwd(machine: Machine): string {
+function safeCwd(environment: Environment): string {
   try {
-    return machine.getcwd();
+    return environment.getcwd();
   } catch {
     return "";
   }

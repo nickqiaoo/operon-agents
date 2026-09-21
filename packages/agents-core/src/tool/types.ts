@@ -1,7 +1,7 @@
 import type { ImageContent, TextContent, ToolSchema } from "../protocol/index.ts";
 import type { ApprovalResponse } from "../permission/types.ts";
 import type { ToolAccesses } from "./access.ts";
-import type { Machine } from "./machine.ts";
+import type { Environment } from "./environment.ts";
 import type { BackgroundSpawner } from "./background.ts";
 import type { FileFreshnessLedger } from "./file-freshness.ts";
 import type { QuestionResponder } from "./questions.ts";
@@ -65,7 +65,7 @@ export interface ToolContextBase {
   readonly turnId: string;
   readonly toolCallId: string;
   readonly signal: AbortSignal;
-  readonly machine: Machine;
+  readonly environment: Environment;
   /**
    * Journal address of the frame running this call — `main` for the root agent, `main/<agentId>`
    * for a subagent. It is the frame's identity: what `agent.started`/`agent.ended` events carry,

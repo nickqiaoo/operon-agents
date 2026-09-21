@@ -10,7 +10,7 @@ const ID_RE = /^[A-Za-z0-9_-]+$/;
 /**
  * Disk-directory task list: one JSON file per task under `<sessionDir>/tasklist/<id>.json`,
  * co-located under the SessionStore's home (next
- * to `agents/`, `blobs/`, `tasks/`), off the Machine sandbox. Atomic writes (temp + rename)
+ * to `agents/`, `blobs/`, `tasks/`), off the Environment sandbox. Atomic writes (temp + rename)
  * so a crash mid-write never leaves a torn file. Single live loop per session ⇒ no file locking.
  */
 export class DiskTaskListPersistence implements TaskListPersistence {

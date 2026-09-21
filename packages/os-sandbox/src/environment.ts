@@ -1,11 +1,11 @@
 import { isAbsolute, resolve } from "node:path";
-import { LocalMachine, type Machine, type RunCommandOptions, type RunCommandResult } from "operon-agents-core";
+import { LocalEnvironment, type Environment, type RunCommandOptions, type RunCommandResult } from "operon-agents-core";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { toSrtInvocation } from "./srt-command.ts";
 
 /**
- * The resolved write/read policy every sandboxed machine of one OsSandbox
- * shares. Immutable — a machine contributes only its own cwd/additionalDirs
+ * The resolved write/read policy every sandboxed environment of one OsSandbox
+ * shares. Immutable — an environment contributes only its own cwd/additionalDirs
  * on top, per call.
  */
 export interface SandboxPolicyContext {
@@ -22,7 +22,7 @@ const VIOLATION_SETTLE_MS = 250;
 let commandCounter = 0;
 
 /**
- * A LocalMachine whose `run` goes through the OS sandbox: the argv is wrapped
+ * A LocalEnvironment whose `run` goes through the OS sandbox: the argv is wrapped
  * by @anthropic-ai/sandbox-runtime (Seatbelt on macOS, bubblewrap on Linux)
  * before it is spawned, and sandbox denials observed during the run are
  * annotated onto the result's stderr so callers see WHY a command failed.
@@ -31,7 +31,7 @@ let commandCounter = 0;
  * framework's own code path, gated by its path-access policy — the sandbox
  * exists for arbitrary COMMANDS, which have no such gate.
  */
-export class SandboxedLocalMachine extends LocalMachine {
+export class SandboxedLocalEnvironment extends LocalEnvironment {
   private readonly policy: SandboxPolicyContext;
 
   constructor(policy: SandboxPolicyContext, cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[] } = process.cwd()) {
@@ -40,24 +40,24 @@ export class SandboxedLocalMachine extends LocalMachine {
   }
 
   /** Re-rooted siblings (subagent worktrees) stay sandboxed — same policy, new cwd. */
-  override withCwd(cwd: string): Machine {
+  override withCwd(cwd: string): Environment {
     const absolute = isAbsolute(cwd) ? cwd : resolve(this.getcwd(), cwd);
-    return new SandboxedLocalMachine(this.policy, { cwd: absolute, additionalDirs: this.additionalDirs() });
+    return new SandboxedLocalEnvironment(this.policy, { cwd: absolute, additionalDirs: this.additionalDirs() });
   }
 
   override async run(argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
     // The sandbox session died or was never initialized — refuse rather than
     // silently running unsandboxed. Hosts that want no sandbox build a plain
-    // LocalMachine (OsSandbox.machine already does this when disabled).
+    // LocalEnvironment (OsSandbox.environment already does this when disabled).
     if (!SandboxManager.isSandboxingEnabled()) {
-      throw new Error("os-sandbox: SandboxManager is not initialized; use OsSandbox.start() and build machines through it.");
+      throw new Error("os-sandbox: SandboxManager is not initialized; use OsSandbox.start() and build environments through it.");
     }
 
-    // Fold a per-run cwd override into the argv exactly as BaseMachine.run
+    // Fold a per-run cwd override into the argv exactly as BaseEnvironment.run
     // would — the sandbox must wrap the FINAL command, subshell and all.
     const { cwd, ...rest } = options;
     const effective = cwd === undefined ? argv : this.withCwdArgv(argv, cwd);
-    const { command, binShell } = toSrtInvocation(effective, this.osEnv.shellPath);
+    const { command, binShell } = toSrtInvocation(effective, this.osInfo.shellPath);
 
     // A unique id, not the command text: srt compares attribution keys on
     // their first 100 chars, so long commands sharing a prefix would
@@ -76,7 +76,7 @@ export class SandboxedLocalMachine extends LocalMachine {
       );
       wrappedArgv = wrapped.argv;
       // wrapped.env is process.env verbatim on macOS/Linux (proxy vars are baked
-      // into the wrapped script) and LocalMachine already layers the caller's
+      // into the wrapped script) and LocalEnvironment already layers the caller's
       // overrides over the ambient env — so it is deliberately not forwarded.
     } catch (error) {
       throw new Error(`os-sandbox: failed to wrap command for the sandbox: ${error instanceof Error ? error.message : String(error)}`);
@@ -89,9 +89,9 @@ export class SandboxedLocalMachine extends LocalMachine {
   }
 
   /**
-   * Every machine states the full filesystem policy per call: srt falls back
+   * Every environment states the full filesystem policy per call: srt falls back
    * per-FIELD (`?? config`), and an empty array is not undefined — restating
-   * the session lists plus this machine's own roots is the only spelling that
+   * the session lists plus this environment's own roots is the only spelling that
    * cannot accidentally drop either half.
    */
   private perCallConfig(): Partial<SandboxRuntimeConfig> {

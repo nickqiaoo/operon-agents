@@ -99,7 +99,7 @@ export async function buildModelCatalog(
 }
 
 /**
- * Every model the engine can name, configured or not. This is the fallback for a machine with no
+ * Every model the engine can name, configured or not. This is the fallback for an environment with no
  * credentials at all, where an empty picker would be worse than a long one, and the source for
  * `/model <id>` validation.
  */

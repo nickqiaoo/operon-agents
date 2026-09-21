@@ -1,14 +1,14 @@
-import type { Machine } from "operon-agents-core";
+import type { Environment } from "operon-agents-core";
 
 /**
  * A sandbox the HOST owns: created here, disposed of here, and handed to the agent
- * framework only as a {@link Machine}.
+ * framework only as a {@link Environment}.
  *
  * This layer exists because sandbox lifetime and agent-session lifetime are different
  * things. A sandbox is normally scoped to a user or a workspace and outlives any single
  * session — new, resumed and forked sessions all run inside the same one. Wire it in with
- * `machine: workspace.machine`; the framework then only ever operates the
- * machine, and closing a session cannot take the workspace down with it.
+ * `environment: workspace.environment`; the framework then only ever operates the
+ * environment, and closing a session cannot take the workspace down with it.
  *
  * Every method states an INTENT and answers honestly about whether the backend could
  * deliver it — `undefined`/`false` rather than a throw or a pretend success. That is why
@@ -18,7 +18,7 @@ import type { Machine } from "operon-agents-core";
  */
 export interface SandboxWorkspace {
   /** The agent-facing handle. Stays valid across {@link restore}, which may swap the sandbox. */
-  readonly machine: Machine;
+  readonly environment: Environment;
   /** Vendor id of the live sandbox. Changes when `restore` replaces it. */
   readonly id: string;
 
@@ -28,7 +28,7 @@ export interface SandboxWorkspace {
    */
   snapshot(): Promise<string | undefined>;
 
-  /** Replace the workspace's contents with a snapshot. `machine` keeps working across it. */
+  /** Replace the workspace's contents with a snapshot. `environment` keeps working across it. */
   restore(snapshotId: string): Promise<void>;
 
   /**
@@ -38,6 +38,6 @@ export interface SandboxWorkspace {
    */
   pause(): Promise<boolean>;
 
-  /** Destroy the sandbox. Terminal: the machine is unusable afterwards. */
+  /** Destroy the sandbox. Terminal: the environment is unusable afterwards. */
   kill(): Promise<void>;
 }

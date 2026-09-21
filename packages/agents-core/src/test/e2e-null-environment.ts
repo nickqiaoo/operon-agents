@@ -14,23 +14,23 @@ function toolResult(messages: readonly Message[], name: string): { text: string;
   return { text: m.content.map((c) => (c.type === "text" ? c.text : "")).join(""), isError: m.isError ?? false };
 }
 
-// ── Mode 1 / scenario A: a session with NO machine opens and runs (stateless, no filesystem) ──
+// ── Mode 1 / scenario A: a session with NO environment opens and runs (stateless, no filesystem) ──
 async function testStatelessRun(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("done, no filesystem needed", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "stateless", model, instructions: "x" });
 
-  // No machine, no store, no capabilities — the canonical stateless server config.
+  // No environment, no store, no capabilities — the canonical stateless server config.
   const runner = testRunner({});
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
-  check("stateless: run completes with no machine configured", result.status === "completed");
+  check("stateless: run completes with no environment configured", result.status === "completed");
   check("stateless: produced output", result.output.includes("no filesystem needed"));
 }
 
-// ── Mode 1 / scenario B: a file tool that slips through fails LOUDLY via NullMachine ──
+// ── Mode 1 / scenario B: a file tool that slips through fails LOUDLY via NullEnvironment ──
 async function testFileToolRefused(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -45,8 +45,8 @@ async function testFileToolRefused(): Promise<void> {
   faux.unregister();
 
   const read = toolResult(result.messages, "Read");
-  check("null-machine: Read fails with a clear error", read.isError && /filesystem disabled|NullMachine/.test(read.text));
-  check("null-machine: loop survives the refusal", result.status === "completed");
+  check("null-environment: Read fails with a clear error", read.isError && /filesystem disabled|NullEnvironment/.test(read.text));
+  check("null-environment: loop survives the refusal", result.status === "completed");
 }
 
 async function main(): Promise<void> {
@@ -57,14 +57,14 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ NULL-MACHINE E2E PASS — stateless run with no machine + file tools refused loudly");
+    console.log("✅ NULL-ENVIRONMENT E2E PASS — stateless run with no environment + file tools refused loudly");
   } else {
-    console.log("❌ NULL-MACHINE E2E FAIL");
+    console.log("❌ NULL-ENVIRONMENT E2E FAIL");
     process.exit(1);
   }
 }
 
 main().catch((error) => {
-  console.error("❌ NULL-MACHINE E2E ERROR:", error);
+  console.error("❌ NULL-ENVIRONMENT E2E ERROR:", error);
   process.exit(1);
 });

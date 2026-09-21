@@ -66,7 +66,7 @@ export type DecodeErrors = "strict" | "replace" | "ignore";
 export type OsKind = "Linux" | "Darwin" | "Windows" | (string & {});
 export type ShellName = "bash" | "zsh" | "sh" | "powershell" | "cmd" | (string & {});
 
-export interface Environment {
+export interface OsInfo {
   readonly osKind: OsKind;
   readonly osArch: string;
   readonly osVersion: string;
@@ -134,7 +134,7 @@ export interface WriteTextResult {
   readonly bytesWritten: number;
   /**
    * The version this write produced — present ONLY when the backend already knew it
-   * (LocalMachine: one stat syscall). `undefined` everywhere a round trip would be
+   * (LocalEnvironment: one stat syscall). `undefined` everywhere a round trip would be
    * needed to learn it, which is why it is optional rather than a promise: the caller
    * records what it got, and a versionless record is decided by content instead
    * (see FileFreshnessLedger). Never stat here just to fill it in.
@@ -143,7 +143,7 @@ export interface WriteTextResult {
 }
 
 /**
- * Handle to the machine the workspace lives on.
+ * Handle to the environment the workspace lives on.
  *
  * Not a filesystem abstraction: files, processes and path/OS semantics are one
  * contract precisely because they must agree — a command started by `run` sees
@@ -164,7 +164,7 @@ export interface WriteTextResult {
  *   call escaping the workspace, not the backend lying — so a `readlink -f` run
  *   through `run` is as authoritative as the backend's own FS view.
  *
- * Implementations extend {@link BaseMachine} (machine-base.ts):
+ * Implementations extend {@link BaseEnvironment} (environment-base.ts):
  * it derives the high-level operations from a small SPI so a new backend only
  * writes the dumb primitives, and overrides them only where it can do better
  * (single round trip, true atomicity, bounded-memory streaming).
@@ -174,9 +174,9 @@ export interface WriteTextResult {
  * by the user's workspace goes through the host; content owned by the agent's
  * session goes through the store.
  */
-export interface Machine {
+export interface Environment {
   readonly name: string;
-  readonly osEnv: Environment;
+  readonly osInfo: OsInfo;
 
   // Identity & path semantics (sync, no I/O).
   pathClass(): "posix" | "win32";
@@ -191,25 +191,25 @@ export interface Machine {
    */
   additionalDirs?(): readonly string[];
   /**
-   * Return a sibling machine rooted at `cwd`, sharing this machine's backend
-   * resources (the same ssh connection / sandbox session / local machine) — only
+   * Return a sibling environment rooted at `cwd`, sharing this environment's backend
+   * resources (the same ssh connection / sandbox session / local environment) — only
    * the working directory differs. Purely structural and cheap (no I/O); the
    * symmetric counterpart of `getcwd()`. Callers that need an isolated workspace
    * (e.g. a git worktree for a subagent) build it on top of this rather than the
-   * machine knowing anything about isolation. A relative `cwd` resolves against
-   * the current one. Never mutates this machine, so re-rooting one copy can't
+   * environment knowing anything about isolation. A relative `cwd` resolves against
+   * the current one. Never mutates this environment, so re-rooting one copy can't
    * clobber the cwd of another that shares the same connection.
    */
-  withCwd(cwd: string): Machine;
+  withCwd(cwd: string): Environment;
 
   /**
-   * Public URL for a port listening inside this machine, or `undefined` when the backend
+   * Public URL for a port listening inside this environment, or `undefined` when the backend
    * has no way to expose one (local, ssh, a sandbox without port forwarding). A dev server
    * the agent just started is only useful if someone can reach it, and only the backend
    * knows the mapping — E2B's `getHost`, a vendor tunnel, and so on.
    *
-   * This is an OPERATION on a running machine, not workspace lifecycle: it answers a
-   * question about a machine we were handed, and never creates or destroys anything.
+   * This is an OPERATION on a running environment, not workspace lifecycle: it answers a
+   * question about an environment we were handed, and never creates or destroys anything.
    * `undefined` rather than a throw, so a caller writes one code path.
    */
   exposedPortUrl?(port: number): Promise<string | undefined>;
@@ -227,7 +227,7 @@ export interface Machine {
    * `onOutput`, learn how it ended from the resolved result. That is exactly what the
    * background-task machinery does.
    *
-   * `BaseMachine` derives it from a process-spawning SPI, so local and SSH backends get it
+   * `BaseEnvironment` derives it from a process-spawning SPI, so local and SSH backends get it
    * for free; backends with native support (a vendor `timeoutMs` + `kill`) override it.
    */
   run(argv: readonly string[], options?: RunCommandOptions): Promise<RunCommandResult>;
@@ -241,7 +241,7 @@ export interface Machine {
    *
    * Entries carry their `kind` because every backend's readdir already knows it — handing
    * back bare names would force callers into a stat per entry, which is free locally and
-   * seconds of serial round trips on a remote machine. `kind` is lstat semantics; resolve
+   * seconds of serial round trips on a remote environment. `kind` is lstat semantics; resolve
    * `"symlink"` entries with `fileInfo` when the target kind matters (see `DirEntry`).
    */
   listDir(path: string): Promise<readonly DirEntry[]>;
@@ -282,7 +282,7 @@ export interface Machine {
    * overriding `writeText` must keep the same two-step.
    *
    * Whether the file lands all-at-once is a BACKEND property, not a promise of this
-   * contract: LocalMachine swaps a sibling temp file into place (free there, and it
+   * contract: LocalEnvironment swaps a sibling temp file into place (free there, and it
    * keeps symlink/mode semantics), remote backends write straight to the target
    * because staging a temp file and renaming it costs round trips on every write to
    * narrow a window nothing in the tool path depends on.
@@ -299,26 +299,26 @@ export interface Machine {
 
 }
 
-export interface MachineOpenContext {
+export interface EnvironmentOpenContext {
   readonly sessionId: string;
   readonly signal: AbortSignal;
 }
 
 /**
- * Lazy, per-session way to hand a session its {@link Machine} — for hosts that can only
+ * Lazy, per-session way to hand a session its {@link Environment} — for hosts that can only
  * build one once they know the session (or that must `await` a connection). Pass a
- * `Machine` directly whenever one already exists; that is the common case.
+ * `Environment` directly whenever one already exists; that is the common case.
  *
  * Sandbox LIFECYCLE — creating, snapshotting, pausing, destroying — deliberately lives
  * outside this framework. A sandbox is typically a user- or workspace-scoped resource
  * whose lifetime spans many sessions (new, resumed and forked alike), so the layer that
  * knows when a user is actually done is the host, not a session. The host creates the
- * sandbox, hands the machine in, and disposes of it on its own terms; everything here
- * only ever OPERATES a machine it was given — which is also why this type has no
- * teardown half: a factory that mints a machine per session has nowhere to release it.
+ * sandbox, hands the environment in, and disposes of it on its own terms; everything here
+ * only ever OPERATES an environment it was given — which is also why this type has no
+ * teardown half: a factory that mints an environment per session has nowhere to release it.
  *
  * The concrete thing this buys: nothing in a session's durable state points at a sandbox,
  * so forking a session cannot silently make two sessions share one workspace, and closing
  * one session cannot pull the sandbox out from under the others.
  */
-export type MachineFactory = (ctx: MachineOpenContext) => Machine | Promise<Machine>;
+export type EnvironmentFactory = (ctx: EnvironmentOpenContext) => Environment | Promise<Environment>;

@@ -45,15 +45,15 @@ export function submitPullRequestTool(github: GitHubApi): Tool {
       accesses: ToolAccesses.none(),
       display: { title: "Submit pull request", detail: `${args.branch}: ${args.title}` },
       run: async (ctx) => {
-        const cwd = ctx.machine.getcwd();
-        const marker = await readMarker(ctx.machine);
+        const cwd = ctx.environment.getcwd();
+        const marker = await readMarker(ctx.environment);
         const repo = parseRepo(marker.repo);
         if (args.branch === marker.base) return fail(`refusing to push to the default branch "${marker.base}"; create a feature branch first`);
-        const dirty = (await git(ctx.machine, ["status", "--porcelain"], { cwd })).trim();
+        const dirty = (await git(ctx.environment, ["status", "--porcelain"], { cwd })).trim();
         if (dirty) return fail(`the working tree has uncommitted changes; commit (or discard) them first:\n${dirty}`);
-        const head = (await git(ctx.machine, ["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
+        const head = (await git(ctx.environment, ["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
         if (head !== args.branch) return fail(`HEAD is on "${head}", not "${args.branch}"; check out the branch you want to submit`);
-        await git(ctx.machine, ["push", "--quiet", "origin", `HEAD:refs/heads/${args.branch}`], { cwd, env: await github.gitEnv() });
+        await git(ctx.environment, ["push", "--quiet", "origin", `HEAD:refs/heads/${args.branch}`], { cwd, env: await github.gitEnv() });
 
         const existing = await github.findPullRequest(repo, args.branch);
         if (existing) {

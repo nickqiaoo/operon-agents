@@ -1,5 +1,5 @@
 import type { Capability } from "../capability.ts";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import { T } from "../../scope/tokens.ts";
 import { SkillRegistry } from "./registry.ts";
 import { resolveSkillRoots } from "./scanner.ts";
@@ -13,7 +13,7 @@ export type { SkillRegistryOptions } from "./registry.ts";
 export { SkillRegistry, SkillNotFoundError } from "./registry.ts";
 export {
   parseSkillText,
-  parseSkillFromMachine,
+  parseSkillFromEnvironment,
   parseFrontmatter,
   expandSkillParameters,
   skillArgumentNames,
@@ -87,24 +87,24 @@ export interface SkillsOptions {
  * registry across the sessions of a working directory.
  */
 export async function loadSkillRoots(
-  machine: Machine,
+  environment: Environment,
   registry: SkillRegistry,
   options: Omit<SkillsOptions, "registry" | "scan" | "flowExecutor" | "onWarning"> = {},
 ): Promise<void> {
   for (const skill of options.builtinSkills ?? []) registry.registerBuiltinSkill(skill);
   const dynamic = options.dynamicRoots ? await options.dynamicRoots() : [];
   const explicitRoots = [...(options.roots ?? []), ...dynamic];
-  const roots = await resolveSkillRoots(machine, {
+  const roots = await resolveSkillRoots(environment, {
     ...(explicitRoots.length > 0 ? { explicitRoots } : {}),
     ...(options.includeDefaultRoots === true ? { includeDefaults: true } : {}),
-    // Default the project root to the machine's working directory, so `<cwd>/.agents/skills`
-    // is scanned for the directory this machine actually operates.
-    projectDir: options.projectDir ?? machine.getcwd(),
+    // Default the project root to the environment's working directory, so `<cwd>/.agents/skills`
+    // is scanned for the directory this environment actually operates.
+    projectDir: options.projectDir ?? environment.getcwd(),
     ...(options.userHomeDir !== undefined ? { userHomeDir: options.userHomeDir } : {}),
     ...(options.builtinDir !== undefined ? { builtinDir: options.builtinDir } : {}),
     ...(options.extraDirs !== undefined ? { extraDirs: options.extraDirs } : {}),
   });
-  await registry.loadRoots(machine, roots);
+  await registry.loadRoots(environment, roots);
 }
 
 export function skillsCapability(options: SkillsOptions = {}): Capability {
@@ -122,7 +122,7 @@ export function skillsCapability(options: SkillsOptions = {}): Capability {
         token: T.Skills,
         create: async (ctx) => {
           sessionId = ctx.sessionId;
-          if (options.scan !== false) await loadSkillRoots(ctx.scope.require(T.Machine), registry, options);
+          if (options.scan !== false) await loadSkillRoots(ctx.scope.require(T.Environment), registry, options);
           service.attach({ sessionId: ctx.sessionId, events: ctx.scope.require(T.Events), steer: ctx.scope.require(T.Steer) });
           return service;
         },

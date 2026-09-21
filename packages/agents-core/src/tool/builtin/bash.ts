@@ -8,7 +8,7 @@ import { matchesBashRule } from "../support/bash-rule-match.ts";
 import { extractBashPaths } from "../support/bash-paths.ts";
 import { destructiveWarning } from "../support/bash-destructive.ts";
 import { escapeRuleSubjectLiteral } from "../support/rule-match.ts";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 import { nonInteractiveShellEnv } from "../shell-env.ts";
 import { runCommandInline, type AttachedOutcome, type AttachedRunOptions, type BackgroundSpawner, type CommandStarter } from "../background.ts";
 import type { ToolResult, ToolUpdate } from "../types.ts";
@@ -103,7 +103,7 @@ export const bashTool = defineTool({
       // What the command is read to touch. Best-effort by nature (see bash-paths.ts): this is
       // what lets the sensitive-file / git-control-path / write-outside-cwd policies see a Bash
       // call at all, which they otherwise skip entirely for want of anything to inspect.
-      accesses: commandAccesses(args, ctx.machine),
+      accesses: commandAccesses(args, ctx.environment),
       // `warning` is advisory only — nothing branches on it. It rides on the plan so whatever
       // renders the approval can show the caller why this command deserves a second look.
       display: {
@@ -113,7 +113,7 @@ export const bashTool = defineTool({
       },
       approvalRule: `Bash(${escapeRuleSubjectLiteral(args.command)})`,
       matchesRule: (ruleArgs) => matchesBashRule(ruleArgs, args.command),
-      run: (runCtx) => execute(args, runCtx.machine, runCtx.signal, runCtx.background, runCtx.onUpdate, runCtx.detachSignal, runCtx.address, runCtx.toolCallId),
+      run: (runCtx) => execute(args, runCtx.environment, runCtx.signal, runCtx.background, runCtx.onUpdate, runCtx.detachSignal, runCtx.address, runCtx.toolCallId),
     };
   },
 });
@@ -126,15 +126,15 @@ export const bashTool = defineTool({
  * for the same reason. Anything that cannot be resolved is dropped rather than guessed at —
  * see bash-paths.ts on why silence is the correct failure mode here.
  */
-function commandAccesses(args: BashInput, machine: Machine): ToolAccesses {
+function commandAccesses(args: BashInput, environment: Environment): ToolAccesses {
   const found = extractBashPaths(args.command);
   if (found.length === 0) return ToolAccesses.none();
 
-  const pathClass = machine.pathClass();
-  const base = args.cwd ?? machine.getcwd();
+  const pathClass = environment.pathClass();
+  const base = args.cwd ?? environment.getcwd();
   let home: string | undefined;
   try {
-    home = machine.gethome();
+    home = environment.gethome();
   } catch {
     home = undefined;
   }
@@ -168,27 +168,27 @@ function toAbsolute(path: string, base: string, home: string | undefined, pathCl
 
 /** The argv + env overrides every bash invocation shares, whichever path ends up running it. */
 function shellInvocation(
-  machine: Machine,
+  environment: Environment,
   effectiveCwd: string,
   command: string,
 ): { readonly argv: string[]; readonly env: Record<string, string> } {
-  const isWindowsBash = machine.osEnv.osKind === "Windows";
+  const isWindowsBash = environment.osInfo.osKind === "Windows";
   const shellCwd = isWindowsBash ? windowsPathToPosixPath(effectiveCwd) : effectiveCwd;
   return {
-    argv: [machine.osEnv.shellPath, "-c", `cd ${shellQuote(shellCwd)} && ${command}`],
-    // Non-interactive overrides only; the machine layers these over its ambient env (PATH +
+    argv: [environment.osInfo.shellPath, "-c", `cd ${shellQuote(shellCwd)} && ${command}`],
+    // Non-interactive overrides only; the environment layers these over its ambient env (PATH +
     // proxy vars ride through), so we don't ship the whole process environment downstream.
-    env: nonInteractiveShellEnv({ shellPath: machine.osEnv.shellPath }),
+    env: nonInteractiveShellEnv({ shellPath: environment.osInfo.shellPath }),
   };
 }
 
 /** The same invocation, packaged for a spawner that owns the run's lifecycle (background,
  *  or foreground-attached-then-detachable). No timeout: those runs are bounded by the
  *  spawner's own foreground timer, or not at all once detached. */
-function commandStarter(machine: Machine, effectiveCwd: string, command: string): CommandStarter {
-  const { argv, env } = shellInvocation(machine, effectiveCwd, command);
+function commandStarter(environment: Environment, effectiveCwd: string, command: string): CommandStarter {
+  const { argv, env } = shellInvocation(environment, effectiveCwd, command);
   return ({ signal, onOutput }) =>
-    machine.run(argv, {
+    environment.run(argv, {
       env,
       signal,
       ...(onOutput !== undefined ? { onOutput: (chunk) => onOutput(chunk.data) } : {}),
@@ -197,7 +197,7 @@ function commandStarter(machine: Machine, effectiveCwd: string, command: string)
 
 async function execute(
   args: BashInput,
-  machine: Machine,
+  environment: Environment,
   signal: AbortSignal,
   background?: BackgroundSpawner,
   onUpdate?: (update: ToolUpdate) => void,
@@ -208,27 +208,27 @@ async function execute(
   if (signal.aborted) return errorResult("Aborted before command started");
   if (args.command.length === 0) return errorResult("Command cannot be empty.");
 
-  const isWindowsBash = machine.osEnv.osKind === "Windows";
+  const isWindowsBash = environment.osInfo.osKind === "Windows";
   const command = isWindowsBash ? rewriteWindowsNullRedirect(args.command) : args.command;
 
   if (args.run_in_background) {
     if (background === undefined) {
       return errorResult("Background execution is not available for this agent (Task tools not enabled).");
     }
-    // Redirect output to a Machine log file: the OS captures the stream (survives this
+    // Redirect output to an Environment log file: the OS captures the stream (survives this
     // process; detached commands keep logging), and the file — not process memory — is
     // the output's home. The ack carries the path so it stays readable across restarts.
     let logPath: string;
     try {
-      logPath = await prepareBackgroundLog(machine);
+      logPath = await prepareBackgroundLog(environment);
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
     const wrapped = `{ ${command}\n} > ${shellQuote(logPath)} 2>&1`;
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
-    const taskId = background.spawnCommand(commandStarter(machine, args.cwd ?? machine.getcwd(), wrapped), args.command, `bash: ${preview}`, {
+    const taskId = background.spawnCommand(commandStarter(environment, args.cwd ?? environment.getcwd(), wrapped), args.command, `bash: ${preview}`, {
       logPath,
-      machine,
+      environment,
       ...(parentAddress !== undefined ? { parentAddress } : {}),
       ...(toolCallId !== undefined ? { toolCallId } : {}),
     });
@@ -259,16 +259,16 @@ async function execute(
   // regardless of backend. The standard loop also supplies detachSignal, but storage does not
   // depend on that routing seam: passing BackgroundManager alone is enough to select one
   // canonical durable output path.
-  // Local machines can do this cheaply, and sandbox/remote machines redirect inside their own
-  // shell then expose the growing file through Machine.readBytes. Detach consequently changes
+  // Local environments can do this cheaply, and sandbox/remote environments redirect inside their own
+  // shell then expose the growing file through Environment.readBytes. Detach consequently changes
   // lifecycle ownership only; it never has to migrate an already-running pipe into memory.
   let logPath: string | undefined;
   if (usesAttachedDriver) {
     try {
-      logPath = await prepareBackgroundLog(machine);
+      logPath = await prepareBackgroundLog(environment);
     } catch {
       // The manager's attached driver refuses pipe-only commands (assertDurableOutput), so a
-      // machine that cannot host the log (unwritable home, quota) degrades to the inline pipe
+      // environment that cannot host the log (unwritable home, quota) degrades to the inline pipe
       // driver below: the command still runs, it just cannot be detached into a task.
       logPath = undefined;
     }
@@ -283,7 +283,7 @@ async function execute(
 
   const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
   const builder = new ToolResultBuilder();
-  const start = commandStarter(machine, args.cwd ?? machine.getcwd(), fgCommand);
+  const start = commandStarter(environment, args.cwd ?? environment.getcwd(), fgCommand);
 
   let outcome: AttachedOutcome;
   try {
@@ -291,10 +291,10 @@ async function execute(
       foregroundSignal: signal,
       ...(detachSignal !== undefined ? { detachSignal } : {}),
       foregroundTimeoutMs: timeoutMs,
-      // Attached mode passes logPath+machine so the driver knows WHERE this command's output
+      // Attached mode passes logPath+environment so the driver knows WHERE this command's output
       // lives; with the live tap below it tails that file while we stay attached, and stops
       // the moment we detach. The no-manager inline path omits them and receives the pipe.
-      ...(logPath !== undefined ? { logPath, machine } : {}),
+      ...(logPath !== undefined ? { logPath, environment } : {}),
       ...(parentAddress !== undefined ? { parentAddress } : {}),
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       onLive: (chunk) => {
@@ -361,53 +361,53 @@ function shellQuote(s: string): string {
 }
 
 /** `<dir>/bash-<random>.log`; undefined = nowhere safe to put durable background output. */
-function backgroundLogPath(machine: Machine): string | undefined {
-  const dir = backgroundLogDir(machine);
+function backgroundLogPath(environment: Environment): string | undefined {
+  const dir = backgroundLogDir(environment);
   // Compose with '/' — both posix hosts and win32 Git-bash shells accept it.
   return dir === undefined ? undefined : `${dir}/bash-${randomBytes(4).toString("hex")}.log`;
 }
 
 /**
- * Task-log directories already created on a given machine. The directory is the same for every
- * command of a session, so creating it once is enough — and on a remote machine that mkdir is a
- * round trip (a whole command on some backends) paid by EVERY Bash call. Keyed by Machine and
- * weak, so a machine that goes away takes its entry with it.
+ * Task-log directories already created on a given environment. The directory is the same for every
+ * command of a session, so creating it once is enough — and on a remote environment that mkdir is a
+ * round trip (a whole command on some backends) paid by EVERY Bash call. Keyed by Environment and
+ * weak, so an environment that goes away takes its entry with it.
  *
  * Only ever an optimization: the entry is dropped the moment the log write fails, and the next
  * call recreates the directory. So a directory removed mid-session (a `rm -rf`, a tmp reaper)
  * costs one retry, not a broken session.
  */
-const preparedLogDirs = new WeakMap<Machine, Set<string>>();
+const preparedLogDirs = new WeakMap<Environment, Set<string>>();
 
 /** Allocate the canonical command log before the user's process starts. The shell only owns
  * appending command output; directory/file setup failures therefore fail the tool cleanly
  * instead of escaping through an uncaptured outer stderr stream. */
-/** Create an empty task log on the machine and return its path — where a background program or command writes its output. */
-export async function prepareBackgroundLog(machine: Machine): Promise<string> {
-  const logPath = backgroundLogPath(machine);
+/** Create an empty task log on the environment and return its path — where a background program or command writes its output. */
+export async function prepareBackgroundLog(environment: Environment): Promise<string> {
+  const logPath = backgroundLogPath(environment);
   if (logPath === undefined) {
-    throw new Error("Background Bash execution requires a durable output log, but this machine has no safe task-log directory.");
+    throw new Error("Background Bash execution requires a durable output log, but this environment has no safe task-log directory.");
   }
   const dir = posixDirname(logPath);
-  let known = preparedLogDirs.get(machine);
+  let known = preparedLogDirs.get(environment);
   if (known === undefined) {
     known = new Set<string>();
-    preparedLogDirs.set(machine, known);
+    preparedLogDirs.set(environment, known);
   }
 
   if (!known.has(dir)) {
-    await machine.mkdir(dir, { parents: true });
+    await environment.mkdir(dir, { parents: true });
     known.add(dir);
   }
   try {
-    await machine.writeText(logPath, "");
+    await environment.writeText(logPath, "");
   } catch (error) {
     // The directory we believed in is gone (or was never writable). Re-create it and try once
     // more, so the cache can never turn a transient state into a hard failure.
     known.delete(dir);
-    await machine.mkdir(dir, { parents: true });
+    await environment.mkdir(dir, { parents: true });
     known.add(dir);
-    await machine.writeText(logPath, "").catch(() => {
+    await environment.writeText(logPath, "").catch(() => {
       throw error;
     });
   }
@@ -425,15 +425,15 @@ export async function prepareBackgroundLog(machine: Machine): Promise<string> {
  * them. Conversely `cwd=/workspace/proj` with `home=/workspace` is perfectly fine, and a
  * `home !== cwd` test would needlessly relocate it.
  *
- * The fallback is `/tmp`: still on the machine (so `Read` reaches it, sandbox included),
- * outside the workspace, and alive for as long as the machine is. On win32 there is no
+ * The fallback is `/tmp`: still on the environment (so `Read` reaches it, sandbox included),
+ * outside the workspace, and alive for as long as the environment is. On win32 there is no
  * equivalent worth guessing at, and a Windows home is never the workspace in practice, so it
  * keeps the home path.
  */
-function backgroundLogDir(machine: Machine): string | undefined {
+function backgroundLogDir(environment: Environment): string | undefined {
   let home: string;
   try {
-    home = machine.gethome();
+    home = environment.gethome();
   } catch {
     return undefined;
   }
@@ -441,11 +441,11 @@ function backgroundLogDir(machine: Machine): string | undefined {
   const candidate = `${home.replaceAll("\\", "/").replace(/\/+$/, "")}/${OPERON_HOME_DIRNAME}/tasks`;
   let cwd: string;
   try {
-    cwd = machine.getcwd();
+    cwd = environment.getcwd();
   } catch {
     return candidate;
   }
-  const pathClass = machine.pathClass();
+  const pathClass = environment.pathClass();
   if (cwd.length === 0 || !isWithinDirectory(candidate, cwd.replaceAll("\\", "/"), pathClass)) return candidate;
   return pathClass === "win32" ? candidate : `/tmp/${OPERON_HOME_DIRNAME}/tasks`;
 }

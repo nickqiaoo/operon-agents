@@ -89,7 +89,7 @@ export class AssembledCapabilities {
     // Session.buildPermissionManager (the manager is session-lived), not per run.
 
     if (capability.hooks) {
-      // Run-tier hooks are driven by the Runner itself, not composed into the step machine.
+      // Run-tier hooks are driven by the Runner itself, not composed into the step environment.
       const { shouldContinueAfterStop, beforeRun, ...loopHooks } = capability.hooks;
       if (Object.keys(loopHooks).length > 0) this.loopHookParts.push(loopHooks);
       if (shouldContinueAfterStop) this.boundaryContinuations.push(shouldContinueAfterStop);

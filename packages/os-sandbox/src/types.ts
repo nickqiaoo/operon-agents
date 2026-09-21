@@ -40,7 +40,7 @@ export interface OsSandboxFilesystemOptions {
    */
   readonly denyRead?: readonly string[];
   /**
-   * Extra write roots granted to EVERY machine, on top of the per-machine
+   * Extra write roots granted to EVERY environment, on top of the per-environment
    * grant (its cwd + additionalDirs) and the shared system roots (tmp, the
    * framework's background-task log directory).
    */

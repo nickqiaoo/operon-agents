@@ -142,17 +142,17 @@ export type AgentRecordBody =
  *   log as the model-facing conversation record, but are no longer the reconcile source of
  *   truth. `session.listSubagents()`/`listWorkflows()` PROJECT that task store — a foreground
  *   subagent/workflow is a plain tool call (conversation + its own shard), never a task.
- * - KV state (②) may hold only (a) handles to external systems (`machine`), (b)
+ * - KV state (②) may hold only (a) handles to external systems (`environment`), (b)
  *   rebuildable foreground control state (`interrupt`), (c) capability current-state (goal/plan/permission/
  *   config/cron/subagents), and (d) the background task store on non-disk backends. If deleting
  *   a KV key would lose information not recoverable elsewhere, that information belonged in the
  *   log or the task store.
- * - The Machine filesystem holds work products (process logs, plan drafts) —
+ * - The Environment filesystem holds work products (process logs, plan drafts) —
  *   cache-grade relative to the log; harvest what must outlive it into a record.
  * - Pure runtime (live output tails) is not storage at all: its durable record is the
  *   entity it drives.
  */
-export type StateKey = "interrupt" | "meta" | "machine" | "cron" | (string & {});
+export type StateKey = "interrupt" | "meta" | "environment" | "cron" | (string & {});
 
 export interface ReadRecordsFilter {
   readonly address?: string;

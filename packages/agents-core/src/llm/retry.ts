@@ -77,7 +77,7 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
     const hint = model.classifyError(reason);
     if (!hint.retryable || attempt >= maxRetries) {
       logger.log("error", "llm error", { model: model.id, attempt, mode: attemptResult.mode, retryable: hint.retryable, reason: result.message.errorMessage });
-      return result; // give up → machine error as the result
+      return result; // give up → environment error as the result
     }
 
     input.onDropPartial?.(result.message);

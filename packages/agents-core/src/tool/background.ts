@@ -1,4 +1,4 @@
-import type { Machine, RunCommandResult } from "./machine.ts";
+import type { Environment, RunCommandResult } from "./environment.ts";
 import type { ToolResult } from "./types.ts";
 
 /**
@@ -13,7 +13,7 @@ import type { ToolResult } from "./types.ts";
 export type CommandStarter = (opts: {
   readonly signal: AbortSignal;
   /** Live pipe tap for an inline foreground run. File-backed background/attached commands omit
-   * it because their canonical output is already on the Machine. */
+   * it because their canonical output is already on the Environment. */
   readonly onOutput?: (chunk: string) => void;
 }) => Promise<RunCommandResult>;
 
@@ -24,10 +24,10 @@ export interface QuestionSpawnOptions {
 }
 
 export interface ProcessSpawnOptions {
-  /** The Machine file the process's output is redirected to (its durable work product);
-   *  set together with `machine` so the task can read it back on demand. */
+  /** The Environment file the process's output is redirected to (its durable work product);
+   *  set together with `environment` so the task can read it back on demand. */
   readonly logPath?: string;
-  readonly machine?: Machine;
+  readonly environment?: Environment;
   /** Parent conversation line. Namespaces `toolCallId`, which is not globally unique. */
   readonly parentAddress?: string;
   /** The tool call that started this command. Carried onto the settle notification so a UI can
@@ -40,7 +40,7 @@ export interface ProcessSpawnOptions {
 export type AttachedSettleStatus = "completed" | "failed" | "timed_out" | "killed";
 
 /** Options for {@link BackgroundSpawner.runCommandAttached}. Extends the command spawn
- *  options (log file / machine) with the foreground-attachment seams. */
+ *  options (log file / environment) with the foreground-attachment seams. */
 export interface AttachedRunOptions extends ProcessSpawnOptions {
   /** The tool call's abort signal. While attached, aborting it KILLS the process
    *  (foreground semantics). Dropped the instant the run detaches. */

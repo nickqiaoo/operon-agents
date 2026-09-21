@@ -12,7 +12,7 @@ import {
   defineAgent,
   Runner,
   Session,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   writeTool,
   goalCapability,
@@ -22,7 +22,7 @@ import {
   MemoryStore,
   type AgentEvent,
   type Capability,
-  type MachineFactory,
+  type EnvironmentFactory,
   type ChatModel,
   type LlmRequest,
   type Logger,
@@ -133,12 +133,12 @@ function recordingModel(base: ChatModel): { model: ChatModel; lastReq: () => Llm
 }
 
 // 1. Session-tier lifecycle survives across runs; per-run lifecycle fires each run.
-async function testCrossRunSurvival(machine: LocalMachine): Promise<void> {
+async function testCrossRunSurvival(environment: LocalEnvironment): Promise<void> {
   const { faux, model } = fauxModel("one", "two");
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const session = await openTestSession({ machine, capabilities: [capability] });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment, capabilities: [capability] });
+  const runner = testRunner({ environment });
 
   check("cross-run: openSession once at open", stats.openSession === 1 && stats.closeSession === 0);
 
@@ -155,12 +155,12 @@ async function testCrossRunSurvival(machine: LocalMachine): Promise<void> {
 }
 
 // 2. Single active run — two concurrent runs on one session never overlap (Invariant 2).
-async function testSingleActiveRun(machine: LocalMachine): Promise<void> {
+async function testSingleActiveRun(environment: LocalEnvironment): Promise<void> {
   const { faux, model } = fauxModel("a", "b");
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
-  const session = await openTestSession({ machine, capabilities: [capability] });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment, capabilities: [capability] });
+  const runner = testRunner({ environment });
 
   const [r1, r2] = await Promise.all([
     runner.run(agent, "concurrent 1", { session }),
@@ -174,12 +174,12 @@ async function testSingleActiveRun(machine: LocalMachine): Promise<void> {
   check("single-run: both runs actually ran", stats.start === 2);
 }
 
-async function testOneShotLifecycle(machine: LocalMachine): Promise<void> {
+async function testOneShotLifecycle(environment: LocalEnvironment): Promise<void> {
   const { faux, model } = fauxModel("done");
   const { capability, stats } = probeCapability();
   const agent = defineAgent({ name: "a", model, instructions: "x" });
   // Capabilities passed to the Runner → folded into the one-shot Session it builds.
-  const runner = testRunner({ machine, capabilities: [capability] });
+  const runner = testRunner({ environment, capabilities: [capability] });
 
   const result = await runner.run(agent, "one-shot");
   faux.unregister();
@@ -189,11 +189,11 @@ async function testOneShotLifecycle(machine: LocalMachine): Promise<void> {
   check("one-shot: per-run start/stop once", stats.start === 1 && stats.stop === 1);
 }
 
-async function testTracingLifecycle(machine: LocalMachine): Promise<void> {
+async function testTracingLifecycle(environment: LocalEnvironment): Promise<void> {
   // Direct Session.open wiring: the session event bus drives the tracing bridge.
   {
     const { processor, stats } = recordingTracingProcessor();
-    const session = await openTestSession({ machine, tracing: processor });
+    const session = await openTestSession({ environment, tracing: processor });
     await session.events.emit({ type: "agent.started", agent: "main", address: "main", sessionId: session.id });
     await session.events.emit({ type: "agent.ended", agent: "main", address: "main", sessionId: session.id });
     await session.close();
@@ -208,7 +208,7 @@ async function testTracingLifecycle(machine: LocalMachine): Promise<void> {
     const { faux, model } = fauxModel("done");
     const { processor, stats } = recordingTracingProcessor();
     const agent = defineAgent({ name: "a", model, instructions: "x" });
-    const result = await testRunner({ machine, tracing: processor }).run(agent, "one-shot tracing");
+    const result = await testRunner({ environment, tracing: processor }).run(agent, "one-shot tracing");
     faux.unregister();
 
     check("tracing: runner one-shot run completes", result.status === "completed");
@@ -218,7 +218,7 @@ async function testTracingLifecycle(machine: LocalMachine): Promise<void> {
 }
 
 // 4. Session-tier fault isolation: openSession throws → capability absent + diagnostic.
-async function testSessionFaultIsolation(machine: LocalMachine): Promise<void> {
+async function testSessionFaultIsolation(environment: LocalEnvironment): Promise<void> {
   const { faux, model } = fauxModel("survived");
   const { capability, stats } = probeCapability({ failOpen: true });
   const agent = defineAgent({ name: "a", model, instructions: "x" });
@@ -227,10 +227,10 @@ async function testSessionFaultIsolation(machine: LocalMachine): Promise<void> {
   const bus = new ListenerSink();
   bus.subscribe((e) => void events.push(e));
 
-  const session = await openTestSession({ machine, events: bus, capabilities: [capability] });
+  const session = await openTestSession({ environment, events: bus, capabilities: [capability] });
   check("fault: session still opens despite a broken capability", session.capabilities.length === 0);
 
-  const runner = testRunner({ machine });
+  const runner = testRunner({ environment });
   const result = await runner.run(agent, "go", { session });
   faux.unregister();
   await session.close();
@@ -241,11 +241,11 @@ async function testSessionFaultIsolation(machine: LocalMachine): Promise<void> {
   check("fault: diagnostic surfaced to the bus", diag !== undefined);
 }
 
-async function testSessionHandles(machine: LocalMachine): Promise<void> {
+async function testSessionHandles(environment: LocalEnvironment): Promise<void> {
   const goal = new GoalStore();
   const bg = new BackgroundManager();
   const session = await openTestSession({
-    machine,
+    environment,
     capabilities: [goalCapability(goal), backgroundCapability(bg)],
   });
 
@@ -257,59 +257,59 @@ async function testSessionHandles(machine: LocalMachine): Promise<void> {
   await session.close();
 }
 
-// 6. A machine factory is a FACTORY, not a lifecycle owner: a session opens a machine,
+// 6. An environment factory is a FACTORY, not a lifecycle owner: a session opens an environment,
 // operates it, and leaves its disposal to whoever created it. The regression this locks is
-// that closing one session must not disturb a machine other sessions still hold, and that
-// nothing about the machine leaks into the session's durable state (which a fork copies).
-async function testMachineFactoryIsFactoryOnly(machine: LocalMachine): Promise<void> {
+// that closing one session must not disturb an environment other sessions still hold, and that
+// nothing about the environment leaks into the session's durable state (which a fork copies).
+async function testEnvironmentFactoryIsFactoryOnly(environment: LocalEnvironment): Promise<void> {
   const store = new MemoryStore();
   let open = 0;
   let sawStoreField = false;
 
-  const factory: MachineFactory = (ctx) => {
+  const factory: EnvironmentFactory = (ctx) => {
     open += 1;
     sawStoreField = "store" in (ctx as Record<string, unknown>);
-    return machine;
+    return environment;
   };
 
-  const session = await openTestSession({ machine: factory, store });
-  check("machine-factory: opened once", open === 1);
-  check("machine-factory: factory returns the Machine itself", session.machine === machine);
-  check("machine-factory: open context carries no store (no machine state to persist)", !sawStoreField);
+  const session = await openTestSession({ environment: factory, store });
+  check("environment-factory: opened once", open === 1);
+  check("environment-factory: factory returns the Environment itself", session.environment === environment);
+  check("environment-factory: open context carries no store (no environment state to persist)", !sawStoreField);
 
   await session.close();
 
-  // Nothing machine-shaped may sit in the KV that `SessionRepository.fork` copies wholesale —
+  // Nothing environment-shaped may sit in the KV that `SessionRepository.fork` copies wholesale —
   // that is exactly how a fork used to end up sharing one sandbox with its source.
   const keys = await store.listStateKeys?.();
-  check("machine-factory: no machine state persisted on close", !(keys ?? []).includes("machine"));
-  // The machine survives its session: still usable for the next one.
-  check("machine-factory: machine still usable after session.close", machine.getcwd().length > 0);
+  check("environment-factory: no environment state persisted on close", !(keys ?? []).includes("environment"));
+  // The environment survives its session: still usable for the next one.
+  check("environment-factory: environment still usable after session.close", environment.getcwd().length > 0);
 
-  // A plain Machine is the common case and must take the same path.
-  const direct = await openTestSession({ machine, store: new MemoryStore() });
-  check("machine-factory: a plain Machine passes straight through", direct.machine === machine);
+  // A plain Environment is the common case and must take the same path.
+  const direct = await openTestSession({ environment, store: new MemoryStore() });
+  check("environment-factory: a plain Environment passes straight through", direct.environment === environment);
   await direct.close();
 }
 
-// resolveExposedPort is an OPERATION on the machine, so it forwards to the backend and
+// resolveExposedPort is an OPERATION on the environment, so it forwards to the backend and
 // degrades to undefined on backends that cannot expose a port (local, ssh, null).
-async function testExposedPortForwarding(machine: LocalMachine): Promise<void> {
-  const withPort = Object.create(machine) as LocalMachine & { exposedPortUrl(p: number): Promise<string | undefined> };
+async function testExposedPortForwarding(environment: LocalEnvironment): Promise<void> {
+  const withPort = Object.create(environment) as LocalEnvironment & { exposedPortUrl(p: number): Promise<string | undefined> };
   withPort.exposedPortUrl = async (p: number) => `https://sbx-${String(p)}.example.dev`;
 
-  const exposing = await openTestSession({ machine: withPort });
-  check("exposed-port: forwarded to the machine", (await exposing.resolveExposedPort(3000)) === "https://sbx-3000.example.dev");
+  const exposing = await openTestSession({ environment: withPort });
+  check("exposed-port: forwarded to the environment", (await exposing.resolveExposedPort(3000)) === "https://sbx-3000.example.dev");
   await exposing.close();
 
-  const plain = await openTestSession({ machine });
+  const plain = await openTestSession({ environment });
   check("exposed-port: undefined when the backend has no mapping", (await plain.resolveExposedPort(3000)) === undefined);
   await plain.close();
 }
 
-// 7. Close hang isolation: a hung store.flush / tracing.forceFlush / machine saveState/close
+// 7. Close hang isolation: a hung store.flush / tracing.forceFlush / environment saveState/close
 // must not wedge session.close() — every exit times out and surfaces a diagnostic.
-async function testCloseHangIsolation(machine: LocalMachine): Promise<void> {
+async function testCloseHangIsolation(environment: LocalEnvironment): Promise<void> {
   setSessionCloseTimeoutsForTest({ close: 100, storeFlush: 150 });
   try {
     const never = new Promise<never>(() => {});
@@ -327,7 +327,7 @@ async function testCloseHangIsolation(machine: LocalMachine): Promise<void> {
       },
     };
 
-    const session = await openTestSession({ machine, store: new HangingFlushStore(), tracing: hangingTracing, logger });
+    const session = await openTestSession({ environment, store: new HangingFlushStore(), tracing: hangingTracing, logger });
     const t0 = Date.now();
     await session.close();
     const elapsed = Date.now() - t0;
@@ -342,15 +342,15 @@ async function testCloseHangIsolation(machine: LocalMachine): Promise<void> {
   }
 }
 
-async function testRuntimeModelAndThinking(machine: LocalMachine): Promise<void> {
+async function testRuntimeModelAndThinking(environment: LocalEnvironment): Promise<void> {
   {
     const { faux, model } = fauxModel("ignored");
     const agentModel = recordingModel(model);
     const overrideModel = recordingModel(model);
     const agent = defineAgent({ name: "a", model: agentModel.model, instructions: "x" });
-    const session = await openTestSession({ machine });
+    const session = await openTestSession({ environment });
     session.setModel(overrideModel.model);
-    await testRunner({ machine }).run(agent, "go", { session });
+    await testRunner({ environment }).run(agent, "go", { session });
     faux.unregister();
     await session.close();
     check("setModel: override model was used", overrideModel.lastReq() !== undefined);
@@ -361,17 +361,17 @@ async function testRuntimeModelAndThinking(machine: LocalMachine): Promise<void>
     const { faux, model } = fauxModel("ok");
     const rec = recordingModel(model);
     const agent = defineAgent({ name: "a", model: rec.model, instructions: "x" });
-    const session = await openTestSession({ machine });
+    const session = await openTestSession({ environment });
     session.setThinking("high");
-    await testRunner({ machine }).run(agent, "go", { session });
+    await testRunner({ environment }).run(agent, "go", { session });
     faux.unregister();
     await session.close();
     check("setThinking: thinking reached request.params", rec.lastReq()?.params?.thinking === "high");
   }
 }
 
-async function testRuntimePermissionMode(machine: LocalMachine): Promise<void> {
-  const file = `${machine.getcwd()}/mode.txt`;
+async function testRuntimePermissionMode(environment: LocalEnvironment): Promise<void> {
+  const file = `${environment.getcwd()}/mode.txt`;
   const faux = registerFauxProvider();
   // run1 (manual): one tool call → interrupt. run2 (yolo): tool call → runs → stop.
   faux.setResponses([
@@ -382,8 +382,8 @@ async function testRuntimePermissionMode(machine: LocalMachine): Promise<void> {
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "w", model, instructions: "x", tools: [writeTool] });
   // No responder → manual mode bubbles a durable interrupt instead of running the tool.
-  const session = await openTestSession({ machine, permission: { mode: "manual" } });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment, permission: { mode: "manual" } });
+  const runner = testRunner({ environment });
 
   const first = await runner.run(agent, "write it", { session });
   check("setPermissionMode: manual run interrupts on the asking tool", first.status === "interrupted");
@@ -399,13 +399,13 @@ async function testRuntimePermissionMode(machine: LocalMachine): Promise<void> {
   check("setPermissionMode: file actually written under yolo", existsSync(file));
 }
 
-async function testSessionIdConflict(machine: LocalMachine): Promise<void> {
+async function testSessionIdConflict(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "c", model, instructions: "x" });
-  const session = await openTestSession({ machine });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment });
+  const runner = testRunner({ environment });
 
   let conflict: unknown;
   try {
@@ -462,21 +462,21 @@ async function testOwnedScopeClosedOnOpenFailure(): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-session-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
     await testOwnedScopeClosedOnOpenFailure();
-    await testCrossRunSurvival(machine);
-    await testSingleActiveRun(machine);
-    await testOneShotLifecycle(machine);
-    await testTracingLifecycle(machine);
-    await testSessionFaultIsolation(machine);
-    await testSessionHandles(machine);
-    await testMachineFactoryIsFactoryOnly(machine);
-    await testExposedPortForwarding(machine);
-    await testCloseHangIsolation(machine);
-    await testSessionIdConflict(machine);
-    await testRuntimeModelAndThinking(machine);
-    await testRuntimePermissionMode(machine);
+    await testCrossRunSurvival(environment);
+    await testSingleActiveRun(environment);
+    await testOneShotLifecycle(environment);
+    await testTracingLifecycle(environment);
+    await testSessionFaultIsolation(environment);
+    await testSessionHandles(environment);
+    await testEnvironmentFactoryIsFactoryOnly(environment);
+    await testExposedPortForwarding(environment);
+    await testCloseHangIsolation(environment);
+    await testSessionIdConflict(environment);
+    await testRuntimeModelAndThinking(environment);
+    await testRuntimePermissionMode(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -485,7 +485,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ SESSION E2E PASS — cross-run survival + single-active-run + one-shot lifecycle + tracing + fault isolation + machine factory + §8.6 handles + runtime setters");
+    console.log("✅ SESSION E2E PASS — cross-run survival + single-active-run + one-shot lifecycle + tracing + fault isolation + environment factory + §8.6 handles + runtime setters");
   } else {
     console.log("❌ SESSION E2E FAIL");
     process.exit(1);

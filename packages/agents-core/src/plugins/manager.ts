@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { HookDef } from "../capabilities/user-hooks/types.ts";
-import type { McpServerConfig, SkillRoot, Machine } from "../index.ts";
+import type { McpServerConfig, SkillRoot, Environment } from "../index.ts";
 import { downloadZip, extractZip } from "./archive.ts";
 import { resolveGithubSource } from "./github-resolver.ts";
 import { parseManifest, type ParsedManifestResult } from "./manifest.ts";
@@ -20,25 +20,25 @@ import {
 } from "./types.ts";
 
 export interface PluginManagerOptions {
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly homeDir: string;
   readonly now?: () => number;
 }
 
 export class PluginManager {
-  private readonly machine: Machine;
+  private readonly environment: Environment;
   private readonly homeDir: string;
   private readonly now: () => number;
   private records = new Map<string, PluginRecord>();
 
   constructor(options: PluginManagerOptions) {
-    this.machine = options.machine;
+    this.environment = options.environment;
     this.homeDir = options.homeDir;
     this.now = options.now ?? Date.now;
   }
 
   async load(): Promise<void> {
-    const file = await readInstalled(this.machine, this.homeDir);
+    const file = await readInstalled(this.environment, this.homeDir);
     const next = new Map<string, PluginRecord>();
     for (const entry of file.plugins) {
       try {
@@ -92,7 +92,7 @@ export class PluginManager {
       }
     }
 
-    const parsed = await parseManifest(this.machine, root);
+    const parsed = await parseManifest(this.environment, root);
     if (parsed.manifest === undefined) {
       const msg = parsed.diagnostics.find((d) => d.severity === "error")?.message ?? "no manifest";
       throw new Error(`Cannot install plugin from ${originalSource}: ${msg}`);
@@ -156,7 +156,7 @@ export class PluginManager {
 
   async reload(): Promise<ReloadSummary> {
     const prevIds = new Set(this.records.keys());
-    const file = await readInstalled(this.machine, this.homeDir);
+    const file = await readInstalled(this.environment, this.homeDir);
     const next = new Map<string, PluginRecord>();
     const errors: Array<{ id: string; message: string }> = [];
     for (const entry of file.plugins) {
@@ -241,11 +241,11 @@ export class PluginManager {
       capabilities: r.capabilities,
       github: r.github,
     }));
-    await writeInstalled(this.machine, this.homeDir, { version: 1, plugins: installed });
+    await writeInstalled(this.environment, this.homeDir, { version: 1, plugins: installed });
   }
 
   private async materialize(entry: InstalledRecord): Promise<PluginRecord> {
-    const parsed = await parseManifest(this.machine, entry.root);
+    const parsed = await parseManifest(this.environment, entry.root);
     return recordFrom({
       id: entry.id,
       root: entry.root,

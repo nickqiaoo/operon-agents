@@ -3,7 +3,7 @@ import type { ChatModel } from "../llm/define-model.ts";
 import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/index.ts";
 import type { PromptOrigin } from "../store/origin.ts";
 import type { Tool } from "../tool/types.ts";
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import { FileFreshnessLedger } from "../tool/file-freshness.ts";
@@ -35,7 +35,7 @@ export interface RunTurnInput {
   readonly sessionId?: string;
   readonly signal: AbortSignal;
   readonly model: ChatModel;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
@@ -116,7 +116,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, machine: input.machine, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -160,7 +160,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           sessionId: input.sessionId,
           signal: input.signal,
           model: input.model,
-          machine: input.machine,
+          environment: input.environment,
           background: input.background,
           responder: input.responder,
           fileLedger,

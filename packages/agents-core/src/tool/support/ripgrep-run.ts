@@ -1,8 +1,8 @@
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 
 /**
- * One ripgrep invocation, run on the given machine (local / ssh / sandbox) through
- * `machine.run`. The Grep and Glob tools share this so their handling of a search that
+ * One ripgrep invocation, run on the given environment (local / ssh / sandbox) through
+ * `environment.run`. The Grep and Glob tools share this so their handling of a search that
  * runs too long or prints too much stays identical.
  *
  * Timeout, output capping and cancellation are stated as INTENT and fulfilled by the
@@ -54,7 +54,7 @@ export interface RipgrepRunOptions {
 
 /**
  * Wording for a timeout, honest about whether the backend could actually stop ripgrep.
- * A backend that can only walk away leaves the search running on the remote machine —
+ * A backend that can only walk away leaves the search running on the remote environment —
  * the model should hear that instead of being told the search "timed out" as if it were
  * cleanly cancelled. Phrasing only: no caller branches on it.
  */
@@ -63,7 +63,7 @@ export function stillRunningNote(terminated: boolean): string {
 }
 
 export async function runRipgrep(
-  machine: Machine,
+  environment: Environment,
   rgArgs: readonly string[],
   signal: AbortSignal,
   options: RipgrepRunOptions,
@@ -72,7 +72,7 @@ export async function runRipgrep(
 
   let result;
   try {
-    result = await machine.run(rgArgs, {
+    result = await environment.run(rgArgs, {
       timeoutMs: options.timeoutMs,
       maxOutputBytes: options.maxOutputBytes,
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),

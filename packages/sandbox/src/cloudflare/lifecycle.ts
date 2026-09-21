@@ -1,21 +1,21 @@
 import type { SandboxWorkspace } from "../types.ts";
 import type { CloudflareSandboxClient } from "./cf-api.ts";
-import { CloudflareMachine, type CloudflareMachineOptions } from "./machine.ts";
+import { CloudflareEnvironment, type CloudflareEnvironmentOptions } from "./environment.ts";
 
 /** Where squashfs archives live inside the sandbox when no explicit path is given. */
 const SNAPSHOT_DIR = "/tmp/operon-snapshots";
 
-export interface CloudflareWorkspaceOptions extends CloudflareMachineOptions {
+export interface CloudflareWorkspaceOptions extends CloudflareEnvironmentOptions {
   /**
    * A `SandboxClient` from `@cloudflare/sandbox`, constructed against YOUR Worker:
    * `new SandboxClient({ baseUrl })`. The Worker must expose the SDK's routes (wrap your
    * handlers with `bridge()` from `@cloudflare/sandbox/bridge`).
    */
   readonly client: CloudflareSandboxClient;
-  /** Workspace root that snapshots capture and restore. Defaults to the machine's cwd. */
+  /** Workspace root that snapshots capture and restore. Defaults to the environment's cwd. */
   readonly root?: string;
   /** Prepare a fresh workspace (clone a repo, drop config files). Runs only on creation. */
-  readonly prepare?: (machine: CloudflareMachine) => Promise<void>;
+  readonly prepare?: (environment: CloudflareEnvironment) => Promise<void>;
 }
 
 /**
@@ -32,21 +32,21 @@ export interface CloudflareWorkspaceOptions extends CloudflareMachineOptions {
  *    container's own idle policy retires it or you `kill()` it.
  */
 export class CloudflareWorkspace implements SandboxWorkspace {
-  readonly machine: CloudflareMachine;
+  readonly environment: CloudflareEnvironment;
   private readonly options: CloudflareWorkspaceOptions;
   private readonly root: string;
   private snapshotSeq = 0;
 
   private constructor(options: CloudflareWorkspaceOptions) {
     this.options = options;
-    this.machine = new CloudflareMachine(options.client, options);
-    this.root = options.root ?? this.machine.getcwd();
+    this.environment = new CloudflareEnvironment(options.client, options);
+    this.root = options.root ?? this.environment.getcwd();
   }
 
   static async open(options: CloudflareWorkspaceOptions): Promise<CloudflareWorkspace> {
     const workspace = new CloudflareWorkspace(options);
-    await workspace.machine.mkdir(workspace.root, { parents: true });
-    if (options.prepare !== undefined) await options.prepare(workspace.machine);
+    await workspace.environment.mkdir(workspace.root, { parents: true });
+    if (options.prepare !== undefined) await options.prepare(workspace.environment);
     return workspace;
   }
 
@@ -81,12 +81,12 @@ export class CloudflareWorkspace implements SandboxWorkspace {
     // millisecond cannot collide onto one archive.
     this.snapshotSeq += 1;
     const archivePath = `${SNAPSHOT_DIR}/snap-${String(this.snapshotSeq)}.sqfs`;
-    await this.machine.mkdir(SNAPSHOT_DIR, { parents: true });
+    await this.environment.mkdir(SNAPSHOT_DIR, { parents: true });
     await backup.createArchive(this.root, archivePath, this.id, { gitignore: false });
     return archivePath;
   }
 
-  /** Unpack an archive back over the workspace root. The machine stays valid throughout. */
+  /** Unpack an archive back over the workspace root. The environment stays valid throughout. */
   async restore(snapshotId: string): Promise<void> {
     const backup = this.options.client.backup;
     if (backup === undefined) throw new Error("This Cloudflare deployment exposes no backup client to restore from.");

@@ -1,9 +1,9 @@
 import path from "node:path";
 import { z } from "zod";
-import { McpServerConfigSchema, type McpServerConfig, type Machine } from "../index.ts";
+import { McpServerConfigSchema, type McpServerConfig, type Environment } from "../index.ts";
 import { loadPluginHooks } from "./hooks.ts";
 import { PLUGIN_NAME_REGEX, type PluginDiagnostic, type PluginInterface, type PluginManifest } from "./types.ts";
-import { readTextFile } from "../tool/support/machine-ops.ts";
+import { readTextFile } from "../tool/support/environment-ops.ts";
 import { describeIssue, optionalText } from "./fields.ts";
 
 const PLUGIN_ROOT_MANIFEST = "agents.plugin.json";
@@ -61,12 +61,12 @@ export interface ParsedManifestResult {
   readonly diagnostics: readonly PluginDiagnostic[];
 }
 
-export async function parseManifest(machine: Machine, pluginRoot: string): Promise<ParsedManifestResult> {
+export async function parseManifest(environment: Environment, pluginRoot: string): Promise<ParsedManifestResult> {
   const candidates = [PLUGIN_ROOT_MANIFEST, PLUGIN_DIR_MANIFEST, CODEX_DIR_MANIFEST];
   let manifestPath: string | undefined;
   for (const candidate of candidates) {
     const candidatePath = path.join(pluginRoot, candidate);
-    if (await isFile(machine, candidatePath)) {
+    if (await isFile(environment, candidatePath)) {
       manifestPath = candidatePath;
       break;
     }
@@ -77,7 +77,7 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
 
   let json: unknown;
   try {
-    json = JSON.parse(await readTextFile(machine, manifestPath));
+    json = JSON.parse(await readTextFile(environment, manifestPath));
   } catch (error) {
     return { manifestPath, diagnostics: [{ severity: "error", message: `Failed to parse ${manifestPath}: ${(error as Error).message}` }] };
   }
@@ -95,8 +95,8 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
     return { manifestPath, diagnostics };
   }
 
-  let skills = await resolveSkillsField(machine, pluginRoot, raw.skills, diagnostics);
-  if (raw.skills === undefined && (await isFile(machine, path.join(pluginRoot, "SKILL.md")))) {
+  let skills = await resolveSkillsField(environment, pluginRoot, raw.skills, diagnostics);
+  if (raw.skills === undefined && (await isFile(environment, path.join(pluginRoot, "SKILL.md")))) {
     skills = [pluginRoot];
   }
 
@@ -104,7 +104,7 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
     if (raw[field] !== undefined) diagnostics.push({ severity: "info", message: `"${field}" is present but not supported` });
   }
 
-  const hooks = await loadPluginHooks(machine, pluginRoot, raw.hooks, diagnostics);
+  const hooks = await loadPluginHooks(environment, pluginRoot, raw.hooks, diagnostics);
 
   const manifest: PluginManifest = {
     name,
@@ -116,7 +116,7 @@ export async function parseManifest(machine: Machine, pluginRoot: string): Promi
     author: raw.author,
     skills,
     sessionStart: raw.sessionStart === undefined ? undefined : { skill: raw.sessionStart.skill.trim() },
-    mcpServers: await readMcpServers(machine, pluginRoot, raw.mcpServers, diagnostics),
+    mcpServers: await readMcpServers(environment, pluginRoot, raw.mcpServers, diagnostics),
     ...(hooks.length > 0 ? { hooks } : {}),
     interface: raw.interface,
     skillInstructions: raw.skillInstructions,
@@ -151,7 +151,7 @@ function parseTolerant(json: Record<string, unknown>, diagnostics: PluginDiagnos
 }
 
 async function resolveSkillsField(
-  machine: Machine,
+  environment: Environment,
   pluginRoot: string,
   raw: string | readonly string[] | undefined,
   diagnostics: PluginDiagnostic[],
@@ -170,7 +170,7 @@ async function resolveSkillsField(
       diagnostics.push({ severity: "error", message: `"skills" path resolves outside the plugin (${entry})` });
       continue;
     }
-    if (!(await isDir(machine, absolute))) {
+    if (!(await isDir(environment, absolute))) {
       diagnostics.push({ severity: "warn", message: `"skills" path is not a directory (${entry})` });
       continue;
     }
@@ -180,7 +180,7 @@ async function resolveSkillsField(
 }
 
 async function readMcpServers(
-  machine: Machine,
+  environment: Environment,
   pluginRoot: string,
   raw: string | Readonly<Record<string, unknown>> | undefined,
   diagnostics: PluginDiagnostic[],
@@ -201,7 +201,7 @@ async function readMcpServers(
       return undefined;
     }
     try {
-      const parsed = JSON.parse(await readTextFile(machine, absolute)) as unknown;
+      const parsed = JSON.parse(await readTextFile(environment, absolute)) as unknown;
       servers = isObject(parsed) && isObject(parsed["mcpServers"]) ? parsed["mcpServers"] : parsed;
     } catch (error) {
       diagnostics.push({ severity: "warn", message: `Failed to read MCP file ${raw}: ${(error as Error).message}` });
@@ -224,13 +224,13 @@ async function readMcpServers(
       diagnostics.push({ severity: "warn", message: `Invalid MCP server "${trimmedName}": ${parsed.error.message}` });
       continue;
     }
-    out[trimmedName] = await normalizePluginMcpServer(machine, pluginRoot, trimmedName, parsed.data, diagnostics);
+    out[trimmedName] = await normalizePluginMcpServer(environment, pluginRoot, trimmedName, parsed.data, diagnostics);
   }
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
 async function normalizePluginMcpServer(
-  machine: Machine,
+  environment: Environment,
   pluginRoot: string,
   name: string,
   config: McpServerConfig,
@@ -240,7 +240,7 @@ async function normalizePluginMcpServer(
   if (config.transport === "stdio" && typeof config.command === "string" && config.command.startsWith("./")) {
     const absolute = path.resolve(pluginRoot, config.command);
     if (isWithin(absolute, pluginRoot)) {
-      if (!(await isFile(machine, absolute))) {
+      if (!(await isFile(environment, absolute))) {
         diagnostics.push({ severity: "warn", message: `"mcpServers.${name}.command" not found (${config.command})` });
       }
       return { ...config, command: absolute };
@@ -259,17 +259,17 @@ function isWithin(child: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function isFile(machine: Machine, p: string): Promise<boolean> {
+async function isFile(environment: Environment, p: string): Promise<boolean> {
   try {
-    return (await machine.fileInfo(p)).kind === "file";
+    return (await environment.fileInfo(p)).kind === "file";
   } catch {
     return false;
   }
 }
 
-async function isDir(machine: Machine, p: string): Promise<boolean> {
+async function isDir(environment: Environment, p: string): Promise<boolean> {
   try {
-    return (await machine.fileInfo(p)).kind === "dir";
+    return (await environment.fileInfo(p)).kind === "dir";
   } catch {
     return false;
   }

@@ -4,9 +4,9 @@ import { defineTool } from "../define.ts";
 import { FILE_UNCHANGED_STUB } from "../file-freshness.ts";
 import { detectFileType, MEDIA_SNIFF_BYTES } from "../support/file-type.ts";
 import { compressImageForModel } from "../support/image-compress.ts";
-import { decodeText, fileVersionFromInfo, fileVersionsMatch, normalizeForCompare, readTextFile } from "../support/machine-ops.ts";
+import { decodeText, fileVersionFromInfo, fileVersionsMatch, normalizeForCompare, readTextFile } from "../support/environment-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
-import type { FileInfo, LineEndings, Machine } from "../machine.ts";
+import type { FileInfo, LineEndings, Environment } from "../environment.ts";
 import type { ToolResult, ToolRunContext } from "../types.ts";
 import { makeCarriageReturnsVisible, type LineEndingStyle } from "./line-endings.ts";
 
@@ -229,22 +229,22 @@ export const readTool = defineTool({
   description: READ_DESCRIPTION,
   params: ReadInput,
   async resolve(args, ctx) {
-    const path = await resolveToolPath(args.path, ctx.machine, "read");
+    const path = await resolveToolPath(args.path, ctx.environment, "read");
     return {
       accesses: ToolAccesses.readFile(path),
       display: { title: `Reading ${args.path}`, path: args.path },
-      ...pathApproval("Read", ctx.machine, path),
+      ...pathApproval("Read", ctx.environment, path),
       run: (runCtx) => execute(args, path, runCtx),
     };
   },
 });
 
 async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): Promise<ToolResult> {
-  const machine = ctx.machine;
+  const environment = ctx.environment;
   try {
     let info: FileInfo;
     try {
-      info = await machine.fileInfo(safePath);
+      info = await environment.fileInfo(safePath);
     } catch (error) {
       if (isFileNotFoundError(error)) return err(`"${args.path}" does not exist.`);
       throw error;
@@ -269,10 +269,10 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
     // same bytes. Sniffing first meant two reads of every text file — free locally, but a second
     // round trip (on a sandbox, a whole extra command) on every remote Read. A large file still
     // gets the sniff alone first, so a binary is refused without pulling all of it across.
-    const whole = info.size <= MAX_UNPAGED_FILE_BYTES ? await machine.readBytes(safePath) : undefined;
-    const header = whole?.subarray(0, MEDIA_SNIFF_BYTES) ?? (await machine.readBytes(safePath, { length: MEDIA_SNIFF_BYTES }));
+    const whole = info.size <= MAX_UNPAGED_FILE_BYTES ? await environment.readBytes(safePath) : undefined;
+    const header = whole?.subarray(0, MEDIA_SNIFF_BYTES) ?? (await environment.readBytes(safePath, { length: MEDIA_SNIFF_BYTES }));
     const fileType = detectFileType(safePath, header);
-    if (fileType.kind === "image") return readImageFile(args, safePath, info, machine, fileType.mimeType, whole);
+    if (fileType.kind === "image") return readImageFile(args, safePath, info, environment, fileType.mimeType, whole);
     if (fileType.kind === "unknown") return err(notReadableFileOutput(args.path));
 
     // After the dedup stub: an unchanged file answers for free no matter how large it is.
@@ -283,7 +283,7 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
       );
     }
 
-    const rawText = whole !== undefined ? decodeText(whole, { errors: "strict" }) : await readTextFile(machine, safePath, { errors: "strict" });
+    const rawText = whole !== undefined ? decodeText(whole, { errors: "strict" }) : await readTextFile(environment, safePath, { errors: "strict" });
 
     const outcome =
       lineOffset < 0
@@ -313,7 +313,7 @@ async function readImageFile(
   args: ReadInput,
   safePath: string,
   info: FileInfo,
-  machine: Machine,
+  environment: Environment,
   mimeType: string,
   /** The file's bytes when the caller already read them whole. */
   preloaded?: Buffer,
@@ -330,7 +330,7 @@ async function readImageFile(
     );
   }
 
-  const data = preloaded ?? (await machine.readBytes(safePath));
+  const data = preloaded ?? (await environment.readBytes(safePath));
   // Downsample/re-encode oversized images before sending to the model (best
   // effort; the original bytes are returned unchanged on any failure).
   const compressed = await compressImageForModel(data, mimeType);

@@ -1,7 +1,7 @@
 import { dirname, join } from "pathe";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { AgentRecord } from "../../store/index.ts";
-import { readTextFile, writeTextFile } from "../../tool/support/machine-ops.ts";
+import { readTextFile, writeTextFile } from "../../tool/support/environment-ops.ts";
 
 export type PlanData = null | { readonly id: string; readonly content: string; readonly path: string };
 
@@ -25,10 +25,10 @@ export class PlanMode {
   private active = false;
   private planId: string | null = null;
   private filePath: string | null = null;
-  private machine: Machine | null = null;
+  private environment: Environment | null = null;
 
-  attachMachine(machine: Machine): void {
-    this.machine = machine;
+  attachEnvironment(environment: Environment): void {
+    this.environment = environment;
   }
 
   get isActive(): boolean {
@@ -82,10 +82,10 @@ export class PlanMode {
   }
 
   async data(): Promise<PlanData> {
-    if (!this.planId || !this.filePath || !this.machine) return null;
+    if (!this.planId || !this.filePath || !this.environment) return null;
     let content = "";
     try {
-      content = await readTextFile(this.machine, this.filePath);
+      content = await readTextFile(this.environment, this.filePath);
     } catch (error) {
       if (!isMissingFileError(error)) throw error;
     }
@@ -100,7 +100,7 @@ export class PlanMode {
 
   private safeHome(): string {
     try {
-      return this.machine?.gethome() ?? "";
+      return this.environment?.gethome() ?? "";
     } catch {
       return "";
     }
@@ -108,18 +108,18 @@ export class PlanMode {
 
   private safeCwd(): string {
     try {
-      return this.machine?.getcwd() ?? "";
+      return this.environment?.getcwd() ?? "";
     } catch {
       return "";
     }
   }
 
   private async ensureDir(path: string): Promise<void> {
-    await this.machine?.mkdir(dirname(path), { parents: true, existOk: true });
+    await this.environment?.mkdir(dirname(path), { parents: true, existOk: true });
   }
 
   private async writeEmpty(path: string): Promise<void> {
-    if (this.machine) await writeTextFile(this.machine, path, "");
+    if (this.environment) await writeTextFile(this.environment, path, "");
   }
 }
 

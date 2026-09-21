@@ -10,7 +10,7 @@ import {
   defaultCapabilities,
   defineModel,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
   McpOAuthService,
   MemoryMcpCredentialStore,
   sinkLogger,
@@ -37,7 +37,7 @@ mkdirSync(WORK, { recursive: true });
 
 // A hosted deployment assembles its own backends — there is no server preset, on purpose.
 // The four choices below ARE what "this is a server" means; everything else is the same
-// engine the local CLI runs. In production: swap the repository for Pg/Redis, the machine
+// engine the local CLI runs. In production: swap the repository for Pg/Redis, the environment
 // for a sandbox factory, and the credential store for your secret manager.
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
@@ -47,11 +47,11 @@ const harness = createHarness({
     if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
     return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
   },
-  // Process-tier objects go on the harness scope: the store, the shared machine, and the logger
+  // Process-tier objects go on the harness scope: the store, the shared environment, and the logger
   // (stdout for the platform's log collector, not a local rotating file).
   harness: (scope) => {
     scope.register(T.SessionRepository, repository);
-    scope.register(T.MachineFactory, new LocalMachine(WORK), { owned: false });
+    scope.register(T.EnvironmentFactory, new LocalEnvironment(WORK), { owned: false });
     scope.register(T.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
   },
   // Built per session, so the OAuth service (and its credential store) is never shared
@@ -74,10 +74,10 @@ const metadataStore = new DiskManagedSessionMetadataStore(
 const environments = new StaticEnvironmentRegistry({
   workspace: {
     workDir: WORK,
-    machine: ({ sessionId }) => {
+    environment: ({ sessionId }) => {
       const directory = new URL(`./workspace/${sessionId}/`, import.meta.url).pathname;
       mkdirSync(directory, { recursive: true });
-      return new LocalMachine(directory);
+      return new LocalEnvironment(directory);
     },
   },
 });

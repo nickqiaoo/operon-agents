@@ -291,7 +291,7 @@ export class SessionWorker<TContext = unknown> {
     ]);
     const session = await this.harness.resumeSession(sessionId, {
       ...agentResolution.resumeOptions,
-      ...(environmentResolution.machine !== undefined ? { machine: environmentResolution.machine } : {}),
+      ...(environmentResolution.environment !== undefined ? { environment: environmentResolution.environment } : {}),
       ...(agentResolution.agent !== undefined ? { agent: agentResolution.agent } : {}),
       eventPublication: "committed",
     });

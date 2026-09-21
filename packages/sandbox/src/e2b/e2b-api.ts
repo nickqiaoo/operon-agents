@@ -95,7 +95,7 @@ export interface E2BSandbox {
 
 /**
  * How to obtain the CURRENT sandbox. Deliberately a function, not a value: restoring a
- * snapshot replaces the underlying instance (the old one gets killed), so a machine holding
+ * snapshot replaces the underlying instance (the old one gets killed), so an environment holding
  * a captured reference would keep talking to a dead sandbox.
  */
 export type SandboxRef = () => E2BSandbox;

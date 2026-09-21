@@ -80,8 +80,8 @@ The lifecycle is the host's (this server's), as `operon-sandbox` intends:
 - **credentials** -- the same as on the host: git authenticates through the command's
   environment for the one push, so nothing lands in the sandbox's filesystem or shell history.
 
-`server/sandbox.ts` is the whole of it; `server/checkout.ts` is machine-agnostic and prepares
-the clone through whichever `Machine` it is handed.
+`server/sandbox.ts` is the whole of it; `server/checkout.ts` is environment-agnostic and prepares
+the clone through whichever `Environment` it is handed.
 
 ### Tracing (Langfuse)
 
@@ -150,7 +150,7 @@ documented at [linear.app/developers/agents](https://linear.app/developers/agent
 | ---- | ---------- |
 | `server/agent-config.ts` | The engineer: id, model, and the guidance appended to the builtin coding profile. |
 | `server/compose.ts` | The managed-agents server: builtin coding tools + `SubmitPullRequest` (as an extension), disk-backed sessions, and environments that are repositories (`owner/name` → a clone). Same composition as [`../managed-agents`](../managed-agents). |
-| `server/checkout.ts` | The clone: one per session, stamped with its session id and repository; prepared through any `Machine`. |
+| `server/checkout.ts` | The clone: one per session, stamped with its session id and repository; prepared through any `Environment`. |
 | `server/sandbox.ts` | E2B mode: a sandbox per session, reconnected on open, paused on close, id kept on disk. |
 | `server/langfuse.ts` | Tracing: the framework's OTel span tree, typed for Langfuse and exported with the project's keys. |
 | `server/github.ts` | The server's GitHub access: git auth through the environment, the PR API, the write-access check. |

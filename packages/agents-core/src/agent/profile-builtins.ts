@@ -77,7 +77,7 @@ whenToUse: |
   Delegate non-trivial software-engineering work (reading files, editing code, running commands) that should return a compact but technically complete summary to the parent agent.
 promptVars:
   roleAdditional: |
-    You are running as a subagent. Every user message comes from the parent agent, which sees only your final message — not your intermediate context. Treat the parent as your caller: do not ask the end user questions; machine any ambiguity in your final summary instead.
+    You are running as a subagent. Every user message comes from the parent agent, which sees only your final message — not your intermediate context. Treat the parent as your caller: do not ask the end user questions; environment any ambiguity in your final summary instead.
 tools:
   - Read
   - Write

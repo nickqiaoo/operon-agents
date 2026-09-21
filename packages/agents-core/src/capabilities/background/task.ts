@@ -1,4 +1,4 @@
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { AgentBackgroundTaskInfo } from "./agent-task.ts";
 import type { CommandBackgroundTaskInfo } from "./command-task.ts";
 import type { QuestionBackgroundTaskInfo } from "./question-task.ts";
@@ -38,7 +38,7 @@ export interface BackgroundTaskInfoBase {
   readonly terminalNotificationSuppressed?: boolean;
   readonly timeoutMs?: number;
   /** Stable pointer to the task's complete output. This is the wire/store shape: unlike
-   *  {@link TaskOutputLocation}, it contains no live Machine handle and survives restart. */
+   *  {@link TaskOutputLocation}, it contains no live Environment handle and survives restart. */
   readonly outputRef?: TaskOutputRef;
 }
 
@@ -58,7 +58,7 @@ export interface BackgroundTaskSink {
  * Where a task's output already lives — a FACT the task states, never a copy it holds.
  *
  * The variants exist because output has several native homes and none is this process. A
- * command's bytes are written by the OS into a file on the machine; a sub-agent's messages are
+ * command's bytes are written by the OS into a file on the environment; a sub-agent's messages are
  * appended by its conversation into a shard of the session store. In both cases the substance
  * is already somewhere durable, addressable, and (for the shard) shared with every other view
  * of the same data — the projection a UI subscribes to reads that identical record.
@@ -76,8 +76,8 @@ export type TaskOutputRef =
   | { readonly kind: "workflow-run"; readonly address: string };
 
 export type TaskOutputLocation =
-  /** Redirected on the machine: `<home>/.operon/tasks/<id>.log` and the like. */
-  | { readonly kind: "file"; readonly machine: Machine; readonly path: string }
+  /** Redirected on the environment: `<home>/.operon/tasks/<id>.log` and the like. */
+  | { readonly kind: "file"; readonly environment: Environment; readonly path: string }
   /** A sub-agent's own conversation shard, read back and reduced to its latest answer. */
   | { readonly kind: "conversation"; readonly address: string }
   /** A workflow run's journal: inputs, every agent result, and the outcome. */
@@ -118,7 +118,7 @@ export interface BackgroundTask {
   readonly timeoutMs?: number;
 
   /** Aborting `sink.signal` is the whole stop protocol — there is no second, harder step.
-   *  A task that drives a command forwards the signal to `machine.run`, where SIGTERM →
+   *  A task that drives a command forwards the signal to `environment.run`, where SIGTERM →
    *  grace → SIGKILL escalation lives. */
   start(sink: BackgroundTaskSink): void | Promise<void>;
   toInfo(base: BackgroundTaskInfoBase): BackgroundTaskInfo;

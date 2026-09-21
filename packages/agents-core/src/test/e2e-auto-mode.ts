@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type ToolCall } from "./faux.ts";
-import { bashTool, ConversationContext, defineModel, LocalMachine, PermissionManager, writeTool } from "../index.ts";
+import { bashTool, ConversationContext, defineModel, LocalEnvironment, PermissionManager, writeTool } from "../index.ts";
 import { runTurn } from "../internal.ts";
 import type { AutoApprover, Logger, PermissionRule, Responder, ToolResultMessage } from "../index.ts";
 
@@ -29,7 +29,7 @@ async function runScenario(
   const pm = new PermissionManager({
     ...pmOpts,
     cwd: dir,
-    machine: new LocalMachine(dir),
+    environment: new LocalEnvironment(dir),
     ...(autoApprover ? { autoApprover, getTranscript: () => context.messages } : {}),
   });
   const faux = registerFauxProvider();
@@ -39,7 +39,7 @@ async function runScenario(
     turnId: "t",
     signal: new AbortController().signal,
     model: faux.getChatModel()!,
-    machine: new LocalMachine(dir),
+    environment: new LocalEnvironment(dir),
     context,
     tools,
     hooks: { authorizeToolExecution: pm.authorize },

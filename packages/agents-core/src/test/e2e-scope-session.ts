@@ -1,7 +1,7 @@
 /**
  * Session over a Scope: what the opener registers wins, `open` fills the gaps, capability
  * provisions land in the session scope and are disposed in reverse, and the fallbacks
- * (NullMachine, in-memory workflow manager, env logger) apply only when nothing else does.
+ * (NullEnvironment, in-memory workflow manager, env logger) apply only when nothing else does.
  */
 import { openTestSession, testHarnessScope, wireTestSession } from "./faux.ts";
 import {
@@ -10,8 +10,8 @@ import {
   ServiceUnavailableError,
   T,
   token,
-  LocalMachine,
-  NullMachine,
+  LocalEnvironment,
+  NullEnvironment,
   MemoryStore,
   goalCapability,
   GoalStore,
@@ -29,7 +29,7 @@ function check(label: string, ok: boolean): void {
 async function testBareSession(): Promise<void> {
   const session = await Session.open(new Scope("session"));
   check("bare: a parentless session scope opens", session.id.length > 0);
-  check("bare: no machine registered → NullMachine", session.machine instanceof NullMachine);
+  check("bare: no environment registered → NullEnvironment", session.environment instanceof NullEnvironment);
   check("bare: no harness above → T.Logger is absent (env fallback in the session)", session.get(T.Logger) === undefined);
   check("bare: T.Store is absent for a storeless session", session.get(T.Store) === undefined && session.store === undefined);
   check("bare: the session registered its own signal + controls", session.get(T.SessionSignal) === session.signal && session.get(T.SessionControls) !== undefined);
@@ -40,31 +40,31 @@ async function testBareSession(): Promise<void> {
   check("bare: close() closes the scope the session owns", session.scope.closed);
 }
 
-async function testMachinePrecedence(): Promise<void> {
-  const harnessMachine = new LocalMachine(process.cwd());
-  const sessionMachine = new LocalMachine(process.cwd());
-  const factoryMachine = new LocalMachine(process.cwd());
+async function testEnvironmentPrecedence(): Promise<void> {
+  const harnessEnvironment = new LocalEnvironment(process.cwd());
+  const sessionEnvironment = new LocalEnvironment(process.cwd());
+  const factoryEnvironment = new LocalEnvironment(process.cwd());
   const harness = new Scope("harness");
-  harness.register(T.MachineFactory, harnessMachine, { owned: false });
+  harness.register(T.EnvironmentFactory, harnessEnvironment, { owned: false });
 
   const a = await Session.open(harness.child("session"));
-  check("machine: the harness-level factory applies when the opener gave none", a.machine === harnessMachine);
+  check("environment: the harness-level factory applies when the opener gave none", a.environment === harnessEnvironment);
   await a.close();
 
   const bScope = harness.child("session");
-  bScope.register(T.Machine, sessionMachine, { owned: false });
+  bScope.register(T.Environment, sessionEnvironment, { owned: false });
   const b = await Session.open(bScope);
-  check("machine: the opener's registration wins over the harness factory", b.machine === sessionMachine);
+  check("environment: the opener's registration wins over the harness factory", b.environment === sessionEnvironment);
   await b.close();
 
   const cScope = harness.child("session");
   let factoryCalls = 0;
-  cScope.register(T.SessionMachineFactory, async ({ sessionId }) => {
+  cScope.register(T.SessionEnvironmentFactory, async ({ sessionId }) => {
     factoryCalls += 1;
-    return sessionId.length > 0 ? factoryMachine : harnessMachine;
+    return sessionId.length > 0 ? factoryEnvironment : harnessEnvironment;
   });
   const c = await Session.open(cScope);
-  check("machine: a per-session factory is resolved with the session id and wins over the harness one", c.machine === factoryMachine && factoryCalls === 1);
+  check("environment: a per-session factory is resolved with the session id and wins over the harness one", c.environment === factoryEnvironment && factoryCalls === 1);
   await c.close();
   await harness.close();
 }
@@ -130,7 +130,7 @@ async function testStoreIsThePublishingWrapper(): Promise<void> {
 
 async function main(): Promise<void> {
   await testBareSession();
-  await testMachinePrecedence();
+  await testEnvironmentPrecedence();
   await testProvisionsAndDisposeOrder();
   await testProvisionFaultIsolation();
   await testWrongTierProvision();
@@ -140,7 +140,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ SCOPE-SESSION E2E PASS — bare open + machine precedence + provisions + fault isolation + tier check + store wrapper");
+    console.log("✅ SCOPE-SESSION E2E PASS — bare open + environment precedence + provisions + fault isolation + tier check + store wrapper");
   } else {
     console.log("❌ SCOPE-SESSION E2E FAIL");
     process.exit(1);

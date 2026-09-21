@@ -10,7 +10,7 @@ import { runCalls, type ToolCallStepContext } from "../loop/tool-call.ts";
 import type { LoopHooks } from "../loop/types.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
-import { NullMachine } from "../tool/machine-null.ts";
+import { NullEnvironment } from "../tool/environment-null.ts";
 import type { Tool, ToolResult } from "../tool/types.ts";
 import type { ApprovalResponse } from "../permission/types.ts";
 import { registerFauxProvider } from "./faux.ts";
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
       stepNumber: 1,
       signal: new AbortController().signal,
       model: faux.getChatModel(),
-      machine: new NullMachine(),
+      environment: new NullEnvironment(),
       tools,
       hooks: hooks as LoopHooks | undefined,
       dispatchEvent: (event) => events.push(event),
@@ -167,7 +167,7 @@ async function main(): Promise<void> {
         stepNumber: 1,
         signal: new AbortController().signal,
         model: faux.getChatModel(),
-        machine: new NullMachine(),
+        environment: new NullEnvironment(),
         tools: withReporter,
         answers,
         hooks: {

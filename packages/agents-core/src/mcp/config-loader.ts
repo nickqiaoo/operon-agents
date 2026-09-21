@@ -1,8 +1,8 @@
 import path from "node:path";
 import { z } from "zod";
-import type { Machine } from "../index.ts";
+import type { Environment } from "../index.ts";
 import { McpServerConfigSchema, type McpServerConfig } from "../config/schema.ts";
-import { readTextFile } from "../tool/support/machine-ops.ts";
+import { readTextFile } from "../tool/support/environment-ops.ts";
 
 const PROJECT_MCP_FILENAMES = ["mcp.json", ".mcp.json"] as const;
 
@@ -10,20 +10,20 @@ const McpJsonFileSchema = z.object({
   mcpServers: z.record(z.string(), McpServerConfigSchema).default({}),
 });
 
-async function findProjectRoot(machine: Machine, cwd: string): Promise<string> {
-  let current = machine.normpath(cwd);
+async function findProjectRoot(environment: Environment, cwd: string): Promise<string> {
+  let current = environment.normpath(cwd);
   // Bounded by reaching the filesystem root (dirname fixpoint).
   for (;;) {
-    if (await pathExists(machine, path.join(current, ".git"))) return current;
+    if (await pathExists(environment, path.join(current, ".git"))) return current;
     const parent = path.dirname(current);
-    if (parent === current) return machine.normpath(cwd);
+    if (parent === current) return environment.normpath(cwd);
     current = parent;
   }
 }
 
-async function pathExists(machine: Machine, p: string): Promise<boolean> {
+async function pathExists(environment: Environment, p: string): Promise<boolean> {
   try {
-    await machine.fileInfo(p);
+    await environment.fileInfo(p);
     return true;
   } catch {
     return false;
@@ -31,15 +31,15 @@ async function pathExists(machine: Machine, p: string): Promise<boolean> {
 }
 
 export async function loadProjectMcpServers(
-  machine: Machine,
+  environment: Environment,
   cwd: string,
 ): Promise<Record<string, McpServerConfig>> {
-  const root = await findProjectRoot(machine, cwd);
+  const root = await findProjectRoot(environment, cwd);
   const merged: Record<string, McpServerConfig> = {};
 
   for (const filename of PROJECT_MCP_FILENAMES) {
     const file = path.join(root, filename);
-    const parsed = await readMcpJsonFile(machine, file);
+    const parsed = await readMcpJsonFile(environment, file);
     if (parsed === undefined) continue;
     Object.assign(merged, parsed.mcpServers);
   }
@@ -52,9 +52,9 @@ const LOCAL_MCP_FILENAMES = ["mcp.local.json", ".mcp.local.json"] as const;
 export type McpConfigTier = "user" | "project" | "local";
 
 export interface McpConfigLayerOptions {
-  /** Working directory the project root is discovered from. Defaults to the machine cwd. */
+  /** Working directory the project root is discovered from. Defaults to the environment cwd. */
   readonly cwd?: string;
-  /** User-tier directory. Defaults to `<machine home>/.<appName>`. */
+  /** User-tier directory. Defaults to `<environment home>/.<appName>`. */
   readonly homeDir?: string;
   readonly appName?: string;
 }
@@ -76,11 +76,11 @@ export interface LoadedMcpServers {
  * < local (`<root>/mcp.local.json` + `.mcp.local.json`). Stdio `cwd` is resolved against the
  * project root. The interop `mcp.json` stays JSON (own config is TOML — see ConfigStore).
  */
-export async function loadMcpServers(machine: Machine, options: McpConfigLayerOptions = {}): Promise<LoadedMcpServers> {
+export async function loadMcpServers(environment: Environment, options: McpConfigLayerOptions = {}): Promise<LoadedMcpServers> {
   const appName = options.appName ?? "agents";
-  const cwd = options.cwd ?? machine.getcwd();
-  const root = await findProjectRoot(machine, cwd);
-  const homeDir = options.homeDir ?? path.join(machine.gethome(), `.${appName}`);
+  const cwd = options.cwd ?? environment.getcwd();
+  const root = await findProjectRoot(environment, cwd);
+  const homeDir = options.homeDir ?? path.join(environment.gethome(), `.${appName}`);
 
   const tiers: { readonly tier: McpConfigTier; readonly files: readonly string[] }[] = [
     { tier: "user", files: [path.join(homeDir, "mcp.json"), path.join(homeDir, ".mcp.json")] },
@@ -98,7 +98,7 @@ export async function loadMcpServers(machine: Machine, options: McpConfigLayerOp
   for (const { tier, files } of tiers) {
     let loaded = false;
     for (const file of files) {
-      const parsed = await readMcpJsonFile(machine, file);
+      const parsed = await readMcpJsonFile(environment, file);
       if (parsed === undefined) continue;
       Object.assign(merged, parsed.mcpServers);
       loaded = true;
@@ -110,12 +110,12 @@ export async function loadMcpServers(machine: Machine, options: McpConfigLayerOp
 }
 
 async function readMcpJsonFile(
-  machine: Machine,
+  environment: Environment,
   file: string,
 ): Promise<{ mcpServers: Record<string, McpServerConfig> } | undefined> {
   let text: string;
   try {
-    text = await readTextFile(machine, file);
+    text = await readTextFile(environment, file);
   } catch {
     return undefined;
   }

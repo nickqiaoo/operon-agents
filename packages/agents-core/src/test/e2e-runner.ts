@@ -11,7 +11,7 @@ import {
   toFunctionToolName,
   Runner,
   Session,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   DiskSessionStore,
@@ -46,7 +46,7 @@ function textOf(messages: readonly Message[], role: Message["role"]): string {
     .join("\n");
 }
 
-async function testHandoff(machine: LocalMachine): Promise<void> {
+async function testHandoff(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("transfer_to_billing", { reason: "refund" }), { stopReason: "toolUse" }),
@@ -56,7 +56,7 @@ async function testHandoff(machine: LocalMachine): Promise<void> {
   const billing = defineAgent({ name: "billing", model, instructions: "Handle billing." });
   const triage = defineAgent({ name: "triage", model, instructions: "Route requests.", handoffs: [handoff(billing)] });
 
-  const runner = testRunner({ machine });
+  const runner = testRunner({ environment });
   const result = await runner.run(triage, "I want a refund");
   faux.unregister();
 
@@ -72,7 +72,7 @@ async function testHandoff(machine: LocalMachine): Promise<void> {
   );
 }
 
-async function testHandoffInputType(machine: LocalMachine): Promise<void> {
+async function testHandoffInputType(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("transfer_to_billing", { orderId: "A-123", priority: "high" }), { stopReason: "toolUse" }),
@@ -95,7 +95,7 @@ async function testHandoffInputType(machine: LocalMachine): Promise<void> {
   check("handoff inputType: tool schema exposes custom fields", !!params.properties && "orderId" in params.properties && "priority" in params.properties);
 
   const triage = defineAgent({ name: "triage", model, instructions: "Route requests.", handoffs: [edge] });
-  const runner = testRunner({ machine });
+  const runner = testRunner({ environment });
   const result = await runner.run(triage, "I want a refund for order A-123");
   faux.unregister();
 
@@ -103,7 +103,7 @@ async function testHandoffInputType(machine: LocalMachine): Promise<void> {
   check("handoff inputType: onHandoff received validated structured input", received?.orderId === "A-123" && received?.priority === "high");
 }
 
-async function testDurableHandoffContinuation(dir: string, machine: LocalMachine): Promise<void> {
+async function testDurableHandoffContinuation(dir: string, environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("transfer_to_billing", { reason: "refund" }), { stopReason: "toolUse" }),
@@ -135,8 +135,8 @@ async function testDurableHandoffContinuation(dir: string, machine: LocalMachine
 
   const storeDir = join(dir, "durable-handoff-session");
   const store = new DiskSessionStore(storeDir);
-  const runner = testRunner({ machine });
-  const firstSession = await openTestSession({ machine, store });
+  const runner = testRunner({ environment });
+  const firstSession = await openTestSession({ environment, store });
   const first = await runner.run(triage, "refund please", { session: firstSession });
   const billingAddress = first.activeAddress;
   const second = await runner.run(triage, "still there?", { session: firstSession });
@@ -144,7 +144,7 @@ async function testDurableHandoffContinuation(dir: string, machine: LocalMachine
 
   // Reopen over the same durable store: no in-memory active-head cache survives this boundary.
   const reopenedStore = new DiskSessionStore(storeDir);
-  const reopened = await openTestSession({ machine, store: reopenedStore });
+  const reopened = await openTestSession({ environment, store: reopenedStore });
   const third = await runner.run(triage, "return me to triage", { session: reopened });
   const triageAddress = third.activeAddress;
   const fourth = await runner.run(triage, "who owns this now?", { session: reopened });
@@ -172,7 +172,7 @@ async function testDurableHandoffContinuation(dir: string, machine: LocalMachine
   );
 }
 
-async function testHandoffInterruptionResume(dir: string, machine: LocalMachine): Promise<void> {
+async function testHandoffInterruptionResume(dir: string, environment: LocalEnvironment): Promise<void> {
   const file = join(dir, "handoff-approved.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -184,12 +184,12 @@ async function testHandoffInterruptionResume(dir: string, machine: LocalMachine)
   const billing = defineAgent({ name: "billing", model, instructions: "BILLING", tools: [writeTool] });
   const triage = defineAgent({ name: "triage", model, instructions: "TRIAGE", handoffs: [handoff(billing)] });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ environment, store, permission: { mode: "manual" } });
 
   const first = await runner.run(triage, "handoff then write");
   const persisted = parseInterruptionState(await store.getState(INTERRUPTION_STATE_KEY));
   const callId = first.interruptions?.[0]?.toolCallId ?? "";
-  const resumedRunner = testRunner({ machine, store, permission: { mode: "manual" } });
+  const resumedRunner = testRunner({ environment, store, permission: { mode: "manual" } });
   const resumed = await resumedRunner.resume(triage, { interruption: persisted, answers: { [callId]: { kind: "approval", decision: "approved" } } });
   faux.unregister();
 
@@ -198,7 +198,7 @@ async function testHandoffInterruptionResume(dir: string, machine: LocalMachine)
   check("handoff HITL: approved target tool executes", existsSync(file) && readFileSync(file, "utf8") === "owned by billing\n");
 }
 
-async function testHandoffResumeIgnoresDecoy(dir: string, machine: LocalMachine): Promise<void> {
+async function testHandoffResumeIgnoresDecoy(dir: string, environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("transfer_to_mid", { reason: "route" }), { stopReason: "toolUse" }),
@@ -225,13 +225,13 @@ async function testHandoffResumeIgnoresDecoy(dir: string, machine: LocalMachine)
 
   const storeDir = join(dir, "decoy-handoff-session");
   const store = new DiskSessionStore(storeDir);
-  const runner = testRunner({ machine });
-  const firstSession = await openTestSession({ machine, store });
+  const runner = testRunner({ environment });
+  const firstSession = await openTestSession({ environment, store });
   const first = await runner.run(triage, "refund please", { session: firstSession });
   await firstSession.close();
 
   // Cold reopen: the head is re-derived from the durable handoff chain, edge by edge.
-  const reopened = await openTestSession({ machine, store: new DiskSessionStore(storeDir) });
+  const reopened = await openTestSession({ environment, store: new DiskSessionStore(storeDir) });
   const second = await runner.run(triage, "still there?", { session: reopened });
   await reopened.close();
   faux.unregister();
@@ -243,11 +243,11 @@ async function testHandoffResumeIgnoresDecoy(dir: string, machine: LocalMachine)
   );
 }
 
-async function testAmbiguousEdgesRejected(machine: LocalMachine): Promise<void> {
+async function testAmbiguousEdgesRejected(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
-  const runner = testRunner({ machine });
+  const runner = testRunner({ environment });
 
   const workerA = defineAgent({ name: "worker", model, instructions: "A" });
   const workerB = defineAgent({ name: "worker", model, instructions: "B" });
@@ -307,7 +307,7 @@ async function testAmbiguousEdgesRejected(machine: LocalMachine): Promise<void> 
   faux.unregister();
 }
 
-async function testInputGuardrail(machine: LocalMachine): Promise<void> {
+async function testInputGuardrail(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("never reached", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
@@ -322,7 +322,7 @@ async function testInputGuardrail(machine: LocalMachine): Promise<void> {
   const blocked: AgentEvent[] = [];
   events.subscribe((e: AgentEvent) => { if (e.type === "guardrail.blocked") blocked.push(e); });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, events, store });
+  const runner = testRunner({ environment, events, store });
   let err: unknown;
   try {
     await runner.run(agent, "please foo the bar");
@@ -350,7 +350,7 @@ async function testInputGuardrail(machine: LocalMachine): Promise<void> {
   check("input guardrail: rejected input stays out of model history", !replayed.history.some((message) => message.role === "user"));
 }
 
-async function testOutputGuardrail(machine: LocalMachine): Promise<void> {
+async function testOutputGuardrail(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("here is the SECRET token", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
@@ -365,7 +365,7 @@ async function testOutputGuardrail(machine: LocalMachine): Promise<void> {
   const blocked: AgentEvent[] = [];
   events.subscribe((e: AgentEvent) => { if (e.type === "guardrail.blocked") blocked.push(e); });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, events, store });
+  const runner = testRunner({ environment, events, store });
   let err: unknown;
   try {
     await runner.run(agent, "tell me a secret");
@@ -382,7 +382,7 @@ async function testOutputGuardrail(machine: LocalMachine): Promise<void> {
   check("output guardrail: blocked final assistant is not persisted", !replayed.history.some((message) => message.role === "assistant"));
 }
 
-async function testStreamingOutputGuardrail(machine: LocalMachine): Promise<void> {
+async function testStreamingOutputGuardrail(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   const base = faux.getChatModel()!;
   const model = Object.create(base) as ChatModel;
@@ -423,7 +423,7 @@ async function testStreamingOutputGuardrail(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((event) => void seen.push(event));
-  const runner = testRunner({ machine, events, store });
+  const runner = testRunner({ environment, events, store });
 
   let error: unknown;
   try {
@@ -451,7 +451,7 @@ async function testStreamingOutputGuardrail(machine: LocalMachine): Promise<void
   check("stream output guardrail: one durable audit record is written", records.filter((record) => record.type === "guardrail.blocked").length === 1);
 }
 
-async function testStreamingOutputGuardrailPass(machine: LocalMachine): Promise<void> {
+async function testStreamingOutputGuardrailPass(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("safe optimistic output", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
@@ -470,7 +470,7 @@ async function testStreamingOutputGuardrailPass(machine: LocalMachine): Promise<
   events.subscribe((event) => {
     if (event.type === "message.appended" && event.message.role === "assistant") appended.push(event.message);
   });
-  const runner = testRunner({ machine, events });
+  const runner = testRunner({ environment, events });
   const result = await runner.run(agent, "safe stream");
   faux.unregister();
 
@@ -478,7 +478,7 @@ async function testStreamingOutputGuardrailPass(machine: LocalMachine): Promise<
   check("stream output guardrail pass: final assistant is appended once", result.status === "completed" && appended.length === 1);
 }
 
-async function testToolGuardrail(dir: string, machine: LocalMachine): Promise<void> {
+async function testToolGuardrail(dir: string, environment: LocalEnvironment): Promise<void> {
   const file = join(dir, "blocked.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -494,7 +494,7 @@ async function testToolGuardrail(dir: string, machine: LocalMachine): Promise<vo
   // yolo mode so permission approves; the tool guardrail is what must block.
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool], guardrails: { toolInput: [blockWrites] } });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "write a file");
   faux.unregister();
 
@@ -504,7 +504,7 @@ async function testToolGuardrail(dir: string, machine: LocalMachine): Promise<vo
   check("tool guardrail: run still completes", result.status === "completed");
 }
 
-async function testAgentAsTool(machine: LocalMachine): Promise<void> {
+async function testAgentAsTool(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("agent_researcher", { input: "find the answer" }), { stopReason: "toolUse" }),
@@ -539,7 +539,7 @@ async function testAgentAsTool(machine: LocalMachine): Promise<void> {
   const addresses = new Set<string>();
   events.subscribe((e: AgentEvent) => void addresses.add(e.address));
 
-  const runner = testRunner<AgentToolContext>({ machine, events });
+  const runner = testRunner<AgentToolContext>({ environment, events });
   const result = await runner.run(main, "do research", { context: appContext });
   faux.unregister();
 
@@ -556,7 +556,7 @@ async function testAgentAsTool(machine: LocalMachine): Promise<void> {
   );
 }
 
-async function testSubagentInputGuardrail(machine: LocalMachine): Promise<void> {
+async function testSubagentInputGuardrail(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("agent_researcher", { input: "blocked child prompt" }), { stopReason: "toolUse" }),
@@ -580,7 +580,7 @@ async function testSubagentInputGuardrail(machine: LocalMachine): Promise<void> 
   events.subscribe((event) => {
     if (event.type === "guardrail.blocked") blocked.push(event);
   });
-  const runner = testRunner({ machine, events, store });
+  const runner = testRunner({ environment, events, store });
   const result = await runner.run(main, "delegate this");
   faux.unregister();
 
@@ -598,7 +598,7 @@ async function testSubagentInputGuardrail(machine: LocalMachine): Promise<void> 
   check("subagent input guardrail: child-address blocked event is emitted", blocked.some((event) => event.address === childAddress));
 }
 
-async function testStreamingEvents(machine: LocalMachine): Promise<void> {
+async function testStreamingEvents(environment: LocalEnvironment): Promise<void> {
   // The model first streams a tool call (toolcall_*), then a plain text reply (text_*).
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -622,7 +622,7 @@ async function testStreamingEvents(machine: LocalMachine): Promise<void> {
     if (e.type === "tool.call.delta") toolcallDeltas.push(e.argumentsPart);
   });
 
-  const runner = testRunner({ machine, events });
+  const runner = testRunner({ environment, events });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -645,7 +645,7 @@ async function testStreamingEvents(machine: LocalMachine): Promise<void> {
   check("streaming: run completes", result.status === "completed");
 }
 
-async function testStreamRetryResetFallback(machine: LocalMachine): Promise<void> {
+async function testStreamRetryResetFallback(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   const base = faux.getChatModel()!;
   const partial = fauxAssistantMessage("partial output", { stopReason: "stop" });
@@ -676,7 +676,7 @@ async function testStreamRetryResetFallback(machine: LocalMachine): Promise<void
   const events = new ListenerSink();
   const seen: AgentEvent[] = [];
   events.subscribe((e) => void seen.push(e));
-  const runner = testRunner({ machine, events });
+  const runner = testRunner({ environment, events });
   const agent = defineAgent({ name: "retry", model, instructions: "x" });
   const result = await runner.run(agent, "go");
   faux.unregister();
@@ -696,7 +696,7 @@ async function testStreamRetryResetFallback(machine: LocalMachine): Promise<void
   check("retry-reset: run completes", result.status === "completed");
 }
 
-async function testHitlResume(dir: string, machine: LocalMachine): Promise<void> {
+async function testHitlResume(dir: string, environment: LocalEnvironment): Promise<void> {
   const file = join(dir, "approved.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -717,7 +717,7 @@ async function testHitlResume(dir: string, machine: LocalMachine): Promise<void>
   const store = new MemoryStore();
   // manual mode + no responder → Write (no rule) falls to fallback-ask → interrupt (durable).
   const runner = testRunner({
-    machine,
+    environment,
     store,
     permission: { mode: "manual" },
     capabilities: [userHooksCapability([{ event: "SessionStart", command: `echo 'CACHE_STABLE_REMINDER'` }])],
@@ -738,7 +738,7 @@ async function testHitlResume(dir: string, machine: LocalMachine): Promise<void>
   // Replay must retain the original reminder, and HITL resume must not inject between the
   // assistant tool call and its ToolResult.
   const resumedRunner = testRunner({
-    machine,
+    environment,
     store,
     permission: { mode: "manual" },
     capabilities: [userHooksCapability([{ event: "SessionStart", command: `echo 'CHANGED_REMINDER'` }])],
@@ -785,7 +785,7 @@ async function testHitlResume(dir: string, machine: LocalMachine): Promise<void>
   );
 }
 
-async function testParallelSubagentInterruption(dir: string, machine: LocalMachine): Promise<void> {
+async function testParallelSubagentInterruption(dir: string, environment: LocalEnvironment): Promise<void> {
   const file = join(dir, "parallel-child-approved.txt");
   const rootFaux = registerFauxProvider();
   const child1Faux = registerFauxProvider();
@@ -835,7 +835,7 @@ async function testParallelSubagentInterruption(dir: string, machine: LocalMachi
     subagents: [child1, child2],
   });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ environment, store, permission: { mode: "manual" } });
 
   try {
     const first = await runner.run(root, "run both children");
@@ -879,7 +879,7 @@ async function testParallelSubagentInterruption(dir: string, machine: LocalMachi
   }
 }
 
-async function testParallelPartialApproval(dir: string, machine: LocalMachine): Promise<void> {
+async function testParallelPartialApproval(dir: string, environment: LocalEnvironment): Promise<void> {
   const file1 = join(dir, "partial-child1.txt");
   const file2 = join(dir, "partial-child2.txt");
   const rootFaux = registerFauxProvider();
@@ -907,7 +907,7 @@ async function testParallelPartialApproval(dir: string, machine: LocalMachine): 
   const child2 = defineAgent({ name: "partial2", model: child2Faux.getChatModel()!, instructions: "x", tools: [writeTool] });
   const root = defineAgent({ name: "partial-root", model: rootFaux.getChatModel()!, instructions: "x", subagents: [child1, child2] });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store, permission: { mode: "manual" } });
+  const runner = testRunner({ environment, store, permission: { mode: "manual" } });
 
   try {
     const first = await runner.run(root, "start partial approvals");
@@ -937,7 +937,7 @@ async function testParallelPartialApproval(dir: string, machine: LocalMachine): 
 // "no live responder ⇒ durable": a Responder is present but reports it isn't a live approver
 // (isLiveApprover() === false), so the run must interrupt durably instead of consulting it —
 // while a live approver (isLiveApprover absent/true) still resolves the approval in place.
-async function testLiveApproverGating(dir: string, machine: LocalMachine): Promise<void> {
+async function testLiveApproverGating(dir: string, environment: LocalEnvironment): Promise<void> {
   const file = join(dir, "gated.txt");
 
   // Case 1: non-live approver (isLiveApprover=false) → durable interrupt, requestApproval untouched.
@@ -955,7 +955,7 @@ async function testLiveApproverGating(dir: string, machine: LocalMachine): Promi
       },
       requestQuestion: async () => null,
     };
-    const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: deferring });
+    const runner = testRunner({ environment, store: new MemoryStore(), permission: { mode: "manual" }, responder: deferring });
     const r = await runner.run(a, "write it");
     faux.unregister();
     check("live-approver: non-live approver → durable interrupt", r.status === "interrupted");
@@ -978,7 +978,7 @@ async function testLiveApproverGating(dir: string, machine: LocalMachine): Promi
       requestApproval: async () => ({ kind: "approval", decision: "approved" }),
       requestQuestion: async () => null,
     };
-    const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder: approving });
+    const runner = testRunner({ environment, store: new MemoryStore(), permission: { mode: "manual" }, responder: approving });
     const r = await runner.run(a, "write it");
     faux.unregister();
     check("live-approver: live approver → live completion", r.status === "completed");
@@ -988,7 +988,7 @@ async function testLiveApproverGating(dir: string, machine: LocalMachine): Promi
 
 // A stopped live approval must not advance to the next approval in the same model batch.
 // This is the exact race that used to surface a second permission prompt after Stop.
-async function testAbortDuringMultiApprovalBatch(dir: string, machine: LocalMachine): Promise<void> {
+async function testAbortDuringMultiApprovalBatch(dir: string, environment: LocalEnvironment): Promise<void> {
   const firstFile = join(dir, "abort-approval-first.txt");
   const secondFile = join(dir, "abort-approval-second.txt");
   const faux = registerFauxProvider();
@@ -1027,7 +1027,7 @@ async function testAbortDuringMultiApprovalBatch(dir: string, machine: LocalMach
     instructions: "write both files",
     tools: [writeTool],
   });
-  const runner = testRunner({ machine, store: new MemoryStore(), permission: { mode: "manual" }, responder });
+  const runner = testRunner({ environment, store: new MemoryStore(), permission: { mode: "manual" }, responder });
 
   try {
     const running = runner.run(agent, "write both", { signal: controller.signal });
@@ -1045,7 +1045,7 @@ async function testAbortDuringMultiApprovalBatch(dir: string, machine: LocalMach
 
 // Multi-turn run() on the same store must feed prior turns back to the model: execute() replays
 // the branch before appending the new input. Regression guard for the revert that dropped this.
-async function testMultiTurnContinuation(machine: LocalMachine): Promise<void> {
+async function testMultiTurnContinuation(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("reply one", { stopReason: "stop" }),
@@ -1061,7 +1061,7 @@ async function testMultiTurnContinuation(machine: LocalMachine): Promise<void> {
   };
   const agent = defineAgent({ name: "chat", model, instructions: "x" });
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store });
+  const runner = testRunner({ environment, store });
   await runner.run(agent, "turn one");
   await runner.run(agent, "turn two");
   faux.unregister();
@@ -1087,7 +1087,7 @@ class CountingStore extends MemoryStore {
   }
 }
 
-async function testLiveContextReuse(machine: LocalMachine): Promise<void> {
+async function testLiveContextReuse(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("r1", { stopReason: "stop" }),
@@ -1105,8 +1105,8 @@ async function testLiveContextReuse(machine: LocalMachine): Promise<void> {
   };
   const agent = defineAgent({ name: "chat", model, instructions: "x" });
   const store = new CountingStore();
-  const session = await openTestSession({ machine, store });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment, store });
+  const runner = testRunner({ environment });
 
   await runner.run(agent, "t1", { session });
   const readsAfterFirstTurn = store.pathReads;
@@ -1125,7 +1125,7 @@ async function testLiveContextReuse(machine: LocalMachine): Promise<void> {
   await session.close();
 }
 
-async function testStorelessLiveContext(machine: LocalMachine): Promise<void> {
+async function testStorelessLiveContext(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("storeless reply one", { stopReason: "stop" }),
@@ -1140,8 +1140,8 @@ async function testStorelessLiveContext(machine: LocalMachine): Promise<void> {
     return stream(req, call);
   };
   const agent = defineAgent({ name: "storeless-chat", model, instructions: "x" });
-  const session = await openTestSession({ machine });
-  const runner = testRunner({ machine });
+  const session = await openTestSession({ environment });
+  const runner = testRunner({ environment });
 
   await runner.run(agent, "storeless turn one", { session });
   await runner.run(agent, "storeless turn two", { session });
@@ -1158,31 +1158,31 @@ async function testStorelessLiveContext(machine: LocalMachine): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-runner-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
-  await testHandoff(machine);
-  await testHandoffInputType(machine);
-  await testDurableHandoffContinuation(dir, machine);
-  await testHandoffInterruptionResume(dir, machine);
-  await testHandoffResumeIgnoresDecoy(dir, machine);
-  await testAmbiguousEdgesRejected(machine);
-    await testInputGuardrail(machine);
-    await testOutputGuardrail(machine);
-    await testStreamingOutputGuardrail(machine);
-    await testStreamingOutputGuardrailPass(machine);
-    await testToolGuardrail(dir, machine);
-    await testAgentAsTool(machine);
-    await testSubagentInputGuardrail(machine);
-    await testStreamingEvents(machine);
-    await testStreamRetryResetFallback(machine);
-    await testHitlResume(dir, machine);
-    await testParallelSubagentInterruption(dir, machine);
-    await testParallelPartialApproval(dir, machine);
-    await testLiveApproverGating(dir, machine);
-    await testAbortDuringMultiApprovalBatch(dir, machine);
-    await testMultiTurnContinuation(machine);
-    await testLiveContextReuse(machine);
-    await testStorelessLiveContext(machine);
+  await testHandoff(environment);
+  await testHandoffInputType(environment);
+  await testDurableHandoffContinuation(dir, environment);
+  await testHandoffInterruptionResume(dir, environment);
+  await testHandoffResumeIgnoresDecoy(dir, environment);
+  await testAmbiguousEdgesRejected(environment);
+    await testInputGuardrail(environment);
+    await testOutputGuardrail(environment);
+    await testStreamingOutputGuardrail(environment);
+    await testStreamingOutputGuardrailPass(environment);
+    await testToolGuardrail(dir, environment);
+    await testAgentAsTool(environment);
+    await testSubagentInputGuardrail(environment);
+    await testStreamingEvents(environment);
+    await testStreamRetryResetFallback(environment);
+    await testHitlResume(dir, environment);
+    await testParallelSubagentInterruption(dir, environment);
+    await testParallelPartialApproval(dir, environment);
+    await testLiveApproverGating(dir, environment);
+    await testAbortDuringMultiApprovalBatch(dir, environment);
+    await testMultiTurnContinuation(environment);
+    await testLiveContextReuse(environment);
+    await testStorelessLiveContext(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

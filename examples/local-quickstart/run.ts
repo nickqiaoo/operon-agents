@@ -2,9 +2,9 @@
  * Local quickstart — the smallest thing that works.
  *
  * One local session, one prompt, events streamed to the console, final result
- * printed. Tools run on THIS machine, scoped to ./workspace. This is the local
+ * printed. Tools run on THIS environment, scoped to ./workspace. This is the local
  * composition root (`createLocalSession`): disk-persisted sessions, local
- * machine, cron on — all wired by the preset, nothing to assemble.
+ * environment, cron on — all wired by the preset, nothing to assemble.
  *
  * Run:  ANTHROPIC_API_KEY=... pnpm start
  *       ANTHROPIC_API_KEY=... pnpm start "count the lines in package.json"
@@ -30,7 +30,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 mkdirSync(WORK, { recursive: true });
 
 // A local session, ready to prompt. `permission: workspace` auto-approves tool use
-// as long as it stays inside the workspace — safe for running on your own machine.
+// as long as it stays inside the workspace — safe for running on your own environment.
 const session = await createLocalSession({
   model: resolveModel(MODEL),
   homeDir: HOME,

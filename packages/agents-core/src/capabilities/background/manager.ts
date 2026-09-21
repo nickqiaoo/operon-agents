@@ -175,12 +175,12 @@ function textSnapshot(text: string, maxBytes: number): BackgroundTaskOutputSnaps
  * costs the same as a 2 KB one — and reports the file's full size so the caller learns how
  * much it is NOT seeing. The file keeps everything either way; this is just the window.
  */
-async function tailFileSnapshot(file: { machine: TaskFileLocation["machine"]; path: string }, maxBytes: number): Promise<BackgroundTaskOutputSnapshot> {
+async function tailFileSnapshot(file: { environment: TaskFileLocation["environment"]; path: string }, maxBytes: number): Promise<BackgroundTaskOutputSnapshot> {
   try {
-    const size = (await file.machine.fileInfo(file.path)).size;
+    const size = (await file.environment.fileInfo(file.path)).size;
     const windowBytes = Math.min(maxBytes, size);
     if (windowBytes === 0) return { content: "", sizeBytes: size, contentBytes: 0, truncated: size > 0 };
-    const bytes = await file.machine.readBytes(file.path, { offset: size - windowBytes, length: windowBytes });
+    const bytes = await file.environment.readBytes(file.path, { offset: size - windowBytes, length: windowBytes });
     const aligned = bytes.subarray(utf8AlignStart(bytes));
     return {
       content: aligned.toString("utf-8"),
@@ -189,7 +189,7 @@ async function tailFileSnapshot(file: { machine: TaskFileLocation["machine"]; pa
       truncated: size > aligned.byteLength,
     };
   } catch {
-    // The file may have been removed or its Machine may no longer be reachable. Empty is the
+    // The file may have been removed or its Environment may no longer be reachable. Empty is the
     // honest snapshot; the task metadata still preserves the canonical location.
     return emptyOutputSnapshot();
   }
@@ -224,7 +224,7 @@ export interface OutputFollowTiming {
  * a tick costs what was WRITTEN, not what the file has accumulated. A decoder spans ticks
  * because a multi-byte character can straddle two reads.
  *
- * A tick is not free on a remote machine: no vendor file API takes a byte range, so reading an
+ * A tick is not free on a remote environment: no vendor file API takes a byte range, so reading an
  * increment means running `tail -c +N | base64` over there — a whole process tree per tick, even
  * for the ticks that find nothing. So once the output goes quiet the follower stops reading and
  * starts ASKING (one `fileInfo`, which the sandbox backends answer with a metadata call rather
@@ -233,7 +233,7 @@ export interface OutputFollowTiming {
  * overhead there, and the watcher is a human waiting to see the next line.
  */
 function followOutputFile(
-  file: { machine: TaskFileLocation["machine"]; path: string },
+  file: { environment: TaskFileLocation["environment"]; path: string },
   emit: (chunk: string) => void,
   timing: OutputFollowTiming = {},
 ): OutputFollower {
@@ -258,13 +258,13 @@ function followOutputFile(
       if (probe) {
         // Not created yet, or no bigger than what we have already consumed — either way there
         // is nothing to read, and the expensive part never runs.
-        const { size } = await file.machine.fileInfo(file.path);
+        const { size } = await file.environment.fileInfo(file.path);
         if (size <= offset) {
           backOff();
           return;
         }
       }
-      const bytes = await file.machine.readBytes(file.path, { offset });
+      const bytes = await file.environment.readBytes(file.path, { offset });
       if (bytes.byteLength === 0) {
         backOff();
         return;
@@ -517,7 +517,7 @@ export class BackgroundManager implements BackgroundSpawner {
   ): Promise<AttachedOutcome> {
     const task = new CommandBackgroundTask(start, command, description, {
       logPath: options.logPath,
-      machine: options.machine,
+      environment: options.environment,
       parentAddress: options.parentAddress,
       toolCallId: options.toolCallId,
     });
@@ -594,7 +594,7 @@ export class BackgroundManager implements BackgroundSpawner {
       },
     });
 
-    // Aborting IS the whole stop protocol: a command task forwards the signal to `machine.run`,
+    // Aborting IS the whole stop protocol: a command task forwards the signal to `environment.run`,
     // where SIGTERM → grace → SIGKILL escalation lives (the layer that can actually kill).
     const kill = (why: "timeout" | "aborted"): void => {
       if (cause === undefined) cause = why;
@@ -975,7 +975,7 @@ export class BackgroundManager implements BackgroundSpawner {
     }
     // A question's answer is persisted on the task record itself, so it survives the process.
     if (ghost.kind === "question" && ghost.answer !== undefined) return textSnapshot(ghost.answer, limit);
-    // A process ghost knows its output path but not the machine it lived on — the Machine is a
+    // A process ghost knows its output path but not the environment it lived on — the Environment is a
     // live handle, not a serialisable one. The tool surfaces `output_path` for a `Read`.
     return emptyOutputSnapshot();
   }
@@ -1002,13 +1002,13 @@ export class BackgroundManager implements BackgroundSpawner {
     if (location?.kind !== "file") return { content: "", nextCursor: from, followable: false };
     const file = location;
     try {
-      const bytes = await file.machine.readBytes(file.path, { offset: from, length: Math.max(0, Math.trunc(maxBytes)) });
+      const bytes = await file.environment.readBytes(file.path, { offset: from, length: Math.max(0, Math.trunc(maxBytes)) });
       // Leave a trailing partial sequence behind and advance the cursor only past what was
       // decodable: the next tick re-reads those bytes and completes the character.
       const whole = bytes.subarray(0, utf8AlignEnd(bytes));
       return { content: whole.toString("utf-8"), nextCursor: from + whole.byteLength, followable: true };
     } catch {
-      // Gone after cleanup or the Machine is temporarily unreachable.
+      // Gone after cleanup or the Environment is temporarily unreachable.
       return { content: "", nextCursor: from, followable: true };
     }
   }

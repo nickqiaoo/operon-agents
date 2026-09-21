@@ -1,19 +1,19 @@
 /**
- * Shared building blocks for Machine implementations and their callers.
+ * Shared building blocks for Environment implementations and their callers.
  *
  * The high-level operations (writeTextIfUnchanged / realpath) are mandatory
- * Machine members; their default compositions live in BaseMachine
- * (machine-base.ts). This module carries what both sides agree on: FileVersion
+ * Environment members; their default compositions live in BaseEnvironment
+ * (environment-base.ts). This module carries what both sides agree on: FileVersion
  * helpers, the decode contract, and the caller-side text-file helpers
  * (readTextFile / writeTextFile) composed from the core members.
  */
 import { createHash } from "node:crypto";
 import type {
   DecodeErrors,
-  Machine,
+  Environment,
   FileInfo,
   FileVersion,
-} from "../machine.ts";
+} from "../environment.ts";
 
 export function fileVersionFromInfo(info: FileInfo): FileVersion {
   return info.mtimeMs === undefined ? {} : { mtimeMs: info.mtimeMs };
@@ -58,16 +58,16 @@ export function decodeText(data: Buffer, options?: { encoding?: BufferEncoding; 
 
 /** Whole-file text read composed from the core members (readBytes + decode). */
 export async function readTextFile(
-  host: Pick<Machine, "readBytes">,
+  host: Pick<Environment, "readBytes">,
   path: string,
   options?: { encoding?: BufferEncoding; errors?: DecodeErrors },
 ): Promise<string> {
   return decodeText(await host.readBytes(path), options);
 }
 
-/** Unconditional whole-file text write — thin sugar over Machine.writeText. */
+/** Unconditional whole-file text write — thin sugar over Environment.writeText. */
 export async function writeTextFile(
-  host: Pick<Machine, "writeText">,
+  host: Pick<Environment, "writeText">,
   path: string,
   data: string,
   options?: { encoding?: BufferEncoding },

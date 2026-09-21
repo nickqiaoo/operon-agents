@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   SteerBus,
   type AgentEvent,
@@ -85,7 +85,7 @@ function providerNames(cap: Capability, server: string, ctx: RunContext): Promis
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
+  const environment = new LocalEnvironment(process.cwd());
   const credentialsDir = mkdtempSync(join(tmpdir(), "af-mcp-mgr-"));
   const oauthService = new McpOAuthService({ homeDir: credentialsDir });
 
@@ -131,9 +131,9 @@ async function main(): Promise<void> {
     if (e.type === "warning") warnings.push(e.message);
   });
 
-  const capCtx = testRunContext({ machine });
+  const capCtx = testRunContext({ environment });
 
-  const opened = await openCapability(cap, { machine, events, steer: new SteerBus() });
+  const opened = await openCapability(cap, { environment, events, steer: new SteerBus() });
 
   const handle = opened.service as McpServersHandle;
   const status = (name: string): string => handle.list().find((v) => v.name === name)?.status ?? "missing";

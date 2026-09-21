@@ -28,7 +28,7 @@ import {
   handoff,
   Runner,
   Session,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   DiskSessionStore,
@@ -90,7 +90,7 @@ function testGraphAmbiguity(): void {
 
 // ── 1b. Same-named agents: warm head cache falls back to the cold edge walk ──────────────
 
-async function testHeadCacheDuplicateFallback(machine: LocalMachine): Promise<void> {
+async function testHeadCacheDuplicateFallback(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("transfer_to_billing", { reason: "route" }), { stopReason: "toolUse" }),
@@ -135,9 +135,9 @@ async function testHeadCacheDuplicateFallback(machine: LocalMachine): Promise<vo
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning") warnings.push(event.message);
   });
-  const session = await openTestSession({ machine, store, events });
+  const session = await openTestSession({ environment, store, events });
   const ctx: Ctx = { visited: [] };
-  const runner = testRunner<Ctx>({ machine });
+  const runner = testRunner<Ctx>({ environment });
 
   const first = await runner.run(main, "I need billing", { session, context: ctx });
   check("dup fallback: turn 1 hands off to the real billing agent", first.finalAgent === "billing" && ctx.visited.includes("A") && !ctx.visited.includes("B"));
@@ -157,7 +157,7 @@ async function testHeadCacheDuplicateFallback(machine: LocalMachine): Promise<vo
 
 // ── 2. Static sub-agent per-instance shards ──────────────────────────────────────────────
 
-async function testStaticSubagentPerInstanceShard(machine: LocalMachine): Promise<void> {
+async function testStaticSubagentPerInstanceShard(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("agent_researcher", { input: "task one" }), { stopReason: "toolUse" }),
@@ -171,7 +171,7 @@ async function testStaticSubagentPerInstanceShard(machine: LocalMachine): Promis
   const main = defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [researcher] });
 
   const store = new MemoryStore();
-  const runner = testRunner({ machine, store });
+  const runner = testRunner({ environment, store });
   const result = await runner.run(main, "do both tasks");
   faux.unregister();
 
@@ -295,7 +295,7 @@ async function testRewriteMetadataAddress(): Promise<void> {
 
 // ── outputType parse failures carry the reason (were silently swallowed) ─────────────────
 
-async function testOutputParseError(machine: LocalMachine): Promise<void> {
+async function testOutputParseError(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("not json at all", { stopReason: "stop" }),
@@ -308,7 +308,7 @@ async function testOutputParseError(machine: LocalMachine): Promise<void> {
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning") warnings.push(event.message);
   });
-  const runner = testRunner({ machine, events });
+  const runner = testRunner({ environment, events });
   const bad = await runner.run(agent, "one");
   const good = await runner.run(agent, "two");
   faux.unregister();
@@ -326,7 +326,7 @@ async function testOutputParseError(machine: LocalMachine): Promise<void> {
 
 // ── provider agents shadowed by static subagents warn (were silently dropped) ────────────
 
-async function testProviderShadowWarning(machine: LocalMachine): Promise<void> {
+async function testProviderShadowWarning(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("echo", { text: "one" }), { stopReason: "toolUse" }),
@@ -353,7 +353,7 @@ async function testProviderShadowWarning(machine: LocalMachine): Promise<void> {
   events.subscribe((event: AgentEvent) => {
     if (event.type === "warning" && event.message.includes("shadowed")) shadowWarnings.push(event.message);
   });
-  const runner = testRunner({ machine, events, subagentProvider: provider, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, events, subagentProvider: provider, permission: { mode: "yolo" } });
   const result = await runner.run(main, "go");
   faux.unregister();
 
@@ -366,16 +366,16 @@ async function testProviderShadowWarning(machine: LocalMachine): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-bugfixes-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
     testGraphAmbiguity();
-    await testHeadCacheDuplicateFallback(machine);
-    await testStaticSubagentPerInstanceShard(machine);
+    await testHeadCacheDuplicateFallback(environment);
+    await testStaticSubagentPerInstanceShard(environment);
     await testMemoryForkFullState();
     await testDiskListStateKeys(dir);
     await testRewriteMetadataAddress();
-    await testOutputParseError(machine);
-    await testProviderShadowWarning(machine);
+    await testOutputParseError(environment);
+    await testProviderShadowWarning(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

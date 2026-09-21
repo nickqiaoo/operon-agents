@@ -1,5 +1,5 @@
 import {
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   SteerBus,
 } from "../index.ts";
@@ -86,13 +86,13 @@ function makeTimer(): { timer: McpTimer; pending: Array<{ fn: () => void; ms: nu
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
+  const environment = new LocalEnvironment(process.cwd());
   const events = new ListenerSink();
   const warnings: string[] = [];
   events.subscribe((e) => {
     if (e.type === "warning") warnings.push(e.message);
   });
-  const wiring = { machine, events, steer: new SteerBus() };
+  const wiring = { environment, events, steer: new SteerBus() };
 
   const built: PingTransport[] = [];
   const factory = (name: string): MCPTransport => {

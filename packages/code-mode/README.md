@@ -58,7 +58,7 @@ The only way out is `tools.*`.
 
 Every `tools.X(args)` is a **nested tool call** the engine runs through its own pipeline
 (`ToolRunContext.dispatch`): the prepare hook, plan resolution, authorization, execution, the
-finalize hook. Permissions, user hooks and the `Machine` apply exactly as for a direct call. This
+finalize hook. Permissions, user hooks and the `Environment` apply exactly as for a direct call. This
 is what makes Code Mode safe to enable where Bash runs inside E2B or under os-sandbox: the program
 never runs on the host's behalf, only the tools do, where they always did.
 
@@ -97,7 +97,7 @@ A program that polls, or makes many slow calls, need not hold the turn. `run_in_
 returns a task id at once; a program already running can be moved with `session.detachTool(id)`
 (the tool announces `tool.detachable`, the cue a UI uses to offer "move to background"). Either
 way it becomes a `code` background task: its `console.log` lines, each nested call's outcome and
-the final result go to a log file on the machine — where a background command's output goes. The
+the final result go to a log file on the environment — where a background command's output goes. The
 model `Read`s that file (the result names its path) and asks `BackgroundOutput` for the task's
 status; a completion notice reaches it on its own. A host reads the same file through
 `session.readBackgroundTaskOutput` / `readBackgroundTaskOutputDelta`. A program in the background

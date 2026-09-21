@@ -27,7 +27,7 @@ export function planCapability(planMode: PlanMode = new PlanMode()): Capability 
       {
         token: T.Plan,
         create: async (ctx) => {
-          planMode.attachMachine(ctx.scope.require(T.Machine));
+          planMode.attachEnvironment(ctx.scope.require(T.Environment));
           // Rebuild plan-mode state from the log's latest enter/exit result (resume/fork aware).
           planMode.reconstruct(await readSessionLog(ctx));
           return planMode;

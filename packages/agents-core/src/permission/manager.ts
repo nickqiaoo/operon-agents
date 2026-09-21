@@ -2,7 +2,7 @@ import type { AuthorizeToolExecutionResult, ResolvedToolExecutionHookContext } f
 import type { Message } from "../protocol/index.ts";
 import type { PathClass } from "../tool/policies/path-access.ts";
 import type { Tool } from "../tool/types.ts";
-import type { GitWorkTreeMachine } from "../tool/support/git-worktree.ts";
+import type { GitWorkTreeEnvironment } from "../tool/support/git-worktree.ts";
 import type { Logger } from "../logging/index.ts";
 import { createPolicies, type PermissionState } from "./policies.ts";
 import { permissionPatternError } from "./matches-rule.ts";
@@ -14,7 +14,7 @@ export interface PermissionManagerOptions {
   readonly responder?: Responder;
   readonly cwd?: string;
   readonly pathClass?: PathClass;
-  readonly machine?: GitWorkTreeMachine;
+  readonly environment?: GitWorkTreeEnvironment;
   readonly policyOverrides?: ReadonlyMap<string, PermissionPolicy>;
   /** The `auto`-mode judge. Consulted for would-prompt actions when `mode === "auto"`. */
   readonly autoApprover?: AutoApprover;
@@ -48,7 +48,7 @@ export class PermissionManager {
   private readonly responder: Responder | undefined;
   private readonly cwd: string;
   private readonly pathClass: PathClass;
-  private readonly machine: GitWorkTreeMachine | undefined;
+  private readonly environment: GitWorkTreeEnvironment | undefined;
   private readonly policies: PermissionPolicy[];
   private readonly autoApprover: AutoApprover | undefined;
   private readonly getTranscript: (() => readonly Message[]) | undefined;
@@ -61,7 +61,7 @@ export class PermissionManager {
     this.responder = options.responder;
     this.cwd = options.cwd ?? "";
     this.pathClass = options.pathClass ?? "posix";
-    this.machine = options.machine;
+    this.environment = options.environment;
     this.autoApprover = options.autoApprover;
     this.getTranscript = options.getTranscript;
     this.getTools = options.getTools;
@@ -74,7 +74,7 @@ export class PermissionManager {
       sessionApprovalRulePatterns: () => [...this.sessionPatterns],
       cwd: () => this.cwd,
       pathClass: () => this.pathClass,
-      machine: () => this.machine,
+      environment: () => this.environment,
     };
     this.policies = createPolicies(state, options.policyOverrides);
   }

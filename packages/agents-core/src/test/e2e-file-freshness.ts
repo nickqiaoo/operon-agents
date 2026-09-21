@@ -1,5 +1,5 @@
 /**
- * E2E for the Machine high-level ops + FileFreshnessLedger. Covers:
+ * E2E for the Environment high-level ops + FileFreshnessLedger. Covers:
  *  - readBytes: whole-file / prefix / window reads, byte-exactness, and default
  *    composition parity with the native local implementation
  *  - writeText: unconditional overwrite, CRLF restore, bytesWritten, and the local
@@ -11,13 +11,13 @@ import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, realpath as nodeRealpath, readdir, readFile, rm, stat as nodeStat, symlink, writeFile } from "node:fs/promises";
 import {
-  BaseMachine,
+  BaseEnvironment,
   checkFreshness,
   FileFreshnessLedger,
   LEDGER_MAX_ENTRIES,
-  LocalMachine,
+  LocalEnvironment,
   type DirEntry,
-  type Machine,
+  type Environment,
   type ByteRange,
   type RunCommandOptions,
   type RunCommandResult,
@@ -32,16 +32,16 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-/** Forwards only the SPI members — exercises BaseMachine's derived default operations. */
-class BareHost extends BaseMachine {
+/** Forwards only the SPI members — exercises BaseEnvironment's derived default operations. */
+class BareHost extends BaseEnvironment {
   readonly name = "bare";
-  private readonly inner: LocalMachine;
-  constructor(inner: LocalMachine) {
+  private readonly inner: LocalEnvironment;
+  constructor(inner: LocalEnvironment) {
     super();
     this.inner = inner;
   }
-  get osEnv() {
-    return this.inner.osEnv;
+  get osInfo() {
+    return this.inner.osInfo;
   }
   pathClass(): "posix" | "win32" {
     return this.inner.pathClass();
@@ -55,8 +55,8 @@ class BareHost extends BaseMachine {
   getcwd(): string {
     return this.inner.getcwd();
   }
-  withCwd(cwd: string): Machine {
-    return new BareHost(this.inner.withCwd(cwd) as LocalMachine);
+  withCwd(cwd: string): Environment {
+    return new BareHost(this.inner.withCwd(cwd) as LocalEnvironment);
   }
   fileInfo(p: string, o?: { followSymlinks?: boolean }): Promise<FileInfo> {
     return this.inner.fileInfo(p, o);
@@ -74,7 +74,7 @@ class BareHost extends BaseMachine {
     return this.inner.mkdir(p, o);
   }
   // No process SPI: this fake only exercises file reads/writes, and delegating `run` to the
-  // inner machine keeps it honest if something ever does need a command.
+  // inner environment keeps it honest if something ever does need a command.
   override run(argv: readonly string[], options?: RunCommandOptions): Promise<RunCommandResult> {
     return this.inner.run(argv, options);
   }
@@ -94,7 +94,7 @@ function sameRangeResult(a: ReadFileRangeResult, b: ReadFileRangeResult): boolea
 
 async function main(): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "operon-freshness-"));
-  const host = new LocalMachine(dir);
+  const host = new LocalEnvironment(dir);
   const bare = new BareHost(host);
 
   try {

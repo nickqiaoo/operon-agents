@@ -1,5 +1,5 @@
 import { errorMessage, isAbortError } from "../../loop/errors.ts";
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import type { BackgroundTask, BackgroundTaskInfoBase, BackgroundTaskSink, TaskOutputLocation } from "./task.ts";
 
 export interface CodeBackgroundTaskInfo extends BackgroundTaskInfoBase {
@@ -13,16 +13,16 @@ export interface CodeBackgroundTaskOptions {
   readonly abort?: () => void;
   readonly parentAddress?: string;
   readonly toolCallId?: string;
-  /** The log file on the machine the program writes its output to. Every background program must have one. */
+  /** The log file on the environment the program writes its output to. Every background program must have one. */
   readonly logPath: string;
-  readonly machine: Machine;
+  readonly environment: Environment;
 }
 
 /**
  * A background task that runs a Code Mode program (`RunCode`) to completion.
  *
  * Holds no output of its own: the program's owner writes its console lines, each nested tool
- * call's outcome and the final result to a log file on the machine as they happen, the same
+ * call's outcome and the final result to a log file on the environment as they happen, the same
  * place a background command's bytes go, and this task names that file. `BackgroundOutput`
  * reads it like any other file-backed task; a detached program's progress is the same thing
  * an attached one's was, in the same place.
@@ -52,7 +52,7 @@ export class CodeBackgroundTask implements BackgroundTask {
     this.abort = options.abort;
     this.parentAddress = options.parentAddress;
     this.toolCallId = options.toolCallId;
-    this.outputLocation = { kind: "file", machine: options.machine, path: options.logPath };
+    this.outputLocation = { kind: "file", environment: options.environment, path: options.logPath };
   }
 
   async start(sink: BackgroundTaskSink): Promise<void> {

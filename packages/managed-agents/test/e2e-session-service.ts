@@ -2,7 +2,7 @@
  * `SessionService` is the managed API surface, and it runs nothing.
  *
  * The strongest statement this file makes is structural rather than any single assertion: there
- * is no Harness here, no Machine, no model, no capabilities — and the whole API still works.
+ * is no Harness here, no Environment, no model, no capabilities — and the whole API still works.
  * Sessions are created, addressed, written to, read back, streamed and deleted without an
  * execution stack existing at all. Under the previous shape none of this was expressible: every
  * route reached its session through `open()`, so a test like this could not be written without
@@ -24,7 +24,7 @@ const root = mkdtempSync(join(tmpdir(), "session-service-"));
 const work = join(root, "work");
 
 /**
- * Resolves a working directory and nothing else. A real registry would also hand back a machine;
+ * Resolves a working directory and nothing else. A real registry would also hand back an environment;
  * this one cannot, which is the point — creating and addressing sessions must not depend on an
  * execution backend being resolvable, or a sandbox outage would take the whole API down with it.
  */

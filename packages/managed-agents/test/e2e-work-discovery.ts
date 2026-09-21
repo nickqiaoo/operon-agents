@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "operon-agents";
-import { createHarness, DiskSessionRepository, LocalMachine } from "operon-agents";
+import { createHarness, DiskSessionRepository, LocalEnvironment } from "operon-agents";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 import { SessionService } from "../src/server/session-service.ts";
 import { SessionWorker } from "../src/server/session-worker.ts";
@@ -42,7 +42,7 @@ function fixture(name: string, responses: number, options: { readonly ttlMs?: nu
   const harness = createHarness({
     harness: (s) => {
       s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.MachineFactory, new LocalMachine(work), { owned: false });
+      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     permission: { mode: "yolo" },

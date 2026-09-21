@@ -19,7 +19,7 @@ import {
   DiskSessionRepository,
   fetchUrlTool,
   FirecrawlProvider,
-  LocalMachine,
+  LocalEnvironment,
   sinkLogger,
   T,
   TavilySearchProvider,
@@ -87,10 +87,10 @@ const metadataStore = new DiskManagedSessionMetadataStore(new URL("../.agent-hom
 const environments = new StaticEnvironmentRegistry({
   [ENVIRONMENT_ID]: {
     workDir: WORK,
-    machine: ({ sessionId }) => {
+    environment: ({ sessionId }) => {
       const directory = new URL(`../workspace/${sessionId}/`, import.meta.url).pathname;
       mkdirSync(directory, { recursive: true });
-      return new LocalMachine(directory);
+      return new LocalEnvironment(directory);
     },
   },
 });

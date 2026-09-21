@@ -37,7 +37,7 @@ not ship with — a local server, a gateway, a proxy — is configured in `provi
 
 Enter submits. While a turn is running a submission queues behind it, and `Ctrl-S` steers the
 queue into the live turn instead. `!` at the start of an empty line switches the editor to shell
-mode: the command runs on the session's own machine, so `!` and the agent's Bash tool share one
+mode: the command runs on the session's own environment, so `!` and the agent's Bash tool share one
 shell and one working directory.
 
 | Key | What it does |

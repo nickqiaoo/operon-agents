@@ -197,10 +197,10 @@ export class ChatModel {
         return;
       }
       const second = await this.runAttempt(req, call, ctx, out);
-      if (!second.resolved) out.push(second.terminal); // retry also failed → machine
+      if (!second.resolved) out.push(second.terminal); // retry also failed → environment
       return;
     }
-    out.push(first.terminal); // not a refreshable auth error → machine
+    out.push(first.terminal); // not a refreshable auth error → environment
   }
 
   /** Stream one attempt. Non-terminal events are relayed live; the terminal event is held so
@@ -232,7 +232,7 @@ export class ChatModel {
     if (terminal === undefined) return { resolved: true }; // (pi always emits a terminal)
     const errorMessage = terminalErrorMessage(terminal);
     if (errorMessage === undefined || streamedContent) {
-      out.push(terminal); // success, or a mid-stream error we must not retry → machine
+      out.push(terminal); // success, or a mid-stream error we must not retry → environment
       return { resolved: true };
     }
     return { resolved: false, errorMessage, terminal };

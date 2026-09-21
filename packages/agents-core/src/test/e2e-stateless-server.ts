@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { defineAgent } from "../agent/agent.ts";
 import { Runner } from "../agent/runner.ts";
 import { DiskSessionRepository } from "../store/repository.ts";
-import { LocalMachine } from "../tool/machine-local.ts";
+import { LocalEnvironment } from "../tool/environment-local.ts";
 import {
   fauxAssistantMessage,
   registerFauxProvider,
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
     try {
       const runner = testRunner({
         store: opened.store,
-        machine: new LocalMachine(opened.workDir),
+        environment: new LocalEnvironment(opened.workDir),
         permission: { mode: "yolo" },
       });
       return await runner.run(agent, input, { sessionId: id });

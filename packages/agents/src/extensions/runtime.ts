@@ -112,7 +112,7 @@ export class ExtensionRuntime {
   /** Serializes flushes so concurrent attach/detach apply strictly in submission order. */
   private flushChain: Promise<void> = Promise.resolve();
   private readonly memoryState = new Map<string, unknown>();
-  /** The session binding: its scope (machine, store, events, steer, log reader, controls) + id + signal. */
+  /** The session binding: its scope (environment, store, events, steer, log reader, controls) + id + signal. */
   private session: ProvisionContext | undefined;
   private run: RunContext | undefined;
   /** The conversation shard the in-flight decision point belongs to; backs `actions.record`. */
@@ -1102,7 +1102,7 @@ export class ExtensionRuntime {
       extensionId,
       sessionId: session.sessionId,
       signal: session.signal,
-      machine: session.scope.require(T.Machine),
+      environment: session.scope.require(T.Environment),
       store,
       state: this.stateFor(extensionId, store),
       actions: this.actionsFor(extensionId),
@@ -1117,7 +1117,7 @@ export class ExtensionRuntime {
       sessionId: session.sessionId,
       address: origin.address ?? "main",
       signal: origin.signal,
-      machine: session.scope.require(T.Machine),
+      environment: session.scope.require(T.Environment),
       store,
       state: this.stateFor(extensionId, store),
       actions: this.actionsFor(extensionId),

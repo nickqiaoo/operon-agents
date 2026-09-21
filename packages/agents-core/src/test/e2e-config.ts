@@ -7,7 +7,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   parseConfig,
   mergeConfigs,
   ModelCatalog,
@@ -60,7 +60,7 @@ function testFlags(): void {
   check("flags: unknown flag → false", flags.enabled("does_not_exist") === false);
 }
 
-async function testConfigDrivenRun(dir: string, machine: LocalMachine): Promise<void> {
+async function testConfigDrivenRun(dir: string, environment: LocalEnvironment): Promise<void> {
   const target = join(dir, "denied.txt");
   const resolver = layeredResolver(
     { permission: { mode: "manual", rules: [{ decision: "deny", scope: "user", pattern: "Read" }] }, loopControl: { maxStepsPerTurn: 3 } },
@@ -93,7 +93,7 @@ async function testConfigDrivenRun(dir: string, machine: LocalMachine): Promise<
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool] });
 
   const runner = testRunner({
-    machine,
+    environment,
     permission: { mode: opts.permission.mode, rules: opts.permission.rules },
     maxStepsPerTurn: opts.loopControl.maxStepsPerTurn,
   });
@@ -109,12 +109,12 @@ async function testConfigDrivenRun(dir: string, machine: LocalMachine): Promise<
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-config-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
     testLayeredMerge();
     testModelCatalog();
     testFlags();
-    await testConfigDrivenRun(dir, machine);
+    await testConfigDrivenRun(dir, environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

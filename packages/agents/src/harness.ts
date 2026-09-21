@@ -70,7 +70,7 @@ import {
   compactionCapability,
   filesystemTools,
   goalCapability,
-  LocalMachine,
+  LocalEnvironment,
   McpOAuthService,
   MemorySessionRepository,
   SessionRepositoryNotFoundError,
@@ -86,8 +86,8 @@ import {
   type McpTransportKind,
   type PluginManager,
   type ApprovalRequestOptions,
-  type Machine,
-  type MachineFactory,
+  type Environment,
+  type EnvironmentFactory,
   type ActivateSkillRequest,
   type SessionRepository,
   type ResolvedAgentProfile,
@@ -165,12 +165,12 @@ export interface DefaultCapabilitiesOptions {
    */
   readonly scope?: Scope<"session">;
   /**
-   * The session brought its own machine (`createSession({ machine })`). The workspace's shared
-   * `T.SkillRegistry` was scanned through the WORKSPACE's machine and does not describe this
-   * one, so the skill scan runs per session through `T.Machine` instead — the catalog follows
+   * The session brought its own environment (`createSession({ environment })`). The workspace's shared
+   * `T.SkillRegistry` was scanned through the WORKSPACE's environment and does not describe this
+   * one, so the skill scan runs per session through `T.Environment` instead — the catalog follows
    * the filesystem the session's tools actually operate. Default false.
    */
-  readonly ownMachine?: boolean;
+  readonly ownEnvironment?: boolean;
   /** Context window budget used to size compaction. Defaults to 200_000. */
   readonly maxContextTokens?: number;
   /** Workspace MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
@@ -206,7 +206,7 @@ export interface DefaultCapabilitiesOptions {
    * MCP transports this host will run. Omitted means both, which is right for a local host.
    *
    * A SERVER host should pass `["http"]`. An stdio server is a child process of the harness
-   * process, so it neither follows the session's machine into a sandbox nor survives the
+   * process, so it neither follows the session's environment into a sandbox nor survives the
    * replica model a server is deployed under — and `transport` defaults to `"stdio"`, so
    * leaving this unset means a config that merely forgot the field spawns a process on the
    * server. `McpTransportNotPermittedError` names the offending server at startup.
@@ -230,8 +230,8 @@ export interface DefaultCapabilitiesOptions {
  */
 export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
   const manager = options.pluginManager ?? options.scope?.get(T.PluginManager);
-  // A session on its own machine ignores the workspace's registry: it was scanned elsewhere.
-  const sharedSkills = options.ownMachine === true ? undefined : options.scope?.get(T.SkillRegistry);
+  // A session on its own environment ignores the workspace's registry: it was scanned elsewhere.
+  const sharedSkills = options.ownEnvironment === true ? undefined : options.scope?.get(T.SkillRegistry);
   const sharedMcp = options.scope?.has(T.McpServers) === true;
   const oauthService = options.oauthService ?? options.scope?.get(T.McpOAuth);
   // Shared registry so the plugin session-start injector can render a skill the skills capability
@@ -323,8 +323,8 @@ export interface HarnessOptions<TContext = unknown> {
    * Process-tier composition: register the objects that live for the whole harness on its scope
    * — `T.SessionRepository` (disk locally, Pg/Redis on a server; in-memory when absent),
    * `T.Logger` (the `AGENTS_LOG` env logger, else silent, when absent), `T.ModelRuntime` (lets
-   * extensions register providers at runtime; without it those actions throw), `T.MachineFactory`
-   * (a shared `Machine` or a per-session factory; sessions default to a `LocalMachine` at their
+   * extensions register providers at runtime; without it those actions throw), `T.EnvironmentFactory`
+   * (a shared `Environment` or a per-session factory; sessions default to a `LocalEnvironment` at their
    * own `workDir`), `T.PluginManager`, `T.Tracing`. Runs before the by-value extensions'
    * `harness` halves, so they can consume what it registers.
    */
@@ -334,14 +334,14 @@ export interface HarnessOptions<TContext = unknown> {
    * tenant / environment id on a server, via `createSession({ workspaceKey })`), shared by every
    * session under it and closed when the last of them closes. Register what a working directory
    * owns: `T.McpServers` (one set of MCP connections for all its sessions), `T.SkillRegistry`
-   * (one skill scan), `T.McpOAuth`, `T.WorkspaceMachineFactory`. `defaultCapabilities({ scope })`
-   * picks those up. A session that brings its own `machine` instance gets a private workspace.
+   * (one skill scan), `T.McpOAuth`, `T.WorkspaceEnvironmentFactory`. `defaultCapabilities({ scope })`
+   * picks those up. A session that brings its own `environment` instance gets a private workspace.
    */
   readonly workspace?: (scope: Scope<"workspace">, ctx: WorkspaceContext) => void | Promise<void>;
   /**
    * Session-tier composition: called once per session being opened, with that session's scope
    * (the opener has already registered `T.SessionId`, `T.Store`, `T.Events`, `T.Responder`,
-   * `T.PermissionOptions`, and `T.Machine` when the caller supplied one). Register anything else
+   * `T.PermissionOptions`, and `T.Environment` when the caller supplied one). Register anything else
    * the session should own and return its capabilities. Defaults to `defaultCapabilities()`.
    * Always called fresh per session, so per-session state (goal/plan/todo/background/skills/mcp)
    * is isolated by construction.
@@ -473,9 +473,9 @@ export interface SessionCapabilityContext {
   readonly workDir: string;
   /** Session-scoped MCP servers, as given to createSession / resumeSession / forkSession. */
   readonly mcpServers?: Record<string, McpServerConfig>;
-  /** The session brought its own machine (`{ machine }` on this open): workspace-shared objects
-   *  derived from the workspace's machine (the skill scan) do not apply to it. */
-  readonly ownMachine: boolean;
+  /** The session brought its own environment (`{ environment }` on this open): workspace-shared objects
+   *  derived from the workspace's environment (the skill scan) do not apply to it. */
+  readonly ownEnvironment: boolean;
 }
 
 /** What the `workspace` hook is told about the workspace scope it is composing. */
@@ -499,8 +499,8 @@ export interface WorkspaceContext {
 interface OpenSessionOptionsBase<TContext = unknown> {
   /** Override the agent for this session only. */
   readonly agent?: Agent<TContext>;
-  /** Override the execution machine for this session only. Lifecycle remains host-owned. */
-  readonly machine?: Machine | MachineFactory;
+  /** Override the execution environment for this session only. Lifecycle remains host-owned. */
+  readonly environment?: Environment | EnvironmentFactory;
   /** Runtime-only application context for this session. Overrides `HarnessOptions.context`. */
   readonly context?: TContext;
   /**
@@ -1177,8 +1177,8 @@ export class HarnessSession<TContext = unknown> {
   }
   /** Where this session's tools run. A host uses it to run a command in the same place the agent
    *  does — one shell, one filesystem, one working directory. */
-  get machine(): Machine {
-    return this.core.machine;
+  get environment(): Environment {
+    return this.core.environment;
   }
   /** The current todo list (the `TodoList` tool's latest state); empty without the todo capability. */
   getTodos(): readonly TodoItem[] {
@@ -1571,8 +1571,8 @@ export class Harness<TContext = unknown> {
    * session's capabilities.
    *
    * Built fresh per session. Runtime-specific prompt data is not captured here: `instructions`
-   * resolves the current frame's machine + cwd through the Session cache, so root/subagent/worktree
-   * prompts stay isolated without coupling Agent lifetime to machine lifetime.
+   * resolves the current frame's environment + cwd through the Session cache, so root/subagent/worktree
+   * prompts stay isolated without coupling Agent lifetime to environment lifetime.
    */
   private buildDefaultAgent(appendSystemPrompt?: string, maxStepsPerTurn?: number): Promise<Agent<TContext>> {
     const additional = appendSystemPrompt ?? this.options.appendSystemPrompt;
@@ -2014,11 +2014,11 @@ export class Harness<TContext = unknown> {
     // params) and read back on resume / fork, so a tenant session never falls back to a
     // directory key on reopen; passing one on a later open overrides the stored key (a
     // generation change). Absent both, the key is derived from this open: a session that
-    // brings its own machine INSTANCE gets a private workspace, everything else the directory's.
+    // brings its own environment INSTANCE gets a private workspace, everything else the directory's.
     let workspaceKey = opts.workspaceKey;
     if (workspaceKey !== undefined) await store.putState(WORKSPACE_KEY_STATE_KEY, workspaceKey);
     else workspaceKey = ((await store.getState(WORKSPACE_KEY_STATE_KEY)) as string | null) ?? undefined;
-    workspaceKey ??= opts.machine !== undefined && typeof opts.machine !== "function" ? `private::${id}` : dirWorkspaceKey(workDir);
+    workspaceKey ??= opts.environment !== undefined && typeof opts.environment !== "function" ? `private::${id}` : dirWorkspaceKey(workDir);
     // The workspace scope (one per key, shared) and under it the session scope: what the harness
     // decides for this session goes in here; Session.open provides the defaults for the rest,
     // and from then on the session owns the scope.
@@ -2038,14 +2038,14 @@ export class Harness<TContext = unknown> {
       scope.register(T.Events, events);
       const responder = new MutableResponder();
       scope.register(T.Responder, responder);
-      // Machine: this call's override → the harness-level factory (resolved by Session.open) →
-      // a LocalMachine at the session's own workDir. The session only OPERATES a caller-supplied
-      // machine; the default one is its own.
-      if (opts.machine !== undefined) {
-        if (typeof opts.machine === "function") scope.register(T.SessionMachineFactory, opts.machine);
-        else scope.register(T.Machine, opts.machine, { owned: false });
-      } else if (!workspace.has(T.WorkspaceMachineFactory) && !this.scope.has(T.MachineFactory)) {
-        scope.provide(T.Machine, () => new LocalMachine(workDir));
+      // Environment: this call's override → the harness-level factory (resolved by Session.open) →
+      // a LocalEnvironment at the session's own workDir. The session only OPERATES a caller-supplied
+      // environment; the default one is its own.
+      if (opts.environment !== undefined) {
+        if (typeof opts.environment === "function") scope.register(T.SessionEnvironmentFactory, opts.environment);
+        else scope.register(T.Environment, opts.environment, { owned: false });
+      } else if (!workspace.has(T.WorkspaceEnvironmentFactory) && !this.scope.has(T.EnvironmentFactory)) {
+        scope.provide(T.Environment, () => new LocalEnvironment(workDir));
       }
       scope.register(T.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
       if (opts.eventPublication !== undefined) scope.register(T.SessionEventPublication, opts.eventPublication);
@@ -2068,7 +2068,7 @@ export class Harness<TContext = unknown> {
         {
           sessionId: id,
           workDir,
-          ownMachine: opts.machine !== undefined,
+          ownEnvironment: opts.environment !== undefined,
           ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
         },
         params,
@@ -2402,7 +2402,7 @@ function workspaceSlug(key: string): string {
  *
  * A worker that dies mid-turn journals no `turn.ended`; to every reader the turn is still
  * running. Opening the session repairs that (the same recovery runs inside `resumeSession`),
- * but opening boots capabilities and a machine just to write two records. This does only the
+ * but opening boots capabilities and an environment just to write two records. This does only the
  * repair: fold the log, and for every frame still inside a turn append `turn.ended` with
  * `reason: "failed"` (and `agent.ended` for a live sub-agent). Returns the events those records
  * project to, so a host that has live subscribers can hand them on — a record appended here

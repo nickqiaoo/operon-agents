@@ -7,7 +7,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   userHooksCapability,
   writeTool,
@@ -47,7 +47,7 @@ function toolResultText(messages: readonly Message[], name: string): { text: str
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function testPreToolUseBlock(dir: string, machine: LocalMachine): Promise<void> {
+async function testPreToolUseBlock(dir: string, environment: LocalEnvironment): Promise<void> {
   const target = join(dir, "hook-denied.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -59,7 +59,7 @@ async function testPreToolUseBlock(dir: string, machine: LocalMachine): Promise<
 
   const hooks = [{ event: "PreToolUse" as const, matcher: "Write", command: `echo '{"block":true,"reason":"hook says no"}'` }];
   // yolo permission → only the PreToolUse hook (chain head) can block.
-  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "write a file");
   faux.unregister();
 
@@ -68,21 +68,21 @@ async function testPreToolUseBlock(dir: string, machine: LocalMachine): Promise<
   check("PreToolUse: file not written", !existsSync(target));
 }
 
-async function testSessionStartInjection(machine: LocalMachine): Promise<void> {
+async function testSessionStartInjection(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const hooks = [{ event: "SessionStart" as const, command: `echo 'PROJECT_CONTEXT: handle with care'` }];
-  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
   check("SessionStart: hook output injected into context", reminderText(result.messages).includes("PROJECT_CONTEXT: handle with care"));
 }
 
-async function testStopContinueOnce(machine: LocalMachine): Promise<void> {
+async function testStopContinueOnce(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("first turn", { stopReason: "stop" }),
@@ -109,7 +109,7 @@ async function testStopContinueOnce(machine: LocalMachine): Promise<void> {
     { event: "SessionStart" as const, command: `echo 'ONE_BOUNDARY_REMINDER'` },
     { event: "Stop" as const, command: `echo '{"block":true}'` },
   ];
-  const runner = testRunner({ machine, events, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" }, maxTurns: 10 });
+  const runner = testRunner({ environment, events, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -125,7 +125,7 @@ async function testStopContinueOnce(machine: LocalMachine): Promise<void> {
   );
 }
 
-async function testPostToolUseObserve(dir: string, machine: LocalMachine): Promise<void> {
+async function testPostToolUseObserve(dir: string, environment: LocalEnvironment): Promise<void> {
   const marker = join(dir, "posthook-ran.txt");
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -136,7 +136,7 @@ async function testPostToolUseObserve(dir: string, machine: LocalMachine): Promi
   const agent = defineAgent({ name: "a", model, instructions: "x", tools: [writeTool] });
 
   const hooks = [{ event: "PostToolUse" as const, command: `cat > /dev/null; echo ran > '${marker}'` }];
-  const runner = testRunner({ machine, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [userHooksCapability(hooks)], permission: { mode: "yolo" } });
   await runner.run(agent, "write then observe");
   faux.unregister();
 
@@ -151,12 +151,12 @@ async function testPostToolUseObserve(dir: string, machine: LocalMachine): Promi
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-hooks-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
-    await testPreToolUseBlock(dir, machine);
-    await testSessionStartInjection(machine);
-    await testStopContinueOnce(machine);
-    await testPostToolUseObserve(dir, machine);
+    await testPreToolUseBlock(dir, environment);
+    await testSessionStartInjection(environment);
+    await testStopContinueOnce(environment);
+    await testPostToolUseObserve(dir, environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

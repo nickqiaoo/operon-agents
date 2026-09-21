@@ -7,7 +7,7 @@ import {
   askUserQuestionTool,
   defineAgent,
   defineModel,
-  LocalMachine,
+  LocalEnvironment,
   MemoryStore,
   readTool,
   Runner,
@@ -47,7 +47,7 @@ function allUserText(messages: readonly Message[]): string {
     .join("\n");
 }
 
-async function testReadImage(dir: string, machine: LocalMachine): Promise<void> {
+async function testReadImage(dir: string, environment: LocalEnvironment): Promise<void> {
   const imagePath = join(dir, "one.png");
   writeFileSync(
     imagePath,
@@ -65,7 +65,7 @@ async function testReadImage(dir: string, machine: LocalMachine): Promise<void> 
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "media", model, instructions: "x", tools: [readTool] });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "inspect image");
   faux.unregister();
 
@@ -74,7 +74,7 @@ async function testReadImage(dir: string, machine: LocalMachine): Promise<void> 
   check("read image: system summary includes dimensions", toolResultText(result.messages, "Read").includes("Original dimensions: 1x1"));
 }
 
-async function testTodoList(machine: LocalMachine): Promise<void> {
+async function testTodoList(environment: LocalEnvironment): Promise<void> {
   const store = new MemoryStore();
   const todoStore = new TodoStore();
 
@@ -93,7 +93,7 @@ async function testTodoList(machine: LocalMachine): Promise<void> {
   ]);
   const firstModel = firstFaux.getChatModel()!;
   const firstAgent = defineAgent({ name: "todo", model: firstModel, instructions: "x" });
-  const runner = testRunner({ machine, store, capabilities: [todoCapability(todoStore)], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, store, capabilities: [todoCapability(todoStore)], permission: { mode: "yolo" } });
   const first = await runner.run(firstAgent, "track this");
   firstFaux.unregister();
   check("todo: update tool returns list", toolResultText(first.messages, "TodoList").includes("[in_progress] Draft patch"));
@@ -123,7 +123,7 @@ async function testTodoList(machine: LocalMachine): Promise<void> {
   );
 }
 
-async function testAskUserQuestion(machine: LocalMachine): Promise<void> {
+async function testAskUserQuestion(environment: LocalEnvironment): Promise<void> {
   const responder: Responder = {
     requestApproval(_request: ApprovalRequest): Promise<ApprovalResponse> {
       return Promise.resolve({ decision: "approved" });
@@ -156,14 +156,14 @@ async function testAskUserQuestion(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "asker", model, instructions: "x", tools: [askUserQuestionTool] });
 
   // Not yolo: policy deliberately denies AskUserQuestion there (no human to answer).
-  const runner = testRunner({ machine, responder, permission: { mode: "workspace" } });
+  const runner = testRunner({ environment, responder, permission: { mode: "workspace" } });
   const result = await runner.run(agent, "ask");
   faux.unregister();
 
   check("ask user: returns serialized answer", toolResultText(result.messages, "AskUserQuestion").includes('"style":"Compact"'));
 }
 
-async function testUnifiedAgentTool(machine: LocalMachine): Promise<void> {
+async function testUnifiedAgentTool(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(
@@ -181,7 +181,7 @@ async function testUnifiedAgentTool(machine: LocalMachine): Promise<void> {
   const coder = defineAgent({ name: "coder", model, instructions: "Code.", handoffDescription: "Implementation subagent." });
   const main = defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [coder] });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   const result = await runner.run(main, "delegate");
   faux.unregister();
 
@@ -193,12 +193,12 @@ async function testUnifiedAgentTool(machine: LocalMachine): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-builtin-tools-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
-    await testReadImage(dir, machine);
-    await testTodoList(machine);
-    await testAskUserQuestion(machine);
-    await testUnifiedAgentTool(machine);
+    await testReadImage(dir, environment);
+    await testTodoList(environment);
+    await testAskUserQuestion(environment);
+    await testUnifiedAgentTool(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

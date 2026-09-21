@@ -15,7 +15,7 @@ function check(label: string, ok: boolean): void {
   check("shell-form: original shell kept", inv.binShell === "/bin/zsh");
 }
 
-// bash and plain `sh` (BaseMachine's cwd fallback) are recognized as shells.
+// bash and plain `sh` (BaseEnvironment's cwd fallback) are recognized as shells.
 {
   check("shell-form: bare sh recognized", toSrtInvocation(["sh", "-c", "pwd"], "/bin/bash").command === "pwd");
   check("shell-form: bash path recognized", toSrtInvocation(["/bin/bash", "-c", "pwd"], "/bin/zsh").binShell === "/bin/bash");

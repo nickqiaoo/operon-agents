@@ -1,5 +1,5 @@
 import { resolvePathAccessPath, type PathAccessOperation, type WorkspaceAccessPolicy } from "../policies/path-access.ts";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 import type { ToolPlan } from "../types.ts";
 import { literalRulePattern, matchesGlobRuleSubject, matchesPathRuleSubject } from "./rule-match.ts";
 
@@ -7,26 +7,26 @@ export const SEARCH_ACCESS_POLICY: WorkspaceAccessPolicy = { guardMode: "absolut
 
 export function resolveToolPath(
   path: string,
-  machine: Machine,
+  environment: Environment,
   operation: PathAccessOperation,
   policy?: WorkspaceAccessPolicy,
 ): Promise<string> {
   return resolvePathAccessPath(path, {
-    machine,
-    workspace: { workspaceDir: machine.getcwd(), additionalDirs: machine.additionalDirs?.() ?? [] },
+    environment,
+    workspace: { workspaceDir: environment.getcwd(), additionalDirs: environment.additionalDirs?.() ?? [] },
     operation,
     policy,
   });
 }
 
-export function pathApproval(toolName: string, machine: Machine, path: string): Pick<ToolPlan, "approvalRule" | "matchesRule"> {
+export function pathApproval(toolName: string, environment: Environment, path: string): Pick<ToolPlan, "approvalRule" | "matchesRule"> {
   return {
     approvalRule: literalRulePattern(toolName, path),
     matchesRule: (ruleArgs) =>
       matchesPathRuleSubject(ruleArgs, path, {
-        cwd: machine.getcwd(),
-        pathClass: machine.pathClass(),
-        homeDir: machine.gethome(),
+        cwd: environment.getcwd(),
+        pathClass: environment.pathClass(),
+        homeDir: environment.gethome(),
       }),
   };
 }

@@ -11,8 +11,8 @@
  *  - `claim` takes the lease on one woken (or abandoned) session. Taking it IS the claim; there
  *    is no separate "dispatched" state that could disagree with "held".
  *  - `renew` is the holder's heartbeat, and carries the only signal a holder gets from other
- *    nodes: whether anything was appended since it last looked. A cancel reaches the machine
- *    running the turn this way — no address for that machine is needed anywhere.
+ *    nodes: whether anything was appended since it last looked. A cancel reaches the environment
+ *    running the turn this way — no address for that environment is needed anywhere.
  *
  * A worker that dies leaves its row held past its TTL. The next `claim` takes such a row like
  * any other: an abandoned session is work, whether or not anything new was appended to it.

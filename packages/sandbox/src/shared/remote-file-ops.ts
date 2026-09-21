@@ -1,4 +1,4 @@
-import type { Machine } from "operon-agents-core";
+import type { Environment } from "operon-agents-core";
 
 /**
  * Read a byte WINDOW of a remote file without transferring the rest.
@@ -22,7 +22,7 @@ export function sliceRange(bytes: Buffer, range?: { readonly offset?: number; re
 }
 
 export async function readWindowViaShell(
-  machine: Machine,
+  environment: Environment,
   absPath: string,
   range: { readonly offset?: number; readonly length?: number },
 ): Promise<Buffer | undefined> {
@@ -32,7 +32,7 @@ export async function readWindowViaShell(
   const cut = length === undefined ? "" : ` | head -c ${String(length)}`;
   // The path goes through `$0` rather than string interpolation, so no quoting scheme has to
   // be trusted with a filename containing quotes, spaces or newlines. The numbers are ours.
-  const result = await machine
+  const result = await environment
     .run(["sh", "-c", `tail -c +${String(offset + 1)} -- "$0"${cut} | base64`, absPath])
     .catch(() => undefined);
   if (result === undefined || result.exitCode !== 0) return undefined;

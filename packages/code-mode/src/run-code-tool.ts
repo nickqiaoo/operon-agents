@@ -24,13 +24,13 @@
  * A long program (polling, many slow tool calls) need not hold the turn. Started with
  * `run_in_background`, or moved there while running (the session's `detachTool`), it becomes a
  * background task the model reads with `BackgroundOutput`; its console lines, each nested call's
- * outcome and the final result go to a log file on the machine, the way a background command's
+ * outcome and the final result go to a log file on the environment, the way a background command's
  * bytes do. A program in the background has no turn to pause, so an approval nobody can give
  * fails inside it instead — the same as with no journal.
  */
 import { z } from "zod";
 import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, ToolAccesses } from "operon-agents-core";
-import type { ApprovalResponse, ImageContent, Machine, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext } from "operon-agents-core";
+import type { ApprovalResponse, ImageContent, Environment, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext } from "operon-agents-core";
 import { briefOf } from "./declarations.ts";
 import { BACKGROUND_PARAM_DESCRIPTION, CODE_PARAM_DESCRIPTION, DESCRIPTION_PARAM_DESCRIPTION, RUN_CODE_NAME } from "./prompt.ts";
 import { ToolCallFailure } from "./runtime.ts";
@@ -134,7 +134,7 @@ type Journal = Record<string, JournalEntry>;
 
 const JOURNAL_KEY_PREFIX = "code-mode:journal:";
 const PAUSING = "the program is pausing for the user's approval";
-/** How often the background log on the machine is rewritten while a program runs. */
+/** How often the background log on the environment is rewritten while a program runs. */
 const LOG_FLUSH_INTERVAL_MS = 250;
 
 const RunCodeInput = z.object({
@@ -192,7 +192,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
     else ctx.signal.addEventListener("abort", bridge, { once: true });
     let detached = runInBackground;
     const detachable = registrar !== undefined && (runInBackground || ctx.detachSignal !== undefined);
-    const log = detachable ? await TaskLog.open(ctx.machine) : undefined;
+    const log = detachable ? await TaskLog.open(ctx.environment) : undefined;
 
     const program = runProgram({
       code,
@@ -224,7 +224,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
             return { ok: !done.isError, ...(done.isError ? { stopReason: firstLine(textOf(done.result.content)) } : {}) };
           },
           description,
-          { logPath: log!.path, machine: ctx.machine, parentAddress: ctx.address, toolCallId: ctx.toolCallId, abort: () => controller.abort() },
+          { logPath: log!.path, environment: ctx.environment, parentAddress: ctx.address, toolCallId: ctx.toolCallId, abort: () => controller.abort() },
         ),
       );
       ctx.onUpdate?.({ kind: "custom", customKind: "detached", customData: { taskId } });
@@ -438,9 +438,9 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
 }
 
 /**
- * The background log of a program: a file on the machine, rewritten with everything so far at
+ * The background log of a program: a file on the environment, rewritten with everything so far at
  * most every {@link LOG_FLUSH_INTERVAL_MS} while the program runs, and once more when it ends.
- * Writes are chained so a slow machine never sees them out of order.
+ * Writes are chained so a slow environment never sees them out of order.
  */
 class TaskLog {
   private readonly lines: string[] = [];
@@ -448,14 +448,14 @@ class TaskLog {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<void> = Promise.resolve();
   readonly path: string;
-  private readonly machine: Machine;
-  private constructor(path: string, machine: Machine) {
+  private readonly environment: Environment;
+  private constructor(path: string, environment: Environment) {
     this.path = path;
-    this.machine = machine;
+    this.environment = environment;
   }
 
-  static async open(machine: Machine): Promise<TaskLog> {
-    return new TaskLog(await prepareBackgroundLog(machine), machine);
+  static async open(environment: Environment): Promise<TaskLog> {
+    return new TaskLog(await prepareBackgroundLog(environment), environment);
   }
 
   append(line: string): void {
@@ -471,7 +471,7 @@ class TaskLog {
     if (!this.dirty) return;
     this.dirty = false;
     const content = `${this.lines.join("\n")}\n`;
-    this.chain = this.chain.then(() => this.machine.writeText(this.path, content)).then(() => undefined, () => undefined);
+    this.chain = this.chain.then(() => this.environment.writeText(this.path, content)).then(() => undefined, () => undefined);
   }
 
   /** Write everything out and wait for it; the log is complete when this resolves. */

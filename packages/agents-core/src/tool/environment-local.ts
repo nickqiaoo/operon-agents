@@ -19,15 +19,15 @@ import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:pa
 import {
   type DecodeErrors,
   type DirEntry,
-  type Environment,
+  type OsInfo,
   type ByteRange,
-  type Machine,
+  type Environment,
   type FileInfo,
   type FileKind,
   type FileVersion,
   type OsKind,
-} from "./machine.ts";
-import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
+} from "./environment.ts";
+import { BaseEnvironment, type SpawnedProcess } from "./environment-base.ts";
 
 function fileKindFromStats(s: Stats): FileKind {
   if (s.isFile()) return "file";
@@ -53,7 +53,7 @@ function isExistsError(error: unknown): boolean {
  * Write `payload` so a reader sees the old file or the new one, never a half-written one:
  * write a sibling temp file, then rename it over the target. This is what makes EVERY local
  * write all-or-nothing; remote backends write straight to the target instead, because there
- * the same staging costs round trips on every write (see Machine.writeText).
+ * the same staging costs round trips on every write (see Environment.writeText).
  *
  * Three details are load-bearing, all of them things a plain `writeFile` gets for free
  * and a rename does not:
@@ -117,7 +117,7 @@ function detectWindowsGitBash(env: NodeJS.ProcessEnv = process.env): string | un
   return undefined;
 }
 
-export function detectEnvironment(env: NodeJS.ProcessEnv = process.env): Environment {
+export function detectOsInfo(env: NodeJS.ProcessEnv = process.env): OsInfo {
   const platform = process.platform;
   const osKind: OsKind = platform === "win32" ? "Windows" : platform === "darwin" ? "Darwin" : "Linux";
   const shellPath =
@@ -133,9 +133,9 @@ export function detectEnvironment(env: NodeJS.ProcessEnv = process.env): Environ
   };
 }
 
-export class LocalMachine extends BaseMachine {
+export class LocalEnvironment extends BaseEnvironment {
   readonly name = "local";
-  readonly osEnv: Environment = detectEnvironment();
+  readonly osInfo: OsInfo = detectOsInfo();
   private cwd: string;
   private readonly extraDirs: readonly string[];
 
@@ -166,9 +166,9 @@ export class LocalMachine extends BaseMachine {
     return this.cwd;
   }
 
-  // Session-granted extra roots survive a re-root (a worktree machine keeps its grants).
-  withCwd(cwd: string): Machine {
-    return new LocalMachine({ cwd: this.abs(cwd), additionalDirs: this.extraDirs });
+  // Session-granted extra roots survive a re-root (a worktree environment keeps its grants).
+  withCwd(cwd: string): Environment {
+    return new LocalEnvironment({ cwd: this.abs(cwd), additionalDirs: this.extraDirs });
   }
 
   override additionalDirs(): readonly string[] {
@@ -259,7 +259,7 @@ export class LocalMachine extends BaseMachine {
     // terminal, so `sudo`/`ssh` fail fast instead of reading the host's keyboard. Windows has no
     // process groups to target; there the direct child is all we can signal.
     const group = process.platform !== "win32";
-    // Cross-machine contract: `env` is a set of OVERRIDES layered over the ambient
+    // Cross-environment contract: `env` is a set of OVERRIDES layered over the ambient
     // environment, not a replacement — so PATH/proxy/etc. are preserved.
     const child = spawn(command, rest, {
       cwd: this.cwd,
@@ -273,7 +273,7 @@ export class LocalMachine extends BaseMachine {
 
 class LocalProcess implements SpawnedProcess {
   private readonly child: ChildProcess;
-  /** The child leads a process group whose id is its pid (see LocalMachine.spawn). */
+  /** The child leads a process group whose id is its pid (see LocalEnvironment.spawn). */
   private readonly group: boolean;
   constructor(child: ChildProcess, group: boolean) {
     this.child = child;

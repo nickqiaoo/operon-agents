@@ -4,7 +4,7 @@ import type { CallOptions, LlmRequest } from "../llm/model.ts";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "../protocol/index.ts";
 import type { ConversationContext } from "./context.ts";
 import type { Tool } from "../tool/types.ts";
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
@@ -32,7 +32,7 @@ export interface ExecuteStepDeps {
   readonly sessionId?: string;
   readonly signal: AbortSignal;
   readonly model: ChatModel;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
@@ -259,7 +259,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, machine: deps.machine, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
       message,
     );
 

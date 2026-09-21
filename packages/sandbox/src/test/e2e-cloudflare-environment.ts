@@ -8,7 +8,7 @@
  * really kills, a cap really stops the command, and an exit code admits when it is unknown.
  */
 import { materializeWorkspace } from "operon-agents-core";
-import { CloudflareMachine } from "../cloudflare/machine.ts";
+import { CloudflareEnvironment } from "../cloudflare/environment.ts";
 import { CloudflareWorkspace } from "../cloudflare/lifecycle.ts";
 import type {
   CloudflareExecOptions,
@@ -157,16 +157,16 @@ const ok = (chunks: FakeProcess["chunks"], exitCode = 0): FakeProcess => ({ chun
 
 async function testCheapPath(): Promise<void> {
   const client = new FakeClient(() => ok([{ stream: "stdout", data: "hi\n" }]));
-  const machine = new CloudflareMachine(client, { cwd: "/workspace" });
+  const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
-  const result = await machine.run(["echo", "hi"]);
+  const result = await environment.run(["echo", "hi"]);
   check("cheap path: plain run uses commands.execute (one round trip)", client.executed.length === 1 && client.started.length === 0);
   check("cheap path: stdout returned", result.stdout === "hi\n");
   check("cheap path: exit code reported", result.exitCode === 0);
   check("cheap path: argv is quoted into one command string", client.executed[0] === "echo hi");
   check("cheap path: cwd passed to the vendor", client.lastExecOptions?.cwd === "/workspace");
 
-  await machine.run(["sleep", "9"], { timeoutMs: 4_000 });
+  await environment.run(["sleep", "9"], { timeoutMs: 4_000 });
   check("cheap path: timeout handed to the vendor natively", client.lastExecOptions?.timeoutMs === 4_000);
 }
 
@@ -178,16 +178,16 @@ async function testStreamingAndCap(): Promise<void> {
       { stream: "stdout", data: "two" },
     ]),
   );
-  const machine = new CloudflareMachine(client, { cwd: "/workspace" });
+  const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
   const seen: string[] = [];
-  const streamed = await machine.run(["build"], { onOutput: (c) => seen.push(`${c.stream}:${c.data}`) });
+  const streamed = await environment.run(["build"], { onOutput: (c) => seen.push(`${c.stream}:${c.data}`) });
   check("stream: onOutput takes the process path, not execute", client.started.length === 1 && client.executed.length === 0);
   check("stream: output arrives incrementally, in order", seen.join("|") === "stdout:one|stderr:warn|stdout:two");
   check("stream: streams stay separated", streamed.stdout === "onetwo" && streamed.stderr === "warn");
   check("stream: exit code read from the exit event", streamed.exitCode === 0);
 
-  const capped = await machine.run(["build"], { maxOutputBytes: 4 });
+  const capped = await environment.run(["build"], { maxOutputBytes: 4 });
   check("cap: output cut at the limit", capped.stdout === "one" && capped.truncated);
   check("cap: the command is actually killed, not just trimmed", client.killed.length === 1);
   check("cap: a killed run reports no exit code", capped.exitCode === undefined && capped.terminated);
@@ -197,44 +197,44 @@ async function testTimeoutAndAbort(): Promise<void> {
   const hanging = (): FakeProcess => ({ chunks: [{ stream: "stdout", data: "partial" }], hangs: true });
 
   const timeoutClient = new FakeClient(hanging);
-  const timeoutMachine = new CloudflareMachine(timeoutClient, { cwd: "/workspace" });
-  const timedOut = await timeoutMachine.run(["sleep", "60"], { timeoutMs: 40, onOutput: () => {} });
+  const timeoutEnvironment = new CloudflareEnvironment(timeoutClient, { cwd: "/workspace" });
+  const timedOut = await timeoutEnvironment.run(["sleep", "60"], { timeoutMs: 40, onOutput: () => {} });
   check("timeout: reported as timed out", timedOut.timedOut);
   check("timeout: the process was really killed", timedOut.terminated && timeoutClient.killed.length === 1);
   check("timeout: partial output is kept", timedOut.stdout === "partial");
   check("timeout: exit code is undefined, not a fabricated 0", timedOut.exitCode === undefined);
 
   const abortClient = new FakeClient(hanging);
-  const abortMachine = new CloudflareMachine(abortClient, { cwd: "/workspace" });
+  const abortEnvironment = new CloudflareEnvironment(abortClient, { cwd: "/workspace" });
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 40);
-  const aborted = await abortMachine.run(["sleep", "60"], { signal: controller.signal });
+  const aborted = await abortEnvironment.run(["sleep", "60"], { signal: controller.signal });
   check("abort: the process was really killed", aborted.terminated && abortClient.killed.length === 1);
   check("abort: exit code is undefined", aborted.exitCode === undefined);
 }
 
 async function testFilesAndListing(): Promise<void> {
   const client = new FakeClient(() => ok([{ stream: "stdout", data: "regular file|11|1700000000\n" }]));
-  const machine = new CloudflareMachine(client, { cwd: "/workspace" });
+  const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
   // Binary round trip: base64 is the only byte-safe route over this transport.
   const payload = Buffer.from([0x00, 0xff, 0x10, 0x80]);
-  await machine.writeBytes("/workspace/blob.bin", payload);
-  const read = await machine.readBytes("/workspace/blob.bin");
+  await environment.writeBytes("/workspace/blob.bin", payload);
+  const read = await environment.readBytes("/workspace/blob.bin");
   check("files: binary survives the base64 round trip", read.equals(payload));
 
-  await machine.writeText("/workspace/note.txt", "hello");
+  await environment.writeText("/workspace/note.txt", "hello");
   check("files: text write lands in the sandbox", client.written.get("/workspace/note.txt")?.toString("utf8") === "hello");
 
-  const entries = await machine.listDir("/workspace");
+  const entries = await environment.listDir("/workspace");
   check("listDir: one round trip carries kinds", entries.length === 3);
   check("listDir: directory flag mapped", entries[0]?.kind === "dir" && entries[0]?.name === "src");
   check("listDir: plain file mapped", entries[1]?.kind === "file");
 
-  const info = await machine.fileInfo("/workspace/note.txt");
+  const info = await environment.fileInfo("/workspace/note.txt");
   check("fileInfo: kind/size/mtime parsed from one stat", info.kind === "file" && info.size === 11 && info.mtimeMs === 1_700_000_000_000);
 
-  check("ports: exposedPortUrl is honestly undefined on this transport", (await machine.exposedPortUrl()) === undefined);
+  check("ports: exposedPortUrl is honestly undefined on this transport", (await environment.exposedPortUrl()) === undefined);
 }
 
 async function testWorkspaceLifecycle(): Promise<void> {
@@ -249,7 +249,7 @@ async function testWorkspaceLifecycle(): Promise<void> {
   check("workspace: snapshot ids are distinct", (await workspace.snapshot()) !== snapshotId);
 
   await workspace.restore(snapshotId!);
-  check("workspace: machine stays usable across restore (no instance swap)", (await workspace.machine.run(["true"])).exitCode === 0);
+  check("workspace: environment stays usable across restore (no instance swap)", (await workspace.environment.run(["true"])).exitCode === 0);
 
   const cloned = await workspace.checkout("https://example.com/app.git", { branch: "main" });
   check("workspace: native git checkout used, shallow by default", cloned && client.clones[0]?.depth === 1 && client.clones[0]?.branch === "main");
@@ -257,9 +257,9 @@ async function testWorkspaceLifecycle(): Promise<void> {
 
 async function testWorkspaceSpec(): Promise<void> {
   const client = new FakeClient(() => ok([{ stream: "stdout", data: "" }]));
-  const machine = new CloudflareMachine(client, { cwd: "/workspace" });
+  const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
-  await materializeWorkspace(machine, {
+  await materializeWorkspace(environment, {
     root: "/workspace",
     entries: {
       repo: { type: "git_repo", repo: "https://example.com/app.git", ref: "main" },
@@ -278,5 +278,5 @@ await testFilesAndListing();
 await testWorkspaceLifecycle();
 await testWorkspaceSpec();
 
-console.log(failures === 0 ? "\n✅ CLOUDFLARE MACHINE E2E PASS" : `\n❌ ${String(failures)} FAILED`);
+console.log(failures === 0 ? "\n✅ CLOUDFLARE ENVIRONMENT E2E PASS" : `\n❌ ${String(failures)} FAILED`);
 if (failures > 0) process.exit(1);

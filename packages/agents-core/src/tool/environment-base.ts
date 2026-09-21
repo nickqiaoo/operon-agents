@@ -1,5 +1,5 @@
 /**
- * Implementer-side base for Machine backends.
+ * Implementer-side base for Environment backends.
  *
  * A backend writes only the dumb primitives (the abstract SPI below); this
  * class derives the high-level operations from them:
@@ -15,22 +15,22 @@ import {
   type RunCommandResult,
   type DecodeErrors,
   type DirEntry,
-  type Environment,
+  type OsInfo,
   type ByteRange,
-  type Machine,
+  type Environment,
   type RunCommandOptions,
   type FileInfo,
   type FileVersion,
   type WriteTextOptions,
   type WriteTextResult,
-} from "./machine.ts";
+} from "./environment.ts";
 import { materializeModelText } from "./builtin/line-endings.ts";
 
-/** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
+/** Deadline for the `readlink -f` realpath fallback (see BaseEnvironment.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
 
 /**
- * A live OS process, normalized. IMPLEMENTER-SIDE ONLY — this is what {@link BaseMachine.spawn}
+ * A live OS process, normalized. IMPLEMENTER-SIDE ONLY — this is what {@link BaseEnvironment.spawn}
  * hands back so ONE copy of `run`'s read/cap/decode/kill-escalate logic can serve backends
  * whose native process objects disagree on the details: node's `ChildProcess` kills by signal
  * name and reports exit on one event, while an ssh2 `ClientChannel` wants the signal without
@@ -60,8 +60,8 @@ function codedError(message: string, code: string): NodeJS.ErrnoException {
   return error;
 }
 
-/** Join with the TARGET machine's path flavour, not the host's — a local process may be
- *  driving a posix machine (SSH / sandbox) or vice versa. */
+/** Join with the TARGET environment's path flavour, not the host's — a local process may be
+ *  driving a posix environment (SSH / sandbox) or vice versa. */
 function joinPath(pathClass: "posix" | "win32", dir: string, name: string): string {
   return (pathClass === "win32" ? win32 : posix).join(dir, name);
 }
@@ -133,17 +133,17 @@ async function collectStream(stream: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export abstract class BaseMachine implements Machine {
+export abstract class BaseEnvironment implements Environment {
   abstract readonly name: string;
-  abstract readonly osEnv: Environment;
+  abstract readonly osInfo: OsInfo;
 
   // ---- SPI: identity & path semantics ----
   abstract pathClass(): "posix" | "win32";
   abstract normpath(path: string): string;
   abstract gethome(): string;
   abstract getcwd(): string;
-  abstract withCwd(cwd: string): Machine;
-  /** Extra workspace roots (see Machine.additionalDirs). Default: cwd only. */
+  abstract withCwd(cwd: string): Environment;
+  /** Extra workspace roots (see Environment.additionalDirs). Default: cwd only. */
   additionalDirs(): readonly string[] {
     return [];
   }

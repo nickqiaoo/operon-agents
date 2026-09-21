@@ -1,6 +1,6 @@
 /**
- * The local composition root — every convention a single-machine, single-operator app runs on,
- * bundled in one place: disk sessions under `<homeDir>/sessions`, the local machine, a rotating
+ * The local composition root — every convention a single-environment, single-operator app runs on,
+ * bundled in one place: disk sessions under `<homeDir>/sessions`, the local environment, a rotating
  * file log, file-backed MCP credentials, disk-discovered agent profiles, and the cron extension.
  *
  * It is a PRESET: pure data in (`LocalDeploymentOptions`), the three composition hooks out.
@@ -21,7 +21,7 @@ import {
   type McpServerConfig,
   type PluginManager,
   DiskSessionRepository,
-  LocalMachine,
+  LocalEnvironment,
   McpOAuthService,
   RotatingFileSink,
   SkillRegistry,
@@ -71,7 +71,7 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
   readonly loadConfiguredProviders?: boolean;
 }
 
-/** Build `HarnessOptions` wired for a local, single-machine deployment. */
+/** Build `HarnessOptions` wired for a local, single-environment deployment. */
 export async function localHarnessOptions<TContext>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<HarnessOptions<TContext>> {
@@ -118,21 +118,21 @@ export async function localHarnessOptions<TContext>(
         await servers.connect({ scope, sessionId: "" });
         scope.register(T.McpServers, servers, { dispose: () => servers.shutdown() });
       }
-      // The host's hook runs BEFORE the skill scan so it can say what machine this workspace
-      // executes on (`T.WorkspaceMachineFactory`) — or register its own `T.SkillRegistry`.
+      // The host's hook runs BEFORE the skill scan so it can say what environment this workspace
+      // executes on (`T.WorkspaceEnvironmentFactory`) — or register its own `T.SkillRegistry`.
       await workspace?.(scope, ctx);
-      // Skills follow the workspace's EXECUTION machine, not the host's disk: the catalog the
+      // Skills follow the workspace's EXECUTION environment, not the host's disk: the catalog the
       // model sees must be the one whose scripts its Bash can reach. A remote workspace
-      // registers its machine above and the scan runs through it; absent that, the harness's
-      // default (`T.MachineFactory`, read through the parent chain) is what sessions here will
-      // execute on — the same precedence `Session.open` resolves. A machine FACTORY (one
-      // machine per session) has no single filesystem to scan — no shared registry then; each
-      // session scans through its own `T.Machine` (`defaultCapabilities` without `T.SkillRegistry`).
+      // registers its environment above and the scan runs through it; absent that, the harness's
+      // default (`T.EnvironmentFactory`, read through the parent chain) is what sessions here will
+      // execute on — the same precedence `Session.open` resolves. An environment FACTORY (one
+      // environment per session) has no single filesystem to scan — no shared registry then; each
+      // session scans through its own `T.Environment` (`defaultCapabilities` without `T.SkillRegistry`).
       if (!scope.hasLocal(T.SkillRegistry)) {
-        const workspaceMachine = scope.get(T.WorkspaceMachineFactory) ?? scope.get(T.MachineFactory) ?? new LocalMachine(ctx.workDir);
-        if (typeof workspaceMachine !== "function") {
+        const workspaceEnvironment = scope.get(T.WorkspaceEnvironmentFactory) ?? scope.get(T.EnvironmentFactory) ?? new LocalEnvironment(ctx.workDir);
+        if (typeof workspaceEnvironment !== "function") {
           const registry = new SkillRegistry();
-          await loadSkillRoots(workspaceMachine, registry, {
+          await loadSkillRoots(workspaceEnvironment, registry, {
             ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
           });
           scope.register(T.SkillRegistry, registry, { owned: false });
@@ -144,7 +144,7 @@ export async function localHarnessOptions<TContext>(
       ((scope, ctx) =>
         defaultCapabilities({
           scope,
-          ownMachine: ctx.ownMachine,
+          ownEnvironment: ctx.ownEnvironment,
           // `createSession({ mcpServers })` — layered over the workspace's shared connections.
           ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
           ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),

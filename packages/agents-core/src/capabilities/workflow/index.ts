@@ -6,7 +6,7 @@
  * It contributes NO tools: the `Workflow` tool is built by the Runner (it needs
  * runLoop to spawn subagents), and reaches this service through the session to read
  * its configured directories and persist run snapshots. The capability's job is
- * purely to make the management/read machine available to upper layers and the
+ * purely to make the management/read environment available to upper layers and the
  * `/workflows` command. A session opened WITHOUT this capability still has a
  * `T.Workflow`: `Session.open` provides an in-memory fallback.
  */
@@ -24,7 +24,7 @@ export function workflowCapability(manager: WorkflowManager = new WorkflowManage
       {
         token: T.Workflow,
         create: (ctx) => {
-          // Bookkeeping goes through the SessionStore, never the Machine: without a
+          // Bookkeeping goes through the SessionStore, never the Environment: without a
           // durable store the manager stays on its in-memory store for the session's lifetime.
           const store = ctx.scope.get(T.Store);
           if (store !== undefined) manager.attachStore(store);

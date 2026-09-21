@@ -1,7 +1,7 @@
 /**
- * Unit-style coverage for two LocalMachine bugs (tool/machine-local.ts):
+ * Unit-style coverage for two LocalEnvironment bugs (tool/environment-local.ts):
  *  - mkdir() ignored `existOk` entirely — {parents:false, existOk:true} on an
- *    already-existing dir threw EEXIST instead of succeeding, unlike SshMachine.
+ *    already-existing dir threw EEXIST instead of succeeding, unlike SshEnvironment.
  *  - readBytes ignored its range and sliced a whole-file read, so a header sniff
  *    or a log follower paid for the entire file on every call.
  *  - run() wrote to the child's stdin with no 'error' listener on the stream. A child that
@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalMachine } from "../index.ts";
+import { LocalEnvironment } from "../index.ts";
 
 /** Processes whose command line carries `marker`, via pgrep; empty when none are left. */
 function processesMatching(marker: string): string {
@@ -64,14 +64,14 @@ async function ok(label: string, fn: () => Promise<unknown>): Promise<void> {
  * hidden until a loaded runner hit the timing that surfaces it.
  */
 async function stdinToADeafChild(): Promise<void> {
-  const machine = new LocalMachine();
+  const environment = new LocalEnvironment();
   const big = "x".repeat(1024 * 1024);
-  const result = await machine.run(["sh", "-c", "exit 0"], { stdin: big });
+  const result = await environment.run(["sh", "-c", "exit 0"], { stdin: big });
   check("stdin: a child that never reads it does not take the process down", result.exitCode === 0);
   check("stdin: and the command's own result still comes back", !result.timedOut && !result.terminated);
 
   // Same shape, but the child writes something — the result must survive the broken pipe intact.
-  const echoed = await machine.run(["sh", "-c", "echo done; exit 0"], { stdin: big });
+  const echoed = await environment.run(["sh", "-c", "echo done; exit 0"], { stdin: big });
   check("stdin: output is unaffected by the unread stdin", echoed.stdout.trim() === "done");
 }
 
@@ -85,19 +85,19 @@ async function stopReachesTheWholeTree(): Promise<void> {
   if (process.platform === "win32") return;
   const marker = `operon-tree-${String(process.pid)}`;
 
-  const machine = new LocalMachine();
-  const wrapped = await machine.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
+  const environment = new LocalEnvironment();
+  const wrapped = await environment.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
     timeoutMs: 300,
   });
   await sleepMs(100);
   check("tree: timeout reports the command stopped", wrapped.timedOut && wrapped.terminated);
   check("tree: the command under the shell does not survive the stop", processesMatching(`${marker}-a`) === "");
 
-  class QuickGraceMachine extends LocalMachine {
+  class QuickGraceEnvironment extends LocalEnvironment {
     protected override sigtermGraceMs = 300;
   }
   const started = Date.now();
-  const stubborn = await new QuickGraceMachine().run(
+  const stubborn = await new QuickGraceEnvironment().run(
     ["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`],
     { timeoutMs: 200 },
   );
@@ -119,30 +119,30 @@ async function stopReachesTheWholeTree(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "machine-local-e2e-"));
-  const machine = new LocalMachine(root);
+  const root = await mkdtemp(join(tmpdir(), "environment-local-e2e-"));
+  const environment = new LocalEnvironment(root);
 
   // ── writeText: line endings ──
   // `lineEndings: "CRLF"` used to join LF straight to CRLF, so text that already had `\r\n`
   // in it came out as `\r\r\n` — a corrupted file, and exactly the shape model output takes
   // after reading a CRLF file. The Edit path was safe (it goes through `materializeModelText`,
-  // which normalizes first); the Machine contract was not, and now shares that implementation.
-  await machine.writeText("crlf-from-crlf.txt", "line one\r\nline two\r\n", { lineEndings: "CRLF" });
+  // which normalizes first); the Environment contract was not, and now shares that implementation.
+  await environment.writeText("crlf-from-crlf.txt", "line one\r\nline two\r\n", { lineEndings: "CRLF" });
   check(
     "writeText(CRLF): text that already has CRLF is not doubled",
     (await readFile(join(root, "crlf-from-crlf.txt"), "utf8")) === "line one\r\nline two\r\n",
   );
-  await machine.writeText("crlf-from-lf.txt", "x\ny\n", { lineEndings: "CRLF" });
+  await environment.writeText("crlf-from-lf.txt", "x\ny\n", { lineEndings: "CRLF" });
   check(
     "writeText(CRLF): LF text is converted",
     (await readFile(join(root, "crlf-from-lf.txt"), "utf8")) === "x\r\ny\r\n",
   );
-  await machine.writeText("crlf-mixed.txt", "a\r\nb\nc\r\n", { lineEndings: "CRLF" });
+  await environment.writeText("crlf-mixed.txt", "a\r\nb\nc\r\n", { lineEndings: "CRLF" });
   check(
     "writeText(CRLF): mixed input lands uniformly CRLF",
     (await readFile(join(root, "crlf-mixed.txt"), "utf8")) === "a\r\nb\r\nc\r\n",
   );
-  await machine.writeText("lf-default.txt", "a\r\nb\n");
+  await environment.writeText("lf-default.txt", "a\r\nb\n");
   check(
     "writeText(): without the option nothing is rewritten",
     (await readFile(join(root, "lf-default.txt"), "utf8")) === "a\r\nb\n",
@@ -152,23 +152,23 @@ async function main(): Promise<void> {
   await mkdir(join(root, "existing"), { recursive: true });
 
   await ok("mkdir: parents=false, existOk=true, dir exists → succeeds (no throw)", () =>
-    machine.mkdir("existing", { parents: false, existOk: true }),
+    environment.mkdir("existing", { parents: false, existOk: true }),
   );
   await throwsWithCode(
     "mkdir: parents=false, existOk=false (default), dir exists → EEXIST",
-    () => machine.mkdir("existing", { parents: false }),
+    () => environment.mkdir("existing", { parents: false }),
     "EEXIST",
   );
   await ok("mkdir: parents=true, existOk=true, dir exists → succeeds", () =>
-    machine.mkdir("existing", { parents: true, existOk: true }),
+    environment.mkdir("existing", { parents: true, existOk: true }),
   );
   await ok("mkdir: parents=true, existOk=false, dir exists → still succeeds (recursive mkdir semantics)", () =>
-    machine.mkdir("existing", { parents: true, existOk: false }),
+    environment.mkdir("existing", { parents: true, existOk: false }),
   );
-  await ok("mkdir: parents=false, dir does not exist yet → succeeds", () => machine.mkdir("fresh-dir", { parents: false }));
+  await ok("mkdir: parents=false, dir does not exist yet → succeeds", () => environment.mkdir("fresh-dir", { parents: false }));
   await throwsWithCode(
     "mkdir: parents=false, nested path with missing intermediate dir → ENOENT",
-    () => machine.mkdir("no-parent/nested", { parents: false }),
+    () => environment.mkdir("no-parent/nested", { parents: false }),
     "ENOENT",
   );
 
@@ -176,12 +176,12 @@ async function main(): Promise<void> {
   await writeFile(join(root, "afile"), "not a dir");
   await throwsWithCode(
     "mkdir: existOk=true but a FILE occupies the path → still EEXIST (not silent success)",
-    () => machine.mkdir("afile", { parents: false, existOk: true }),
+    () => environment.mkdir("afile", { parents: false, existOk: true }),
     "EEXIST",
   );
   await throwsWithCode(
     "mkdir: parents=true, existOk=true, FILE at path → still EEXIST",
-    () => machine.mkdir("afile", { parents: true, existOk: true }),
+    () => environment.mkdir("afile", { parents: true, existOk: true }),
     "EEXIST",
   );
 
@@ -194,23 +194,23 @@ async function main(): Promise<void> {
       Buffer.concat([Buffer.from("HEAD"), Buffer.from([0xff, 0xfe, 0xff]), Buffer.from("TAIL"), Buffer.alloc(4096, 0x41)]),
     );
 
-    const head = await machine.readBytes("window.bin", { length: 4 });
+    const head = await environment.readBytes("window.bin", { length: 4 });
     check("readBytes({length}): prefix only", head.byteLength === 4 && head.toString("utf8") === "HEAD");
 
-    const slice = await machine.readBytes("window.bin", { offset: 7, length: 4 });
+    const slice = await environment.readBytes("window.bin", { offset: 7, length: 4 });
     check("readBytes({offset,length}): window from the middle", slice.toString("utf8") === "TAIL");
 
     // Offset with no length = "everything appended since here" — the log-follower shape.
-    const rest = await machine.readBytes("window.bin", { offset: 11 });
+    const rest = await environment.readBytes("window.bin", { offset: 11 });
     check("readBytes({offset}): reads to EOF", rest.byteLength === 4096 && rest[0] === 0x41);
 
     await writeFile(join(root, "short.bin"), "hi");
-    const overshoot = await machine.readBytes("short.bin", { length: 100 });
+    const overshoot = await environment.readBytes("short.bin", { length: 100 });
     check("readBytes: length past EOF returns only what exists", overshoot.toString("utf8") === "hi");
-    const pastEof = await machine.readBytes("short.bin", { offset: 99 });
+    const pastEof = await environment.readBytes("short.bin", { offset: 99 });
     check("readBytes: offset past EOF returns empty", pastEof.byteLength === 0);
 
-    const whole = await machine.readBytes("window.bin");
+    const whole = await environment.readBytes("window.bin");
     check("readBytes(): no range still reads the whole file", whole.byteLength === 4107);
   }
 
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     console.log("❌ FAILED:", failed.map(([label]) => label).join(", "));
     process.exit(1);
   }
-  console.log("✅ E2E PASS — LocalMachine mkdir(existOk) + windowed readBytes + unread stdin + process-tree stop");
+  console.log("✅ E2E PASS — LocalEnvironment mkdir(existOk) + windowed readBytes + unread stdin + process-tree stop");
 }
 
 main().catch((error) => {

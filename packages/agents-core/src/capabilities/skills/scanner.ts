@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "pathe";
-import type { DirEntry, Machine } from "../../tool/machine.ts";
-import { SkillParseError, UnsupportedSkillTypeError, parseSkillFromMachine } from "./parser.ts";
+import type { DirEntry, Environment } from "../../tool/environment.ts";
+import { SkillParseError, UnsupportedSkillTypeError, parseSkillFromEnvironment } from "./parser.ts";
 import type { SkillDefinition, SkillRoot, SkillSource, SkippedSkill } from "./types.ts";
 import { normalizeSkillName } from "./types.ts";
 
@@ -35,9 +35,9 @@ export interface DiscoverSkillsOptions {
 
 type EntryKind = "file" | "dir" | "none";
 
-async function statKind(machine: Machine, p: string): Promise<EntryKind> {
+async function statKind(environment: Environment, p: string): Promise<EntryKind> {
   try {
-    const kind = (await machine.fileInfo(p)).kind;
+    const kind = (await environment.fileInfo(p)).kind;
     if (kind === "dir") return "dir";
     if (kind === "file") return "file";
     return "none";
@@ -46,9 +46,9 @@ async function statKind(machine: Machine, p: string): Promise<EntryKind> {
   }
 }
 
-async function listDir(machine: Machine, p: string): Promise<readonly DirEntry[]> {
+async function listDir(environment: Environment, p: string): Promise<readonly DirEntry[]> {
   // Sorted so first-wins collision resolution across siblings is deterministic.
-  return (await machine.listDir(p)).toSorted((a, b) => a.name.localeCompare(b.name));
+  return (await environment.listDir(p)).toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -56,21 +56,21 @@ async function listDir(machine: Machine, p: string): Promise<readonly DirEntry[]
  * symlinked bundles is normal, and treating those as neither file nor dir would silently
  * hide them. Only `"symlink"` entries cost a stat; everything else is already decided.
  */
-async function resolveEntryKind(machine: Machine, dirPath: string, entry: DirEntry): Promise<EntryKind> {
+async function resolveEntryKind(environment: Environment, dirPath: string, entry: DirEntry): Promise<EntryKind> {
   if (entry.kind === "dir") return "dir";
   if (entry.kind === "file") return "file";
   if (entry.kind !== "symlink") return "none";
-  return statKind(machine, path.join(dirPath, entry.name));
+  return statKind(environment, path.join(dirPath, entry.name));
 }
 
 export async function resolveSkillRoots(
-  machine: Machine,
+  environment: Environment,
   options: ResolveSkillRootsOptions,
 ): Promise<readonly SkillRoot[]> {
   const roots: SkillRoot[] = [];
   const push = async (dir: string, source: SkillSource, plugin?: SkillRoot["plugin"]): Promise<void> => {
     const resolved = path.resolve(dir);
-    if ((await statKind(machine, resolved)) !== "dir") return;
+    if ((await statKind(environment, resolved)) !== "dir") return;
     if (roots.some((root) => root.path === resolved)) return;
     roots.push(plugin ? { path: resolved, source, plugin } : { path: resolved, source });
   };
@@ -91,7 +91,7 @@ export async function resolveSkillRoots(
 }
 
 export async function discoverSkills(
-  machine: Machine,
+  environment: Environment,
   options: DiscoverSkillsOptions,
 ): Promise<readonly SkillDefinition[]> {
   const warn = options.onWarning ?? (() => {});
@@ -105,7 +105,7 @@ export async function discoverSkills(
    */
   const parseSkill = async (skillMdPath: string, skillDirName: string, root: SkillRoot): Promise<SkillDefinition | undefined> => {
     try {
-      const parsed = await parseSkillFromMachine(machine, { skillMdPath, skillDirName, source: root.source });
+      const parsed = await parseSkillFromEnvironment(environment, { skillMdPath, skillDirName, source: root.source });
       return root.plugin === undefined ? parsed : { ...parsed, plugin: root.plugin };
     } catch (error) {
       if (error instanceof UnsupportedSkillTypeError) {
@@ -132,13 +132,13 @@ export async function discoverSkills(
 
     let entries: readonly DirEntry[];
     try {
-      entries = await listDir(machine, dirPath);
+      entries = await listDir(environment, dirPath);
     } catch (error) {
       warn(`Failed to read skill directory ${dirPath}`, error);
       return [];
     }
 
-    const kinds = await Promise.all(entries.map((entry) => resolveEntryKind(machine, dirPath, entry)));
+    const kinds = await Promise.all(entries.map((entry) => resolveEntryKind(environment, dirPath, entry)));
     const dirNames: string[] = [];
     const fileNames: string[] = [];
     for (const [i, entry] of entries.entries()) {
@@ -149,7 +149,7 @@ export async function discoverSkills(
     // A directory is a bundle iff it holds a SKILL.md. Probed for directories only — the old
     // scan asked this of every entry, including plain files, which can never answer yes.
     const bundleFlags = await Promise.all(
-      dirNames.map(async (name) => (await statKind(machine, path.join(dirPath, name, "SKILL.md"))) === "file"),
+      dirNames.map(async (name) => (await statKind(environment, path.join(dirPath, name, "SKILL.md"))) === "file"),
     );
     const bundles = new Set(dirNames.filter((_, i) => bundleFlags[i]));
 

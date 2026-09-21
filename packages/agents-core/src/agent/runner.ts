@@ -5,7 +5,7 @@ import { runTurn } from "../loop/run-turn.ts";
 import { isAbortError } from "../loop/errors.ts";
 import { ConversationContext, replayContext } from "../loop/context.ts";
 import type { BatchResume, PendingApprovalInterrupt } from "../loop/types.ts";
-import type { Machine } from "../tool/machine.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
@@ -61,7 +61,7 @@ import {
 } from "./run-support.ts";
 
 /**
- * Engine configuration — VALUES, not lifetimes. Everything with a lifetime (machine, store,
+ * Engine configuration — VALUES, not lifetimes. Everything with a lifetime (environment, store,
  * events, responder, permission options, capabilities' services) lives in a `Scope`: the
  * harness-tier scope the Runner is constructed on, and the session-tier scope the `session`
  * hook fills for each session the Runner opens itself.
@@ -70,7 +70,7 @@ export interface RunnerConfig<TContext = unknown> {
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
   /**
    * Called once per session the Runner opens on its own (no `RunOptions.session`): register
-   * this session's objects (`T.Store`, `T.Machine`, `T.PermissionOptions`, …) on `scope` and
+   * this session's objects (`T.Store`, `T.Environment`, `T.PermissionOptions`, …) on `scope` and
    * return its capabilities. A caller-supplied session is never passed through here.
    */
   readonly session?: (scope: Scope<"session">, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
@@ -175,7 +175,7 @@ export interface RunOptions<TContext = unknown> {
 }
 
 /**
- * A run's runtime: the shared machine (session/store/machine/permission/…, one per
+ * A run's runtime: the shared environment (session/store/environment/permission/…, one per
  * agent graph) plus the per-(sub)run frame (`address`, `usage`, `turns`). `Engine.run`
  * takes one of these; `deriveChild` forks a child frame for a spawned sub-agent.
  */
@@ -194,7 +194,7 @@ export interface RunState<TContext> {
   readonly maxTurns: number;
   address: string;
   readonly events: EventSink;
-  readonly machine: Machine;
+  readonly environment: Environment;
   readonly store?: SessionStore;
   readonly responder?: Responder;
   readonly background?: BackgroundSpawner;
@@ -225,8 +225,8 @@ export interface DeriveOptions {
   readonly parentToolCallId?: string;
   /** Per-child abort (background / workflow per-agent); defaults to the parent's. */
   readonly signal?: AbortSignal;
-  /** Isolated machine (e.g. a workflow worktree); defaults to the parent's. */
-  readonly machine?: Machine;
+  /** Isolated environment (e.g. a workflow worktree); defaults to the parent's. */
+  readonly environment?: Environment;
   /** Own SteerBus (parallel workflow agents can't share the parent's single-turn bus). */
   readonly steer?: SteerBus;
   /** Stable instance identity for a fresh child. Defaults to the address tail. */
@@ -770,7 +770,7 @@ export class Runner<TContext = unknown> {
       maxTurns: frame?.execution.maxTurns ?? opts?.maxTurns ?? this.config.maxTurns ?? 16,
       address: frame?.address ?? initialAddress,
       events: session.events,
-      machine: session.machine,
+      environment: session.environment,
       store: session.store,
       responder: session.responder,
       background: session.background,
@@ -918,7 +918,7 @@ class Engine<TContext> {
           sessionId: state.sessionId,
           signal: state.signal,
           model,
-          machine: state.machine,
+          environment: state.environment,
           background: state.background,
           responder: state.responder,
           // Per-address ledger: main agent and each subagent line keep independent

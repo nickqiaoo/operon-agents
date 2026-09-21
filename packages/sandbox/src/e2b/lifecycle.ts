@@ -1,6 +1,6 @@
 import type { SandboxWorkspace } from "../types.ts";
 import type { E2BSandbox } from "./e2b-api.ts";
-import { E2BMachine, type E2BMachineOptions } from "./machine.ts";
+import { E2BEnvironment, type E2BEnvironmentOptions } from "./environment.ts";
 
 /**
  * The bits of the `Sandbox` class we call. Structural, so `e2b` stays an optional peer and
@@ -12,13 +12,13 @@ export interface E2BSandboxFactory {
 }
 
 /** Persisted between sessions so a reopen reconnects instead of starting a fresh sandbox. */
-export interface E2BMachineState {
+export interface E2BEnvironmentState {
   readonly sandboxId: string;
   /** Snapshot the sandbox was last restored from, if any. */
   readonly snapshotId?: string;
 }
 
-export interface E2BWorkspaceOptions extends E2BMachineOptions {
+export interface E2BWorkspaceOptions extends E2BEnvironmentOptions {
   /** Usually the `Sandbox` class from the `e2b` package. */
   readonly sandbox: E2BSandboxFactory;
   /** Template/base image id for a fresh sandbox. */
@@ -27,7 +27,7 @@ export interface E2BWorkspaceOptions extends E2BMachineOptions {
   /** Sandbox-level inactivity timeout (distinct from a command's timeout). */
   readonly timeoutMs?: number;
   /** Prepare a fresh workspace (clone a repo, drop config files). Runs only on creation. */
-  readonly prepare?: (machine: E2BMachine) => Promise<void>;
+  readonly prepare?: (environment: E2BEnvironment) => Promise<void>;
 }
 
 /**
@@ -36,26 +36,26 @@ export interface E2BWorkspaceOptions extends E2BMachineOptions {
  *
  * Restore is the subtle part. E2B restores a snapshot by starting a NEW sandbox from it, so
  * the old instance is dead afterwards. Everything therefore reads the sandbox through a
- * mutable cell rather than capturing it — `E2BMachine` holds `() => current`, so a restore
- * is transparent to every tool already holding the machine.
+ * mutable cell rather than capturing it — `E2BEnvironment` holds `() => current`, so a restore
+ * is transparent to every tool already holding the environment.
  */
 export class E2BWorkspace implements SandboxWorkspace {
   private current: E2BSandbox;
   private readonly factory: E2BSandboxFactory;
   private readonly options: E2BWorkspaceOptions;
-  readonly machine: E2BMachine;
+  readonly environment: E2BEnvironment;
 
   private constructor(sandbox: E2BSandbox, options: E2BWorkspaceOptions) {
     this.current = sandbox;
     this.factory = options.sandbox;
     this.options = options;
-    this.machine = new E2BMachine(() => this.current, options);
+    this.environment = new E2BEnvironment(() => this.current, options);
   }
 
-  static async open(options: E2BWorkspaceOptions, state?: E2BMachineState): Promise<E2BWorkspace> {
+  static async open(options: E2BWorkspaceOptions, state?: E2BEnvironmentState): Promise<E2BWorkspace> {
     const sandbox = await openSandbox(options, state);
     const workspace = new E2BWorkspace(sandbox, options);
-    if (state === undefined && options.prepare !== undefined) await options.prepare(workspace.machine);
+    if (state === undefined && options.prepare !== undefined) await options.prepare(workspace.environment);
     return workspace;
   }
 
@@ -63,7 +63,7 @@ export class E2BWorkspace implements SandboxWorkspace {
     return this.current.sandboxId;
   }
 
-  state(): E2BMachineState {
+  state(): E2BEnvironmentState {
     return { sandboxId: this.current.sandboxId };
   }
 
@@ -76,7 +76,7 @@ export class E2BWorkspace implements SandboxWorkspace {
 
   /**
    * Restore a snapshot by starting a replacement sandbox from it and retiring the old one.
-   * The machine keeps working because it reads `current` through a closure.
+   * The environment keeps working because it reads `current` through a closure.
    */
   async restore(snapshotId: string): Promise<void> {
     const replacement = await this.factory.create({
@@ -92,7 +92,7 @@ export class E2BWorkspace implements SandboxWorkspace {
   }
 
   /** Fork the workspace: snapshot, then start an independent sandbox from that snapshot. */
-  async fork(): Promise<{ machine: E2BMachine; dispose: () => Promise<void> } | undefined> {
+  async fork(): Promise<{ environment: E2BEnvironment; dispose: () => Promise<void> } | undefined> {
     const snapshotId = await this.snapshot();
     if (snapshotId === undefined) return undefined;
     const clone = await this.factory.create({
@@ -100,7 +100,7 @@ export class E2BWorkspace implements SandboxWorkspace {
       ...(this.options.envs !== undefined ? { envs: this.options.envs } : {}),
     });
     return {
-      machine: new E2BMachine(() => clone, this.options),
+      environment: new E2BEnvironment(() => clone, this.options),
       dispose: async () => void (await clone.kill().catch(() => undefined)),
     };
   }
@@ -116,7 +116,7 @@ export class E2BWorkspace implements SandboxWorkspace {
   }
 }
 
-async function openSandbox(options: E2BWorkspaceOptions, state?: E2BMachineState): Promise<E2BSandbox> {
+async function openSandbox(options: E2BWorkspaceOptions, state?: E2BEnvironmentState): Promise<E2BSandbox> {
   if (state !== undefined && options.sandbox.connect !== undefined) {
     try {
       return await options.sandbox.connect(state.sandboxId, {
@@ -135,7 +135,7 @@ async function openSandbox(options: E2BWorkspaceOptions, state?: E2BMachineState
 }
 
 /**
- * No `e2bMachineFactory` here on purpose.
+ * No `e2bEnvironmentFactory` here on purpose.
  *
  * A factory that created a sandbox per session, stored its id in the session's state and
  * killed it on session close got three things wrong at once: every new session started a
@@ -146,8 +146,8 @@ async function openSandbox(options: E2BWorkspaceOptions, state?: E2BMachineState
  * A sandbox is a user- or workspace-scoped resource. So the host owns it:
  *
  *   const workspace = await E2BWorkspace.open({ sandbox: Sandbox, template: "node20" });
- *   await materializeWorkspace(workspace.machine, spec);          // prepare it once
- *   const harness = new Harness({ machine: workspace.machine });
+ *   await materializeWorkspace(workspace.environment, spec);          // prepare it once
+ *   const harness = new Harness({ environment: workspace.environment });
  *   // ...every session — new, resumed, forked — runs in that one sandbox, and the host
  *   // calls workspace.close() when the USER is done, not when a session is.
  *

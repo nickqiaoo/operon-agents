@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  LocalMachine,
+  LocalEnvironment,
   webSearchTool,
   fetchUrlTool,
   FirecrawlProvider,
@@ -25,8 +25,8 @@ function textOf(result: ToolResult): string {
   return result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 }
 
-async function runTool(tool: Tool, args: unknown, machine: LocalMachine): Promise<ToolResult> {
-  const ctx = { turnId: "t", toolCallId: "tc", signal: new AbortController().signal, machine };
+async function runTool(tool: Tool, args: unknown, environment: LocalEnvironment): Promise<ToolResult> {
+  const ctx = { turnId: "t", toolCallId: "tc", signal: new AbortController().signal, environment };
   const plan = await tool.resolve(args, ctx);
   return plan.run(ctx);
 }
@@ -39,7 +39,7 @@ function fakeFetch(body: string, init?: { status?: number; contentType?: string 
     })) as unknown as typeof fetch;
 }
 
-async function testToolFormatting(machine: LocalMachine): Promise<void> {
+async function testToolFormatting(environment: LocalEnvironment): Promise<void> {
   const search: WebSearchProvider = {
     async search() {
       return [
@@ -48,31 +48,31 @@ async function testToolFormatting(machine: LocalMachine): Promise<void> {
       ];
     },
   };
-  const out = textOf(await runTool(webSearchTool(search), { query: "hello world" }, machine));
+  const out = textOf(await runTool(webSearchTool(search), { query: "hello world" }, environment));
   check("websearch: formats ranked results", out.includes("Title: Result A") && out.includes("URL: https://b.example") && out.includes("---"));
   check("websearch: includes date when present", out.includes("Date: 2026-01-01"));
 
   const empty: WebSearchProvider = { async search() { return []; } };
-  check("websearch: empty → friendly message", textOf(await runTool(webSearchTool(empty), { query: "x" }, machine)).includes("No search results"));
+  check("websearch: empty → friendly message", textOf(await runTool(webSearchTool(empty), { query: "x" }, environment)).includes("No search results"));
 
   const fetcher: UrlFetchProvider = {
     async fetch(url) {
       return { url, content: "# Page\n\nbody text", kind: "markdown", title: "Page Title" };
     },
   };
-  const fout = textOf(await runTool(fetchUrlTool(fetcher), { url: "https://a.example/p" }, machine));
+  const fout = textOf(await runTool(fetchUrlTool(fetcher), { url: "https://a.example/p" }, environment));
   check("fetchurl: renders title + url + body", fout.includes("# Page Title") && fout.includes("https://a.example/p") && fout.includes("body text"));
 
   const longFetcher: UrlFetchProvider = {
     async fetch(url) { return { url, content: "x".repeat(100), kind: "text" }; },
   };
-  const tout = textOf(await runTool(fetchUrlTool(longFetcher), { url: "https://a.example/long", max_length: 10 }, machine));
+  const tout = textOf(await runTool(fetchUrlTool(longFetcher), { url: "https://a.example/long", max_length: 10 }, environment));
   check("fetchurl: truncates to max_length", tout.includes("…[truncated]") && tout.includes("x".repeat(10)) && !tout.includes("x".repeat(11)));
 
   const failing: UrlFetchProvider = {
     async fetch() { throw new WebToolError("upstream exploded"); },
   };
-  const eout = await runTool(fetchUrlTool(failing), { url: "https://a.example/err" }, machine);
+  const eout = await runTool(fetchUrlTool(failing), { url: "https://a.example/err" }, environment);
   check("fetchurl: provider error → isError + message", (eout.isError ?? false) && textOf(eout).includes("upstream exploded"));
 }
 
@@ -127,9 +127,9 @@ async function testDirectFetch(): Promise<void> {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "af-web-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
-    await testToolFormatting(machine);
+    await testToolFormatting(environment);
     await testFirecrawl();
     await testTavily();
     await testDirectFetch();

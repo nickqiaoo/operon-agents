@@ -122,7 +122,7 @@ export {
   resolveSkillRoots,
   discoverSkills,
   parseSkillText,
-  parseSkillFromMachine,
+  parseSkillFromEnvironment,
   parseFrontmatter,
   expandSkillParameters,
   skillArgumentNames,

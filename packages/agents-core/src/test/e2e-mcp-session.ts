@@ -2,7 +2,7 @@ import { testRunner, openTestSession } from "./faux.ts";
 // The MCP capability is reachable through ergonomic Session methods (listMcpServers /
 // reconnectMcpServer), not only the raw capability service. With no MCP capability open, listing
 // is empty and reconnect is a clear error.
-import { ListenerSink, LocalMachine, Session } from "../index.ts";
+import { ListenerSink, LocalEnvironment, Session } from "../index.ts";
 import { mcpServersCapability, MockMCPTransport } from "../mcp/index.ts";
 import type { McpTransportFactory } from "../mcp/index.ts";
 
@@ -23,13 +23,13 @@ function okTransport(name: string): MockMCPTransport {
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
+  const environment = new LocalEnvironment(process.cwd());
 
   // ── with an MCP capability open ──
   {
     const factory: McpTransportFactory = (name) => okTransport(name);
     const cap = mcpServersCapability({ good: { transport: "http", url: "http://good.example" } }, { transportFactory: factory });
-    const session = await openTestSession({ machine, events: new ListenerSink(), capabilities: [cap] });
+    const session = await openTestSession({ environment, events: new ListenerSink(), capabilities: [cap] });
     try {
       const servers = session.listMcpServers();
       check("session.listMcpServers returns the connected server", servers.length === 1 && servers[0]!.name === "good" && servers[0]!.status === "connected");
@@ -51,7 +51,7 @@ async function main(): Promise<void> {
 
   // ── with no MCP capability ──
   {
-    const session = await openTestSession({ machine });
+    const session = await openTestSession({ environment });
     try {
       check("session.listMcpServers is empty when no MCP capability is open", session.listMcpServers().length === 0);
       let threw = false;

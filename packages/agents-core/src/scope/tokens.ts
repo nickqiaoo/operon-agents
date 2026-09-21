@@ -1,5 +1,5 @@
 /**
- * Every framework token, by tier. `T.Machine`, `T.Goal`, … are the keys the harness, sessions,
+ * Every framework token, by tier. `T.Environment`, `T.Goal`, … are the keys the harness, sessions,
  * capabilities and hosts use to register and look things up in a {@link Scope}.
  *
  * Token names for capability services equal the capability's `name` ("goal", "plan", …).
@@ -14,7 +14,7 @@ import type { SessionRepository } from "../store/repository.ts";
 import type { AgentRecord, SessionStore } from "../store/index.ts";
 import type { ModelRuntime } from "../llm/runtime.ts";
 import type { PluginManager } from "../plugins/manager.ts";
-import type { Machine, MachineFactory } from "../tool/machine.ts";
+import type { Environment, EnvironmentFactory } from "../tool/environment.ts";
 import type { EventPublicationMode, EventSink } from "../events/index.ts";
 import type { SessionEventPublisher } from "../events/publisher.ts";
 import type { TracingProcessor } from "../tracing/processor.ts";
@@ -48,8 +48,8 @@ export const T = Object.freeze({
   SessionRepository: token<SessionRepository, "harness">("session-repository", "harness"),
   ModelRuntime: token<ModelRuntime, "harness">("model-runtime", "harness"),
   PluginManager: token<PluginManager, "harness">("plugin-manager", "harness"),
-  /** Harness-level default machine (an instance or a per-session factory). */
-  MachineFactory: token<Machine | MachineFactory, "harness">("machine-factory", "harness"),
+  /** Harness-level default environment (an instance or a per-session factory). */
+  EnvironmentFactory: token<Environment | EnvironmentFactory, "harness">("environment-factory", "harness"),
   EventPublication: token<EventPublicationMode, "harness">("event-publication", "harness"),
   Tracing: token<TracingProcessor, "harness">("tracing", "harness"),
   /** Product telemetry (docs/telemetry.md). Absent = nothing is counted. */
@@ -59,8 +59,8 @@ export const T = Object.freeze({
   McpServers: token<McpServersHandle, "workspace">("mcp", "workspace"),
   SkillRegistry: token<SkillRegistry, "workspace">("skill-registry", "workspace"),
   McpOAuth: token<McpOAuthService, "workspace">("mcp-oauth", "workspace"),
-  /** Workspace-level default machine; consulted before the harness-level one. */
-  WorkspaceMachineFactory: token<Machine | MachineFactory, "workspace">("workspace-machine-factory", "workspace"),
+  /** Workspace-level default environment; consulted before the harness-level one. */
+  WorkspaceEnvironmentFactory: token<Environment | EnvironmentFactory, "workspace">("workspace-environment-factory", "workspace"),
 
   // ── session tier: identity and infrastructure ──────────────────────────────────────────
   SessionId: token<string, "session">("session-id", "session"),
@@ -75,12 +75,12 @@ export const T = Object.freeze({
    *  record-backed events are published on `Events` when an append commits. Registered by
    *  `Session.open`; absent when there is no backend. */
   Store: token<SessionStore, "session">("store", "session"),
-  /** This session's own machine factory (a `createSession({ machine })` override); wins over the
+  /** This session's own environment factory (a `createSession({ environment })` override); wins over the
    *  workspace- and harness-level ones. */
-  SessionMachineFactory: token<Machine | MachineFactory, "session">("session-machine-factory", "session"),
+  SessionEnvironmentFactory: token<Environment | EnvironmentFactory, "session">("session-environment-factory", "session"),
   /** Per-session override of the harness-level `EventPublication`. */
   SessionEventPublication: token<EventPublicationMode, "session">("session-event-publication", "session"),
-  Machine: token<Machine, "session">("machine", "session"),
+  Environment: token<Environment, "session">("environment", "session"),
   Events: token<EventSink, "session">("events", "session"),
   Steer: token<SteerBus, "session">("steer", "session"),
   EventPublisher: token<SessionEventPublisher, "session">("event-publisher", "session"),

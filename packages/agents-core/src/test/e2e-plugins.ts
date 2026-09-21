@@ -2,7 +2,7 @@ import { testRunner, openTestSession } from "./faux.ts";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
-import { LocalMachine, Session, SkillRegistry, discoverSkills, skillsCapability } from "../index.ts";
+import { LocalEnvironment, Session, SkillRegistry, discoverSkills, skillsCapability } from "../index.ts";
 import { mcpServersCapability } from "../mcp/index.ts";
 import {
   PluginManager,
@@ -21,7 +21,7 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-const MACHINE = new LocalMachine(process.cwd());
+const ENVIRONMENT = new LocalEnvironment(process.cwd());
 
 async function writePlugin(root: string, manifest: object, skill?: { dir: string; name: string; body: string }): Promise<void> {
   await mkdir(root, { recursive: true });
@@ -170,17 +170,17 @@ async function main(): Promise<void> {
     await writePlugin(badRoot, { description: "no name field" }); // missing required name → error
 
     // 2. manifest parsing.
-    const parsed = await parseManifest(MACHINE, goodRoot);
+    const parsed = await parseManifest(ENVIRONMENT, goodRoot);
     check("manifest: parsed with no error diagnostics", parsed.manifest !== undefined && !parsed.diagnostics.some((d) => d.severity === "error"));
     const sloppyRoot = path.join(tmp, "sloppy-plugin");
     await writePlugin(sloppyRoot, { name: "sloppy-plugin", author: 42, keywords: "not-a-list", sessionStart: { skill: " " } });
-    const sloppy = await parseManifest(MACHINE, sloppyRoot);
+    const sloppy = await parseManifest(ENVIRONMENT, sloppyRoot);
     check(
       "manifest: a malformed optional field is dropped with a warning naming it",
       sloppy.manifest?.name === "sloppy-plugin" && sloppy.manifest.author === undefined && sloppy.manifest.keywords === undefined && sloppy.manifest.sessionStart === undefined
         && ['"author"', '"keywords"', '"sessionStart.skill"'].every((field) => sloppy.diagnostics.some((d) => d.severity === "warn" && d.message.includes(field))),
     );
-    const nameless = await parseManifest(MACHINE, badRoot);
+    const nameless = await parseManifest(ENVIRONMENT, badRoot);
     check("manifest: a missing name is an error naming the field", nameless.manifest === undefined && nameless.diagnostics.some((d) => d.severity === "error" && d.message.includes('"name"')));
     check("manifest: name + skills + sessionStart + mcpServers", parsed.manifest?.name === "demo-plugin" && (parsed.manifest?.skills?.length ?? 0) === 1 && parsed.manifest?.sessionStart?.skill === "greet" && parsed.manifest?.mcpServers?.["weather"] !== undefined);
     check(
@@ -193,7 +193,7 @@ async function main(): Promise<void> {
     );
 
     // 3. manager install + contributions.
-    const mgr = new PluginManager({ machine: MACHINE, homeDir: home, now: () => 1_700_000_000_000 });
+    const mgr = new PluginManager({ environment: ENVIRONMENT, homeDir: home, now: () => 1_700_000_000_000 });
     const rec = await mgr.install(goodRoot);
     check("manager: install(local-path) → state ok", rec.state === "ok" && rec.id === "demo-plugin");
     check("manager: skillRoots() exposes the plugin skills dir + instructions", mgr.skillRoots().length === 1 && mgr.skillRoots()[0]!.plugin?.id === "demo-plugin" && mgr.skillRoots()[0]!.plugin?.instructions === "Prefer the demo skills.");
@@ -212,7 +212,7 @@ async function main(): Promise<void> {
     check("mcp toggle: disabled plugin MCP server stops contributing", Object.keys(mgr.mcpServerConfigs()).length === 0 && mgr.info("demo-plugin")?.mcpServers[0]?.enabled === false);
 
     // 5. persist + reload (fresh manager rehydrates from installed.json).
-    const mgr2 = new PluginManager({ machine: MACHINE, homeDir: home, now: () => 1_700_000_000_000 });
+    const mgr2 = new PluginManager({ environment: ENVIRONMENT, homeDir: home, now: () => 1_700_000_000_000 });
     await mgr2.load();
     check("persist+reload: fresh manager rehydrates the installed plugin", mgr2.get("demo-plugin")?.state === "ok" && mgr2.skillRoots().length === 1);
     check("persist+reload: per-server MCP enabled override round-trips", Object.keys(mgr2.mcpServerConfigs()).length === 0 && mgr2.info("demo-plugin")?.enabledMcpServerCount === 0);
@@ -232,7 +232,7 @@ async function main(): Promise<void> {
 
     // 7. session-start injector — renders the block once.
     const registry = new SkillRegistry();
-    await registry.loadRoots(MACHINE, mgr.skillRoots());
+    await registry.loadRoots(ENVIRONMENT, mgr.skillRoots());
     const resolveSkill: SessionStartSkillResolver = (_pid, name) => (registry.getSkill(name) ? `BODY:${name}` : undefined);
     const injector = new PluginSessionStartInjector(mgr, resolveSkill);
     const first = injector.inject({ history: [], sessionId: "s", address: "main", originOf: () => undefined });
@@ -246,14 +246,14 @@ async function main(): Promise<void> {
     check("session-start: injects only once per session", second === null);
 
     // 8. skills bridge — manager.skillRoots() feed discoverSkills; the plugin skill is found.
-    const discovered = await discoverSkills(MACHINE, { roots: mgr.skillRoots() });
+    const discovered = await discoverSkills(ENVIRONMENT, { roots: mgr.skillRoots() });
     const greet = discovered.find((s) => s.name === "greet");
     check("skills bridge: the plugin skill is discoverable with plugin context", greet !== undefined && greet.plugin?.id === "demo-plugin");
 
     // 8b. dynamicRoots bridge — skillsCapability merges plugin skill roots at session-open, so an
     //     enabled plugin's skill shows up in the session's skill list (how operon loads them).
     const skillSession = await openTestSession({
-      machine: MACHINE,
+      environment: ENVIRONMENT,
       capabilities: [skillsCapability({ dynamicRoots: () => mgr.skillRoots() })],
     });
     try {
@@ -271,7 +271,7 @@ async function main(): Promise<void> {
 
     // 9. session facade — the plugin manager is reachable through Session.
     const session = await openTestSession({
-      machine: MACHINE,
+      environment: ENVIRONMENT,
       capabilities: [pluginsCapability(mgr2, () => undefined)],
     });
     try {

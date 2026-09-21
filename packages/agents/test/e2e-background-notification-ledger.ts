@@ -170,7 +170,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
 
 /**
  * The converse of the agent case above: a command's output was redirected to a log file on the
- * machine, so it outlived the process that queued the notification. Here the resend SHOULD name
+ * environment, so it outlived the process that queued the notification. Here the resend SHOULD name
  * a read — the bytes are still there — and carry the exit code the settle recorded.
  */
 async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {

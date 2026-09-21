@@ -23,7 +23,7 @@ and inner rings know nothing of outer ones. That is the onion.
 ```
                     ┌──────────────────────────────────────────────────────────────┐
                     │  ⑥ Adapters / substrate  sandbox(E2B·Cloudflare) os-sandbox   │
-                    │     Machine impls · Store backends(disk/pg/redis/memory)      │
+                    │     Environment impls · Store backends(disk/pg/redis/memory)      │
                     │     · model vendors                                           │
                     │  ┌─────────────────────────────────────────────────────────┐ │
                     │  │  ⑤ Hosts / products    local: app-server · TUI · desktop │ │
@@ -45,7 +45,7 @@ and inner rings know nothing of outer ones. That is the onion.
                     │  │  │  │  │  │   Runner·Session·Engine          │  │  │  │  │ │
                     │  │  │  │  │  │   runTurn·executeStep·runCalls   │  │  │  │  │ │
                     │  │  │  │  │  │   protocol · LoopHooks · 3 seams │  │  │  │  │ │
-                    │  │  │  │  │  │   (ChatModel/SessionStore/Machine)│  │  │  │  │ │
+                    │  │  │  │  │  │   (ChatModel/SessionStore/Environment)│  │  │  │  │ │
                     │  │  │  │  │  │                                   │  │  │  │  │ │
                     │  │  │  │  │  └─────────────────────────────────┘  │  │  │  │ │
                     │  │  │  │  └───────────────────────────────────────┘  │  │  │ │
@@ -64,7 +64,7 @@ and inner rings know nothing of outer ones. That is the onion.
 | ③ Harness | `packages/agents` (`harness.ts`, `extensions/`, `local.ts`) | The process-level runtime: session fleet, service registry, extension runtime and loader, deployment presets | Contains no new engine behavior (pure composition of core primitives) |
 | ④ Extension | `packages/agents/src/cron/`, `agents-peers`, `examples/*-extension` | Behavior **on top of** the engine: tools, injection, commands, events, shared resources; attachable, time-limited, absent-tolerant | Carries no vetoing or safety logic |
 | ⑤ Host | `packages/agents/src/app-server/`, `agents-tui`, `managed-agents` | Exposes the harness to a person or a network: stdio JSON-RPC / SSE+HTTP / terminal | Does not change the engine; only injects backends |
-| ⑥ Adapter | `sandbox`, `os-sandbox`, `store/{disk,pg,redis}.ts`, `llm/` providers | Implements the three ports the kernel defines (Machine / SessionStore / ChatModel) | Contains no business logic |
+| ⑥ Adapter | `sandbox`, `os-sandbox`, `store/{disk,pg,redis}.ts`, `llm/` providers | Implements the three ports the kernel defines (Environment / SessionStore / ChatModel) | Contains no business logic |
 
 **Why an onion rather than a flat set of packages**: this framework serves two deployments at once
 (local interactive, server managed). What genuinely diverges between them is storage, process model,
@@ -100,11 +100,11 @@ frame through `deriveChild`, which is the **only** place in the project that min
 
 | Seam | Interface | Implementations in the kernel | Implementations outside |
 |---|---|---|---|
-| Execution substrate | `Machine` (`tool/machine.ts`) | `LocalMachine`, `NullMachine`, SSH | `operon-sandbox` (direct E2B/Cloudflare vendor SDKs), `operon-os-sandbox` (Seatbelt/bubblewrap wrapping LocalMachine) |
+| Execution substrate | `Environment` (`tool/environment.ts`) | `LocalEnvironment`, `NullEnvironment`, SSH | `operon-sandbox` (direct E2B/Cloudflare vendor SDKs), `operon-os-sandbox` (Seatbelt/bubblewrap wrapping LocalEnvironment) |
 | Persistence | `SessionStore` + `SessionRepository` (`store/`) | memory, disk (JSONL) | pg, redis — **four backends, one contract** |
 | Model | `ChatModel` / `ModelRuntime` (`llm/`) | provider registry | each vendor |
 
-The design stance of `Machine` deserves its own note: `RunCommandOptions` expresses **intent**
+The design stance of `Environment` deserves its own note: `RunCommandOptions` expresses **intent**
 (timeoutMs, maxOutputBytes, onOutput) which each backend honors with its own native means, rather than
 handing POSIX process mechanics to the caller to assemble — an assembly that works only on the local
 backend and fails silently on a sandbox. `RunCommandResult.exitCode` may be `undefined` and
@@ -154,7 +154,7 @@ These belong to the kernel rather than a host, because skipping any one of them 
 ```ts
 interface Capability {
   name;  tools?;  toolProviders?;  toolFilters?;        // add/remove tools
-  hooks?: Partial<LoopHooks>;                            // participate in the step machine (10 slots)
+  hooks?: Partial<LoopHooks>;                            // participate in the step environment (10 slots)
   injectors?;  policies?;  gates?;                       // injection, permission rules, arbitration
   provides?: Provision[];                                // per session: { token, create(ctx), dispose? }
   start?(ctx: RunContext, signal); stop?(signal);        // per run
@@ -164,7 +164,7 @@ interface Capability {
 A capability's session-lived state is a **provision**: `Session.open` runs each `create` in order
 and registers the result in the session scope under the provision's token (`T.Goal`, `T.Mcp`, …);
 `scope.close()` disposes them in reverse. `create` receives `{ scope, sessionId, signal }` and reads
-everything else from the scope (`T.Machine`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`, and
+everything else from the scope (`T.Environment`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`, and
 whatever earlier capabilities provided). There is no separate `openSession`/`closeSession`: the
 provision IS the session-tier lifecycle, and one teardown path serves capabilities, the session's
 own objects, and the harness alike (§5.7).
@@ -228,7 +228,7 @@ which is why an outer ring is required:
 | **Extension runtime** | `ExtensionRuntime` (`extensions/runtime.ts`) projects capability hooks **one by one** into extension events, giving each hook a timeout and fault isolation |
 | **File loading** | `extensions/loader.ts`: file → import → value → attach; manual approval accounted by mtime |
 | **Model provider registry** | `T.ModelRuntime`, registered on the harness scope by the `harness` hook |
-| **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalMachine, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |
+| **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalEnvironment, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |
 
 The comment on `createHarness()` pins down its nature: **"pure composition of core primitives — no new
 engine behavior"**. The harness is not a second engine; it is a composition root.
@@ -348,14 +348,14 @@ that declares its tier (`T.Logger` is harness-scoped, `T.McpServers` workspace-s
 session-scoped). Three tiers, each a scope with a parent:
 
 ```
-Harness   (one per process)      T.Logger, T.SessionRepository, T.ModelRuntime, T.MachineFactory, extension create results
- └ Workspace (one per key)        T.McpServers, T.SkillRegistry, T.McpOAuth, T.WorkspaceMachineFactory, extension workspace results
-    └ Session (one per session)   T.Machine, T.Store, T.Events, T.Steer, T.Permission, T.Goal / T.Plan / … (provisions)
+Harness   (one per process)      T.Logger, T.SessionRepository, T.ModelRuntime, T.EnvironmentFactory, extension create results
+ └ Workspace (one per key)        T.McpServers, T.SkillRegistry, T.McpOAuth, T.WorkspaceEnvironmentFactory, extension workspace results
+    └ Session (one per session)   T.Environment, T.Store, T.Events, T.Steer, T.Permission, T.Goal / T.Plan / … (provisions)
 ```
 
 Four rules carry the whole design: a lookup walks UP the chain (a session reads harness services
 without anything threaded through by hand); a child that registers the same token OVERRIDES its
-parent's (`createSession({ machine })` beats the harness-level `T.MachineFactory`); `provide` is a
+parent's (`createSession({ environment })` beats the harness-level `T.EnvironmentFactory`); `provide` is a
 default that a prior `register` silently beats (the old `a ?? b ?? new X()` chains became
 registrations at the right tier); and `close()` runs children first, then a scope's own entries in
 reverse registration order — one teardown path for capabilities, session infrastructure, workspace
@@ -364,14 +364,14 @@ mechanism that keeps session state from leaking across sessions.
 
 The rule for what may sit in a workspace scope: **it must hold for every session under that
 key.** Shared connections, credential stores, tenant configuration, an extension's per-workspace
-instance — yes. Anything derived from a MACHINE only if it is the workspace's machine: the local
-preset scans skills through `T.WorkspaceMachineFactory` (a remote workspace registers it in the
+instance — yes. Anything derived from an ENVIRONMENT only if it is the workspace's environment: the local
+preset scans skills through `T.WorkspaceEnvironmentFactory` (a remote workspace registers it in the
 `workspace` hook), publishes no shared registry when that is a per-session factory, and a session
-that brings its own machine (`createSession({ machine })`) scans through it instead of reading the
+that brings its own environment (`createSession({ environment })`) scans through it instead of reading the
 workspace's — the catalog the model sees is always the one whose scripts its tools can reach.
 Where a workspace's MCP servers RUN is a separate axis: stdio servers are spawned by the host
 process (near the user's credentials and devices), remote ones are URLs; neither follows the
-machine, and a session on a remote machine with local connectors is the ordinary shape, not a
+environment, and a session on a remote environment with local connectors is the ordinary shape, not a
 special combination.
 
 Run and frame are deliberately NOT scopes: `RunState` is a snapshot the runner resolves from the
@@ -429,7 +429,7 @@ Three parts, with hard boundaries between them:
 |---|---|---|
 | `SessionService` | The API surface: **entirely store operations**. It opens no sessions, installs no capabilities, connects no MCP, starts no sandbox | Stateless and horizontally scalable; the gateway in front is an ordinary reverse proxy needing no owner affinity; **there is no `open()`** — otherwise every read could wake a billable sandbox |
 | `SessionWorker` | The execution half: claims sessions from the work table, holds the lease, moves the inbox into session records, and runs. cancel and resume are control records in the same log going through the same loop | **"Handled" means the input landed in the session record** (`message.appended`), not that the turn finished: if a turn dies midway the history is still complete, the reopened session is idle, and the next message continues without re-running. **There is no separate recovery branch**: the next worker seeing unprocessed inbox records past the cursor is indistinguishable from a session nobody has touched. **The worker is pure execution**: it never calls `list()`, never scans logs, and knows no other node; finding work is only the claim loop in `start()` (one indexed statement, zero rows on an empty table) plus an in-process nudge. **Failures are observable**: failures inside a turn get a `turn.ended reason:"failed"` from the kernel runner (with error text, persisted); failures outside a turn (environment, sandbox refusing to start) are broadcast by the worker as a live `error` event; an open turn left by a process dying is closed by the next claim |
-| `SessionWork` (the work table, `Memory` / `Pg`) plus metadata and the broadcaster | **The queue and the lock are the same table**: `append` writes the record into the log and sets the row to woken (in one transaction on Postgres); `claim` takes a row with `FOR UPDATE SKIP LOCKED`, and holding it is holding the lease (with a fencing token); renewal is the heartbeat and **carries back whether anything new arrived** — which is how a cancel reaches the machine currently running, without needing to know which one it is. A lease that expires without a release means something died holding it, and the next claim takes it anyway and appends the missing `turn.ended failed` | No dispatcher, no Kafka, no LISTEN/NOTIFY: Postgres is already the truth, so using it directly as the queue leaves no double write to reconcile. Steady-state load: zero queries for an idle session; one primary-key UPDATE every 2s for a running one; one indexed empty query per worker per second. `authorize` is **required** |
+| `SessionWork` (the work table, `Memory` / `Pg`) plus metadata and the broadcaster | **The queue and the lock are the same table**: `append` writes the record into the log and sets the row to woken (in one transaction on Postgres); `claim` takes a row with `FOR UPDATE SKIP LOCKED`, and holding it is holding the lease (with a fencing token); renewal is the heartbeat and **carries back whether anything new arrived** — which is how a cancel reaches the environment currently running, without needing to know which one it is. A lease that expires without a release means something died holding it, and the next claim takes it anyway and appends the missing `turn.ended failed` | No dispatcher, no Kafka, no LISTEN/NOTIFY: Postgres is already the truth, so using it directly as the queue leaves no double write to reconcile. Steady-state load: zero queries for an idle session; one primary-key UPDATE every 2s for a running one; one indexed empty query per worker per second. `authorize` is **required** |
 
 Writing and observing are separated at the protocol level: `messages.create()` returns an acceptance
 receipt immediately (the input is journaled **at the moment of acceptance**, which is the durable
@@ -444,17 +444,17 @@ never ended early by an older turn's `turn.ended` arriving in the backfill.
 > framework-level invariant, and making every consumer implement
 > leases and fencing outsources exactly the part that is easiest to get wrong and hardest to test.
 
-### 6.3 What follows the machine, and what stays with the host
+### 6.3 What follows the environment, and what stays with the host
 
-A host that runs its sessions in a sandbox writes `new Harness({ machine: workspace.machine })`:
-the harness is a process here, the machine is a handle to somewhere else. Capabilities then split
-themselves along one line — whether they reach the world through `Machine` or through the host
+A host that runs its sessions in a sandbox writes `new Harness({ environment: workspace.environment })`:
+the harness is a process here, the environment is a handle to somewhere else. Capabilities then split
+themselves along one line — whether they reach the world through `Environment` or through the host
 process — and the split is worth stating, because it is invisible in the capability list.
 
 | | Where it runs | Why |
 |---|---|---|
-| Built-in tools, `background`, `user-hooks`, the skill scan | **Follow the machine** | All of them reach the world through `Machine` (`machine.run`, `machine.readBytes`), so pointing the machine at a sandbox moves them with it, with no capability aware that anything changed |
-| **MCP connections** | **Stay with the host** | `mcp/server.ts` does not mention `Machine` at all. An http server is a network call from the harness process; an stdio server is a **child process of it**. Neither follows the session's machine |
+| Built-in tools, `background`, `user-hooks`, the skill scan | **Follow the environment** | All of them reach the world through `Environment` (`environment.run`, `environment.readBytes`), so pointing the environment at a sandbox moves them with it, with no capability aware that anything changed |
+| **MCP connections** | **Stay with the host** | `mcp/server.ts` does not mention `Environment` at all. An http server is a network call from the harness process; an stdio server is a **child process of it**. Neither follows the session's environment |
 | `todo`, `plan`, `goal`, `task`, `compaction` | Either — it makes no difference | Pure state over `T.Store`; nothing touches the world |
 
 That MCP stays host-side is the **right default, not an oversight**. Most MCP servers are API
@@ -466,7 +466,7 @@ for; the built-in tools already run there.
 
 **Therefore stdio is a local-host transport.** It is fine, and normal, on a laptop or a
 single-tenant self-deployment. On a server host it is four separate problems: the child process
-does not follow the machine into the sandbox, so it reads the *host's* disk instead of the
+does not follow the environment into the sandbox, so it reads the *host's* disk instead of the
 workspace; `T.McpServers`'s "one set of connections per working directory" stops holding across
 replicas and rolling restarts; a crashing `npx`-launched server takes down a process carrying every
 tenant's sessions; and stdio secrets travel in `config.env`, which has no tenant boundary. A server
@@ -487,8 +487,8 @@ Stating it is the host's call rather than the kernel's, which is Invariant 7 aga
 as cron being local-only. And the default matters: `transport` defaults to `"stdio"`, so a server
 host that states nothing will spawn a process for a config that merely forgot the field.
 
-> **The path not taken**: making stdio follow the machine (running the child *inside* the sandbox)
-> needs a stdin handle on `Machine`, which was deliberately not built. stdio MCP does not get
+> **The path not taken**: making stdio follow the environment (running the child *inside* the sandbox)
+> needs a stdin handle on `Environment`, which was deliberately not built. stdio MCP does not get
 > remoted; it is local-host-only, and that is the end of it.
 
 ---
@@ -504,7 +504,7 @@ host that states nothing will spawn a process for a config that merely forgot th
 ① Engine.run ─ turn loop: drainFollowUps → injectAtTurnBoundary (② injectors) → buildRunTools (② tools ∪ ④ registerTool, ② toolFilters)
 ①   runTurn ─ step loop: drainSteering (④ peers / ④ cron arriving over SteerBus)
 ①     executeStep: ② compaction.beforeStep → ⑥ ChatModel streaming → event decomposition → guardrail
-①       runCalls: prepare (②/④ rewrite) → ① authorize (the single point of enforcement) → ToolScheduler orders by resource conflict → ⑥ Machine.run
+①       runCalls: prepare (②/④ rewrite) → ① authorize (the single point of enforcement) → ToolScheduler orders by resource conflict → ⑥ Environment.run
 ①         approval required and no answerer present → pauseRun persists (⑥ Store) → returns interrupted; otherwise continue
 ①   settleRun: flush the shard, ② stop (5s timeout)
 ③ detachRun (quiet point): queued attach/detach take effect here; the barrier rendezvouses here
@@ -542,7 +542,7 @@ are not migrated — the criterion is applied only to new ones.
 |---|---|---|---|
 | One kernel plus two host profiles, not two frameworks | None of the five things that diverge is the agent loop | 80% of the logic written once; the option of flipping priorities on the same kernel | Host requirements seep into kernel contracts (the store's whole-session sequence semantics is one instance — the cost is isolated, the contract complexity remains) |
 | A stateless Engine with state flowing through parameters | Only a frame that is a value can be made concurrent, derived and serialized | Sub-agents, usage, the interruption tree and workflows share one frame semantics | The five-layer path has a higher cognitive bar than a single-loop design |
-| The three seams are interfaces; implementations live in outer rings | The difference between local and sandbox, disk and pg, does not belong in the loop | Four store backends on one contract; a replaceable Machine; `Invariant 7`, no mode | The interface must stay honest to the weakest backend (`exitCode: undefined`; mtime absence falls back to content comparison) |
+| The three seams are interfaces; implementations live in outer rings | The difference between local and sandbox, disk and pg, does not belong in the loop | Four store backends on one contract; a replaceable Environment; `Invariant 7`, no mode | The interface must stay honest to the weakest backend (`exitCode: undefined`; mtime absence falls back to content comparison) |
 | A session-level permission singleton with a single enforcement point | When concurrent frames share a manager, the current frame's data must be closure-bound | Auditing has one landing point; the invariant can only tighten inward | — |
 | Durable interruption; absence of an answerer makes it durable | Processes die, and approvals and `suspend` must cross them | Kill the process, resume the next day | The store contract, the interruption tree and frame serialization must all land together |
 | Capability composition fixed per slot | Short-circuit, chaining and OR are different problems | Behavior is independent of registration order | A new slot means changing core |
@@ -569,7 +569,7 @@ are not migrated — the criterion is applied only to new ones.
 3. Durable interruption: approval and `suspend` survive the death of the process, which requires the
    store contract, the interruption tree and frame serialization to be in place simultaneously.
 4. A single point of permission enforcement, with an LLM-driven auto-approver as one of four modes.
-5. The execution substrate is a first-class citizen: the `Machine` seam plus OS-level sandboxing plus
+5. The execution substrate is a first-class citizen: the `Environment` seam plus OS-level sandboxing plus
    vendor sandboxes.
 6. The capability/extension split: the kernel knows nothing of todo or cron; a bad extension cannot
    drag down a run; one body of extension code is delivered to both ends; service replacement does not
@@ -594,5 +594,5 @@ to serve multiple hosts, while so far only one host has truly exercised it.
 | Writing an extension | §5 of this document | `extensions/types.ts`, `examples/extension-template`, `examples/peers-extension` |
 | Hot replacement and the barrier | §5.5 of this document | `extensions/services.ts`, `extensions/manager.ts`, `extensions/loader.ts` |
 | How a server is assembled | §6.2 of this document | `managed-agents/src/server/{session-service,session-worker}.ts`, `examples/managed-agents` |
-| Replacing the execution substrate | `examples/README.md` | `tool/machine.ts`, `packages/sandbox`, `packages/os-sandbox` |
+| Replacing the execution substrate | `examples/README.md` | `tool/environment.ts`, `packages/sandbox`, `packages/os-sandbox` |
 | Events and UI state | §2.3 of this document | `events/projection.ts`, `events/publisher.ts` |

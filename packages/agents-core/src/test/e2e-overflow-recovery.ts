@@ -6,7 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux
 import {
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   ConversationContext,
@@ -46,7 +46,7 @@ function testClassification(): void {
 }
 
 /** Overflow on a step → compaction claims via recoverStepError → step re-runs and completes. */
-async function testOverflowCompactRetry(dir: string, machine: LocalMachine): Promise<void> {
+async function testOverflowCompactRetry(dir: string, environment: LocalEnvironment): Promise<void> {
   writeFileSync(join(dir, "big1.txt"), bulkText("A"));
   writeFileSync(join(dir, "big2.txt"), bulkText("B"));
 
@@ -76,7 +76,7 @@ async function testOverflowCompactRetry(dir: string, machine: LocalMachine): Pro
   // A window far above what the reads produce: the PROACTIVE thresholds must never fire, so a
   // compaction can only come from the reactive overflow-recovery path under test.
   const runner = testRunner({
-    machine,
+    environment,
     store,
     events,
     capabilities: [compactionCapability({ maxContextTokens: 9_000_000 })],
@@ -107,13 +107,13 @@ async function testOverflowCompactRetry(dir: string, machine: LocalMachine): Pro
 
 /** Overflow with no claimant (no compaction capability) → the turn settles as "error",
  *  exactly the pre-recovery degradation — the run must not reject. */
-async function testUnclaimedOverflowDegrades(machine: LocalMachine): Promise<void> {
+async function testUnclaimedOverflowDegrades(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: OVERFLOW_TEXT })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "bare", model, instructions: "x" });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
@@ -125,7 +125,7 @@ async function testUnclaimedOverflowDegrades(machine: LocalMachine): Promise<voi
 }
 
 /** A claimant that never fixes anything is cut off after MAX_STEP_RECOVERIES_PER_TURN (2). */
-async function testRecoveryCap(machine: LocalMachine): Promise<void> {
+async function testRecoveryCap(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage("", { stopReason: "error", errorMessage: OVERFLOW_TEXT }),
@@ -141,7 +141,7 @@ async function testRecoveryCap(machine: LocalMachine): Promise<void> {
     turnId: "t1",
     signal: new AbortController().signal,
     model,
-    machine,
+    environment,
     context: new ConversationContext({
       history: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 }],
     }),
@@ -160,7 +160,7 @@ async function testRecoveryCap(machine: LocalMachine): Promise<void> {
 }
 
 /** The compaction claimant only answers for context overflow. */
-async function testCompactionDeclinesOtherErrors(machine: LocalMachine): Promise<void> {
+async function testCompactionDeclinesOtherErrors(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("unused", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
@@ -183,18 +183,18 @@ async function testCompactionDeclinesOtherErrors(machine: LocalMachine): Promise
     "decline: overflow error class carries the message text",
     new APIContextOverflowError(0, OVERFLOW_TEXT, null).message === OVERFLOW_TEXT,
   );
-  void machine;
+  void environment;
 }
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "overflow-recovery-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
     testClassification();
-    await testOverflowCompactRetry(dir, machine);
-    await testUnclaimedOverflowDegrades(machine);
-    await testRecoveryCap(machine);
-    await testCompactionDeclinesOtherErrors(machine);
+    await testOverflowCompactRetry(dir, environment);
+    await testUnclaimedOverflowDegrades(environment);
+    await testRecoveryCap(environment);
+    await testCompactionDeclinesOtherErrors(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

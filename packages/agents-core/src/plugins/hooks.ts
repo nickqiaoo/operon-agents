@@ -13,8 +13,8 @@
  */
 import path from "node:path";
 import { HOOK_EVENT_TYPES, type HookDef, type HookEventType } from "../capabilities/user-hooks/types.ts";
-import type { Machine } from "../tool/machine.ts";
-import { readTextFile } from "../tool/support/machine-ops.ts";
+import type { Environment } from "../tool/environment.ts";
+import { readTextFile } from "../tool/support/environment-ops.ts";
 import type { PluginDiagnostic } from "./types.ts";
 
 const DEFAULT_HOOKS_FILE = "hooks/hooks.json";
@@ -30,12 +30,12 @@ export interface ParsedPluginHooks {
  * Expands `${PLUGIN_ROOT}` (and Claude-compat aliases) in command strings.
  */
 export async function loadPluginHooks(
-  machine: Machine,
+  environment: Environment,
   pluginRoot: string,
   rawHooksField: unknown,
   diagnostics: PluginDiagnostic[],
 ): Promise<readonly HookDef[]> {
-  const docs = await collectHookDocuments(machine, pluginRoot, rawHooksField, diagnostics);
+  const docs = await collectHookDocuments(environment, pluginRoot, rawHooksField, diagnostics);
   const out: HookDef[] = [];
   for (const doc of docs) {
     const parsed = parseHooksDocument(doc);
@@ -112,7 +112,7 @@ export function hookDefsFromConfig(
 // ── internal ─────────────────────────────────────────────────────────────────
 
 async function collectHookDocuments(
-  machine: Machine,
+  environment: Environment,
   pluginRoot: string,
   rawHooksField: unknown,
   diagnostics: PluginDiagnostic[],
@@ -120,8 +120,8 @@ async function collectHookDocuments(
   // No field → try default path; absence is silent.
   if (rawHooksField === undefined) {
     const defaultPath = path.join(pluginRoot, DEFAULT_HOOKS_FILE);
-    if (!(await isFile(machine, defaultPath))) return [];
-    return [await readJson(machine, defaultPath, diagnostics)];
+    if (!(await isFile(environment, defaultPath))) return [];
+    return [await readJson(environment, defaultPath, diagnostics)];
   }
 
   // Inline document
@@ -147,11 +147,11 @@ async function collectHookDocuments(
   for (const entry of paths) {
     const absolute = resolvePluginPath(pluginRoot, entry, "hooks", diagnostics);
     if (absolute === undefined) continue;
-    if (!(await isFile(machine, absolute))) {
+    if (!(await isFile(environment, absolute))) {
       diagnostics.push({ severity: "warn", message: `"hooks" path not found (${entry})` });
       continue;
     }
-    docs.push(await readJson(machine, absolute, diagnostics));
+    docs.push(await readJson(environment, absolute, diagnostics));
   }
   return docs;
 }
@@ -303,9 +303,9 @@ function resolvePluginPath(
   return absolute;
 }
 
-async function readJson(machine: Machine, absolute: string, diagnostics: PluginDiagnostic[]): Promise<unknown> {
+async function readJson(environment: Environment, absolute: string, diagnostics: PluginDiagnostic[]): Promise<unknown> {
   try {
-    return JSON.parse(await readTextFile(machine, absolute)) as unknown;
+    return JSON.parse(await readTextFile(environment, absolute)) as unknown;
   } catch (error) {
     diagnostics.push({
       severity: "warn",
@@ -320,9 +320,9 @@ function isWithin(child: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function isFile(machine: Machine, p: string): Promise<boolean> {
+async function isFile(environment: Environment, p: string): Promise<boolean> {
   try {
-    return (await machine.fileInfo(p)).kind === "file";
+    return (await environment.fileInfo(p)).kind === "file";
   } catch {
     return false;
   }

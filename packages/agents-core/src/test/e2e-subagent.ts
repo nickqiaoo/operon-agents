@@ -136,8 +136,8 @@ async function testProfiles(root: string): Promise<void> {
     sessionId: "t",
     address: "main",
     signal: new AbortController().signal,
-    machine: session.machine,
-    resolveSystemPromptContext: () => session.resolveSystemPromptContext(session.machine),
+    environment: session.environment,
+    resolveSystemPromptContext: () => session.resolveSystemPromptContext(session.environment),
   });
   check("profile: builds a runnable Agent with a rendered system prompt", built.name === "analyst" && (rendered ?? "").includes("Analyze carefully."));
 

@@ -51,7 +51,7 @@ export interface RegisterOptions {
   readonly dispose?: (instance: unknown) => void | Promise<void>;
   /**
    * `false` = the scope does not own this object: it was lent by the registrant (a caller's
-   * machine, a repository's store) and is never disposed here. Default `true`.
+   * environment, a repository's store) and is never disposed here. Default `true`.
    */
   readonly owned?: boolean;
 }

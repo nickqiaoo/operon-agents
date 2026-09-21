@@ -19,7 +19,7 @@
  * Persistence is the SessionStore's append log under a per-run address
  * (`workflow:<runId>`): the journal is agent bookkeeping shaped exactly like the
  * log facet — crash-safe appends, replayed whole on load — so it never touches
- * the Machine or the host filesystem. `custom` entries are audit-only and
+ * the Environment or the host filesystem. `custom` entries are audit-only and
  * are never folded into a conversation.
  */
 
@@ -226,7 +226,7 @@ export class WorkflowJournal {
    * block included — because a resume re-parses it, and `parseWorkflow` strips that block off.
    *
    * Carries the script in full rather than a path:
-   * a path points at the machine, which is a cache — the file can be edited, overwritten by
+   * a path points at the environment, which is a cache — the file can be edited, overwritten by
    * the next run of the same workflow, or vanish with a sandbox. Replay needs the exact bytes
    * that produced these keys, so the record holds them.
    */

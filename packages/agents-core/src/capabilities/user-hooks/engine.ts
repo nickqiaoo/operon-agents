@@ -1,4 +1,4 @@
-import type { Machine } from "../../tool/machine.ts";
+import type { Environment } from "../../tool/environment.ts";
 import {
   DEFAULT_HOOK_TIMEOUT_MS,
   type HookBlockResult,
@@ -10,14 +10,14 @@ import {
 
 export class HookEngine {
   private readonly hooks: readonly HookDef[];
-  private machine: Machine | null = null;
+  private environment: Environment | null = null;
 
   constructor(hooks: readonly HookDef[]) {
     this.hooks = hooks;
   }
 
-  attachMachine(machine: Machine): void {
-    this.machine = machine;
+  attachEnvironment(environment: Environment): void {
+    this.environment = environment;
   }
 
   has(event: HookEventType): boolean {
@@ -76,10 +76,10 @@ export class HookEngine {
    * timed-out hook has no opinion to report.
    */
   private async runHook(hook: HookDef, args: HookTriggerArgs): Promise<HookRunResult> {
-    if (!this.machine) throw new Error("HookEngine has no machine attached.");
+    if (!this.environment) throw new Error("HookEngine has no environment attached.");
     const timeoutMs = hook.timeout ?? DEFAULT_HOOK_TIMEOUT_MS;
-    const shell = this.machine.osEnv.shellPath || "/bin/sh";
-    const result = await this.machine.run([shell, "-c", hook.command], {
+    const shell = this.environment.osInfo.shellPath || "/bin/sh";
+    const result = await this.environment.run([shell, "-c", hook.command], {
       stdin: JSON.stringify(args.inputData ?? {}),
       timeoutMs,
       ...(args.signal !== undefined ? { signal: args.signal } : {}),

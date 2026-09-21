@@ -22,7 +22,7 @@ import {
 import {
   defineAgent,
   defineModel,
-  LocalMachine,
+  LocalEnvironment,
   resolveModelParams,
   Runner,
   Session,
@@ -44,7 +44,7 @@ type CapturedOptions = Record<string, unknown> | undefined;
  * through the same setter a user would call.
  */
 async function captureOptions(
-  machine: LocalMachine,
+  environment: LocalEnvironment,
   settings: ModelSettings | undefined,
   sessionThinking?: "low" | "high",
 ): Promise<CapturedOptions> {
@@ -63,8 +63,8 @@ async function captureOptions(
     ...(settings !== undefined ? { modelSettings: settings } : {}),
   });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
-  const session = await openTestSession({ machine });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
+  const session = await openTestSession({ environment });
   try {
     if (sessionThinking !== undefined) session.setThinking(sessionThinking);
     await runner.run(agent, "hello", { session });
@@ -75,8 +75,8 @@ async function captureOptions(
   return captured;
 }
 
-async function testAgentSettingsReachTheProvider(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, {
+async function testAgentSettingsReachTheProvider(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, {
     temperature: 0.25,
     maxTokens: 4096,
     thinking: "low",
@@ -88,8 +88,8 @@ async function testAgentSettingsReachTheProvider(machine: LocalMachine): Promise
   check("modelSettings.thinking maps to the provider's `reasoning`", options?.reasoning === "low");
 }
 
-async function testThinkingBudgetsReachTheProvider(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, {
+async function testThinkingBudgetsReachTheProvider(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, {
     thinking: "medium",
     thinkingBudgets: { medium: 4321 },
   });
@@ -98,8 +98,8 @@ async function testThinkingBudgetsReachTheProvider(machine: LocalMachine): Promi
   check("modelSettings.thinkingBudgets reaches the provider", budgets?.medium === 4321);
 }
 
-async function testSessionThinkingOutranksTheProfile(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, { temperature: 0.7, thinking: "low" }, "high");
+async function testSessionThinkingOutranksTheProfile(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, { temperature: 0.7, thinking: "low" }, "high");
 
   check(
     "session setThinking() overrides the agent profile's thinking level",
@@ -111,8 +111,8 @@ async function testSessionThinkingOutranksTheProfile(machine: LocalMachine): Pro
   );
 }
 
-async function testNoSettingsSendsNoParams(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, undefined);
+async function testNoSettingsSendsNoParams(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, undefined);
 
   // Guards the no-regression case: an agent without modelSettings must produce a request
   // byte-identical to what it produced before this plumbing existed.
@@ -121,8 +121,8 @@ async function testNoSettingsSendsNoParams(machine: LocalMachine): Promise<void>
   check("an agent with no modelSettings sends no reasoning", options?.reasoning === undefined);
 }
 
-async function testSessionIdIsStampedPerConversationLine(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, undefined);
+async function testSessionIdIsStampedPerConversationLine(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, undefined);
 
   const sessionId = options?.sessionId;
   check(
@@ -136,7 +136,7 @@ async function testSessionIdIsStampedPerConversationLine(machine: LocalMachine):
  * in code or config. It is a named field on ModelSpec rather than a generic options bag,
  * because it deliberately overrides resolved provider auth and that has to be visible.
  */
-async function testApiKeyOnTheModelSpec(machine: LocalMachine): Promise<void> {
+async function testApiKeyOnTheModelSpec(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   let captured: CapturedOptions;
   faux.setResponses([
@@ -149,15 +149,15 @@ async function testApiKeyOnTheModelSpec(machine: LocalMachine): Promise<void> {
   const model = defineModel({ descriptor, runtime: faux.runtime, apiKey: "sk-from-code" });
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   await runner.run(agent, "hello");
   faux.unregister();
 
   check("ModelSpec.apiKey reaches the provider", captured?.apiKey === "sk-from-code");
 }
 
-async function testNoApiKeyLeavesResolutionToTheRuntime(machine: LocalMachine): Promise<void> {
-  const options = await captureOptions(machine, undefined);
+async function testNoApiKeyLeavesResolutionToTheRuntime(environment: LocalEnvironment): Promise<void> {
+  const options = await captureOptions(environment, undefined);
 
   // Absent (not empty-string) is what lets pi fall back to the credential store / env vars:
   // `models.js` resolves `options?.apiKey ?? auth.apiKey`.
@@ -172,7 +172,7 @@ async function testNoApiKeyLeavesResolutionToTheRuntime(machine: LocalMachine): 
  * request. Asserted together with `params` to pin the thing that actually matters — the two
  * tiers reach the provider in one options object without clobbering each other.
  */
-async function testConnectionSettings(machine: LocalMachine): Promise<void> {
+async function testConnectionSettings(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   let captured: CapturedOptions;
   faux.setResponses([
@@ -197,7 +197,7 @@ async function testConnectionSettings(machine: LocalMachine): Promise<void> {
     modelSettings: { temperature: 0.5 },
   });
 
-  const runner = testRunner({ machine, permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, permission: { mode: "yolo" } });
   await runner.run(agent, "hello");
   faux.unregister();
 
@@ -211,7 +211,7 @@ async function testConnectionSettings(machine: LocalMachine): Promise<void> {
   check("connection and params coexist on one request", captured?.temperature === 0.5);
 }
 
-async function testConnectionIsOverridablePerRequest(machine: LocalMachine): Promise<void> {
+async function testConnectionIsOverridablePerRequest(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   let captured: CapturedOptions;
   faux.setResponses([
@@ -266,18 +266,18 @@ function testResolveModelParams(): void {
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine();
+  const environment = new LocalEnvironment();
 
   testResolveModelParams();
-  await testAgentSettingsReachTheProvider(machine);
-  await testThinkingBudgetsReachTheProvider(machine);
-  await testSessionThinkingOutranksTheProfile(machine);
-  await testNoSettingsSendsNoParams(machine);
-  await testSessionIdIsStampedPerConversationLine(machine);
-  await testApiKeyOnTheModelSpec(machine);
-  await testNoApiKeyLeavesResolutionToTheRuntime(machine);
-  await testConnectionSettings(machine);
-  await testConnectionIsOverridablePerRequest(machine);
+  await testAgentSettingsReachTheProvider(environment);
+  await testThinkingBudgetsReachTheProvider(environment);
+  await testSessionThinkingOutranksTheProfile(environment);
+  await testNoSettingsSendsNoParams(environment);
+  await testSessionIdIsStampedPerConversationLine(environment);
+  await testApiKeyOnTheModelSpec(environment);
+  await testNoApiKeyLeavesResolutionToTheRuntime(environment);
+  await testConnectionSettings(environment);
+  await testConnectionIsOverridablePerRequest(environment);
 
   const failed = checks.filter(([, ok]) => !ok);
   console.log(`\n${checks.length - failed.length}/${checks.length} passed`);

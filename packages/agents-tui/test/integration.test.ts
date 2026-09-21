@@ -34,10 +34,10 @@ async function withSession(run: (harness: Harness, session: HarnessSession, work
   }
 }
 
-test('the session exposes the machine its tools run on', async () => {
+test('the session exposes the environment its tools run on', async () => {
   await withSession(async (_harness, session, workDir) => {
-    const machine = session.machine;
-    const result = await machine.run([machine.osEnv.shellPath, '-c', 'echo hello-from-the-session'], { cwd: workDir });
+    const environment = session.environment;
+    const result = await environment.run([environment.osInfo.shellPath, '-c', 'echo hello-from-the-session'], { cwd: workDir });
     assert.equal(result.stdout.trim(), 'hello-from-the-session');
     assert.equal(result.exitCode, 0);
   });

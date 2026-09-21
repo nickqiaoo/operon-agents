@@ -4,16 +4,16 @@ import { posix } from "node:path";
 import * as ssh2 from "ssh2";
 import type { AnyAuthMethod, Client, ClientChannel, ConnectConfig, OpenMode, SFTPWrapper, Stats as SFTPStats } from "ssh2";
 import {
-  type Environment,
+  type OsInfo,
   type OsKind,
   type ShellName,
   type ByteRange,
-  type Machine,
+  type Environment,
   type DirEntry,
   type FileInfo,
   type FileKind,
-} from "./machine.ts";
-import { BaseMachine, type SpawnedProcess } from "./machine-base.ts";
+} from "./environment.ts";
+import { BaseEnvironment, type SpawnedProcess } from "./environment-base.ts";
 import { proxyEnv } from "./shell-env.ts";
 
 const FALLBACK_SFTP_STATUS = {
@@ -23,12 +23,12 @@ const FALLBACK_SFTP_STATUS = {
   CONNECTION_LOST: 7,
 } as const;
 
-export type SshMachineExtraOptions = Omit<
+export type SshEnvironmentExtraOptions = Omit<
   ConnectConfig,
   "host" | "port" | "username" | "password" | "privateKey" | "authHandler" | "hostVerifier"
 >;
 
-export interface SshMachineOptions {
+export interface SshEnvironmentOptions {
   readonly host: string;
   readonly port?: number;
   readonly username: string;
@@ -36,12 +36,12 @@ export interface SshMachineOptions {
   readonly keyPaths?: readonly string[];
   readonly keyContents?: readonly string[];
   readonly cwd?: string;
-  /** Extra workspace roots granted cwd-equivalent path access (see Machine.additionalDirs). */
+  /** Extra workspace roots granted cwd-equivalent path access (see Environment.additionalDirs). */
   readonly additionalDirs?: readonly string[];
   readonly name?: string;
   readonly hostVerifier?: (key: Buffer) => boolean;
   readonly forwardProxyEnv?: boolean;
-  readonly extraOptions?: SshMachineExtraOptions;
+  readonly extraOptions?: SshEnvironmentExtraOptions;
 }
 
 function codedError(message: string, code: string): NodeJS.ErrnoException {
@@ -77,7 +77,7 @@ export function buildSshExecCommand(args: readonly string[], cwd: string, env?: 
     const assignments: string[] = [];
     for (const [key, value] of Object.entries(env)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-        throw new Error(`SshMachine: invalid env variable name ${JSON.stringify(key)}`);
+        throw new Error(`SshEnvironment: invalid env variable name ${JSON.stringify(key)}`);
       }
       assignments.push(`${key}=${sshShellQuote(value)}`);
     }
@@ -352,10 +352,10 @@ function buildAuthHandler(
 
 /** Deadline for the env probe: the probe is best-effort (failure already falls back to
  *  defaults), but a server that never closes the exec channel — a restricted shell, an
- *  unclean close — must not hang `SshMachine.create()` forever. */
+ *  unclean close — must not hang `SshEnvironment.create()` forever. */
 const PROBE_TIMEOUT_MS = 10_000;
 
-async function probeRemoteEnvironment(client: Client): Promise<Environment> {
+async function probeRemoteOsInfo(client: Client): Promise<OsInfo> {
   let raw = "";
   try {
     raw = await new Promise<string>((resolve, reject) => {
@@ -380,7 +380,7 @@ async function probeRemoteEnvironment(client: Client): Promise<Environment> {
   } catch {
     /* fall through to defaults */
   }
-  const [sysname = "", machine = "", osVersion = "", shell = ""] = raw.split("\n").map((line) => line.trim());
+  const [sysname = "", environment = "", osVersion = "", shell = ""] = raw.split("\n").map((line) => line.trim());
   const osKind: OsKind = /^linux/i.test(sysname)
     ? "Linux"
     : /^darwin/i.test(sysname)
@@ -392,12 +392,12 @@ async function probeRemoteEnvironment(client: Client): Promise<Environment> {
           : "Linux";
   const shellPath = shell.length > 0 ? shell : "/bin/sh";
   const shellName: ShellName = posix.basename(shellPath);
-  return { osKind, osArch: machine || "unknown", osVersion: osVersion || "unknown", shellName, shellPath };
+  return { osKind, osArch: environment || "unknown", osVersion: osVersion || "unknown", shellName, shellPath };
 }
 
-export class SshMachine extends BaseMachine {
+export class SshEnvironment extends BaseEnvironment {
   readonly name: string;
-  readonly osEnv: Environment;
+  readonly osInfo: OsInfo;
   private readonly client: Client;
   private readonly sftp: SFTPWrapper;
   private readonly home: string;
@@ -410,7 +410,7 @@ export class SshMachine extends BaseMachine {
     sftp: SFTPWrapper;
     home: string;
     cwd: string;
-    osEnv: Environment;
+    osInfo: OsInfo;
     name: string;
     injectedEnv: Record<string, string>;
     additionalDirs: readonly string[];
@@ -420,7 +420,7 @@ export class SshMachine extends BaseMachine {
     this.sftp = args.sftp;
     this.home = args.home;
     this.cwd = args.cwd;
-    this.osEnv = args.osEnv;
+    this.osInfo = args.osInfo;
     this.name = args.name;
     this.injectedEnv = args.injectedEnv;
     this.extraDirs = args.additionalDirs;
@@ -431,24 +431,24 @@ export class SshMachine extends BaseMachine {
     sftp: SFTPWrapper;
     home: string;
     cwd?: string;
-    osEnv: Environment;
+    osInfo: OsInfo;
     name?: string;
     injectedEnv?: Record<string, string>;
     additionalDirs?: readonly string[];
-  }): SshMachine {
-    return new SshMachine({
+  }): SshEnvironment {
+    return new SshEnvironment({
       client: args.client,
       sftp: args.sftp,
       home: args.home,
       cwd: args.cwd ?? args.home,
-      osEnv: args.osEnv,
+      osInfo: args.osInfo,
       name: args.name ?? "ssh",
       injectedEnv: args.injectedEnv ?? {},
       additionalDirs: args.additionalDirs ?? [],
     });
   }
 
-  static async create(options: SshMachineOptions): Promise<SshMachine> {
+  static async create(options: SshEnvironmentOptions): Promise<SshEnvironment> {
     const config: ConnectConfig = {
       ...options.extraOptions,
       host: options.host,
@@ -478,9 +478,9 @@ export class SshMachine extends BaseMachine {
         const attrs = await sftpStat(sftp, cwd);
         if (!attrs.isDirectory()) throw codedError(`${cwd} is not a directory`, "ENOTDIR");
       }
-      const osEnv = await probeRemoteEnvironment(client);
+      const osInfo = await probeRemoteOsInfo(client);
       const injectedEnv = options.forwardProxyEnv === false ? {} : proxyEnv();
-      return new SshMachine({ client, sftp, home, cwd, osEnv, name: options.name ?? `ssh:${options.host}`, injectedEnv, additionalDirs: options.additionalDirs ?? [] });
+      return new SshEnvironment({ client, sftp, home, cwd, osInfo, name: options.name ?? `ssh:${options.host}`, injectedEnv, additionalDirs: options.additionalDirs ?? [] });
     } catch (error) {
       client.end();
       throw error;
@@ -529,15 +529,15 @@ export class SshMachine extends BaseMachine {
       .map((entry) => ({ name: entry.filename, kind: fileKindFromSftpStats(entry.attrs) }));
   }
 
-  withCwd(cwd: string): Machine {
+  withCwd(cwd: string): Environment {
     // Share this connection's client/sftp — only the cwd differs. Never close the
-    // clone independently; the connection is owned by whoever opened this machine.
-    const clone = SshMachine.fromConnection({
+    // clone independently; the connection is owned by whoever opened this environment.
+    const clone = SshEnvironment.fromConnection({
       client: this.client,
       sftp: this.sftp,
       home: this.home,
       cwd: this.resolvePath(cwd),
-      osEnv: this.osEnv,
+      osInfo: this.osInfo,
       name: this.name,
       injectedEnv: this.injectedEnv,
     });
@@ -562,7 +562,7 @@ export class SshMachine extends BaseMachine {
 
   /** Streamed via SFTP + the shared scanner: bounded memory ("read the last 10 lines"
    *  no longer pulls the whole file into a Buffer), same range/byte-cap semantics as
-   *  LocalMachine's streaming path — replaces the whole-file BaseMachine composition. */
+   *  LocalEnvironment's streaming path — replaces the whole-file BaseEnvironment composition. */
   protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
     await sftpWriteFile(this.sftp, this.resolvePath(path), data);
   }
@@ -583,7 +583,7 @@ export class SshMachine extends BaseMachine {
         const kind = await sftpKindOf(this.sftp, current);
         if (kind === "dir") continue;
         // `mkdir -p` tolerates existing DIRECTORIES only — a file occupant anywhere on
-        // the way (final component included) is EEXIST, matching LocalMachine/Node.
+        // the way (final component included) is EEXIST, matching LocalEnvironment/Node.
         if (kind !== undefined) throw codedError(`${current} already exists and is not a directory`, "EEXIST");
         try {
           await sftpMkdir(this.sftp, current);
@@ -609,7 +609,7 @@ export class SshMachine extends BaseMachine {
     const merged = { ...this.injectedEnv, ...(env ?? {}) };
     const command = buildSshExecCommand(argv, this.cwd, Object.keys(merged).length > 0 ? merged : undefined);
     // A Windows server's shell has no process groups (or `sh`) to report — signal the channel.
-    if (this.osEnv.osKind === "Windows") return new SshProcess(await clientExec(this.client, command));
+    if (this.osInfo.osKind === "Windows") return new SshProcess(await clientExec(this.client, command));
     const channel = await clientExec(this.client, SSH_PGID_REPORT + command);
     return new SshProcess(channel, (side) => execForExitCode(this.client, side));
   }
@@ -624,13 +624,13 @@ export class SshMachine extends BaseMachine {
 }
 
 /*
- * No `sshMachineFactory` here on purpose. Its only job would be closing the connection on
+ * No `sshEnvironmentFactory` here on purpose. Its only job would be closing the connection on
  * session close — the lifecycle management that now belongs to whoever opened it (see
- * `MachineFactory`). A host wires SSH in the same way it wires a sandbox:
+ * `EnvironmentFactory`). A host wires SSH in the same way it wires a sandbox:
  *
- *   const machine = await SshMachine.create(options);
- *   const harness = new Harness({ machine });
- *   // ...and calls machine.close() on its own terms.
+ *   const environment = await SshEnvironment.create(options);
+ *   const harness = new Harness({ environment });
+ *   // ...and calls environment.close() on its own terms.
  *
  * That also fixes what the factory form got wrong: it opened a NEW connection per session,
  * so several sessions on one host meant several connections, each dying with its own session.

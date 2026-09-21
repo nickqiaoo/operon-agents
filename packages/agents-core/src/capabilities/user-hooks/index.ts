@@ -77,7 +77,7 @@ export function userHooksCapability(hooks: readonly HookDef[]): Capability {
       {
         token: T.HookEngine,
         create: async (ctx) => {
-          engine.attachMachine(ctx.scope.require(T.Machine));
+          engine.attachEnvironment(ctx.scope.require(T.Environment));
           if (engine.has("SessionStart")) {
             sessionStartOutput = await engine
               .trigger("SessionStart", { inputData: { session_id: ctx.sessionId }, signal: ctx.signal })

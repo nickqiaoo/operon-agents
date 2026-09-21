@@ -1,6 +1,6 @@
 import { testRunner, openTestSession } from "./faux.ts";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineModel, defineAgent, Runner, LocalMachine, type RunContext, type Message } from "../index.ts";
+import { defineModel, defineAgent, Runner, LocalEnvironment, type RunContext, type Message } from "../index.ts";
 import { testRunContext } from "./faux.ts";
 import {
   TransportMCPServer,
@@ -45,7 +45,7 @@ function makeServer(overrides: Partial<ConstructorParameters<typeof TransportMCP
   return { server, transport };
 }
 
-const minimalCtx = (machine: LocalMachine): RunContext => testRunContext({ machine });
+const minimalCtx = (environment: LocalEnvironment): RunContext => testRunContext({ environment });
 
 function toolResult(messages: readonly Message[], name: string): { text: string; isError: boolean } {
   const m = [...messages].reverse().find((x) => x.role === "toolResult" && x.toolName === name);
@@ -111,21 +111,21 @@ async function testCache(): Promise<void> {
   await byDefault.server.close();
 }
 
-async function testFilter(machine: LocalMachine): Promise<void> {
+async function testFilter(environment: LocalEnvironment): Promise<void> {
   const blocked = makeServer({ toolFilter: { blockedToolNames: ["danger", "boom"] } });
   await blocked.server.connect();
-  const blockedNames = (await mcpToolProvider(blocked.server).listTools(minimalCtx(machine))).map((t) => t.schema.name);
+  const blockedNames = (await mcpToolProvider(blocked.server).listTools(minimalCtx(environment))).map((t) => t.schema.name);
   check("filter: block excludes named tools", !blockedNames.includes("mcp__mock__danger") && blockedNames.includes("mcp__mock__echo"));
   await blocked.server.close();
 
   const allowed = makeServer({ toolFilter: { allowedToolNames: ["echo"] } });
   await allowed.server.connect();
-  const allowedNames = (await mcpToolProvider(allowed.server).listTools(minimalCtx(machine))).map((t) => t.schema.name);
+  const allowedNames = (await mcpToolProvider(allowed.server).listTools(minimalCtx(environment))).map((t) => t.schema.name);
   check("filter: allow restricts to the listed tools", allowedNames.length === 1 && allowedNames[0] === "mcp__mock__echo");
   await allowed.server.close();
 }
 
-async function testToolCall(machine: LocalMachine): Promise<void> {
+async function testToolCall(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("mcp__mock__echo", { text: "world" }), { stopReason: "toolUse" }),
@@ -135,7 +135,7 @@ async function testToolCall(machine: LocalMachine): Promise<void> {
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const { server, transport } = makeServer();
-  const runner = testRunner({ machine, capabilities: [mcpCapability([server])], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [mcpCapability([server])], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "use the mcp tool");
   faux.unregister();
 
@@ -145,7 +145,7 @@ async function testToolCall(machine: LocalMachine): Promise<void> {
   check("lifecycle: server closed on stop", transport.closeCalls === 1);
 }
 
-async function testPermissionGlob(machine: LocalMachine): Promise<void> {
+async function testPermissionGlob(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("mcp__mock__danger", {}), { stopReason: "toolUse" }),
@@ -156,7 +156,7 @@ async function testPermissionGlob(machine: LocalMachine): Promise<void> {
 
   const { server } = makeServer();
   const runner = testRunner({
-    machine,
+    environment,
     capabilities: [mcpCapability([server])],
     permission: { mode: "yolo", rules: [{ decision: "deny", scope: "user", pattern: "mcp__mock__*" }] },
   });
@@ -167,36 +167,36 @@ async function testPermissionGlob(machine: LocalMachine): Promise<void> {
   check("permission: mcp__mock__* deny rule blocks the tool (Ring 3 glob)", r.isError && !r.text.includes("danger ran"));
 }
 
-async function testResourcesInjection(machine: LocalMachine): Promise<void> {
+async function testResourcesInjection(environment: LocalEnvironment): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const { server } = makeServer();
-  const runner = testRunner({ machine, capabilities: [mcpCapability([server], { injectResources: true })], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment, capabilities: [mcpCapability([server], { injectResources: true })], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "hello");
   faux.unregister();
 
   check("resources: discovered resources injected at session start", reminderText(result.messages).includes("mem://notes"));
 }
 
-async function testErrorFunction(machine: LocalMachine): Promise<void> {
+async function testErrorFunction(environment: LocalEnvironment): Promise<void> {
   const { server } = makeServer({ errorFunction: ({ toolName }) => `custom failure for ${toolName}` });
   await server.connect();
   const tool = wrapMcpTool(server, { name: "boom" });
-  const plan = await tool.resolve({}, { turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine });
-  const res = await plan.run({ turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine });
+  const plan = await tool.resolve({}, { turnId: "t", toolCallId: "c", signal: new AbortController().signal, environment });
+  const res = await plan.run({ turnId: "t", toolCallId: "c", signal: new AbortController().signal, environment });
   check("errorFunction: failure → model-visible text", res.isError === true && res.content.some((c) => c.type === "text" && c.text.includes("custom failure for boom")));
   await server.close();
 
   const { server: rethrow } = makeServer({ errorFunction: null });
   await rethrow.connect();
   const toolR = wrapMcpTool(rethrow, { name: "boom" });
-  const planR = await toolR.resolve({}, { turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine });
+  const planR = await toolR.resolve({}, { turnId: "t", toolCallId: "c", signal: new AbortController().signal, environment });
   let threw = false;
   try {
-    await planR.run({ turnId: "t", toolCallId: "c", signal: new AbortController().signal, machine });
+    await planR.run({ turnId: "t", toolCallId: "c", signal: new AbortController().signal, environment });
   } catch {
     threw = true;
   }
@@ -205,15 +205,15 @@ async function testErrorFunction(machine: LocalMachine): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const machine = new LocalMachine(process.cwd());
+  const environment = new LocalEnvironment(process.cwd());
   testNaming();
   testConversion();
   await testCache();
-  await testFilter(machine);
-  await testToolCall(machine);
-  await testPermissionGlob(machine);
-  await testResourcesInjection(machine);
-  await testErrorFunction(machine);
+  await testFilter(environment);
+  await testToolCall(environment);
+  await testPermissionGlob(environment);
+  await testResourcesInjection(environment);
+  await testErrorFunction(environment);
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

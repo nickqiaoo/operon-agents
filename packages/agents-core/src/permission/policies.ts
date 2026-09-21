@@ -5,7 +5,7 @@ import {
   findGitWorkTreeMarker,
   isGitControlPath,
   type GitWorkTreeMarker,
-  type GitWorkTreeMachine,
+  type GitWorkTreeEnvironment,
 } from "../tool/support/git-worktree.ts";
 import type { ToolFileAccess } from "../tool/access.ts";
 import { matchPermissionRule, type PermissionRuleMatch } from "./matches-rule.ts";
@@ -25,7 +25,7 @@ export interface PermissionState {
   sessionApprovalRulePatterns(): readonly string[];
   cwd(): string;
   pathClass(): PathClass;
-  machine?(): GitWorkTreeMachine | undefined;
+  environment?(): GitWorkTreeEnvironment | undefined;
 }
 
 const USER_CONFIGURED_SCOPES = new Set<PermissionRuleScope>(["turn-override", "project", "user"]);
@@ -92,10 +92,10 @@ export function createPolicies(
   // both git-control-path-access-ask and git-cwd-write-approve so they probe at most once.
   let markerProbe: Promise<GitWorkTreeMarker | null> | undefined;
   const gitMarker = (): Promise<GitWorkTreeMarker | null> => {
-    const machine = state.machine?.();
+    const environment = state.environment?.();
     const cwd = state.cwd();
-    if (machine === undefined || cwd.length === 0) return Promise.resolve(null);
-    markerProbe ??= findGitWorkTreeMarker(machine, cwd).catch(() => null);
+    if (environment === undefined || cwd.length === 0) return Promise.resolve(null);
+    markerProbe ??= findGitWorkTreeMarker(environment, cwd).catch(() => null);
     return markerProbe;
   };
   return [
@@ -254,7 +254,7 @@ export function createPolicies(
     },
 
     // Write/Edit inside cwd inside a git work tree → approve (changes are recoverable via git).
-    // Still overridable by name; degrades to undefined (→ fallback ask) when no machine/marker.
+    // Still overridable by name; degrades to undefined (→ fallback ask) when no environment/marker.
     overrides?.get("git-cwd-write-approve") ?? {
       name: "git-cwd-write-approve",
       async evaluate(ctx) {

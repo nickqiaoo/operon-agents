@@ -10,7 +10,7 @@
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
-import { globTool, grepTool, LocalMachine, type Tool, type ToolResult } from "../index.ts";
+import { globTool, grepTool, LocalEnvironment, type Tool, type ToolResult } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, okFlag: boolean): void {
@@ -18,8 +18,8 @@ function check(label: string, okFlag: boolean): void {
   console.log(`${okFlag ? "PASS" : "FAIL"} ${label}`);
 }
 
-function makeCtx(host: LocalMachine) {
-  return { turnId: "t1", toolCallId: "c1", signal: new AbortController().signal, machine: host };
+function makeCtx(host: LocalEnvironment) {
+  return { turnId: "t1", toolCallId: "c1", signal: new AbortController().signal, environment: host };
 }
 
 async function runTool(tool: Tool, args: unknown, ctx: ReturnType<typeof makeCtx>): Promise<ToolResult> {
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     await writeFile(path.join(dir, "notes.md"), "not typescript\n");
     await writeFile(path.join(dir, ".git", "config.ts"), "vcs metadata\n");
 
-    const host = new LocalMachine(dir);
+    const host = new LocalEnvironment(dir);
     const ctx = makeCtx(host);
 
     // ── Glob ────────────────────────────────────────────────────────────────────

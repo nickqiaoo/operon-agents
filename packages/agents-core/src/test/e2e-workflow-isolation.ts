@@ -11,7 +11,7 @@ import {
   DiskSessionStore,
   defineAgent,
   defineModel,
-  LocalMachine,
+  LocalEnvironment,
   type Message,
   Runner,
   Session,
@@ -30,7 +30,7 @@ function git(cwd: string, ...args: string[]): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Part A — createWorktree (business logic over machine.exec + withCwd) on a real repo
+// Part A — createWorktree (business logic over environment.exec + withCwd) on a real repo
 // ─────────────────────────────────────────────────────────────────────────────
 async function testWorktree(): Promise<void> {
   const repo = mkdtempSync(join(tmpdir(), "wf-repo-"));
@@ -42,23 +42,23 @@ async function testWorktree(): Promise<void> {
     git(repo, "add", ".");
     git(repo, "commit", "-qm", "init");
 
-    const machine = new LocalMachine(repo);
+    const environment = new LocalEnvironment(repo);
 
     // Dirty worktree → kept for inspection.
-    const wt = await createWorktree(machine, { label: "alpha" });
+    const wt = await createWorktree(environment, { label: "alpha" });
     check("createWorktree returns a handle in a git repo", wt !== null);
     if (wt) {
       check("worktree cwd exists on disk", existsSync(wt.cwd));
-      check("scoped machine getcwd() == worktree cwd", wt.machine.getcwd() === wt.cwd);
-      await wt.machine.writeText("scratch.txt", "isolated");
-      check("write via scoped machine lands IN the worktree", existsSync(join(wt.cwd, "scratch.txt")));
+      check("scoped environment getcwd() == worktree cwd", wt.environment.getcwd() === wt.cwd);
+      await wt.environment.writeText("scratch.txt", "isolated");
+      check("write via scoped environment lands IN the worktree", existsSync(join(wt.cwd, "scratch.txt")));
       check("write does NOT touch the main repo", !existsSync(join(repo, "scratch.txt")));
       await wt.cleanup();
       check("dirty worktree kept after cleanup (has uncommitted scratch.txt)", existsSync(wt.cwd));
     }
 
     // Clean worktree → removed on cleanup.
-    const wt2 = await createWorktree(machine, { label: "beta" });
+    const wt2 = await createWorktree(environment, { label: "beta" });
     check("second worktree created", wt2 !== null);
     if (wt2) {
       await wt2.cleanup();
@@ -68,7 +68,7 @@ async function testWorktree(): Promise<void> {
     // Non-repo dir → null (graceful: caller degrades to shared workspace).
     const nonRepo = mkdtempSync(join(tmpdir(), "wf-norepo-"));
     try {
-      const ns = new LocalMachine(nonRepo);
+      const ns = new LocalEnvironment(nonRepo);
       check("createWorktree returns null outside a git repo", (await createWorktree(ns)) === null);
     } finally {
       rmSync(nonRepo, { recursive: true, force: true });

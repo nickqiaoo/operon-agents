@@ -36,11 +36,11 @@ Override the model with `MODEL="provider/model"` (default `anthropic/claude-opus
 
 1. **Deployment (local ⇄ server)** — there is no "mode" inside the engine. `createLocalHarness`
    (`packages/agents/src/local.ts`) bundles the local conventions; a server calls `createHarness`
-   directly and injects its own backends (Pg/Redis store, sandbox machine, stdout log, no cron).
+   directly and injects its own backends (Pg/Redis store, sandbox environment, stdout log, no cron).
    There is deliberately no server preset — see `managed-agents` for the assembly.
-2. **Machine** — where tools actually run. Local by default; flip to an E2B / Cloudflare
-   sandbox by opening an `operon-sandbox` workspace and passing its machine as
-   `machine` (see `managed-agents`). Sandbox lifecycle stays with the host;
+2. **Environment** — where tools actually run. Local by default; flip to an E2B / Cloudflare
+   sandbox by opening an `operon-sandbox` workspace and passing its environment as
+   `environment` (see `managed-agents`). Sandbox lifecycle stays with the host;
    the agent, sessions, and events stay identical.
 
 ## Running

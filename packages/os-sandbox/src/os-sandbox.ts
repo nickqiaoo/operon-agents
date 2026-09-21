@@ -1,12 +1,12 @@
 import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { LocalMachine, type Machine } from "operon-agents-core";
+import { LocalEnvironment, type Environment } from "operon-agents-core";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { SandboxedLocalMachine, type SandboxPolicyContext } from "./machine.ts";
+import { SandboxedLocalEnvironment, type SandboxPolicyContext } from "./environment.ts";
 import type { OsSandboxOptions, OsSandboxStatus } from "./types.ts";
 
 /**
- * Write roots every sandboxed machine needs regardless of its cwd:
+ * Write roots every sandboxed environment needs regardless of its cwd:
  * the temp trees (both the symlink and its real path — srt matches paths
  * literally), and the framework's background-task log directory — the bash
  * tool redirects background/attached command output to
@@ -60,7 +60,7 @@ function buildRuntimeConfig(options: OsSandboxOptions): SandboxRuntimeConfig {
     },
     filesystem: {
       denyRead: [...(options.filesystem?.denyRead ?? [])],
-      // Session-level extras only; each machine adds its own cwd tree per call.
+      // Session-level extras only; each environment adds its own cwd tree per call.
       allowWrite: [...(options.filesystem?.allowWrite ?? [])],
       denyWrite: [...(options.filesystem?.denyWrite ?? [])],
     },
@@ -68,17 +68,17 @@ function buildRuntimeConfig(options: OsSandboxOptions): SandboxRuntimeConfig {
 }
 
 /**
- * Process-wide OS sandbox session for LOCAL machines.
+ * Process-wide OS sandbox session for LOCAL environments.
  *
  * `start()` never throws: on macOS/Linux with dependencies present it
  * initializes @anthropic-ai/sandbox-runtime (which starts the network filter
- * proxy) and `machine()` mints {@link SandboxedLocalMachine}s; anywhere else
- * `status.enabled` is false and `machine()` mints plain {@link LocalMachine}s
+ * proxy) and `environment()` mints {@link SandboxedLocalEnvironment}s; anywhere else
+ * `status.enabled` is false and `environment()` mints plain {@link LocalEnvironment}s
  * — same API, today's behavior, and `status.reason` says why.
  *
  * One OsSandbox per process: the underlying SandboxManager is a module-level
  * singleton, so a second concurrent `start()` with a different config would
- * silently share the first one's session. Remote machines (SSH, vendor
+ * silently share the first one's session. Remote environments (SSH, vendor
  * sandboxes) are out of scope by design — their commands do not run on this
  * host.
  */
@@ -123,20 +123,20 @@ export class OsSandbox {
     return new OsSandbox({ enabled: true, platform, warnings: deps.warnings }, policy);
   }
 
-  /** An explicitly-off OsSandbox: same `machine()` API, plain LocalMachines. */
+  /** An explicitly-off OsSandbox: same `environment()` API, plain LocalEnvironments. */
   static disabled(reason = "disabled by host"): OsSandbox {
     return new OsSandbox({ enabled: false, reason });
   }
 
   /**
-   * Build the machine a session should get — sandboxed when this OsSandbox is
-   * enabled, a plain LocalMachine otherwise. Accepts exactly what LocalMachine's
+   * Build the environment a session should get — sandboxed when this OsSandbox is
+   * enabled, a plain LocalEnvironment otherwise. Accepts exactly what LocalEnvironment's
    * constructor does.
    */
-  machine(cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[] } = process.cwd()): Machine {
+  environment(cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[] } = process.cwd()): Environment {
     return this.policy === undefined
-      ? new LocalMachine(cwdOrOptions)
-      : new SandboxedLocalMachine(this.policy, cwdOrOptions);
+      ? new LocalEnvironment(cwdOrOptions)
+      : new SandboxedLocalEnvironment(this.policy, cwdOrOptions);
   }
 
   /** Tear down the srt session (filter proxies, monitors). Idempotent. */

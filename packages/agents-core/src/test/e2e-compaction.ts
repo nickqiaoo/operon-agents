@@ -7,7 +7,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   ListenerSink,
   MemoryStore,
   MicroCompaction,
@@ -69,7 +69,7 @@ function bulkText(ch: string): string {
   return `${ch.repeat(80)}\n`.repeat(500);
 }
 
-async function testFullCompaction(dir: string, machine: LocalMachine): Promise<void> {
+async function testFullCompaction(dir: string, environment: LocalEnvironment): Promise<void> {
   writeFileSync(join(dir, "big1.txt"), bulkText("A"));
   writeFileSync(join(dir, "big2.txt"), bulkText("B"));
 
@@ -98,7 +98,7 @@ async function testFullCompaction(dir: string, machine: LocalMachine): Promise<v
   // which means afterStep's compact check fires — not beforeStep's hard block.
   const compaction = compactionCapability({ maxContextTokens: 48_000 });
   const runner = testRunner({
-    machine,
+    environment,
     store,
     events,
     capabilities: [compaction],
@@ -127,7 +127,7 @@ async function testFullCompaction(dir: string, machine: LocalMachine): Promise<v
   check("full: run completes", result.status === "completed");
 }
 
-async function testMicroCompaction(dir: string, machine: LocalMachine): Promise<void> {
+async function testMicroCompaction(dir: string, environment: LocalEnvironment): Promise<void> {
   writeFileSync(join(dir, "m1.txt"), "X".repeat(1500));
   writeFileSync(join(dir, "m2.txt"), "Y".repeat(1500));
 
@@ -147,7 +147,7 @@ async function testMicroCompaction(dir: string, machine: LocalMachine): Promise<
     micro: { cacheMissedThresholdMs: 0, minContextUsageRatio: 0, keepRecentMessages: 1, minContentTokens: 10 },
   });
   const runner = testRunner({
-    machine,
+    environment,
     store,
     capabilities: [compaction],
     permission: { mode: "yolo" },
@@ -180,7 +180,7 @@ async function testMicroCompaction(dir: string, machine: LocalMachine): Promise<
  * degrades — the step proceeds uncompacted and the breaker eventually stops retrying — whereas
  * the previous code let runFullCompaction's throw escape the hook and abort the step.
  */
-async function testCompactionFailureDegrades(dir: string, machine: LocalMachine): Promise<void> {
+async function testCompactionFailureDegrades(dir: string, environment: LocalEnvironment): Promise<void> {
   writeFileSync(join(dir, "fail1.txt"), bulkText("C"));
   writeFileSync(join(dir, "fail2.txt"), bulkText("D"));
 
@@ -197,7 +197,7 @@ async function testCompactionFailureDegrades(dir: string, machine: LocalMachine)
   const agent = defineAgent({ name: "reader", model, instructions: "x", tools: [readTool] });
 
   const runner = testRunner({
-    machine,
+    environment,
     store: new MemoryStore(),
     events: new ListenerSink(),
     // Same real-scale window as testFullCompaction, so the failure path is exercised at the
@@ -276,13 +276,13 @@ function testStrategyThresholds(): void {
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-compaction-e2e-"));
-  const machine = new LocalMachine(dir);
+  const environment = new LocalEnvironment(dir);
   try {
     testStrategyThresholds();
     testMicroPreservesDeferredMetadata();
-    await testFullCompaction(dir, machine);
-    await testMicroCompaction(dir, machine);
-    await testCompactionFailureDegrades(dir, machine);
+    await testFullCompaction(dir, environment);
+    await testMicroCompaction(dir, environment);
+    await testCompactionFailureDegrades(dir, environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -37,7 +37,7 @@ export interface SessionControls {
 
 /**
  * What a capability's `Provision.create` receives: the session scope (everything the session
- * registered — `T.Machine`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`,
+ * registered — `T.Environment`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`,
  * `T.SessionControls`, plus whatever earlier capabilities provided) and the two values every
  * provision needs. Everything else is a `ctx.scope.get(T.…)` away.
  */

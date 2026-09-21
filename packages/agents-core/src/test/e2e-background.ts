@@ -4,7 +4,7 @@ import {
   defineModel,
   defineAgent,
   Runner,
-  LocalMachine,
+  LocalEnvironment,
   SteerBus,
   bashTool,
   BackgroundManager,
@@ -52,11 +52,11 @@ function toolResultTexts(messages: readonly Message[]): string {
 
 async function runTool(tool: ReturnType<typeof backgroundListTool>, args: unknown, signal?: AbortSignal): Promise<ToolResult> {
   const sig = signal ?? new AbortController().signal;
-  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
-  return plan.run({ turnId: "t", toolCallId: "c", signal: sig, machine: MACHINE });
+  const plan = await tool.resolve(args, { turnId: "t", toolCallId: "c", signal: sig, environment: ENVIRONMENT });
+  return plan.run({ turnId: "t", toolCallId: "c", signal: sig, environment: ENVIRONMENT });
 }
 
-let MACHINE: LocalMachine;
+let ENVIRONMENT: LocalEnvironment;
 
 async function mkdtempDir(): Promise<string> {
   const { mkdtemp } = await import("node:fs/promises");
@@ -75,7 +75,7 @@ function scriptedTask(opts: {
 }): BackgroundTask {
   const outputLocation =
     opts.kind === "process"
-      ? ({ kind: "file", machine: MACHINE, path: `/tmp/operon-background-test-${opts.idPrefix}.log` } as const)
+      ? ({ kind: "file", environment: ENVIRONMENT, path: `/tmp/operon-background-test-${opts.idPrefix}.log` } as const)
       : opts.kind === "agent"
         ? ({ kind: "conversation", address: `main/test-${opts.idPrefix}` } as const)
         : opts.kind === "workflow"
@@ -111,7 +111,7 @@ async function testBashBackground(): Promise<void> {
 
   const bus = new SteerBus();
   const mgr = new BackgroundManager();
-  const runner = testRunner({ machine: MACHINE, steer: bus, background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } });
+  const runner = testRunner({ environment: ENVIRONMENT, steer: bus, background: mgr, capabilities: [backgroundCapability(mgr)], permission: { mode: "yolo" } });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
@@ -129,7 +129,7 @@ async function testBashBackground(): Promise<void> {
   );
   await tick();
 
-  // A command's output is a FILE on the machine. BackgroundOutput reports where it is and
+  // A command's output is a FILE on the environment. BackgroundOutput reports where it is and
   // stops — serving a second, truncating view of the same bytes would only tempt the model to
   // read it the worse way. `Read` is the path, and it pages properly.
   const out = await runTool(backgroundOutputTool(mgr), { task_id: taskId });
@@ -143,7 +143,7 @@ async function testBashBackground(): Promise<void> {
   // so this genuinely distinguishes the two (an earlier version of this test could not).
   check("BackgroundOutput: does not carry the command's output", !outText.includes("out-123"));
   // ...and the bytes really are in that file, so nothing was lost by not serving them here.
-  const logged = logPath === undefined ? "" : (await MACHINE.readBytes(logPath)).toString("utf-8");
+  const logged = logPath === undefined ? "" : (await ENVIRONMENT.readBytes(logPath)).toString("utf-8");
   check("BackgroundOutput: the named file holds the actual output", logged.includes("out-123"));
 
   // BackgroundList (all) lists the finished task.
@@ -255,7 +255,7 @@ async function testQuestionSettleCarriesTheAnswer(): Promise<void> {
 /**
  * Bash has ONE foreground path. Which driver runs it depends on what the deployment has, but
  * the tool does not branch — so the outcome→result framing cannot drift between them, which
- * is what happened when the tool chose between a bespoke `machine.run` and the attached
+ * is what happened when the tool chose between a bespoke `environment.run` and the attached
  * driver. This runs the same failing command with and without the background capability and
  * requires byte-identical results.
  */
@@ -269,7 +269,7 @@ async function testForegroundHasOneShape(): Promise<void> {
     const agent = defineAgent({ name: "a", model: faux.getChatModel()!, instructions: "x", tools: [bashTool] });
     const mgr = withBackground ? new BackgroundManager() : undefined;
     const runner = testRunner({
-      machine: MACHINE,
+      environment: ENVIRONMENT,
       permission: { mode: "yolo" },
       ...(mgr !== undefined ? { background: mgr, capabilities: [backgroundCapability(mgr)] } : {}),
     });
@@ -323,7 +323,7 @@ async function testDetachableIsOfferedLate(): Promise<void> {
       foregroundSignal: new AbortController().signal,
       detachSignal: detach.signal,
       logPath: "/tmp/operon-background-test-detachable.log",
-      machine: MACHINE,
+      environment: ENVIRONMENT,
       onDetachable: () => offers.push("offered"),
     },
   );
@@ -333,7 +333,7 @@ async function testDetachableIsOfferedLate(): Promise<void> {
 }
 
 /** A manager-backed Bash is file-backed before it starts, so detach changes ownership only:
- * bytes written on both sides of the transition stay in one canonical Machine file. */
+ * bytes written on both sides of the transition stay in one canonical Environment file. */
 async function testForegroundBashDetachesToSameFile(): Promise<void> {
   const mgr = new BackgroundManager();
   mgr.attach({});
@@ -343,7 +343,7 @@ async function testForegroundBashDetachesToSameFile(): Promise<void> {
     turnId: "t",
     toolCallId: "bash-detach-file",
     signal: foreground.signal,
-    machine: MACHINE,
+    environment: ENVIRONMENT,
   };
   const plan = await bashTool.resolve(
     { command: "printf 'before\\n'; sleep 0.2; printf 'after\\n'" },
@@ -370,7 +370,7 @@ async function testForegroundBashDetachesToSameFile(): Promise<void> {
   }
   check("foreground detach: reports its canonical output file", logPath.endsWith(".log"));
   const settled = await mgr.wait(taskId, 3_000);
-  const logged = (await MACHINE.readBytes(logPath)).toString("utf-8");
+  const logged = (await ENVIRONMENT.readBytes(logPath)).toString("utf-8");
   check(
     "foreground detach: the same file contains output from both phases",
     settled?.status === "completed" && logged.includes("before\n") && logged.includes("after\n"),
@@ -582,7 +582,7 @@ async function testStorelessBackgroundAgentIsRejected(): Promise<void> {
 }
 
 async function testBackgroundBashWithoutDurableLogIsRejected(): Promise<void> {
-  const machine = new Proxy(MACHINE, {
+  const environment = new Proxy(ENVIRONMENT, {
     get(target, property) {
       if (property === "gethome") return () => { throw new Error("home unavailable"); };
       const value = Reflect.get(target, property, target) as unknown;
@@ -595,7 +595,7 @@ async function testBackgroundBashWithoutDurableLogIsRejected(): Promise<void> {
     turnId: "t",
     toolCallId: "bash-no-log",
     signal: new AbortController().signal,
-    machine,
+    environment,
   };
   const plan = await bashTool.resolve({ command: "printf x", run_in_background: true }, base);
   const result = await plan.run({ ...base, background: mgr } as Parameters<typeof plan.run>[0]);
@@ -617,8 +617,8 @@ async function testFileBackedOutputIsReadOnDemand(): Promise<void> {
   const LOG = "/log/out.txt";
   let contents = "";
   const reads: Array<{ offset?: number; length?: number }> = [];
-  const machine = {
-    ...MACHINE,
+  const environment = {
+    ...ENVIRONMENT,
     fileInfo: async () => ({ kind: "file" as const, size: Buffer.byteLength(contents, "utf8") }),
     readBytes: async (path: string, range?: { offset?: number; length?: number }) => {
       if (path !== LOG) throw new Error(`unexpected read of ${path}`);
@@ -627,7 +627,7 @@ async function testFileBackedOutputIsReadOnDemand(): Promise<void> {
       const from = range?.offset ?? 0;
       return range?.length === undefined ? all.subarray(from) : all.subarray(from, from + range.length);
     },
-  } as unknown as typeof MACHINE;
+  } as unknown as typeof ENVIRONMENT;
 
   const mgr = new BackgroundManager();
   mgr.attach({});
@@ -640,7 +640,7 @@ async function testFileBackedOutputIsReadOnDemand(): Promise<void> {
     },
     "build",
     "bash: build",
-    { logPath: LOG, machine },
+    { logPath: LOG, environment },
   );
 
   contents = "alpha-beta-gamma";
@@ -697,15 +697,15 @@ async function testUtf8WindowsAlign(): Promise<void> {
   const TEXT = "你好世界再见";
   const LOG = "/log/zh.txt";
   const bytes = Buffer.from(TEXT, "utf-8");
-  const machine = {
-    ...MACHINE,
+  const environment = {
+    ...ENVIRONMENT,
     fileInfo: async () => ({ kind: "file" as const, size: bytes.byteLength }),
     readBytes: async (_p: string, range?: { offset?: number; length?: number }) => {
       const from = range?.offset ?? 0;
       const len = range?.length ?? bytes.byteLength - from;
       return bytes.subarray(from, from + len);
     },
-  } as unknown as LocalMachine;
+  } as unknown as LocalEnvironment;
 
   const mgr = new BackgroundManager();
   mgr.attach({});
@@ -714,7 +714,7 @@ async function testUtf8WindowsAlign(): Promise<void> {
     idPrefix: "bash",
     kind: "process",
     description: "chinese log",
-    outputLocation: { kind: "file", machine, path: LOG },
+    outputLocation: { kind: "file", environment, path: LOG },
     async start(sink) {
       await settle.promise;
       await sink.settle({ status: "completed" });
@@ -762,7 +762,7 @@ async function testForegroundTruncationNamesTheLog(): Promise<void> {
   const agent = defineAgent({ name: "a", model: faux.getChatModel()!, instructions: "x", tools: [bashTool] });
   const mgr = new BackgroundManager();
   const runner = testRunner({
-    machine: MACHINE,
+    environment: ENVIRONMENT,
     steer: new SteerBus(),
     background: mgr,
     capabilities: [backgroundCapability(mgr)],
@@ -777,7 +777,7 @@ async function testForegroundTruncationNamesTheLog(): Promise<void> {
   check("foreground truncation: it names the log file", named !== undefined && named.endsWith(".log"));
   // The sentence continues past the path, so no full stop is glued onto the filename.
   check("foreground truncation: the path is not punctuated into uselessness", named !== undefined && !named.endsWith("."));
-  const logged = named === undefined ? "" : (await MACHINE.readBytes(named)).toString("utf-8");
+  const logged = named === undefined ? "" : (await ENVIRONMENT.readBytes(named)).toString("utf-8");
   check("foreground truncation: the named file holds what the result dropped", logged.includes("\n20000\n"));
 
   // A small command is handed over in full, so there is nothing to point at.
@@ -788,7 +788,7 @@ async function testForegroundTruncationNamesTheLog(): Promise<void> {
   ]);
   const agent2 = defineAgent({ name: "a", model: faux2.getChatModel()!, instructions: "x", tools: [bashTool] });
   const small = await testRunner({
-    machine: MACHINE,
+    environment: ENVIRONMENT,
     steer: new SteerBus(),
     background: mgr,
     capabilities: [backgroundCapability(mgr)],
@@ -889,11 +889,11 @@ async function testUnconfirmedStopIsNotAKill(): Promise<void> {
   // BackgroundStop on a detached command.
   const mgr = new BackgroundManager();
   mgr.attach({});
-  const stubborn = mgr.registerTask(new CommandBackgroundTask(walksAway, "npm run dev", "bash: npm run dev", { logPath, machine: MACHINE }));
+  const stubborn = mgr.registerTask(new CommandBackgroundTask(walksAway, "npm run dev", "bash: npm run dev", { logPath, environment: ENVIRONMENT }));
   const stubbornInfo = await mgr.stop(stubborn, undefined);
   check("unconfirmed stop: a command that may still run is not recorded as killed", stubbornInfo?.status === "failed");
   check("unconfirmed stop: and says why", stubbornInfo?.stopReason?.includes("may still be running") === true);
-  const confirmed = mgr.registerTask(new CommandBackgroundTask(stops, "npm test", "bash: npm test", { logPath, machine: MACHINE }));
+  const confirmed = mgr.registerTask(new CommandBackgroundTask(stops, "npm test", "bash: npm test", { logPath, environment: ENVIRONMENT }));
   check("unconfirmed stop: a confirmed stop is still a kill", (await mgr.stop(confirmed, undefined))?.status === "killed");
 
   // Foreground, through the manager's attached driver.
@@ -901,7 +901,7 @@ async function testUnconfirmedStopIsNotAKill(): Promise<void> {
     foregroundSignal: new AbortController().signal,
     foregroundTimeoutMs: 20,
     logPath,
-    machine: MACHINE,
+    environment: ENVIRONMENT,
   });
   check(
     "unconfirmed stop: attached timeout stays a timeout, flagged as possibly running",
@@ -911,7 +911,7 @@ async function testUnconfirmedStopIsNotAKill(): Promise<void> {
     foregroundSignal: new AbortController().signal,
     foregroundTimeoutMs: 20,
     logPath,
-    machine: MACHINE,
+    environment: ENVIRONMENT,
   });
   check("unconfirmed stop: a confirmed attached stop carries no flag", attachedOk.kind === "settled" && attachedOk.stillRunning === undefined);
 
@@ -938,7 +938,7 @@ async function testStuckOnAPromptIsReported(): Promise<void> {
   const dir = await mkdtempDir();
   // Writes its output, then blocks the way a command waiting on stdin does: until stopped.
   const writesThenBlocks = (logPath: string, output: string): CommandStarter => async ({ signal }) => {
-    await MACHINE.writeText(logPath, output);
+    await ENVIRONMENT.writeText(logPath, output);
     await new Promise<void>((resolve) => {
       if (signal.aborted) resolve();
       else signal.addEventListener("abort", () => resolve(), { once: true });
@@ -950,11 +950,11 @@ async function testStuckOnAPromptIsReported(): Promise<void> {
 
   const promptLog = `${dir}/prompt.log`;
   const stuck = mgr.registerTask(
-    new CommandBackgroundTask(writesThenBlocks(promptLog, "Scaffolding project...\nOk to proceed? (y) "), "npm create vite", "bash: npm create vite", { logPath: promptLog, machine: MACHINE }),
+    new CommandBackgroundTask(writesThenBlocks(promptLog, "Scaffolding project...\nOk to proceed? (y) "), "npm create vite", "bash: npm create vite", { logPath: promptLog, environment: ENVIRONMENT }),
   );
   const quietLog = `${dir}/quiet.log`;
   const quiet = mgr.registerTask(
-    new CommandBackgroundTask(writesThenBlocks(quietLog, "Compiling 42 of 380 modules\n"), "npm run build", "bash: npm run build", { logPath: quietLog, machine: MACHINE }),
+    new CommandBackgroundTask(writesThenBlocks(quietLog, "Compiling 42 of 380 modules\n"), "npm run build", "bash: npm run build", { logPath: quietLog, environment: ENVIRONMENT }),
   );
   await tick(600);
   const seen = notices();
@@ -981,16 +981,16 @@ async function testStuckOnAPromptIsReported(): Promise<void> {
 async function testQuietOutputIsProbedNotRead(): Promise<void> {
   const { appendFile, writeFile } = await import("node:fs/promises");
   const counts = { reads: 0, stats: 0 };
-  const counted = new Proxy(MACHINE, {
+  const counted = new Proxy(ENVIRONMENT, {
     get(target, prop, receiver: unknown) {
       if (prop === "readBytes") {
-        return (...args: Parameters<LocalMachine["readBytes"]>) => {
+        return (...args: Parameters<LocalEnvironment["readBytes"]>) => {
           counts.reads += 1;
           return target.readBytes(...args);
         };
       }
       if (prop === "fileInfo") {
-        return (...args: Parameters<LocalMachine["fileInfo"]>) => {
+        return (...args: Parameters<LocalEnvironment["fileInfo"]>) => {
           counts.stats += 1;
           return target.fileInfo(...args);
         };
@@ -1019,7 +1019,7 @@ async function testQuietOutputIsProbedNotRead(): Promise<void> {
     },
     "slow-command",
     "bash: slow-command",
-    { foregroundSignal: foreground.signal, logPath, machine: counted as unknown as LocalMachine, onLive: (chunk) => (live += chunk) },
+    { foregroundSignal: foreground.signal, logPath, environment: counted as unknown as LocalEnvironment, onLive: (chunk) => (live += chunk) },
   );
 
   await tick(300);
@@ -1052,15 +1052,15 @@ async function testQuietOutputIsProbedNotRead(): Promise<void> {
 /**
  * The task-log directory is the same for every command of a session, and creating it is a round
  * trip — a whole command on some backends — that every Bash call used to pay. It is created once
- * per machine, and a directory that disappears underneath us still heals on the next call.
+ * per environment, and a directory that disappears underneath us still heals on the next call.
  */
 async function testLogDirIsPreparedOnce(): Promise<void> {
   const { rm, stat } = await import("node:fs/promises");
   let mkdirs = 0;
-  const counted = new Proxy(MACHINE, {
+  const counted = new Proxy(ENVIRONMENT, {
     get(target, prop, receiver: unknown) {
       if (prop === "mkdir") {
-        return (...args: Parameters<LocalMachine["mkdir"]>) => {
+        return (...args: Parameters<LocalEnvironment["mkdir"]>) => {
           mkdirs += 1;
           return target.mkdir(...args);
         };
@@ -1068,7 +1068,7 @@ async function testLogDirIsPreparedOnce(): Promise<void> {
       const value = Reflect.get(target, prop, receiver) as unknown;
       return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
     },
-  }) as unknown as LocalMachine;
+  }) as unknown as LocalEnvironment;
 
   const first = await prepareBackgroundLog(counted);
   const second = await prepareBackgroundLog(counted);
@@ -1084,7 +1084,7 @@ async function testLogDirIsPreparedOnce(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  MACHINE = new LocalMachine(process.cwd());
+  ENVIRONMENT = new LocalEnvironment(process.cwd());
   await testBashBackground();
   await testFileBackedOutputIsReadOnDemand();
   await testBackgroundStop();

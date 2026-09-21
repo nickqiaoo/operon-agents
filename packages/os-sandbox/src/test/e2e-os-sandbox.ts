@@ -5,15 +5,15 @@
  * asserts the degrade contract — that is a pass, not a skip, because the
  * degrade path IS the product behavior there.
  *
- * Layout: workspace under tmp is the machine's cwd (writable); a sibling
+ * Layout: workspace under tmp is the environment's cwd (writable); a sibling
  * "secret" dir is deny-read; $HOME is outside every write root. Network is
  * deny-all.
  */
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { OsSandbox, SandboxedLocalMachine } from "../index.ts";
-import { LocalMachine } from "operon-agents-core";
+import { OsSandbox, SandboxedLocalEnvironment } from "../index.ts";
+import { LocalEnvironment } from "operon-agents-core";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: string): void {
@@ -36,73 +36,73 @@ const sandbox = await OsSandbox.start({
 
 async function testDisabledContract(): Promise<void> {
   console.log(`sandbox disabled (${sandbox.status.enabled ? "?" : sandbox.status.reason}) — asserting the degrade contract`);
-  const machine = sandbox.machine(work);
-  check("degrade: plain LocalMachine", machine instanceof LocalMachine && !(machine instanceof SandboxedLocalMachine));
-  const result = await machine.run(["/bin/sh", "-c", "echo degraded"]);
+  const environment = sandbox.environment(work);
+  check("degrade: plain LocalEnvironment", environment instanceof LocalEnvironment && !(environment instanceof SandboxedLocalEnvironment));
+  const result = await environment.run(["/bin/sh", "-c", "echo degraded"]);
   check("degrade: commands still run", result.exitCode === 0 && result.stdout.trim() === "degraded");
 }
 
 async function testEnabledContract(): Promise<void> {
-  const machine = sandbox.machine(work);
-  check("machine: sandboxed type", machine instanceof SandboxedLocalMachine);
+  const environment = sandbox.environment(work);
+  check("environment: sandboxed type", environment instanceof SandboxedLocalEnvironment);
 
   // Baseline: an ordinary command runs and its streams come home.
-  const echo = await machine.run(["/bin/sh", "-c", "echo hello && echo oops >&2"]);
+  const echo = await environment.run(["/bin/sh", "-c", "echo hello && echo oops >&2"]);
   check("run: exit 0", echo.exitCode === 0, `exit=${String(echo.exitCode)} stderr=${echo.stderr}`);
   check("run: stdout", echo.stdout.trim() === "hello");
   check("run: stderr", echo.stderr.trim() === "oops");
 
   // cwd tree is writable.
-  const writeIn = await machine.run(["/bin/sh", "-c", "echo data > inside.txt && cat inside.txt"]);
+  const writeIn = await environment.run(["/bin/sh", "-c", "echo data > inside.txt && cat inside.txt"]);
   check("fs: write inside cwd allowed", writeIn.exitCode === 0 && writeIn.stdout.trim() === "data", writeIn.stderr);
 
   // $HOME is outside every write root.
-  const writeOut = await machine.run(["/bin/sh", "-c", `echo nope > ${homeProbe}`]);
+  const writeOut = await environment.run(["/bin/sh", "-c", `echo nope > ${homeProbe}`]);
   check("fs: write outside roots denied", writeOut.exitCode !== 0 && !existsSync(homeProbe), `exit=${String(writeOut.exitCode)}`);
 
   // denyRead carve-out.
-  const readSecret = await machine.run(["/bin/sh", "-c", `cat ${secretFile}`]);
+  const readSecret = await environment.run(["/bin/sh", "-c", `cat ${secretFile}`]);
   check("fs: deny-read enforced", readSecret.exitCode !== 0 && !readSecret.stdout.includes("s3cret"), `exit=${String(readSecret.exitCode)}`);
 
   // denyWrite carve-out inside the writable cwd; reading it stays fine.
-  const writeProtected = await machine.run(["/bin/sh", "-c", `echo clobber > ${denyWriteFile}`]);
+  const writeProtected = await environment.run(["/bin/sh", "-c", `echo clobber > ${denyWriteFile}`]);
   check("fs: deny-write carve-out enforced", writeProtected.exitCode !== 0);
-  const readProtected = await machine.run(["/bin/sh", "-c", `cat ${denyWriteFile}`]);
+  const readProtected = await environment.run(["/bin/sh", "-c", `cat ${denyWriteFile}`]);
   check("fs: deny-write file still readable", readProtected.exitCode === 0 && readProtected.stdout.trim() === "keep me");
 
   // Deny-all network. Blocking has two shapes: plain HTTP gets the filter
   // proxy's block-page BODY (curl exits 0), HTTPS gets a refused CONNECT
   // (curl exits nonzero). Either way the request never reaches the target.
-  const netHttp = await machine.run(["/bin/sh", "-c", "curl -sS --max-time 5 http://example.com/"], { timeoutMs: 15_000 });
+  const netHttp = await environment.run(["/bin/sh", "-c", "curl -sS --max-time 5 http://example.com/"], { timeoutMs: 15_000 });
   const httpBlocked = netHttp.exitCode !== 0 || /blocked by network allowlist/i.test(netHttp.stdout + netHttp.stderr);
   check("net: deny-all intercepts http", httpBlocked, `exit=${String(netHttp.exitCode)} stdout=${netHttp.stdout.slice(0, 80)}`);
-  const netHttps = await machine.run(["/bin/sh", "-c", "curl -sS --max-time 5 https://example.com/"], { timeoutMs: 15_000 });
+  const netHttps = await environment.run(["/bin/sh", "-c", "curl -sS --max-time 5 https://example.com/"], { timeoutMs: 15_000 });
   check("net: deny-all refuses https CONNECT", netHttps.exitCode !== 0, `exit=${String(netHttps.exitCode)} stdout=${netHttps.stdout.slice(0, 80)}`);
 
   // Non-shell argv form goes through the quoting path.
-  const argvForm = await machine.run(["ls", work]);
+  const argvForm = await environment.run(["ls", work]);
   check("run: plain argv form works", argvForm.exitCode === 0 && argvForm.stdout.includes("inside.txt"), argvForm.stderr);
 
   // A per-run cwd override is folded in BEFORE wrapping.
   const sub = join(work, "sub");
-  await machine.mkdir(sub);
-  const cwdRun = await machine.run(["/bin/sh", "-c", "pwd"], { cwd: sub });
+  await environment.mkdir(sub);
+  const cwdRun = await environment.run(["/bin/sh", "-c", "pwd"], { cwd: sub });
   check("run: cwd override respected", cwdRun.stdout.trim().endsWith("/sub"), cwdRun.stdout);
 
   // withCwd keeps the sandbox: same policy object, still denied outside.
-  const sibling = machine.withCwd(sub);
-  check("withCwd: sandboxed sibling", sibling instanceof SandboxedLocalMachine);
+  const sibling = environment.withCwd(sub);
+  check("withCwd: sandboxed sibling", sibling instanceof SandboxedLocalEnvironment);
   const siblingDenied = await sibling.run(["/bin/sh", "-c", `echo nope > ${homeProbe}`]);
   check("withCwd: still denied outside", siblingDenied.exitCode !== 0 && !existsSync(homeProbe));
   const siblingWrite = await sibling.run(["/bin/sh", "-c", "echo ok > from-sibling.txt"]);
   check("withCwd: sibling cwd writable", siblingWrite.exitCode === 0 && existsSync(join(sub, "from-sibling.txt")), siblingWrite.stderr);
 
   // Direct file I/O is NOT the sandbox's business (path-access policy owns it).
-  await machine.writeText(join(work, "direct.txt"), "direct\n");
-  check("io: writeText untouched", (await machine.readBytes(join(work, "direct.txt"))).toString("utf8") === "direct\n");
+  await environment.writeText(join(work, "direct.txt"), "direct\n");
+  check("io: writeText untouched", (await environment.readBytes(join(work, "direct.txt"))).toString("utf8") === "direct\n");
 
   // Timeout/kill machinery still works through the wrapper.
-  const slow = await machine.run(["/bin/sh", "-c", "sleep 30"], { timeoutMs: 1_500 });
+  const slow = await environment.run(["/bin/sh", "-c", "sleep 30"], { timeoutMs: 1_500 });
   check("run: timeout kills wrapped command", slow.timedOut && slow.terminated);
 
   // stderr annotation is best-effort (macOS log stream lags) — report, don't fail.
@@ -118,9 +118,9 @@ try {
     await testDisabledContract();
   }
 
-  // The explicit-off constructor honors the same machine() contract everywhere.
+  // The explicit-off constructor honors the same environment() contract everywhere.
   const off = OsSandbox.disabled("test");
-  check("disabled(): plain LocalMachine", !(off.machine(work) instanceof SandboxedLocalMachine));
+  check("disabled(): plain LocalEnvironment", !(off.environment(work) instanceof SandboxedLocalEnvironment));
 } finally {
   await sandbox.dispose();
   rmSync(work, { recursive: true, force: true });

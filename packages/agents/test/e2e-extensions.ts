@@ -9,7 +9,7 @@ import {
   defineAgent,
   extensionsCapability,
   ListenerSink,
-  LocalMachine,
+  LocalEnvironment,
   MemoryStore,
   Runner,
   Session,
@@ -131,7 +131,7 @@ async function coreSurface(): Promise<void> {
   const model = faux.getChatModel()!;
   const agent = defineAgent({ name: "extension-test", model, instructions: "x" });
   const result = await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     store,
     events,
     permission: { mode: "yolo" },
@@ -200,7 +200,7 @@ async function interventions(): Promise<void> {
 
   const agent = defineAgent({ name: "intervention-test", model, instructions: "x" });
   const result = await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events,
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -239,7 +239,7 @@ async function runTierHooks(): Promise<void> {
 
   const agent = defineAgent({ name: "run-tier", model, instructions: "ORIGINAL_SYSTEM" });
   const result = await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -265,7 +265,7 @@ async function runTierHooks(): Promise<void> {
     },
   };
   const stopResult = await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([terminating])],
@@ -304,7 +304,7 @@ async function toolGating(): Promise<void> {
   };
 
   const session = await openTestSession({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -355,7 +355,7 @@ async function abortControl(): Promise<void> {
   };
 
   const session = await openTestSession({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -411,7 +411,7 @@ async function collision(): Promise<void> {
     },
   };
   const result = await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events,
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -543,7 +543,7 @@ async function providerHooks(): Promise<void> {
   };
 
   await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([first, second]), probe],
@@ -579,7 +579,7 @@ async function providerHooks(): Promise<void> {
     },
   };
   await testRunner({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([{ id: "noop-ext", session: () => undefined }]), bareProbe],
@@ -621,7 +621,7 @@ async function handledInput(): Promise<void> {
   };
 
   const session = await openTestSession({
-    machine: new LocalMachine(process.cwd()),
+    environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
     capabilities: [extensionsCapability([extension])],
@@ -658,7 +658,7 @@ async function compactionGate(): Promise<void> {
     ]);
     const model = faux.getChatModel()!;
     const session = await openTestSession({
-      machine: new LocalMachine(process.cwd()),
+      environment: new LocalEnvironment(process.cwd()),
       events: new ListenerSink(),
       permission: { mode: "yolo" },
       capabilities: [extensionsCapability([extension]), compactionCapability({ maxContextTokens: 48_000 })],

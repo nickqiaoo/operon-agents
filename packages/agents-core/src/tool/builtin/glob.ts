@@ -6,7 +6,7 @@ import { defineTool } from "../define.ts";
 import { resolveRgCommand, rgUnavailableMessage } from "../support/rg-locator.ts";
 import { runRipgrep, stillRunningNote, type RipgrepRunOutcome, type RipgrepRunResult } from "../support/ripgrep-run.ts";
 import { globApproval, resolveToolPath, SEARCH_ACCESS_POLICY } from "../support/tool-path.ts";
-import type { Machine } from "../machine.ts";
+import type { Environment } from "../environment.ts";
 import type { ToolResult } from "../types.ts";
 
 type PathClass = "posix" | "win32";
@@ -51,23 +51,23 @@ export const globTool = defineTool({
   async resolve(args, ctx) {
     const root =
       args.path !== undefined
-        ? await resolveToolPath(args.path, ctx.machine, "search", SEARCH_ACCESS_POLICY)
-        : ctx.machine.getcwd();
+        ? await resolveToolPath(args.path, ctx.environment, "search", SEARCH_ACCESS_POLICY)
+        : ctx.environment.getcwd();
     return {
       accesses: ToolAccesses.searchTree(root),
       display: { title: `Searching ${args.pattern}`, detail: `pattern: ${args.pattern}`, pattern: args.pattern, ...(args.path !== undefined ? { path: args.path } : {}) },
       ...globApproval("Glob", args.pattern),
-      run: (runCtx) => execute(args, root, runCtx.machine, runCtx.signal),
+      run: (runCtx) => execute(args, root, runCtx.environment, runCtx.signal),
     };
   },
 });
 
-async function execute(args: GlobInput, root: string, machine: Machine, signal: AbortSignal): Promise<ToolResult> {
+async function execute(args: GlobInput, root: string, environment: Environment, signal: AbortSignal): Promise<ToolResult> {
   if (signal.aborted) return err("Glob aborted");
 
   let rgCommand: string;
   try {
-    rgCommand = await resolveRgCommand(machine, { signal });
+    rgCommand = await resolveRgCommand(environment, { signal });
   } catch (error) {
     if (isAbortError(error)) return err("Glob aborted");
     return err(rgUnavailableMessage(error));
@@ -76,7 +76,7 @@ async function execute(args: GlobInput, root: string, machine: Machine, signal: 
   // Probe the root so a missing/non-dir root reports clearly. rg would otherwise emit a
   // terse stderr; this single fileInfo gives the same ENOENT/ENOTDIR message Read/Grep do.
   try {
-    const info = await machine.fileInfo(root);
+    const info = await environment.fileInfo(root);
     if (info.kind !== "dir") return err(`${root} is not a directory`);
   } catch (error) {
     const code = errorCode(error);
@@ -85,17 +85,17 @@ async function execute(args: GlobInput, root: string, machine: Machine, signal: 
     // Unknown failure: fall through and let rg run.
   }
 
-  const pattern = relativizePattern(args.pattern, root, machine.pathClass());
+  const pattern = relativizePattern(args.pattern, root, environment.pathClass());
   // Search target is "." with the process cwd at `root`, NOT the absolute root — see
   // buildRgArgs. Everything downstream therefore sees paths like `./src/a.ts`.
   const runOptions = { timeoutMs: DEFAULT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, cwd: root };
-  let outcome = await runRipgrep(machine, buildRgArgs(rgCommand, pattern), signal, runOptions);
+  let outcome = await runRipgrep(environment, buildRgArgs(rgCommand, pattern), signal, runOptions);
   const earlyExit = mapNonResult(outcome);
   if (earlyExit) return earlyExit;
   let runResult = (outcome as Extract<RipgrepRunOutcome, { kind: "result" }>).result;
 
   if (shouldRetryEagain(runResult)) {
-    outcome = await runRipgrep(machine, buildRgArgs(rgCommand, pattern, true), signal, runOptions);
+    outcome = await runRipgrep(environment, buildRgArgs(rgCommand, pattern, true), signal, runOptions);
     const retryExit = mapNonResult(outcome);
     if (retryExit) return retryExit;
     runResult = (outcome as Extract<RipgrepRunOutcome, { kind: "result" }>).result;
@@ -129,8 +129,8 @@ async function execute(args: GlobInput, root: string, machine: Machine, signal: 
   // Paths arrive relative to `root` (the target was "."). Keep them that way when the search
   // stayed inside the workspace; otherwise re-absolutize, since a bare relative path would be
   // read against the caller's cwd and point somewhere else entirely.
-  const pathClass = machine.pathClass();
-  const keepRelative = isWithinDirectory(root, machine.getcwd(), pathClass);
+  const pathClass = environment.pathClass();
+  const keepRelative = isWithinDirectory(root, environment.getcwd(), pathClass);
   const displayLines = capped.map((p) => {
     const relative = stripLeadingDotSlash(p);
     return keepRelative ? relative : joinPath(pathClass, root, relative);
@@ -235,7 +235,7 @@ function stripLeadingDotSlash(value: string): string {
   return value;
 }
 
-/** Join with the TARGET machine's path flavour — a local process may drive a posix machine. */
+/** Join with the TARGET environment's path flavour — a local process may drive a posix environment. */
 function joinPath(pathClass: PathClass, dir: string, name: string): string {
   return (pathClass === "win32" ? win32 : posix).join(dir, name);
 }
