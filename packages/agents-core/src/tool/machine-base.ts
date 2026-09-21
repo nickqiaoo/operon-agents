@@ -24,6 +24,7 @@ import {
   type WriteTextOptions,
   type WriteTextResult,
 } from "./machine.ts";
+import { materializeModelText } from "./builtin/line-endings.ts";
 
 /** Deadline for the `readlink -f` realpath fallback (see BaseMachine.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
@@ -345,7 +346,11 @@ export abstract class BaseMachine implements Machine {
   }
 
   async writeText(path: string, data: string, options: WriteTextOptions = {}): Promise<WriteTextResult> {
-    const payload = options.lineEndings === "CRLF" ? data.replaceAll("\n", "\r\n") : data;
+    // Normalize to LF BEFORE joining with CRLF. Text that already contains `\r\n` — which a
+    // model's output routinely does, having just read a CRLF file — would otherwise come out
+    // as `\r\r\n` and corrupt the file. Same two-step as `materializeModelText`, which the
+    // Edit path uses; the two must not disagree about what "write this as CRLF" means.
+    const payload = options.lineEndings === "CRLF" ? materializeModelText(data, "crlf") : data;
     const buf = Buffer.from(payload, options.encoding ?? "utf8");
     await this.writeBytesRaw(path, buf);
     const version = await this.versionAfterWrite(path);

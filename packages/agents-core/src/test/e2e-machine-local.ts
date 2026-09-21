@@ -13,7 +13,7 @@
  *    the shell exiting says nothing about what it started.
  */
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalMachine } from "../index.ts";
@@ -121,6 +121,32 @@ async function stopReachesTheWholeTree(): Promise<void> {
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "machine-local-e2e-"));
   const machine = new LocalMachine(root);
+
+  // ── writeText: line endings ──
+  // `lineEndings: "CRLF"` used to join LF straight to CRLF, so text that already had `\r\n`
+  // in it came out as `\r\r\n` — a corrupted file, and exactly the shape model output takes
+  // after reading a CRLF file. The Edit path was safe (it goes through `materializeModelText`,
+  // which normalizes first); the Machine contract was not, and now shares that implementation.
+  await machine.writeText("crlf-from-crlf.txt", "line one\r\nline two\r\n", { lineEndings: "CRLF" });
+  check(
+    "writeText(CRLF): text that already has CRLF is not doubled",
+    (await readFile(join(root, "crlf-from-crlf.txt"), "utf8")) === "line one\r\nline two\r\n",
+  );
+  await machine.writeText("crlf-from-lf.txt", "x\ny\n", { lineEndings: "CRLF" });
+  check(
+    "writeText(CRLF): LF text is converted",
+    (await readFile(join(root, "crlf-from-lf.txt"), "utf8")) === "x\r\ny\r\n",
+  );
+  await machine.writeText("crlf-mixed.txt", "a\r\nb\nc\r\n", { lineEndings: "CRLF" });
+  check(
+    "writeText(CRLF): mixed input lands uniformly CRLF",
+    (await readFile(join(root, "crlf-mixed.txt"), "utf8")) === "a\r\nb\r\nc\r\n",
+  );
+  await machine.writeText("lf-default.txt", "a\r\nb\n");
+  check(
+    "writeText(): without the option nothing is rewritten",
+    (await readFile(join(root, "lf-default.txt"), "utf8")) === "a\r\nb\n",
+  );
 
   // ── mkdir: existOk × parents combinations ──
   await mkdir(join(root, "existing"), { recursive: true });

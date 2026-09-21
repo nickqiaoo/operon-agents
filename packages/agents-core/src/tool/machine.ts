@@ -251,7 +251,6 @@ export interface Machine {
    *    directory is always OK (`existOk` is implied and effectively ignored).
    *  - `existOk: true` (with `parents` unset/false) — an existing DIRECTORY at `path` is
    *    OK; anything else occupying the path (a file) must still throw EEXIST.
-   *    (Known deviation: `SshMachine` currently passes a file occupant through.)
    *  - neither — plain mkdir: throws if `path` exists or its parent is missing.
    */
   mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void>;
@@ -276,6 +275,11 @@ export interface Machine {
   writeBytes(path: string, data: Buffer): Promise<void>;
   /**
    * Unconditional text write — no staleness check, no stat round trips, no version stamp.
+   *
+   * `lineEndings: "CRLF"` normalizes to LF first and then joins, so text that ALREADY contains
+   * `\r\n` — which model output routinely does, having just read a CRLF file — comes out with
+   * `\r\n` rather than `\r\r\n`. Backends share one implementation of this; a backend
+   * overriding `writeText` must keep the same two-step.
    *
    * Whether the file lands all-at-once is a BACKEND property, not a promise of this
    * contract: LocalMachine swaps a sibling temp file into place (free there, and it
