@@ -66,7 +66,7 @@ function parseField(field: string, min: number, max: number, name: string): Set<
 }
 
 // Cron numeric fields are digit-only; `Number(...)` would otherwise accept '', '1e1',
-// '0x10', '+5', '  3  ' — none valid cron. Gate before conversion to machine typos.
+// '0x10', '+5', '  3  ' — none valid cron. Gate before conversion to surface typos.
 const DIGIT_ONLY = /^\d+$/;
 
 function parseCronInt(raw: string, name: string, role: string): number {

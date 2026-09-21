@@ -138,13 +138,13 @@ async function main(): Promise<void> {
   const handle = opened.service as McpServersHandle;
   const status = (name: string): string => handle.list().find((v) => v.name === name)?.status ?? "missing";
 
-  // 1. status machine
+  // 1. status surface
   check("status: healthy http server → connected", status("good") === "connected");
   check("status: enabled:false → disabled (transport never built)", status("off") === "disabled" && offBuilt === 0);
   check("status: generic connect failure → failed", status("broken") === "failed");
   check("status: 401 + oauth service → needs-auth", status("remote") === "needs-auth");
 
-  // 2. tools machine by status
+  // 2. tools surface by status
   check("tools: connected server exposes its real tool", (await providerNames(cap, "good", capCtx)).includes("mcp__good__echo"));
   check("tools: failed server exposes nothing", (await providerNames(cap, "broken", capCtx)).length === 0);
   check("tools: disabled server exposes nothing", (await providerNames(cap, "off", capCtx)).length === 0);
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ MCP MANAGER E2E PASS — status machine + filter + needs-auth swap + reconnect + warnings");
+    console.log("✅ MCP MANAGER E2E PASS — status surface + filter + needs-auth swap + reconnect + warnings");
   } else {
     console.log("❌ MCP MANAGER E2E FAIL");
     process.exit(1);

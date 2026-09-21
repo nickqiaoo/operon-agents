@@ -29,7 +29,7 @@ export interface ReadLinesPageOptions {
 }
 
 /**
- * The **linear** session log implemented once over a tiny physical machine
+ * The **linear** session log implemented once over a tiny physical surface
  * (raw line append/read/rewrite + key-value state + content-addressed blobs). A new backing
  * (disk, Postgres, Redis, S3…) implements only those primitives; the flat append log, first-
  * record `metadata` prepend, wire migration, and blob offload are written once here. Records are

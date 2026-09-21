@@ -96,7 +96,7 @@ async function pairedHalf(): Promise<void> {
     const bashText =
       bashResult && bashResult.role === "toolResult" ? bashResult.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
     check("prompt #2: approved tool actually ran", bashText.includes("BASH_OK"));
-    // Tool *results* come back in the run result (the engine doesn't machine them as live
+    // Tool *results* come back in the run result (the engine doesn't surface them as live
     // events); what crosses the wire live is the message/turn stream — assert it coexisted
     // with the reverse-RPC approval round-trip.
     check("prompt #2: assistant message streamed over the wire", events.some((e) => e.type === "message.appended"));

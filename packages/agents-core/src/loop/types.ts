@@ -224,7 +224,7 @@ export interface RecoverStepErrorResult {
   readonly recovered: boolean;
 }
 
-// Hook function types + the LoopHooks machine.
+// Hook function types + the LoopHooks surface.
 
 export type BeforeStepHook = (ctx: ContextStepHookContext) => Promise<BeforeStepResult | undefined>;
 export type AfterStepHook = (ctx: AfterStepContext) => Promise<AfterStepResult | void>;

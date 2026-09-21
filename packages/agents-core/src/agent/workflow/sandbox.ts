@@ -3,7 +3,7 @@
  *   - the async IIFE runs in `'use strict'`, so `with` is a SyntaxError and
  *     silent-failure footguns become throws;
  *   - dynamic `import()` is rejected (no importModuleDynamically callback is
- *     provided to vm, so any import() throws — we machine a clear message).
+ *     provided to vm, so any import() throws — we surface a clear message).
  *
  * Node's built-in `vm` is NOT a security sandbox on its own; the hardening here
  * covers the realistic failure modes: strip `constructor`/`prototype` off injected functions,

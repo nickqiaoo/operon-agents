@@ -84,7 +84,7 @@ export class TransportMCPServer implements MCPServerWithResources {
       this.transportWatchInstalled = true;
       this.transport.onUnexpectedClose((reason) => this.onTransportDrop(reason));
     }
-    // Bound the handshake: a hung connect must machine as a failure, not stall the session.
+    // Bound the handshake: a hung connect must surface as a failure, not stall the session.
     await withTimeout(this.transport.connect(), this.startupTimeoutMs, this.name, () => {
       void this.transport.close().catch(() => undefined);
     });
