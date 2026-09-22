@@ -1,6 +1,8 @@
+import { provision } from "../capability.ts";
+import { optional } from "../needs.ts";
 import type { SessionStore } from "../../store/index.ts";
 import type { Capability } from "../capability.ts";
-import { T } from "../../scope/tokens.ts";
+import { Tokens } from "../../scope/tokens.ts";
 import { TaskListInjector } from "./injector.ts";
 import { StoreTaskListPersistence, type TaskListPersistence } from "./persist.ts";
 import { DiskTaskListPersistence } from "./persist-disk.ts";
@@ -38,14 +40,15 @@ export function taskCapability(store: TaskStore = new TaskStore()): Capability {
     tools: [taskCreateTool(store), taskUpdateTool(store), taskListTool(store), taskGetTool(store)],
     injectors: [new TaskListInjector(store)],
     provides: [
-      {
-        token: T.Task,
-        create: async (ctx) => {
-          store.attach(makeTaskListPersistence(ctx.scope.get(T.Store)));
+      provision({
+        token: Tokens.Task,
+        needs: { sessionStore: optional(Tokens.Store) },
+        create: async ({ sessionStore }) => {
+          store.attach(makeTaskListPersistence(sessionStore));
           await store.load();
           return store;
         },
-      },
+      }),
     ],
   };
 }

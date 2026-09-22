@@ -1,4 +1,4 @@
-import { T } from "operon-agents-core";
+import { Tokens } from "operon-agents-core";
 import { testRunner, openTestSession } from "operon-agents-core/internal";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
@@ -466,7 +466,7 @@ async function hostReach(): Promise<void> {
 
   const harness = createHarness({
     model,
-    harness: (s) => s.register(T.ModelRuntime, faux.runtime, { owned: false }),
+    harness: (s) => s.register(Tokens.ModelRuntime, faux.runtime, { owned: false }),
     workDir: process.cwd(),
     permission: { mode: "yolo" },
     extensions: [extension],
@@ -667,7 +667,7 @@ async function compactionGate(): Promise<void> {
     const agent = defineAgent({ name: "gate-test", model, instructions: "x" });
     await runner.run(agent, "one", { session });
     await runner.run(agent, "two", { session });
-    await session.compact();
+    session.compaction.request();
     const result = await runner.run(agent, "three", { session });
     await session.close();
     faux.unregister();

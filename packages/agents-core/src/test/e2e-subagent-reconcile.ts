@@ -47,17 +47,17 @@ async function main(): Promise<void> {
   });
   const session = await openTestSession({ store, events: sink, capabilities: [backgroundCapability()] });
 
-  const listed = await session.listSubagents();
+  const listed = await session.background?.listSubagents() ?? [];
   check("store: both background subagents are listed", listed.length === 2);
   const preById = Object.fromEntries(listed.map((r) => [r.agentId, r]));
   check("store: unsettled background task loads as running", preById["bg-1"]!.status === "running");
   check("store: settled background task loads as completed", preById["bg-done"]!.status === "completed");
   check("store: address carried on the record", preById["bg-1"]!.address === "main/bg-1");
 
-  const lost = await session.reconcileSubagents();
+  const lost = await session.background?.reconcileSubagents() ?? [];
   check("reconcile: returns the orphaned background subagent", lost.length === 1 && lost[0]!.agentId === "bg-1" && lost[0]!.status === "lost");
 
-  const byId = Object.fromEntries((await session.listSubagents()).map((r) => [r.agentId, r]));
+  const byId = Object.fromEntries((await session.background?.listSubagents() ?? []).map((r) => [r.agentId, r]));
   check("reconcile: orphaned background running → lost", byId["bg-1"]!.status === "lost");
   check("reconcile: already-settled record left untouched", byId["bg-done"]!.status === "completed");
   check("reconcile: emitted a warning naming the lost agent", events.some((e) => e.type === "warning" && String((e as { message?: unknown }).message).includes("bg-1")));
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   // Persisted back as terminal `lost`, so a later reopen has nothing running to reconcile.
   const persistedAfter = await persistence.readTask("bg-1");
   check("reconcile: lost status persisted back to the store", persistedAfter?.status === "lost");
-  const again = await session.reconcileSubagents();
+  const again = await session.background?.reconcileSubagents() ?? [];
   check("reconcile: idempotent — nothing running left to reconcile", again.length === 0);
 
   await session.close();

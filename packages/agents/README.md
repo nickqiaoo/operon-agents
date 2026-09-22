@@ -19,7 +19,7 @@ import { OTelTracingProcessor } from "operon-agents/tracing";
 
 ## Tracing
 
-Every session drives a `TracingProcessor` registered on the harness scope as `T.Tracing`: one
+Every session drives a `TracingProcessor` registered on the harness scope as `Tokens.Tracing`: one
 trace per run (a prompt and everything it triggers), spans for agents, turns, model generations,
 tool calls and sub-agents, the session id on every span as `gen_ai.conversation.id`. By default
 spans are metadata only. Pass `content: "delta"` to also record the system prompt, the messages
@@ -35,7 +35,7 @@ import { NodeTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { OTelTracingProcessor } from "operon-agents/tracing";
-import { T } from "operon-agents/core";
+import { Tokens } from "operon-agents/core";
 
 const provider = new NodeTracerProvider({
   resource: resourceFromAttributes({ "service.name": "my-agent" }),
@@ -45,7 +45,7 @@ const tracing = new OTelTracingProcessor({ tracer: provider.getTracer("my-agent"
 
 const harness = await createLocalHarness({
   model,
-  harness: (scope) => scope.register(T.Tracing, tracing),
+  harness: (scope) => scope.register(Tokens.Tracing, tracing),
 });
 ```
 

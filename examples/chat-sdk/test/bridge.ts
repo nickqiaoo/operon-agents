@@ -27,7 +27,7 @@ import {
   defineAgent,
   defineModel,
   DiskSessionRepository,
-  T,
+  Tokens,
   webSearchTool,
   type WebSearchProvider,
 } from "operon-agents";
@@ -73,7 +73,7 @@ const tools = [webSearchTool(cannedSearch), askUserQuestionTool];
 const repository = new DiskSessionRepository(home);
 const harness = createHarness({
   model,
-  harness: (scope) => scope.register(T.SessionRepository, repository),
+  harness: (scope) => scope.register(Tokens.SessionRepository, repository),
   agent: defineAgent({ name: "analyst", model, instructions: "You are a research analyst.", tools }),
   tools,
   subagentProvider: null,

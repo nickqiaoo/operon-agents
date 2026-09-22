@@ -51,7 +51,7 @@ async function testResume(root: string): Promise<void> {
 
   // A foreground subagent is a plain Agent tool call, not a background task — so it is NOT
   // listed as a subagent task. Its record is the conversation + its own shard (resumable by id).
-  const subs1 = await session.listSubagents();
+  const subs1 = await session.background?.listSubagents() ?? [];
   check("foreground subagent is a tool call — not listed as a task", subs1.length === 0);
 
   const shard = `main/${agentId}`;
@@ -74,7 +74,7 @@ async function testResume(root: string): Promise<void> {
 
   // Resume reloaded the shard by id (via the shard's own meta record) with no registry/fold;
   // it stays a foreground tool call, so still not listed as a task.
-  const subs2 = await session.listSubagents();
+  const subs2 = await session.background?.listSubagents() ?? [];
   check("resume of a foreground subagent stays a tool call — not listed", subs2.length === 0);
 
   await session.close();

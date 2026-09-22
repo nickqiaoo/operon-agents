@@ -68,7 +68,7 @@ export class TasksBrowserController {
 
     let tasks: readonly BackgroundTaskInfo[] = [];
     try {
-      tasks = await session.listBackgroundTasks({ activeOnly: false });
+      tasks = session.background?.list(false) ?? [];
     } catch (error) {
       this.host.showError(
         `Failed to load tasks: ${error instanceof Error ? error.message : String(error)}`,
@@ -154,7 +154,7 @@ export class TasksBrowserController {
     const myRefreshId = ++viewer.refreshId;
     let output: string;
     try {
-      output = (await session.readBackgroundTaskOutput(viewer.taskId)).content;
+      output = (await session.background?.readOutput(viewer.taskId, 16 * 1024))?.content ?? '';
     } catch (error) {
       if (!opts.silent) {
         const message = error instanceof Error ? error.message : String(error);
@@ -211,7 +211,7 @@ export class TasksBrowserController {
 
     let tasks: readonly BackgroundTaskInfo[];
     try {
-      tasks = await session.listBackgroundTasks({ activeOnly: false });
+      tasks = session.background?.list(false) ?? [];
     } catch (error) {
       if (!opts.silent) {
         this.flash(
@@ -327,7 +327,7 @@ export class TasksBrowserController {
 
     this.flash(`Stopping ${taskId}…`, 1500);
     try {
-      await session.stopBackgroundTask(taskId, 'User initiated stop');
+      await session.background?.stop(taskId, 'User initiated stop');
       await this.refresh({ silent: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -363,7 +363,7 @@ export class TasksBrowserController {
 
     let output: string;
     try {
-      output = (await session.readBackgroundTaskOutput(taskId)).content;
+      output = (await session.background?.readOutput(taskId, 16 * 1024))?.content ?? '';
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.flash(`Cannot open output: ${message}`);
@@ -492,9 +492,9 @@ export class TasksBrowserController {
     }
 
     const requestId = ++browser.tailRequestId;
-    void session
-      .readBackgroundTaskOutput(taskId, { maxBytes: 4000 })
-      .then(({ content: output }) => {
+    void Promise.resolve(session.background?.readOutput(taskId, 4000))
+      .then((snapshot) => {
+        const output = snapshot?.content ?? '';
         const current = state.tasksBrowser;
         if (current === undefined) return;
         if (current !== browser || current.tailRequestId !== requestId) return;

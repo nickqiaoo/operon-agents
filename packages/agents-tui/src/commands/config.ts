@@ -45,7 +45,7 @@ export async function handlePlanCommand(host: SlashCommandHost, args: string): P
   if (session === undefined) return;
   const arg = args.trim().toLowerCase();
   if (arg === 'clear') {
-    await session.clearPlan();
+    await session.plan.setEnabled(false);
     host.setAppState({ planMode: false });
     host.showStatus('Plan cleared; plan mode off.', 'success');
     return;
@@ -57,7 +57,7 @@ export async function handlePlanCommand(host: SlashCommandHost, args: string): P
 async function applyPlanMode(host: SlashCommandHost, enabled: boolean): Promise<void> {
   const session = host.requireSession();
   try {
-    await session.setPlanMode(enabled);
+    await session.plan.setEnabled(enabled);
   } catch (error) {
     host.showError(`Failed to switch plan mode: ${formatErrorMessage(error)}`);
     return;
@@ -75,7 +75,7 @@ export async function handleCompactCommand(host: SlashCommandHost, args: string)
   if (session === undefined) return;
   const instruction = args.trim();
   try {
-    const pending = await session.compact(instruction.length > 0 ? { instruction } : {});
+    const pending = session.compaction.request(instruction.length > 0 ? { instruction } : {});
     host.showStatus(`Compaction ${pending.id} runs at the next step boundary.`, 'textMuted');
   } catch (error) {
     host.showError(`Failed to request compaction: ${formatErrorMessage(error)}`);

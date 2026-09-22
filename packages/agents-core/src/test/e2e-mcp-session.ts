@@ -1,8 +1,8 @@
 import { testRunner, openTestSession } from "./faux.ts";
-// The MCP capability is reachable through ergonomic Session methods (listMcpServers /
-// reconnectMcpServer), not only the raw capability service. With no MCP capability open, listing
-// is empty and reconnect is a clear error.
-import { ListenerSink, LocalEnvironment, Session } from "../index.ts";
+// The MCP capability is reachable through `session.mcp`, the PROBE accessor: with no MCP
+// capability open the handle is absent, so listing degrades to empty at the CALL SITE and a
+// caller that genuinely requires it says so with `require`.
+import { ListenerSink, LocalEnvironment, Session, Tokens } from "../index.ts";
 import { mcpServersCapability, MockMCPTransport } from "../mcp/index.ts";
 import type { McpTransportFactory } from "../mcp/index.ts";
 
@@ -31,15 +31,15 @@ async function main(): Promise<void> {
     const cap = mcpServersCapability({ good: { transport: "http", url: "http://good.example" } }, { transportFactory: factory });
     const session = await openTestSession({ environment, events: new ListenerSink(), capabilities: [cap] });
     try {
-      const servers = session.listMcpServers();
+      const servers = session.mcp?.list() ?? [];
       check("session.listMcpServers returns the connected server", servers.length === 1 && servers[0]!.name === "good" && servers[0]!.status === "connected");
 
-      await session.reconnectMcpServer("good");
-      check("session.reconnectMcpServer succeeds + stays connected", session.listMcpServers()[0]!.status === "connected");
+      await session.require(Tokens.Mcp).reconnect("good");
+      check("session.reconnectMcpServer succeeds + stays connected", (session.mcp?.list() ?? [])[0]!.status === "connected");
 
       let threw = false;
       try {
-        await session.reconnectMcpServer("nope");
+        await session.require(Tokens.Mcp).reconnect("nope");
       } catch {
         threw = true;
       }
@@ -53,10 +53,10 @@ async function main(): Promise<void> {
   {
     const session = await openTestSession({ environment });
     try {
-      check("session.listMcpServers is empty when no MCP capability is open", session.listMcpServers().length === 0);
+      check("session.listMcpServers is empty when no MCP capability is open", (session.mcp?.list() ?? []).length === 0);
       let threw = false;
       try {
-        await session.reconnectMcpServer("good");
+        await session.require(Tokens.Mcp).reconnect("good");
       } catch {
         threw = true;
       }

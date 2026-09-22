@@ -6,15 +6,26 @@ export type {
   CompactionGate,
   CompactionGateContext,
   CompactionGateResult,
+  ContextFor,
   Provision,
   ProvisionContext,
+  ProvisionKind,
   RunContext,
+  SessionProvisionContext,
+  WorkspaceProvisionContext,
   SessionControls,
   ToolFilter,
 } from "./capability.ts";
 export type { Injector, InjectionContext, InjectionResult, InjectionAppender } from "./injection.ts";
 export { BoundaryInjector, InjectionManager, systemReminder } from "./injection.ts";
-export { readLog, readSessionLog } from "./capability-state.ts";
+export { readLog } from "./capability-state.ts";
+// The capability SERVICES themselves — what `session.goal`, `session.skills`, … hand back, so a
+// host can name the type it is holding.
+export type { SkillsService } from "./skills/service.ts";
+export { taskToSubagentRecord, taskToWorkflowSnapshot } from "./background/projections.ts";
+export { provision, workspaceProvision } from "./capability.ts";
+export { optional, resolveNeeds, assertDependencyTiers, MissingDependencyError, DependencyScopeError } from "./needs.ts";
+export type { Dependency, Needs, OptionalDependency, Resolved, VisibleFrom } from "./needs.ts";
 export type { ToolProvider } from "./tool-provider.ts";
 export { staticToolProvider, tagToolSource, toolSource } from "./tool-provider.ts";
 // Extensions are a HARNESS concept and live in `operon-agents` — core deliberately knows

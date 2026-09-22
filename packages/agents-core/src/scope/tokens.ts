@@ -1,5 +1,5 @@
 /**
- * Every framework token, by tier. `T.Environment`, `T.Goal`, … are the keys the harness, sessions,
+ * Every framework token, by tier. `Tokens.Environment`, `Tokens.Goal`, … are the keys the harness, sessions,
  * capabilities and hosts use to register and look things up in a {@link Scope}.
  *
  * Token names for capability services equal the capability's `name` ("goal", "plan", …).
@@ -37,74 +37,91 @@ import type { CompactionService } from "../capabilities/compaction/service.ts";
 import type { SkillsService } from "../capabilities/skills/service.ts";
 import type { HookEngine } from "../capabilities/user-hooks/engine.ts";
 import type { MCPServer } from "../mcp/server.ts";
-import { token } from "./token.ts";
+import { capabilityToken, token } from "./token.ts";
 
 /** The session's whole append log, read once at open and memoized (see `Session.open`). */
 export type SessionLogReader = () => Promise<readonly AgentRecord[]>;
 
-export const T = Object.freeze({
+export const Tokens = Object.freeze({
   // ── harness tier: one per process ──────────────────────────────────────────────────────
-  Logger: token<Logger, "harness">("logger", "harness"),
-  SessionRepository: token<SessionRepository, "harness">("session-repository", "harness"),
-  ModelRuntime: token<ModelRuntime, "harness">("model-runtime", "harness"),
-  PluginManager: token<PluginManager, "harness">("plugin-manager", "harness"),
+  Logger: token<Logger, "harness">("logger", "harness", "the harness scope — register it when the harness is created"),
+  SessionRepository: token<SessionRepository, "harness">("session-repository", "harness", "the harness scope — register it when the harness is created"),
+  ModelRuntime: token<ModelRuntime, "harness">("model-runtime", "harness", "the harness scope — register it when the harness is created"),
+  PluginManager: token<PluginManager, "harness">("plugin-manager", "harness", "the harness scope — register it when the harness is created"),
   /** Harness-level default environment (an instance or a per-session factory). */
-  EnvironmentFactory: token<Environment | EnvironmentFactory, "harness">("environment-factory", "harness"),
-  EventPublication: token<EventPublicationMode, "harness">("event-publication", "harness"),
-  Tracing: token<TracingProcessor, "harness">("tracing", "harness"),
+  EnvironmentFactory: token<Environment | EnvironmentFactory, "harness">("environment-factory", "harness", "the harness scope — register it when the harness is created"),
+  EventPublication: token<EventPublicationMode, "harness">("event-publication", "harness", "the harness scope — register it when the harness is created"),
+  Tracing: token<TracingProcessor, "harness">("tracing", "harness", "the harness scope — register it when the harness is created"),
   /** Product telemetry (docs/telemetry.md). Absent = nothing is counted. */
-  Telemetry: token<TelemetryService, "harness">("telemetry", "harness"),
+  Telemetry: token<TelemetryService, "harness">("telemetry", "harness", "the harness scope — register it when the harness is created"),
 
   // ── workspace tier: one per working directory (or tenant / environment on a server) ─────
-  McpServers: token<McpServersHandle, "workspace">("mcp", "workspace"),
-  SkillRegistry: token<SkillRegistry, "workspace">("skill-registry", "workspace"),
-  McpOAuth: token<McpOAuthService, "workspace">("mcp-oauth", "workspace"),
+  McpServers: token<McpServersHandle, "workspace">("mcp", "workspace", "the workspace scope — register it when the workspace is opened"),
+  SkillRegistry: token<SkillRegistry, "workspace">("skill-registry", "workspace", "the workspace scope — register it when the workspace is opened"),
+  McpOAuth: token<McpOAuthService, "workspace">("mcp-oauth", "workspace", "the workspace scope — register it when the workspace is opened"),
   /** Workspace-level default environment; consulted before the harness-level one. */
-  WorkspaceEnvironmentFactory: token<Environment | EnvironmentFactory, "workspace">("workspace-environment-factory", "workspace"),
+  WorkspaceEnvironmentFactory: token<Environment | EnvironmentFactory, "workspace">("workspace-environment-factory", "workspace", "the workspace scope — register it when the workspace is opened"),
 
-  // ── session tier: identity and infrastructure ──────────────────────────────────────────
-  SessionId: token<string, "session">("session-id", "session"),
-  /** Upstream cancellation the session's own signal is derived from. Optional. */
-  HostSignal: token<AbortSignal, "session">("host-signal", "session"),
+  // ── session tier: infrastructure ───────────────────────────────────────────────────────
+  // What is NOT here is as deliberate as what is. A session's id, the host's signal and the
+  // durable store are `Session.open` ARGUMENTS: nothing inherits them from a parent scope,
+  // nothing else shares them, and they have no lifetime for a scope to manage. Its permission
+  // manager and event publisher are its own FIELDS, for the same reason — one producer and one
+  // consumer, both inside `Session`. Registering any of them would make this table double as a
+  // parameter list, which is how it grew confusing in the first place.
   /** The session's signal (host signal ∪ `session.abort()`); registered by `Session.open`. */
-  SessionSignal: token<AbortSignal, "session">("session-signal", "session"),
-  /** The durable store the OPENER registers (disk / Pg / Redis / memory). Absent = a storeless
-   *  (in-memory) session. Capabilities never read this one — see `Store`. */
-  StoreBackend: token<SessionStore, "session">("store-backend", "session"),
+  SessionSignal: token<AbortSignal, "session">("session-signal", "session", "`Session.open` — a session missing it is not open"),
   /** The store everything in the session writes through: `StoreBackend` wrapped so that
    *  record-backed events are published on `Events` when an append commits. Registered by
    *  `Session.open`; absent when there is no backend. */
-  Store: token<SessionStore, "session">("store", "session"),
+  Store: token<SessionStore, "session">("store", "session", "`Session.open`, and only when the opener gave it a store — a storeless session has none"),
   /** This session's own environment factory (a `createSession({ environment })` override); wins over the
    *  workspace- and harness-level ones. */
-  SessionEnvironmentFactory: token<Environment | EnvironmentFactory, "session">("session-environment-factory", "session"),
+  SessionEnvironmentFactory: token<Environment | EnvironmentFactory, "session">("session-environment-factory", "session", "the session opener — pass it to `createSession`"),
   /** Per-session override of the harness-level `EventPublication`. */
-  SessionEventPublication: token<EventPublicationMode, "session">("session-event-publication", "session"),
-  Environment: token<Environment, "session">("environment", "session"),
-  Events: token<EventSink, "session">("events", "session"),
-  Steer: token<SteerBus, "session">("steer", "session"),
-  EventPublisher: token<SessionEventPublisher, "session">("event-publisher", "session"),
-  Responder: token<Responder, "session">("responder", "session"),
+  SessionEventPublication: token<EventPublicationMode, "session">("session-event-publication", "session", "the session opener — pass it to `createSession`"),
+  /**
+   * The durable store the OPENER hands the session (disk / Pg / Redis / memory). Absent = a
+   * storeless, in-memory session.
+   *
+   * The one parameter-shaped token that earns its place: a `Runner` opens the session, but the
+   * store is chosen by the host's `session` hook, and a hook can only write to the scope. So this
+   * is how the hook passes it along — `Session.open` prefers its own `store` option and falls back
+   * to this. Capabilities never read it; they read `Tokens.Store`, the publishing wrapper.
+   */
+  StoreBackend: token<SessionStore, "session">("store-backend", "session", "the session opener — pass it to `createSession`"),
+  Environment: token<Environment, "session">("environment", "session", "`Session.open` — a session missing it is not open"),
+  Events: token<EventSink, "session">("events", "session", "`Session.open` — a session missing it is not open"),
+  Steer: token<SteerBus, "session">("steer", "session", "`Session.open` — a session missing it is not open"),
+  Responder: token<Responder, "session">("responder", "session", "the session opener — pass it to `createSession`"),
   /** Host-injected spawner used when no background capability is open. */
-  BackgroundSpawner: token<BackgroundSpawner, "session">("background-spawner", "session"),
-  PermissionOptions: token<PermissionManagerOptions, "session">("permission-options", "session"),
-  Permission: token<PermissionManager, "session">("permission", "session"),
-  SessionLog: token<SessionLogReader, "session">("session-log", "session"),
-  SessionControls: token<SessionControls, "session">("session-controls", "session"),
+  BackgroundSpawner: token<BackgroundSpawner, "session">("background-spawner", "session", "the session opener — pass it to `createSession`"),
+  PermissionOptions: token<PermissionManagerOptions, "session">("permission-options", "session", "the session opener — pass it to `createSession`"),
+  SessionLog: token<SessionLogReader, "session">("session-log", "session", "`Session.open` — a session missing it is not open"),
+  SessionControls: token<SessionControls, "session">("session-controls", "session", "`Session.open` — a session missing it is not open"),
 
   // ── session tier: capability services (name = capability name) ─────────────────────────
-  Goal: token<GoalStore, "session">("goal", "session"),
-  Plan: token<PlanMode, "session">("plan", "session"),
-  Todo: token<TodoStore, "session">("todo", "session"),
-  Task: token<TaskStore, "session">("task", "session"),
-  Workflow: token<WorkflowManager, "session">("workflow", "session"),
-  Background: token<BackgroundManager, "session">("background", "session"),
-  Compaction: token<CompactionService, "session">("compaction", "session"),
-  Skills: token<SkillsService, "session">("skills", "session"),
-  /** `mcpServersCapability` (config-driven controllers). */
-  Mcp: token<McpServersHandle, "session">("mcp-session", "session"),
-  /** `mcpCapability` (caller-built `MCPServer` instances). */
-  McpRaw: token<readonly MCPServer[], "session">("mcp-raw", "session"),
-  Plugins: token<PluginManager, "session">("plugins", "session"),
-  HookEngine: token<HookEngine, "session">("user-hooks", "session"),
+  Goal: capabilityToken<GoalStore>("goal"),
+  Plan: capabilityToken<PlanMode>("plan"),
+  Todo: capabilityToken<TodoStore>("todo"),
+  Task: capabilityToken<TaskStore>("task"),
+  Workflow: capabilityToken<WorkflowManager>("workflow"),
+  Background: capabilityToken<BackgroundManager>("background"),
+  Compaction: capabilityToken<CompactionService>("compaction"),
+  Skills: capabilityToken<SkillsService>("skills"),
+  /** `mcpServersCapability` — config-driven controllers, plus a view over `McpServers` when the
+   *  workspace registered one. */
+  Mcp: capabilityToken<McpServersHandle>("mcp-session", "mcp"),
+  /**
+   * `mcpCapability` (caller-built `MCPServer` instances). A LIFECYCLE ANCHOR, not a lookup: it
+   * exists because `provides` is the only session-lived hook a capability has, and every
+   * `Provision` needs a token. Nothing reads it, and it is deliberately NOT `Mcp`: a controller
+   * reconnects by rebuilding its server from the config it holds, and an instance handed in from
+   * outside has no config to rebuild from — so these servers have no control plane to expose, and
+   * `session.mcp?.list() ?? []` does not see them. Same reason it cannot share `Mcp`'s name: two
+   * MCP capabilities in one session would collide on it.
+   */
+  McpRaw: capabilityToken<readonly MCPServer[]>("mcp-raw", "mcp"),
+  Plugins: capabilityToken<PluginManager>("plugins"),
+  HookEngine: capabilityToken<HookEngine>("user-hooks"),
 });

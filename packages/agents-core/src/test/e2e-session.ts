@@ -6,7 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux
 import { existsSync } from "node:fs";
 import {
   ServiceUnavailableError,
-  T,
+  Tokens,
   token,
   defineModel,
   defineAgent,
@@ -249,9 +249,9 @@ async function testSessionHandles(environment: LocalEnvironment): Promise<void> 
     capabilities: [goalCapability(goal), backgroundCapability(bg)],
   });
 
-  check("handles: session.get(T.Goal) returns the GoalStore", session.get(T.Goal) === goal);
+  check("handles: session.get(Tokens.Goal) returns the GoalStore", session.get(Tokens.Goal) === goal);
   check("handles: session.background unifies the BackgroundManager", session.background === bg);
-  check("handles: session.require(T.Goal) also resolves", session.require(T.Goal) === goal);
+  check("handles: session.require(Tokens.Goal) also resolves", session.require(Tokens.Goal) === goal);
   check("handles: unknown service is undefined", session.get(token("nope", "session")) === undefined);
 
   await session.close();
@@ -422,11 +422,11 @@ async function testSessionIdConflict(environment: LocalEnvironment): Promise<voi
   // REQUIRE-tier capability methods throw the TYPED error; the probe getter stays undefined.
   let missing: unknown;
   try {
-    await session.getPlan();
+    await session.plan.data();
   } catch (e) {
     missing = e;
   }
-  check("capability-missing: probe getter returns undefined", session.get(T.Plan) === undefined);
+  check("capability-missing: probe getter returns undefined", session.get(Tokens.Plan) === undefined);
   check(
     "capability-missing: require method throws ServiceUnavailableError with the service name",
     missing instanceof ServiceUnavailableError && missing.serviceName === "plan",

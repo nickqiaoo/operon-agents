@@ -3,7 +3,7 @@
  *
  * One local session, one prompt, events streamed to the console, final result
  * printed. Tools run on THIS environment, scoped to ./workspace. This is the local
- * composition root (`createLocalSession`): disk-persisted sessions, local
+ * composition root (`createLocalHarness`): disk-persisted sessions, local
  * environment, cron on — all wired by the preset, nothing to assemble.
  *
  * Run:  ANTHROPIC_API_KEY=... pnpm start
@@ -12,7 +12,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  createLocalSession,
+  createLocalHarness,
   defineModel,
   type AgentEvent,
   type ChatModel,
@@ -29,15 +29,17 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 mkdirSync(WORK, { recursive: true });
 
-// A local session, ready to prompt. `permission: workspace` auto-approves tool use
-// as long as it stays inside the workspace — safe for running on your own environment.
-const session = await createLocalSession({
+// One harness for the process; every session is opened on it. `permission: workspace`
+// auto-approves tool use as long as it stays inside the workspace — safe for running
+// on your own environment.
+const harness = await createLocalHarness({
   model: resolveModel(MODEL),
   homeDir: HOME,
   workDir: WORK,
   permission: { mode: "workspace" },
   appendSystemPrompt: "Be concise. Use the tools; explain briefly what you do.",
 });
+const session = await harness.createSession();
 
 console.log(`session ${session.id}  ·  model ${MODEL}  ·  workspace ${WORK}\n`);
 console.log(`❯ ${TASK}\n`);
@@ -49,7 +51,7 @@ session.onEvent(render);
 const result = await session.prompt(TASK);
 
 console.log(`\n─ ${result.status} · ${result.usage.output} output tokens ─`);
-await session.close();
+await harness.close(); // closes the session, then cron, MCP and the log handle
 
 /** Compact console renderer for the event stream. */
 function render(ev: AgentEvent): void {

@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, T, LocalEnvironment, MemorySessionRepository, type ExtensionDefinition, type Logger } from "../src/index.ts";
+import { createHarness, Tokens, LocalEnvironment, MemorySessionRepository, type ExtensionDefinition, type Logger } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -38,26 +38,28 @@ async function main(): Promise<void> {
       workDir: work,
       permission: { mode: "yolo" },
       harness: (scope) => {
-        scope.register(T.SessionRepository, repo, { owned: false });
-        scope.register(T.EnvironmentFactory, harnessEnvironment, { owned: false });
-        scope.register(T.Logger, logger, { owned: false });
+        scope.register(Tokens.SessionRepository, repo, { owned: false });
+        scope.register(Tokens.EnvironmentFactory, harnessEnvironment, { owned: false });
+        scope.register(Tokens.Logger, logger, { owned: false });
       },
       extensions: [shapes],
     });
-    check("harness: the hook's repository replaces the in-memory default", harness.scope.get(T.SessionRepository) === repo);
-    check("harness: the hook's logger replaces the env default", harness.scope.get(T.Logger) === logger);
+    check("harness: the hook's repository replaces the in-memory default", harness.scope.get(Tokens.SessionRepository) === repo);
+    check("harness: the hook's logger replaces the env default", harness.scope.get(Tokens.Logger) === logger);
     check("harness: an extension harness() result is registered by id in the harness scope", harness.services.has("shapes") && harness.services.handle<{ render(): string }>("shapes").render() === "v1");
 
     const a = await harness.createSession();
     check("session: the harness-level environment applies when the session gives none", a.core.environment === harnessEnvironment);
     check("session: the session scope hangs under a workspace scope, which hangs under the harness scope", a.core.scope.kind === "session" && a.core.scope.parent?.kind === "workspace" && a.core.scope.parent.parent === harness.scope);
-    check("session: a session reads harness-tier services through its own scope", a.core.get(T.Logger) === logger && a.core.get(T.SessionRepository) === repo);
-    check("session: the store backend and the publishing store are both registered", a.core.get(T.StoreBackend) !== undefined && a.core.get(T.Store) === a.core.store);
-    check("session: the permission options came through the scope", a.core.get(T.PermissionOptions)?.mode === "yolo");
+    check("session: a session reads harness-tier services through its own scope", a.core.get(Tokens.Logger) === logger && a.core.get(Tokens.SessionRepository) === repo);
+    // The harness hands the store to `Session.open` as an argument, so only the PUBLISHING
+    // wrapper is in the registry — that is what capabilities and the loop write through.
+    check("session: the publishing store is registered, the raw backend is not", a.core.get(Tokens.Store) === a.core.store && a.core.get(Tokens.StoreBackend) === undefined);
+    check("session: the permission options came through the scope", a.core.get(Tokens.PermissionOptions)?.mode === "yolo");
 
     const b = await harness.createSession({ environment: sessionEnvironment, permission: { mode: "manual" } });
     check("session: createSession({ environment }) overrides the harness-level environment", b.core.environment === sessionEnvironment);
-    check("session: createSession({ permission }) overrides the harness-level policy", b.core.get(T.PermissionOptions)?.mode === "manual");
+    check("session: createSession({ permission }) overrides the harness-level policy", b.core.get(Tokens.PermissionOptions)?.mode === "manual");
 
     const result = await a.prompt("hi");
     check("run: a prompt completes over the composed scopes", result.status === "completed");

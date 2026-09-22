@@ -3,7 +3,7 @@ import {
   ListenerSink,
   SteerBus,
 } from "../index.ts";
-import { openCapability } from "./faux.ts";
+import { provisionCapability } from "./faux.ts";
 import {
   mcpServersCapability,
   type McpServersHandle,
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
     reconnectPolicy: { maxRetries: 1, initialDelayMs: 100, maxDelayMs: 100, factor: 2 },
     timer,
   });
-  const handle = (await openCapability(cap, wiring)).service as McpServersHandle;
+  const handle = (await provisionCapability(cap, wiring)).service as McpServersHandle;
   check("heartbeat: connected server schedules the first ping", handle.list()[0]?.status === "connected" && pending.length === 1 && pending[0]!.ms === 50);
 
   const firstDelay = fire();

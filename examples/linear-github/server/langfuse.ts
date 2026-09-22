@@ -43,7 +43,7 @@ export function langfuseFromEnv(env: NodeJS.ProcessEnv = process.env): LangfuseO
 
 export const LANGFUSE_DEFAULT_BASE_URL = "https://cloud.langfuse.com";
 
-/** The tracing processor to register on the harness (`T.Tracing`); every session drives it. */
+/** The tracing processor to register on the harness (`Tokens.Tracing`); every session drives it. */
 export function langfuseTracing(options: LangfuseOptions): OTelTracingProcessor {
   return otelTracing([langfuseAttributes(), langfuseExporter(options)], options);
 }

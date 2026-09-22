@@ -1,5 +1,6 @@
 import type { ApprovalResponse } from "../permission/types.ts";
 import type { ChatModel } from "../llm/define-model.ts";
+import type { LlmRequest } from "../llm/model.ts";
 import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/index.ts";
 import type { PromptOrigin } from "../store/origin.ts";
 import type { Tool } from "../tool/types.ts";
@@ -42,7 +43,7 @@ export interface RunTurnInput {
   /** Session-scoped file freshness ledger for this agent line; forwarded to tool contexts. */
   readonly fileLedger?: FileFreshnessLedger;
   readonly system?: string;
-  readonly params?: import("../llm/model.ts").LlmRequest["params"];
+  readonly params?: LlmRequest["params"];
   readonly context: ConversationContext;
   readonly tools?: readonly Tool[];
   /** Capability tools hidden until transcript load/use evidence activates them. */

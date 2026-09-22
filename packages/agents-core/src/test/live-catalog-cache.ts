@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     messages: [
       user("Say OK."),
       first,
-      user("<system-reminder>\nThe following deferred tools are now available via SearchTool. Their schemas are NOT loaded — calling them directly will fail. Use SearchTool with query "select:<name>[,<name>...]" to load tool schemas before calling them:\nmcp__slack__send_message\n</system-reminder>\nLoad the slack tool."),
+      user("<system-reminder>\nThe following deferred tools are now available via SearchTool. Their schemas are NOT loaded — calling them directly will fail. Use SearchTool with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nmcp__slack__send_message\n</system-reminder>\nLoad the slack tool."),
       fauxAssistantMessage(fauxToolCall(SEARCH_TOOL_NAME, { query: `select:${SLACK}` }, { id: "toolu_live_search" }), { stopReason: "toolUse" }),
       { role: "toolResult", toolCallId: "toolu_live_search", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: `Loaded: ${SLACK}` }], addedToolNames: [SLACK], isError: false, timestamp: Date.now() },
       user("Now just say OK."),

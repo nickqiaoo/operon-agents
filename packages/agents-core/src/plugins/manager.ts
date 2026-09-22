@@ -149,6 +149,17 @@ export class PluginManager {
     await this.persist();
   }
 
+  /**
+   * Install and answer with the installed plugin's summary — what a host showing a plugin list
+   * wants, rather than the raw record plus a second lookup it has to remember to do.
+   */
+  async installSummary(source: string): Promise<PluginSummary> {
+    const record = await this.install(source);
+    const summary = this.summaries().find((plugin) => plugin.id === record.id);
+    if (summary === undefined) throw new Error(`Plugin "${record.id}" was installed but no summary was produced.`);
+    return summary;
+  }
+
   async remove(id: string): Promise<void> {
     if (!this.records.delete(normalizePluginId(id))) throw new Error(`Plugin "${id}" is not installed`);
     await this.persist();

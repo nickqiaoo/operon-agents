@@ -6,7 +6,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, createLocalHarness } from "operon-agents";
+import { createHarness, createLocalHarness , Tokens} from "operon-agents";
 import type { AgentEvent, ExtensionDefinition, PermissionManagerOptions, ToolSchema } from "operon-agents";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
 import { codeMode, DEFAULT_DIRECT_TOOLS, RUN_CODE_NAME } from "../src/index.ts";
@@ -229,13 +229,13 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
     const details = parentResult?.result.details as RunCodeDetails | undefined;
     check("background: the call returns at once with a task id", result.output === "done" && details?.movedToBackground === true && typeof details.taskId === "string");
     const taskId = details?.taskId ?? "";
-    let task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    let task = (session.core.require(Tokens.Background).list(false)).find((t) => t.taskId === taskId);
     for (let i = 0; i < 100 && (task === undefined || task.status === "running"); i++) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+      task = (session.core.require(Tokens.Background).list(false)).find((t) => t.taskId === taskId);
     }
     check("background: the task is a code task that completes on its own", task?.kind === "code" && task.status === "completed");
-    const output = await session.readBackgroundTaskOutput(taskId);
+    const output = await session.core.require(Tokens.Background).readOutput(taskId, 16 * 1024);
     check("background: the task log carries console lines, nested call outcomes and the result", output.content.includes("starting") && output.content.includes("tools.Bash -> ok") && output.content.includes("finished") && output.content.includes("--- result ---") && output.content.includes("slow-result"));
     check("background: nested calls still went through the engine", events.some((event) => event.type === "tool.call.started" && event.toolName === "Bash" && event.parentToolCallId !== undefined));
     await harness.close();
@@ -252,7 +252,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
       if (event.type === "tool.detachable" && event.toolName === RUN_CODE_NAME && detachedAt === undefined) {
         detachedAt = event.toolCallId;
         // Let the program get going, then move it: the same thing a UI's "move to background" does.
-        setTimeout(() => session.detachTool(event.toolCallId), 120);
+        setTimeout(() => session.core.require(Tokens.Background).detach(event.toolCallId), 120);
       }
     });
     faux.setResponses([
@@ -273,12 +273,12 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
     check("detach: the tool announced it could be detached, and was", detachedAt !== undefined && details?.movedToBackground === true && result.output === "done");
     check("detach: console lines streamed as progress while attached", events.some((event) => event.type === "tool.progress" && event.toolName === RUN_CODE_NAME && event.update.kind === "stdout" && event.update.text === "tick"));
     const taskId = details?.taskId ?? "";
-    let task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+    let task = (session.core.require(Tokens.Background).list(false)).find((t) => t.taskId === taskId);
     for (let i = 0; i < 100 && (task === undefined || task.status === "running"); i++) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      task = (await session.listBackgroundTasks()).find((t) => t.taskId === taskId);
+      task = (session.core.require(Tokens.Background).list(false)).find((t) => t.taskId === taskId);
     }
-    const output = await session.readBackgroundTaskOutput(taskId);
+    const output = await session.core.require(Tokens.Background).readOutput(taskId, 16 * 1024);
     check("detach: the program kept running after the turn ended and its result reached the log", task?.status === "completed" && output.content.includes("tock") && output.content.includes("late"));
     await harness.close();
   }

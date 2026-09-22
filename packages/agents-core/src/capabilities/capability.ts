@@ -8,12 +8,12 @@ import type { ChatModel } from "../llm/define-model.ts";
 import type { ThinkingLevel } from "../llm/model.ts";
 import type { ContextBreakdown } from "../agent/context-report.ts";
 import type { CompactRequestOptions, PendingCompaction } from "./compaction/index.ts";
-import type { Scope } from "../scope/scope.ts";
-import type { Token } from "../scope/token.ts";
+import type { ScopeKind, Token } from "../scope/token.ts";
+import type { Needs, Resolved } from "./needs.ts";
 
 /**
  * The narrow slice of the owning Session a capability may ACT on (as opposed to observe).
- * Implemented by `Session`; registered as `T.SessionControls` and handed to capabilities that
+ * Implemented by `Session`; registered as `Tokens.SessionControls` and handed to capabilities that
  * participate in the run rather than just watching it — today the extension runtime's
  * `ctx.actions`.
  *
@@ -25,7 +25,7 @@ import type { Token } from "../scope/token.ts";
 export interface SessionControls {
   /**
    * Cancel work. Scope depends on where the controls came from: from a `RunContext` (per run)
-   * this aborts THAT run and leaves the session usable; from `T.SessionControls` it aborts the
+   * this aborts THAT run and leaves the session usable; from `Tokens.SessionControls` it aborts the
    * session. Either way the affected run(s) settle as `status: "aborted"`.
    */
   abort(reason?: string): void;
@@ -35,38 +35,109 @@ export interface SessionControls {
   setThinking(level: ThinkingLevel): void;
 }
 
+/** The tiers a capability may contribute a service to. The token picks one; see {@link Provision}. */
+export type ProvisionKind = "session" | "workspace";
+
 /**
- * What a capability's `Provision.create` receives: the session scope (everything the session
- * registered — `T.Environment`, `T.Store`, `T.Events`, `T.Steer`, `T.SessionLog`,
- * `T.SessionControls`, plus whatever earlier capabilities provided) and the two values every
- * provision needs. Everything else is a `ctx.scope.get(T.…)` away.
+ * The session FACTS a provision gets for free, as opposed to the SERVICES it gets by declaring
+ * them in `needs`. Deliberately tiny: everything a capability depends on should be visible in
+ * its `needs`, where the compiler and the assembler can both see it.
+ *
+ * There is deliberately no `scope` here. A lookup inside `create` is a dependency the compiler
+ * cannot see, the assembler cannot pre-check and a reader has to hunt for — and it is also how
+ * the tier rule gets bypassed, since a scope handed to a workspace factory can reach down into
+ * the session that triggered it. Anything a provision needs goes in `needs`.
  */
-export interface ProvisionContext {
-  readonly scope: Scope<"session">;
+export interface SessionProvisionContext {
   readonly sessionId: string;
   /** The session's signal (aborts when the session is cancelled). */
   readonly signal: AbortSignal;
 }
 
 /**
- * A service a capability contributes, declaring where it lives (the token's scope), how it is
- * built and how it is torn down. `Session.open` runs `create` for each capability in order and
- * registers the result under `token`; `scope.close()` disposes it in reverse registration order.
+ * What a WORKSPACE provision gets. Pointedly not the session's: the service outlives whichever
+ * session happened to build it, so there is no session id here, and the signal is the
+ * workspace's — cancelling the session that triggered the build must not abort an object every
+ * other session is about to share.
+ */
+export interface WorkspaceProvisionContext {
+  /** Aborts when the WORKSPACE is torn down, never when one session is. */
+  readonly signal: AbortSignal;
+}
+
+export type ContextFor<K extends ProvisionKind> = K extends "session" ? SessionProvisionContext : WorkspaceProvisionContext;
+
+/** @deprecated Use {@link SessionProvisionContext}; kept so existing session provisions read unchanged. */
+export type ProvisionContext = SessionProvisionContext;
+
+/**
+ * A service a capability contributes: what it needs, where it lives (the token's scope), how it
+ * is built and how it is torn down. `Session.open` resolves `needs`, runs `create` with the
+ * result and registers it under `token`; `scope.close()` disposes it in reverse order.
+ *
+ * `needs` is the point of the shape. Declared dependencies are resolved BEFORE `create` runs, so
+ * a missing one fails here — naming the capability and the field — instead of at whatever later
+ * call first touches it; and `create` is handed exactly what it asked for, so it cannot quietly
+ * grow a dependency nobody declared.
  *
  * `create` may be async (it typically folds the session log, attaches to the store, or connects
  * to something). `dispose` defaults to `instance.close()` when present.
+ *
+ * Write one with {@link provision}, which infers `deps` from `needs`.
  */
-export interface Provision<T = unknown> {
-  /** Session-tier by contract: a provision lives exactly as long as the session. */
-  readonly token: Token<T, "session">;
-  create(ctx: ProvisionContext): T | Promise<T>;
+export interface Provision<T = unknown, N extends Needs<any> = Needs<any>, K extends ProvisionKind = ProvisionKind> {
+  /**
+   * The token decides the LIFETIME, not this list. A session-tier token is built once per
+   * session; a workspace-tier one is built by the first session that declares it and then shared
+   * by every session in that working directory, living as long as the workspace does.
+   *
+   * That is what lets a capability own its whole assembly. A skill scan or an MCP connection is
+   * shared by nature — it used to be hand-wired in the host, outside the capability that needed
+   * it, so the two halves could drift apart and every new host had to wire them again. Declaring
+   * both halves here keeps them together.
+   */
+  readonly token: Token<T, K>;
+  /** Field name → token (or `optional(token)`). Resolved once, before `create` runs. */
+  readonly needs?: N;
+  create(deps: Resolved<N>, ctx: ContextFor<K>): T | Promise<T>;
   dispose?(instance: T): void | Promise<void>;
 }
 
-/** What a capability's per-run `start` (and its tool providers) receive. */
-export interface RunContext {
-  readonly scope: Scope<"session">;
-  readonly sessionId: string;
+/**
+ * Define a SESSION-tier provision, inferring `deps` from `needs` — `provision({ token, needs: {
+ * environment: Tokens.Environment }, create: ({ environment }) => … })`. The function exists only
+ * so TypeScript can tie the two together; a bare object literal in `provides` would widen `needs`
+ * and leave `deps` untyped.
+ *
+ * A session service may name any tier: everything else outlives it.
+ */
+export function provision<T, const N extends Needs<"session"> = Record<string, never>>(
+  spec: Provision<T, N, "session">,
+): Provision<T, N, "session"> {
+  return spec;
+}
+
+/**
+ * Define a WORKSPACE-tier provision: built by the first session in the workspace that declares
+ * it, shared by every session after, disposed with the workspace.
+ *
+ * A separate function rather than a flag, because the tier changes two things at once and both
+ * are type-level: `needs` may only name workspace and harness services (a session one would be
+ * gone while this object is still handed out), and `create` gets the workspace's context — no
+ * session id, and a signal that belongs to the workspace.
+ */
+export function workspaceProvision<T, const N extends Needs<"workspace"> = Record<string, never>>(
+  spec: Provision<T, N, "workspace">,
+): Provision<T, N, "workspace"> {
+  return spec;
+}
+
+/**
+ * What a capability's per-run `start` (and its tool providers) receive. Services are NOT here:
+ * a capability resolves its dependencies once, in its provision, and keeps them — a run is where
+ * they are used, not where they are found. What is here is what only a run has.
+ */
+export interface RunContext extends SessionProvisionContext {
   /** Aborts when this RUN is cancelled (downstream of the session signal). */
   readonly signal: AbortSignal;
   readonly injection: import("./injection.ts").InjectionManager;
@@ -82,12 +153,26 @@ export interface AssembledGates {
 }
 
 /**
+ * Which frame a toolset is being assembled for. A capability's tools are visible to every agent
+ * in the session — the main one and each subagent — and some of them should not be: a tool that
+ * negotiates with the human (a plan to approve) or rewrites the conversation's own goal belongs
+ * to the agent the human is talking to. That is a visibility question, distinct from who OWNS
+ * the state behind the tool (docs/state-and-lifetime.md); a capability may need to answer both.
+ */
+export interface ToolFilterContext {
+  /** The frame's journal address: `main` for the root agent, `main/<agentId>` for a subagent. */
+  readonly address: string;
+  /** True for the session's root agent — the one whose turns a human is watching. */
+  readonly isRootAgent: boolean;
+}
+
+/**
  * Narrows the assembled toolset just before a turn runs. The mirror image of `toolProviders`:
  * providers add, filters remove. Called once per turn with the complete registry (agent tools ∪
  * capability tools ∪ handoff/subagent tools), so a filter that drops a handoff tool is
  * responsible for what that does to the agent graph. A filter that throws is skipped.
  */
-export type ToolFilter = (tools: readonly Tool[]) => readonly Tool[];
+export type ToolFilter = (tools: readonly Tool[], ctx: ToolFilterContext) => readonly Tool[];
 
 /**
  * Gates are the one place where a capability ASKS other capabilities before acting, instead of
@@ -146,7 +231,7 @@ export interface Capability {
   readonly hooks?: Partial<LoopHooks>;
   readonly injectors?: readonly Injector[];
   /** Session-lived services, in dependency order. See {@link Provision}. */
-  readonly provides?: readonly Provision[];
+  readonly provides?: readonly Provision<any, any, any>[];
   /** Per-run startup. `signal` aborts when the assembler's start timeout expires — the
    *  timeout itself still wins the race (the capability is marked absent), but a
    *  signal-respecting implementation can release whatever it was holding. */

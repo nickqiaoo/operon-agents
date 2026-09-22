@@ -1,6 +1,8 @@
+import { provision } from "../capability.ts";
+import { optional } from "../needs.ts";
 import type { SessionStore } from "../../store/index.ts";
 import type { Capability } from "../capability.ts";
-import { T } from "../../scope/tokens.ts";
+import { Tokens } from "../../scope/tokens.ts";
 import { BackgroundManager } from "./manager.ts";
 import type { BackgroundTaskPersistence } from "./persist.ts";
 import { StoreBackgroundTaskPersistence } from "./persist.ts";
@@ -56,18 +58,18 @@ export function backgroundCapability(manager: BackgroundManager = new Background
     // exposing an unbounded list invites unrelated historical tasks into the reasoning path.
     tools: [backgroundOutputTool(manager), backgroundStopTool(manager)],
     provides: [
-      {
-        token: T.Background,
-        create: async (ctx) => {
+      provision({
+        token: Tokens.Background,
+        needs: { steer: Tokens.Steer, events: Tokens.Events, store: optional(Tokens.Store) },
+        create: async ({ steer, events, store }, ctx) => {
           // Each task's status is now durably recorded in a dedicated per-task store (disk
           // sessions get the `<sessionDir>/tasks/<id>/` layout; other backends use KV state),
           // so a task orphaned by a dead process can be reconciled to `lost` on reopen. Loading
           // + reconcile happen in the store-cutover step; here we attach the persistence so live
           // spawns start recording. Without a durable store the manager stays purely in memory.
-          const store = ctx.scope.get(T.Store);
           manager.attach({
-            steer: ctx.scope.require(T.Steer),
-            events: ctx.scope.require(T.Events),
+            steer,
+            events,
             sessionId: ctx.sessionId,
             persistence: makeTaskPersistence(store),
             // Shard-backed output (a sub-agent's conversation) is read back from here rather than
@@ -85,7 +87,7 @@ export function backgroundCapability(manager: BackgroundManager = new Background
         dispose: () => {
           manager.detachRuntime();
         },
-      },
+      }),
     ],
   };
 }

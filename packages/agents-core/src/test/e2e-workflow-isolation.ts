@@ -16,6 +16,7 @@ import {
   Runner,
   Session,
   SessionProjection,
+  Tokens,
 } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -135,7 +136,7 @@ async function testBackground(): Promise<void> {
       // The task holds no output: this is its journal, read back and rendered. It is the same
       // record `resumeFromRunId` replays from and the same one a UI seeds its progress view
       // with — not a copy the task kept, which is why it survives the process that wrote it.
-      const output = (await session.readBackgroundTaskOutput(taskId)).content;
+      const output = (await session.require(Tokens.Background).readOutput(taskId, 16 * 1024)).content;
       check("task output is the run's journal, not a copy it kept", output.includes("workflow: bg-demo"), output.slice(0, 200));
       check("journal carries the run's outcome", output.includes("outcome: completed"), output.slice(0, 200));
       check("background workflow result is correct", output.includes('{"answer":99}'), output.slice(0, 200));
@@ -169,7 +170,7 @@ async function testFailedWorkflowClosesItsJournal(): Promise<void> {
     if (taskId !== undefined) {
       const info = await mgr.wait(taskId, 3000);
       check("failed workflow maps to task failed", info?.status === "failed", String(info?.status));
-      const output = (await session.readBackgroundTaskOutput(taskId)).content;
+      const output = (await session.require(Tokens.Background).readOutput(taskId, 16 * 1024)).content;
       check("failed workflow journal has a terminal outcome", output.includes("outcome: failed") && output.includes("boom"), output);
       const projection = await SessionProjection.attach({ id: session.id, store, events: session.events });
       check("failed workflow projection is no longer live", projection.snapshot().workflows.find((run) => run.runId === info?.runId)?.live === false);

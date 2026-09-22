@@ -55,11 +55,11 @@ async function pairedHalf(): Promise<void> {
     check("init: advertises invokable methods", init.invokableMethods.includes("getRecords"));
     check(
       "init: advertises the two background output read protocols only",
-      invokableMethods.has("readBackgroundTaskOutput") &&
-        invokableMethods.has("readBackgroundTaskOutputDelta") &&
-        !invokableMethods.has("getBackgroundTaskOutput") &&
-        !invokableMethods.has("getBackgroundTaskOutputSnapshot") &&
-        !invokableMethods.has("getBackgroundTaskOutputDelta"),
+      invokableMethods.has("background.readOutput") &&
+        invokableMethods.has("background.readOutputDelta") &&
+        !invokableMethods.has("background.getOutput") &&
+        !invokableMethods.has("background.getOutputSnapshot") &&
+        !invokableMethods.has("background.getOutputDelta"),
     );
 
     const { sessionId } = await client.newSession();
@@ -105,8 +105,8 @@ async function pairedHalf(): Promise<void> {
     // `getRecords` reflects conversation state: after two prompts the append log is non-empty.
     const records = await client.invoke<unknown[]>(sessionId, "getRecords");
     check("invoke: getRecords returns the append log after prompts", Array.isArray(records) && records.length > 0);
-    const skills = await client.invoke<unknown[]>(sessionId, "listSkills");
-    check("invoke: listSkills returns an array", Array.isArray(skills));
+    const skills = await client.invoke<unknown[]>(sessionId, "skills.listSkills");
+    check("invoke: skills.listSkills returns an array", Array.isArray(skills));
     await client.invoke(sessionId, "setPermissionMode", "yolo");
     check("invoke: setPermissionMode (void) resolves", true);
 

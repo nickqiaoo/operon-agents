@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineAgent, T, token, type Logger } from "operon-agents-core";
+import { defineAgent, Tokens, token, type Logger } from "operon-agents-core";
 import { createHarness, defaultCapabilities, tool } from "../src/index.ts";
 import { setHarnessCloseTimeoutsForTest } from "../src/internal.ts";
 
@@ -442,7 +442,7 @@ async function scopeDisposeHasADeadline(): Promise<void> {
   const harness = createHarness({
     model: faux.getChatModel()!,
     permission: { mode: "yolo" },
-    harness: (scope) => { scope.register(T.Logger, logger, { owned: false }); },
+    harness: (scope) => { scope.register(Tokens.Logger, logger, { owned: false }); },
     // A workspace service whose close never settles — a hung MCP shutdown, say.
     workspace: (scope) => { scope.register(WsHang, { close: () => new Promise<void>(() => undefined) }); },
   });

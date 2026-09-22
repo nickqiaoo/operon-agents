@@ -1,5 +1,5 @@
 /**
- * Telemetry through the real harness: `HarnessOptions.telemetry` → `T.Telemetry` → the core
+ * Telemetry through the real harness: `HarnessOptions.telemetry` → `Tokens.Telemetry` → the core
  * Session subscribes the projection on open → registry events arrive at a product appender with
  * `session_id` context. Also: no option = nothing counted; resume flips `resumed`.
  */

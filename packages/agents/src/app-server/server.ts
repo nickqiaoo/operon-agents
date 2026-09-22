@@ -298,12 +298,30 @@ export class AppServer {
     if (!INVOKABLE.has(params.method)) {
       throw new RpcError(ErrorCode.MethodNotFound, `not invokable: ${params.method}`);
     }
-    const fn = (session as unknown as Record<string, unknown>)[params.method];
+    // `"<service>.<op>"` resolves through the session's capability accessor; a bare name is a
+    // method on the session. Reading a REQUIRE accessor throws when that capability is not open,
+    // which is a legitimate answer for a remote caller — reported as "unavailable", not a crash.
+    const dot = params.method.indexOf(".");
+    let target: unknown = session;
+    let name = params.method;
+    if (dot > 0) {
+      const service = params.method.slice(0, dot);
+      name = params.method.slice(dot + 1);
+      try {
+        target = (session as unknown as Record<string, unknown>)[service];
+      } catch (error) {
+        throw new RpcError(ErrorCode.MethodNotFound, `capability unavailable: ${service} (${error instanceof Error ? error.message : String(error)})`);
+      }
+      if (target === undefined || target === null) {
+        throw new RpcError(ErrorCode.MethodNotFound, `capability unavailable: ${service}`);
+      }
+    }
+    const fn = (target as Record<string, unknown>)[name];
     if (typeof fn !== "function") {
       throw new RpcError(ErrorCode.MethodNotFound, `not a method: ${params.method}`);
     }
     const args = [...(params.args ?? [])];
-    const value = await (fn as (...a: unknown[]) => unknown).apply(session, args);
+    const value = await (fn as (...a: unknown[]) => unknown).apply(target, args);
     return { value: toWireSafe(value) };
   }
 

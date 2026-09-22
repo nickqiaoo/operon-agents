@@ -94,7 +94,7 @@ test('the journal is readable per address and replayable through the turn window
 
 test('skills list, and the activatable ones become slash commands', async () => {
   await withSession(async (_harness, session) => {
-    const skills = await session.listSkills();
+    const skills = session.skills.listSkills();
     const built = buildSkillSlashCommands(skills);
     assert.equal(built.commands.length, built.commandMap.size);
     for (const command of built.commands) {
@@ -112,10 +112,10 @@ test('the session reports the control state the footer renders', async () => {
     session.setThinking('high');
     assert.equal(session.permissionMode, 'workspace');
     assert.equal(session.thinkingSetting, 'high');
-    const plan = await session.setPlanMode(true);
+    const plan = await session.plan.setEnabled(true);
     assert.ok(plan !== null, 'entering plan mode should produce a plan');
-    await session.clearPlan();
-    assert.equal(await session.getPlan(), null);
+    await session.plan.setEnabled(false);
+    assert.equal(await session.plan.data(), null);
   });
 });
 
@@ -127,24 +127,24 @@ test('a durable interruption list exists and is empty on a fresh session', async
 
 test('background tasks, MCP servers and plugins are all listable views', async () => {
   await withSession(async (_harness, session) => {
-    assert.deepEqual(await session.listBackgroundTasks({ activeOnly: false }), []);
-    assert.deepEqual(session.listMcpServers(), []);
+    assert.deepEqual((session.background?.list(false) ?? []), []);
+    assert.deepEqual(session.mcp?.list() ?? [], []);
     // Plugins are a capability a host opts into; the local preset leaves them off, and asking a
     // session without them is a registry error the TUI turns into a plain sentence.
-    await assert.rejects(() => session.listPlugins(), /plugins/);
+    assert.throws(() => session.plugins, /plugins/);
   });
 });
 
 test('a goal is created, paused, resumed and cancelled through the snapshots the footer shows', async () => {
   await withSession(async (_harness, session) => {
-    assert.equal(await session.getGoal(), null);
-    const created = await session.createGoal({ objective: 'ship the port' });
+    assert.equal(session.goal.snapshot(), null);
+    const created = await session.goal.create({ objective: 'ship the port' });
     assert.equal(created.objective, 'ship the port');
     assert.equal(created.status, 'active');
-    assert.equal((await session.pauseGoal({ reason: 'by hand' }))?.status, 'paused');
-    assert.equal((await session.resumeGoal())?.status, 'active');
-    assert.equal((await session.cancelGoal())?.objective, 'ship the port');
-    assert.equal(await session.getGoal(), null);
+    assert.equal((await session.goal.pause('by hand'))?.status, 'paused');
+    assert.equal((await session.goal.resume())?.status, 'active');
+    assert.equal((await session.goal.cancel())?.objective, 'ship the port');
+    assert.equal(session.goal.snapshot(), null);
   });
 });
 

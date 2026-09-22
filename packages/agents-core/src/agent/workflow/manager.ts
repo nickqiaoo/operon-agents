@@ -6,7 +6,7 @@
  * session to get a run's journal.
  *
  * Run DISCOVERY is no longer here: a background workflow run is a task, so past runs
- * are listed from the durable task store via `session.listWorkflows()`. A foreground
+ * are listed from the durable task store via `session.background?.listWorkflows() ?? []`. A foreground
  * workflow is a plain `Workflow` tool call — its record is the conversation plus its
  * journal shard. This manager only owns the resume journal (`newJournal(runId)`).
  *

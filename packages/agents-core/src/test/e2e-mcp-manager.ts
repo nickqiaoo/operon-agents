@@ -9,7 +9,7 @@ import {
   type RunContext,
   type Capability,
 } from "../index.ts";
-import { openCapability, testRunContext } from "./faux.ts";
+import { provisionCapability, testRunContext } from "./faux.ts";
 import {
   mcpServersCapability,
   MockMCPTransport,
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
 
   const capCtx = testRunContext({ environment });
 
-  const opened = await openCapability(cap, { environment, events, steer: new SteerBus() });
+  const opened = await provisionCapability(cap, { environment, events, steer: new SteerBus() });
 
   const handle = opened.service as McpServersHandle;
   const status = (name: string): string => handle.list().find((v) => v.name === name)?.status ?? "missing";

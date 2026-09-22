@@ -20,7 +20,8 @@ export class TodoListInjector extends BoundaryInjector {
 
   protected getInjection(ctx: InjectionContext): InjectionResult | null {
     this.restoreInjectedAt(ctx, ["todo_reminder"]);
-    const todos = this.store.get();
+    // The reminder is for the frame being injected into — never another agent's list.
+    const todos = this.store.get(ctx.address);
     if (todos.length === 0) return null;
 
     const turnsSinceWrite = assistantTurnsSinceTodoWrite(ctx.history);

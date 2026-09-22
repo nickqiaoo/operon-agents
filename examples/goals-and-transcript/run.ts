@@ -3,7 +3,7 @@
  *
  * Two things a plain prompt doesn't show:
  *
- *   1. GOALS — `session.createGoal({ objective, budget })` sets a standing objective with a
+ *   1. GOALS — `session.goal.create({ objective, budget })` sets a standing objective with a
  *      turn/token budget. The agent keeps working toward it across turns until it's met or
  *      the budget runs out; `getGoal()` reports progress (turns/tokens used, remaining).
  *   2. THE LOG — the session is a flat, linear, append-only record stream. `getRecords()`
@@ -15,7 +15,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  createLocalSession,
+  createLocalHarness,
   defineModel,
   type AgentEvent,
   type ChatModel,
@@ -30,16 +30,17 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 mkdirSync(WORK, { recursive: true });
 
-const session = await createLocalSession({
+const harness = await createLocalHarness({
   model: resolveModel(MODEL),
   homeDir: join(process.cwd(), ".agent-home"),
   workDir: WORK,
   permission: { mode: "workspace" },
   appendSystemPrompt: "You are working toward a standing goal. Be concise.",
 });
+const session = await harness.createSession();
 
 // 1. Set a goal with a budget: at most 6 turns / 60k tokens.
-const goal = await session.createGoal({
+const goal = await session.goal.create({
   objective: "Create a small Python project scaffold: main.py with a greet() function, plus a README.md that documents it.",
   budget: { turns: 6, tokens: 60_000 },
 });
@@ -53,7 +54,7 @@ session.onEvent(render);
 await session.prompt("Start working on the goal.");
 
 // Goal progress after the run.
-const after = await session.getGoal();
+const after = await session.goal.snapshot();
 if (after) {
   console.log(`\n🎯 ${after.status} · ${after.turnsUsed} turns · ${after.tokensUsed} tokens used` +
     (after.terminalReason ? ` · ${after.terminalReason}` : ""));
@@ -76,7 +77,7 @@ for (const r of records) {
   if (text) console.log(`   [${msg.role}] ${clip(text)}`);
 }
 
-await session.close();
+await harness.close(); // closes the session, then cron, MCP and the log handle
 
 function render(ev: AgentEvent): void {
   switch (ev.type) {

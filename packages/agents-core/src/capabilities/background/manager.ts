@@ -1,3 +1,6 @@
+import { taskToSubagentRecord, taskToWorkflowSnapshot } from "./projections.ts";
+import type { SubagentRecord } from "../../agent/subagent.ts";
+import type { WorkflowSnapshot } from "../../agent/workflow/snapshot.ts";
 import { randomBytes } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 
@@ -869,6 +872,60 @@ export class BackgroundManager implements BackgroundSpawner {
       if (task.parentAddress === parentAddress && task.toolCallId === toolCallId) return publicTaskInfo(task);
     }
     return undefined;
+  }
+
+  /**
+   * Past BACKGROUND workflow runs, newest first. A FOREGROUND workflow is a plain `Workflow`
+   * tool call — its record is the conversation plus its journal shard — so it is not a task and
+   * is not listed here (its shard stays resumable by runId).
+   */
+  listWorkflows(): readonly WorkflowSnapshot[] {
+    const runs: WorkflowSnapshot[] = [];
+    for (const info of this.list(false)) {
+      const snap = taskToWorkflowSnapshot(info);
+      if (snap !== undefined) runs.push(snap);
+    }
+    runs.sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
+    return runs;
+  }
+
+  /** One background workflow run by runId, or undefined if this ledger has never seen it. */
+  getWorkflow(runId: string): WorkflowSnapshot | undefined {
+    return this.listWorkflows().find((run) => run.runId === runId);
+  }
+
+  /**
+   * The background subagents in this ledger (live + reconciled ghosts). Foreground subagents are
+   * plain `Agent` tool calls, so they are not here — same reason as `listWorkflows`.
+   */
+  listSubagents(): readonly SubagentRecord[] {
+    const records: SubagentRecord[] = [];
+    for (const info of this.list(false)) {
+      const record = taskToSubagentRecord(info);
+      if (record !== undefined) records.push(record);
+    }
+    return records;
+  }
+
+  /**
+   * Reconcile orphaned work and report it as subagents: `reconcile()` writes the terminal status
+   * back, and each reclassified subagent gets a warning on the session's sink so a host does not
+   * have to poll for it. Returns the lost subagents (resume any with `Agent(resume="<id>", …)`).
+   */
+  async reconcileSubagents(): Promise<readonly SubagentRecord[]> {
+    const lost: SubagentRecord[] = [];
+    for (const info of await this.reconcile()) {
+      const record = taskToSubagentRecord(info);
+      if (record === undefined) continue;
+      lost.push(record);
+      await this.events?.emit({
+        type: "warning",
+        address: "main",
+        sessionId: this.sessionId,
+        message: `Background subagent "${record.agentId}" (${record.type}) was running when the previous process exited; marked lost. Resume with Agent(resume="${record.agentId}", ...).`,
+      });
+    }
+    return lost;
   }
 
   list(activeOnly = true, limit?: number): BackgroundTaskInfo[] {

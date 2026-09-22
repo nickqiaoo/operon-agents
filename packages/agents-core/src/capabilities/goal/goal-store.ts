@@ -60,8 +60,103 @@ export interface UpdateGoalInput {
   readonly reason?: string;
 }
 
+/** Everything the session-level goal operations take as input. */
+export interface CreateGoalInput {
+  readonly objective: string;
+  readonly completionCriterion?: string;
+  readonly budget?: GoalBudgetInput;
+}
+
+export interface GoalBudgetInput {
+  readonly turns?: number;
+  readonly tokens?: number;
+  readonly wallClockMs?: number;
+}
+
+function positiveInt(name: string, value: number): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`Goal budget ${name} must be a positive integer.`);
+  return value;
+}
+
+function normalizeBudget(input: GoalBudgetInput): GoalBudgetInput {
+  const budget: { turns?: number; tokens?: number; wallClockMs?: number } = {};
+  if (input.turns !== undefined) budget.turns = positiveInt("turns", input.turns);
+  if (input.tokens !== undefined) budget.tokens = positiveInt("tokens", input.tokens);
+  if (input.wallClockMs !== undefined) budget.wallClockMs = positiveInt("wallClockMs", input.wallClockMs);
+  if (Object.keys(budget).length === 0) throw new Error("At least one goal budget field is required.");
+  return budget;
+}
+
 export class GoalStore {
   private goal: GoalRecord | null = null;
+  /** Set by the capability's provision; absent in a bare store (tests, replay). */
+  private announce: ((snapshot: GoalSnapshot | null) => Promise<void>) | undefined;
+
+  /**
+   * Where a goal change becomes a `goal.updated` event. The store owns this because the store is
+   * what changes: a facade that emitted on the caller's behalf could only cover the calls that
+   * went through it, and left anything mutating the goal directly silently unobserved.
+   */
+  attachAnnouncer(announce: (snapshot: GoalSnapshot | null) => Promise<void>): void {
+    this.announce = announce;
+  }
+
+  private async announced(snapshot: GoalSnapshot | null): Promise<GoalSnapshot | null> {
+    await this.announce?.(snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Start a goal, replacing any goal already running. The budget is validated BEFORE anything
+   * changes, so a bad budget leaves the previous goal intact rather than half-replacing it.
+   */
+  async create(input: CreateGoalInput): Promise<GoalSnapshot> {
+    const objective = input.objective.trim();
+    if (objective.length === 0) throw new Error("Goal objective cannot be empty.");
+    const budget = input.budget !== undefined ? normalizeBudget(input.budget) : undefined;
+    if (this.has()) this.update({ status: "complete" });
+    let snapshot = this.update({
+      objective,
+      completionCriterion: input.completionCriterion?.trim(),
+      status: "active",
+    });
+    if (budget !== undefined) snapshot = this.setBudget(budget);
+    if (snapshot === null) throw new Error("Goal was not created.");
+    await this.announce?.(snapshot);
+    return snapshot;
+  }
+
+  /** Change a running goal's status. Returns null (and announces nothing) when there is none. */
+  private async transition(status: "active" | "blocked" | "paused", reason?: string): Promise<GoalSnapshot | null> {
+    if (this.snapshot() === null) return null;
+    return this.announced(this.update({ status, reason }));
+  }
+
+  pause(reason?: string): Promise<GoalSnapshot | null> {
+    return this.transition("paused", reason);
+  }
+
+  resume(reason?: string): Promise<GoalSnapshot | null> {
+    return this.transition("active", reason);
+  }
+
+  block(reason?: string): Promise<GoalSnapshot | null> {
+    return this.transition("blocked", reason);
+  }
+
+  /** End the current goal. Returns the snapshot AS IT WAS, or null if there was none. */
+  async cancel(reason?: string): Promise<GoalSnapshot | null> {
+    const previous = this.snapshot();
+    if (previous === null) return null;
+    this.update({ status: "complete", reason });
+    await this.announce?.(null);
+    return previous;
+  }
+
+  /** Validate, apply and announce — the budget path a caller outside the loop should use. */
+  async changeBudget(budget: GoalBudgetInput): Promise<GoalSnapshot | null> {
+    return this.announced(this.setBudget(normalizeBudget(budget)));
+  }
 
   isActive(): boolean {
     return this.goal?.status === "active";

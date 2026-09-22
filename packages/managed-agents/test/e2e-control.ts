@@ -1,4 +1,4 @@
-import { T } from "operon-agents";
+import { Tokens } from "operon-agents";
 /**
  * Control commands travel the same way inputs do: written to the log, acted on by whoever
  * holds the session, picked up by the next holder when nobody does.
@@ -42,8 +42,8 @@ function fixture(name: string, options: { readonly permission?: "yolo" | "manual
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const harness = createHarness({
     harness: (s) => {
-      s.register(T.SessionRepository, repository, { owned: false });
-      s.register(T.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
+      s.register(Tokens.SessionRepository, repository, { owned: false });
+      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
     },
     model: faux.getChatModel(),
     permission: { mode: options.permission ?? "yolo" },

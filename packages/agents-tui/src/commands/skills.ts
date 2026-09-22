@@ -2,7 +2,7 @@ import type { HarnessSession, SkillSummary } from 'operon-agents';
 
 import type { TuiSlashCommand } from './types.ts';
 
-export type SkillListSession = Pick<HarnessSession, 'listSkills'>;
+export type SkillListSession = Pick<HarnessSession, 'skills'>;
 
 export interface SkillSlashCommands {
   readonly commands: readonly TuiSlashCommand[];

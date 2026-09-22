@@ -1,4 +1,4 @@
-import { T } from "operon-agents";
+import { Tokens } from "operon-agents";
 /**
  * `SessionService.ownerKey` — the tenant seam for a server that serves many users.
  *
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     const repository = new DiskSessionRepository(join(root, "home"));
     const harness = createHarness({
       harness: (s) => {
-        s.register(T.SessionRepository, repository, { owned: false });
+        s.register(Tokens.SessionRepository, repository, { owned: false });
       },
       model,
       permission: { mode: "yolo" },

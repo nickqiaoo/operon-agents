@@ -1,7 +1,7 @@
 import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Workflow discovery test — a BACKGROUND workflow run is a task, discoverable through
- * session.listWorkflows()/getWorkflow() and the /workflows command, sourced from the durable
+ * session.background?.listWorkflows() ?? []/getWorkflow() and the /workflows command, sourced from the durable
  * task store (not a conversation fold). A FOREGROUND workflow is a plain Workflow tool call —
  * its record is the conversation plus its journal shard — so it is NOT listed (its shard stays
  * resumable by runId), mirroring how foreground subagents are handled.
@@ -141,15 +141,15 @@ async function main(): Promise<void> {
     check("foreground workflow run completes", r.status === "completed", r.status);
 
     // ── Discovery: only the BACKGROUND run is listed, from the task store ──
-    const runs = await session.listWorkflows();
-    check("session.listWorkflows() returns only the background run", runs.length === 1, String(runs.length));
+    const runs = await session.background?.listWorkflows() ?? [];
+    check("session.background?.listWorkflows() ?? [] returns only the background run", runs.length === 1, String(runs.length));
     const run: WorkflowSnapshot | undefined = runs[0];
     check("background run recorded as completed", run?.status === "completed", JSON.stringify(run?.status));
     check("background run carries name + timestamps", run?.workflowName === "nightly" && run?.startedAt !== undefined && run?.endedAt !== undefined, JSON.stringify({ n: run?.workflowName, s: run?.startedAt, e: run?.endedAt }));
     check("foreground run is not listed", !runs.some((w) => w.workflowName === "demo"));
 
-    const byId = run ? await session.getWorkflow(run.runId) : undefined;
-    check("session.getWorkflow(runId) round-trips", byId?.runId === run?.runId, JSON.stringify(byId?.runId));
+    const byId = run ? await session.background?.getWorkflow(run.runId) : undefined;
+    check("session.background?.getWorkflow(runId) round-trips", byId?.runId === run?.runId, JSON.stringify(byId?.runId));
 
     // ── The /workflows user command consumes the same store-backed listing ──
     const commands = createExtensionCommandRegistry();

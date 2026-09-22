@@ -22,7 +22,7 @@
  * reverse registration order — drain, then dispose (default: `instance.close()` when present;
  * `owned: false` skips disposal for objects the registrant merely lent). Parents are untouched.
  */
-import { SCOPE_ORDER, type ScopeKind, type Token } from "./token.ts";
+import { SCOPE_ORDER, providerHintOf, type ScopeKind, type Token } from "./token.ts";
 
 /** The tiers a scope of kind `K` may open beneath it. */
 export type Below<K extends ScopeKind> = K extends "harness" ? "workspace" | "session" : K extends "workspace" ? "session" : never;
@@ -32,10 +32,21 @@ export type ServiceUnavailableReason = "missing" | "draining";
 export class ServiceUnavailableError extends Error {
   readonly serviceName: string;
   readonly reason: ServiceUnavailableReason;
-  constructor(serviceName: string, reason: ServiceUnavailableReason) {
+  /**
+   * A "missing" failure is almost always "nobody registered this", and the thing worth knowing
+   * at that moment is WHO would have — so the message carries the token's `providedBy` hint
+   * instead of leaving the reader to grep for the token name.
+   *
+   * Callers holding the token pass its hint directly; the by-name lookup is the fallback for
+   * the handle path, which only ever has the service's name.
+   */
+  constructor(serviceName: string, reason: ServiceUnavailableReason, providedBy?: string) {
+    providedBy ??= providerHintOf(serviceName);
     super(
       reason === "missing"
-        ? `service "${serviceName}" is not registered`
+        ? providedBy === undefined
+          ? `service "${serviceName}" is not registered`
+          : `service "${serviceName}" is not registered; it comes from ${providedBy}`
         : `service "${serviceName}" is shutting down`,
     );
     this.name = "ServiceUnavailableError";
@@ -73,11 +84,36 @@ interface Provider {
   readonly options: RegisterOptions;
 }
 
+/** What a factory is handed: this scope's own cancel, not a caller's. */
+export interface ServiceBuildContext {
+  /** Aborts when the owning scope starts closing. Return early; a late result is disposed. */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * One in-flight build. The scope tracks it because until the object is registered, NOBODY owns
+ * it: not the factory (it already returned), not the table (it never got there). Between those
+ * two moments a close would leak it.
+ */
+interface InFlightBuild {
+  readonly promise: Promise<unknown>;
+  readonly cancel: AbortController;
+  /** Set by `unregister`: the result must be disposed, never published. */
+  stale: boolean;
+}
+
 const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
+const DEFAULT_BUILD_TIMEOUT_MS = 10_000;
 
 export interface CloseOptions {
   /** How long to wait for in-flight handle calls before disposing anyway. Default 10s. */
   readonly drainTimeoutMs?: number;
+  /**
+   * Budget for ALL in-flight builds to notice the cancel and return, before teardown proceeds
+   * without them. Default 10s. A factory that ignores its signal and never returns cannot be
+   * stopped — close carries on, logs, and disposes whatever it eventually hands back.
+   */
+  readonly buildTimeoutMs?: number;
   /** Deadline for one entry's dispose; a straggler is abandoned (logged) so close() never hangs. */
   readonly disposeTimeoutMs?: number;
   /** Where a dispose failure/timeout goes. Default: the scope's `warn`. */
@@ -112,8 +148,12 @@ export class Scope<K extends ScopeKind = ScopeKind> {
   private readonly handles = new Map<string, unknown>();
   /** Per-name op chain: concurrent replace/unregister serialize instead of interleaving. */
   private readonly ops = new Map<string, Promise<unknown>>();
+  /** In-flight builds: shared by concurrent `ensure`s, awaited and cancelled by `close`. */
+  private readonly building = new Map<string, InFlightBuild>();
   private readonly children = new Set<Scope>();
   private readonly warn: (message: string) => void;
+  /** Aborted the moment `close()` starts — this scope's lifetime as a signal. */
+  private readonly lifetime = new AbortController();
   /** open → closing (the one `close()` in flight) → closed. Never goes back. */
   private _state: ScopeState = "open";
   /** The one close in flight (or finished): every `close()` call returns THIS promise. */
@@ -133,6 +173,15 @@ export class Scope<K extends ScopeKind = ScopeKind> {
 
   get state(): ScopeState {
     return this._state;
+  }
+
+  /**
+   * Aborts when this scope starts closing. It is the scope's OWN lifetime, not a caller's: a
+   * service built here may hold it for as long as it lives, which is exactly as long as the
+   * scope does. Factories get it (combined with their own cancel) as `ctx.signal`.
+   */
+  get signal(): AbortSignal {
+    return this.lifetime.signal;
   }
 
   /** Open a nested scope. Tiers only go down: harness → workspace | session, workspace → session. */
@@ -175,8 +224,8 @@ export class Scope<K extends ScopeKind = ScopeKind> {
 
   require<T>(tok: Token<T>): T {
     const entry = this.lookup(tok.name);
-    if (entry === undefined) throw new ServiceUnavailableError(tok.name, "missing");
-    if (entry.draining) throw new ServiceUnavailableError(tok.name, "draining");
+    if (entry === undefined) throw new ServiceUnavailableError(tok.name, "missing", tok.providedBy);
+    if (entry.draining) throw new ServiceUnavailableError(tok.name, "draining", tok.providedBy);
     return entry.instance as T;
   }
 
@@ -189,6 +238,128 @@ export class Scope<K extends ScopeKind = ScopeKind> {
   /** Registered or provided in THIS scope (a pending default counts). */
   hasLocal<T>(tok: Token<T>): boolean {
     return this.table.has(tok.name) || this.providers.has(tok.name);
+  }
+
+  /** This scope or the nearest ancestor of that tier, or undefined if there is none. */
+  scopeOf(kind: ScopeKind): Scope | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- walking the parent chain
+    for (let s: Scope | undefined = this; s !== undefined; s = s.parent) {
+      if (s.kind === kind) return s;
+    }
+    return undefined;
+  }
+
+  /**
+   * Register `create`'s result under `tok` unless this scope already has one, and return what is
+   * there either way. Concurrent callers share the single in-flight build.
+   *
+   * This is how something SHARED gets built by whoever needs it first. A workspace-tier service
+   * declared by a capability is the case it exists for: the workspace scope opens before anyone
+   * knows which capabilities the sessions under it will carry, so the first session that declares
+   * the service builds it, every later one finds it, and it lives and dies with the workspace
+   * rather than with whichever session happened to be first.
+   */
+  async ensure<T>(tok: Token<T, K>, create: (ctx: ServiceBuildContext) => T | Promise<T>, options: RegisterOptions = {}): Promise<T> {
+    this.assertOpen();
+    this.assertTier(tok);
+    const existing = this.get(tok);
+    if (existing !== undefined) return existing;
+    const inFlight = this.building.get(tok.name);
+    if (inFlight !== undefined) return (await inFlight.promise) as T;
+    return this.build(tok, create, options, "reuse");
+  }
+
+  /**
+   * Build and register a service that must NOT already exist here — the asynchronous twin of
+   * `register`, for the case where the instance takes an await to produce.
+   *
+   * The difference from `await factory(); scope.register(…)` is ownership during the await: that
+   * pair leaves the object owned by nobody until `register` lands, so a `close()` in between
+   * loses it (the register throws, and the object it was carrying is never disposed). Here the
+   * scope knows a build is out, waits for it while closing, and disposes whatever comes back
+   * too late to be registered.
+   */
+  async create<T>(tok: Token<T, K>, factory: (ctx: ServiceBuildContext) => T | Promise<T>, options: RegisterOptions = {}): Promise<T> {
+    this.assertOpen();
+    this.assertTier(tok);
+    if (this.hasLocal(tok)) throw new Error(`service "${tok.name}" is already registered in this ${this.kind} scope`);
+    if (this.building.has(tok.name)) throw new Error(`service "${tok.name}" is already being built in this ${this.kind} scope`);
+    return this.build(tok, factory, options, "exclusive");
+  }
+
+  /**
+   * The one path from "a factory is running" to "the scope owns the result". Everything that can
+   * go wrong between those two points settles here, and every branch that does not publish
+   * disposes: closing scope, unregistered token, lost race, duplicate.
+   */
+  private build<T>(
+    tok: Token<T, K>,
+    factory: (ctx: ServiceBuildContext) => T | Promise<T>,
+    options: RegisterOptions,
+    mode: "reuse" | "exclusive",
+  ): Promise<T> {
+    const name = tok.name;
+    const cancel = new AbortController();
+    const run = (async (): Promise<T> => {
+      // Yield once so the ledger entry below is in place before the factory runs: a build that
+      // is not yet on the books is a build `close` cannot wait for.
+      await Promise.resolve();
+      const record = this.building.get(name);
+      // The scope may have started closing in that gap. Nothing is built for a scope that is
+      // already tearing down — there would be nowhere to put it.
+      if (this._state !== "open") throw new Error(`${this.kind} scope is ${this._state}`);
+      // The factory's signal is the scope's lifetime PLUS this build's own cancel, so a service
+      // that keeps it sees the scope close, while `unregister` can stop just this one.
+      const instance = await factory({ signal: AbortSignal.any([this.lifetime.signal, cancel.signal]) });
+      // Every branch from here that does not publish must dispose: the object exists, and the
+      // scope is the only one that still knows about it.
+      const discard = async (reason: string): Promise<never> => {
+        await this.disposeOf(entryOf(instance, options), name);
+        throw new Error(reason);
+      };
+      if (this._state !== "open") return discard(`${this.kind} scope is ${this._state}`);
+      if (record?.stale === true) return discard(`service "${name}" was unregistered while it was being built`);
+      const winner = this.get(tok);
+      if (winner !== undefined) {
+        // Someone registered under this token while the factory ran. `ensure` promised the
+        // caller "whatever is there", so it hands back the winner and disposes the loser — but
+        // only when they are actually two objects.
+        if (mode === "exclusive") return discard(`service "${name}" is already registered in this ${this.kind} scope`);
+        if (winner !== (instance as unknown)) await this.disposeOf(entryOf(instance, options), name);
+        return winner;
+      }
+      this.register(tok, instance, options);
+      return instance;
+    })();
+    this.building.set(name, { promise: run, cancel, stale: false });
+    const forget = (): void => {
+      if (this.building.get(name)?.promise === run) this.building.delete(name);
+    };
+    run.then(forget, forget);
+    return run;
+  }
+
+  /**
+   * Wait for the builds this scope started, so teardown disposes what they produce instead of
+   * racing them. Rejections are expected here (that is what a cancelled build looks like) and
+   * belong to whoever called `ensure`/`create`, not to close.
+   */
+  private async settleBuilds(timeoutMs: number): Promise<void> {
+    if (this.building.size === 0) return;
+    const pending = [...this.building.values()].map((b) => b.promise.then(noop, noop));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = await Promise.race([
+      Promise.all(pending).then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (timedOut) {
+      this.warn(
+        `${this.kind} scope: ${this.building.size} service build(s) did not finish within ${timeoutMs}ms; closing without them (a late result is disposed, not registered)`,
+      );
+    }
   }
 
   /**
@@ -284,6 +455,13 @@ export class Scope<K extends ScopeKind = ScopeKind> {
     const name = tok.name;
     return this.enqueueOp(name, async () => {
       this.providers.delete(name);
+      // A build still running under this name must not publish after the unregister that was
+      // meant to remove it; it disposes its result instead.
+      const build = this.building.get(name);
+      if (build !== undefined) {
+        build.stale = true;
+        build.cancel.abort();
+      }
       const entry = this.table.get(name);
       if (entry === undefined) return;
       entry.draining = true;
@@ -308,14 +486,28 @@ export class Scope<K extends ScopeKind = ScopeKind> {
     if (this.closing !== undefined) return this.closing;
     this._state = "closing";
     this.providers.clear();
+    // Tell every in-flight factory to stop BEFORE anything is disposed, and do it for the whole
+    // subtree up front: a child's build must not first watch its dependencies disappear. The
+    // lifetime signal goes with it, so services that kept it see the teardown too.
+    this.cancelBuilds();
     this.closing = this.runClose(options);
     return this.closing;
+  }
+
+  /** Signal this scope's builds and every descendant's, newest child first. */
+  private cancelBuilds(): void {
+    this.lifetime.abort();
+    for (const build of this.building.values()) build.cancel.abort();
+    for (const child of [...this.children].reverse()) child.cancelBuilds();
   }
 
   private async runClose(options: CloseOptions): Promise<void> {
     try {
       for (const child of [...this.children].reverse()) await child.close(options);
       this.children.clear();
+      // Then this scope's own builds: they were cancelled when `close` began, and their
+      // dependencies are still registered until the loop below runs.
+      await this.settleBuilds(options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
       for (const name of [...this.order].reverse()) {
         await this.unregister({ name, scope: this.kind } as Token<unknown, K>, options);
       }
@@ -443,6 +635,8 @@ export class Scope<K extends ScopeKind = ScopeKind> {
   }
 }
 
+function noop(): void {}
+
 function entryOf(instance: unknown, options: RegisterOptions): ServiceEntry {
   return {
     instance,
@@ -462,7 +656,7 @@ export function deadHandle<T>(tok: Token<T>): T {
     get(_target, prop) {
       if (isProbeProperty(prop)) return undefined;
       return () => {
-        throw new ServiceUnavailableError(tok.name, "missing");
+        throw new ServiceUnavailableError(tok.name, "missing", tok.providedBy);
       };
     },
     // `in` is the registration probe (thin shells use it to fall back to a direct instance);

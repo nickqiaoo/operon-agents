@@ -1,6 +1,6 @@
 import type { BeforeRunHook, LoopHooks, ShouldContinueAfterStopHook } from "../loop/types.ts";
 import type { Tool } from "../tool/types.ts";
-import type { AssembledGates, Capability, RunContext, CapabilityDiagnostic, CompactionGate, ToolFilter } from "./capability.ts";
+import type { AssembledGates, Capability, RunContext, CapabilityDiagnostic, CompactionGate, ToolFilter, ToolFilterContext } from "./capability.ts";
 import { InjectionManager } from "./injection.ts";
 import type { ToolProvider } from "./tool-provider.ts";
 
@@ -62,11 +62,11 @@ export class AssembledCapabilities {
   }
 
   /** Apply every capability's tool filter in registration order. A thrower is skipped. */
-  applyToolFilters(tools: readonly Tool[]): readonly Tool[] {
+  applyToolFilters(tools: readonly Tool[], ctx: ToolFilterContext): readonly Tool[] {
     let current = tools;
     for (const filter of this.toolFilters) {
       try {
-        current = filter(current);
+        current = filter(current, ctx);
       } catch (error) {
         this.diagnostics.push({
           capability: "toolFilter",

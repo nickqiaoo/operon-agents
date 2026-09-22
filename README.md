@@ -73,14 +73,16 @@ pnpm build
 ## Quickstart
 
 ```ts
-import { createLocalSession, defineModel, type AgentEvent } from "operon-agents";
+import { createLocalHarness, defineModel, type AgentEvent } from "operon-agents";
 
-const session = await createLocalSession({
+const harness = await createLocalHarness({
   model: defineModel({ provider: "anthropic", model: "claude-opus-4-8" }),
   homeDir: ".agent-home",   // sessions persist here — resumable
   workDir: "workspace",     // the agent's scope on disk
   permission: { mode: "workspace" },  // auto-approve tools that stay inside workDir
 });
+
+const session = await harness.createSession();
 
 session.onEvent((ev: AgentEvent) => {
   if (ev.type === "assistant.delta") process.stdout.write(ev.delta);
@@ -88,11 +90,13 @@ session.onEvent((ev: AgentEvent) => {
 
 const result = await session.prompt("create greeting.txt with a haiku, then read it back");
 console.log(`\n${result.status} · ${result.usage.output} output tokens`);
-await session.close();
+await harness.close();
 ```
 
-`createLocalSession` is the local composition root: disk-persisted sessions, the local environment, and
-cron, all wired for you. A server calls `createHarness` directly and injects its own backends —
+`createLocalHarness` is the local composition root: disk-persisted sessions, the local environment, and
+cron, all wired for you. One harness per process, one `createSession()` per conversation on it;
+`harness.close()` closes those sessions and then everything the preset wired. A server calls
+`createHarness` directly and injects its own backends —
 there is deliberately no server preset, because one would force every session to share a single
 credential store with no tenant dimension.
 

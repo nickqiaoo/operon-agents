@@ -1,5 +1,6 @@
-import type { Capability, RunContext, CompactionGate } from "../capability.ts";
-import { T } from "../../scope/tokens.ts";
+import { provision, type Capability, type RunContext, type CompactionGate } from "../capability.ts";
+import { optional } from "../needs.ts";
+import { Tokens } from "../../scope/tokens.ts";
 import { APIContextOverflowError } from "../../llm/errors.ts";
 import type { InjectionManager } from "../injection.ts";
 import type { EventSink } from "../../events/index.ts";
@@ -110,11 +111,25 @@ export function compactionCapability(options: CompactionOptions): Capability {
 
   return {
     name: "compaction",
-    provides: [{ token: T.Compaction, create: () => service }],
+    provides: [
+      provision({
+        token: Tokens.Compaction,
+        // The sink and the logger were being picked up in `start`, once per run, from whatever
+        // the scope held at that moment. They are session-lived, so they belong here: resolved
+        // once, declared where a reader can see them.
+        needs: { sink: Tokens.Events, log: optional(Tokens.Logger) },
+        create: ({ sink, log }) => {
+          events = sink;
+          logger = log ?? noopLogger;
+          return service;
+        },
+      }),
+    ],
     hooks: {
       beforeStep: async (ctx) => {
         maxOutputTokens = ctx.model.maxOutputTokens;
-        const manual = service.consume();
+        // This frame's request only: `beforeStep` runs for every agent in the session.
+        const manual = service.consume(ctx.address);
         if (manual !== null) await compact(ctx, manual);
         if (micro) {
           // Truncate on a copy and commit through the journaled mutator. The previous
@@ -154,8 +169,6 @@ export function compactionCapability(options: CompactionOptions): Capability {
     start: (ctx: RunContext) => {
       injection = ctx.injection;
       gates = ctx.gates.compaction;
-      events = ctx.scope.get(T.Events);
-      logger = ctx.scope.get(T.Logger) ?? noopLogger;
       sessionId = ctx.sessionId;
       lastAssistantAtMs = Date.now();
     },

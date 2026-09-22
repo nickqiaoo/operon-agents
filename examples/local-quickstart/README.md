@@ -11,9 +11,10 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start "count the lines in package.json"
 
 ## What it shows
 
-- `createLocalSession(...)` — the **local composition root**. It bundles the
+- `createLocalHarness(...)` — the **local composition root**. It bundles the
   local-deployment backends (disk sessions, local environment, cron on) so you
-  don't wire them by hand. One call gets you a session ready to `prompt()`.
+  don't wire them by hand. `harness.createSession()` then opens as many sessions
+  on it as you want, and `harness.close()` takes the whole thing down.
 - **Streaming**: `session.promptStream(task)` is async-iterable over `AgentEvent`s
   (`assistant.delta`, `tool.call.started`, `tool.result`, …) and exposes `.completed`
   for the final `RunResult`.

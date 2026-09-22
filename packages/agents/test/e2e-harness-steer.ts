@@ -55,7 +55,7 @@ async function skillReceiptsTrackConsumption(): Promise<void> {
 
     faux.setResponses([fauxAssistantMessage("reviewed both", { stopReason: "stop" })]);
     const gate = session.holdAtBoundary();
-    const activations = await Promise.all([session.activateSkill("review"), session.activateSkill("review")]);
+    const activations = await Promise.all([session.skills.activateSkill({ name: "review" }), session.skills.activateSkill({ name: "review" })]);
     check("skills idle: separate activations have distinct message ids", activations[0]!.steerId !== activations[1]!.steerId);
     gate.release();
     await session.whenIdle();
@@ -66,7 +66,7 @@ async function skillReceiptsTrackConsumption(): Promise<void> {
     holdModel = true;
     const running = session.prompt("start work");
     await entered.promise;
-    const activation = await session.activateSkill("review");
+    const activation = await session.skills.activateSkill({ name: "review" });
     holdModel = false;
     release.resolve();
     const result = await running;

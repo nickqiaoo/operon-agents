@@ -50,14 +50,14 @@ export async function handleGoalCommand(host: SlashCommandHost, args: string): P
       await showGoalStatus(host, session);
       return;
     case 'pause':
-      await runGoalLifecycle(host, () => session.pauseGoal({ reason: 'Paused by the user' }), 'Goal paused.');
+      await runGoalLifecycle(host, () => session.goal.pause('Paused by the user'), 'Goal paused.');
       return;
     case 'resume':
-      await runGoalLifecycle(host, () => session.resumeGoal({ reason: 'Resumed by the user' }), 'Goal resumed.');
+      await runGoalLifecycle(host, () => session.goal.resume('Resumed by the user'), 'Goal resumed.');
       return;
     case 'cancel':
       host.noteGoalCancelled?.();
-      await runGoalLifecycle(host, () => session.cancelGoal({ reason: 'Cancelled by the user' }), 'Goal cancelled.');
+      await runGoalLifecycle(host, () => session.goal.cancel('Cancelled by the user'), 'Goal cancelled.');
       return;
     case 'create':
     case 'replace':
@@ -69,7 +69,7 @@ export async function handleGoalCommand(host: SlashCommandHost, args: string): P
 async function showGoalStatus(host: SlashCommandHost, session: HarnessSession): Promise<void> {
   let goal: GoalSnapshot | null;
   try {
-    goal = await session.getGoal();
+    goal = await session.goal.snapshot();
   } catch (error) {
     host.showError(`Failed to read the goal: ${formatErrorMessage(error)}`);
     return;
@@ -123,13 +123,13 @@ export async function createGoal(
     host.showError(`${warning} Put the detail in a file and point the goal at it.`);
     return false;
   }
-  const existing = await session.getGoal().catch(() => null);
+  const existing = session.goal.snapshot();
   if (existing !== null && !replace) {
     host.showError('A goal is already active. Use /goal replace <objective> to swap it, or /goal cancel first.');
     return false;
   }
   try {
-    const snapshot = await session.createGoal({ objective: trimmed });
+    const snapshot = await session.goal.create({ objective: trimmed });
     host.setAppState({ goal: snapshot });
   } catch (error) {
     host.showError(`Failed to create the goal: ${formatErrorMessage(error)}`);

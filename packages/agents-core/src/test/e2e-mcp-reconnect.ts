@@ -3,7 +3,7 @@ import {
   ListenerSink,
   SteerBus,
 } from "../index.ts";
-import { openCapability, type TestSessionWiring } from "./faux.ts";
+import { provisionCapability, type TestSessionWiring } from "./faux.ts";
 import {
   mcpServersCapability,
   type McpServersHandle,
@@ -125,7 +125,7 @@ async function testSupersededAttempt(wiring: TestSessionWiring): Promise<void> {
     reconnectPolicy: { maxRetries: 3, initialDelayMs: 100, maxDelayMs: 1000, factor: 2 },
     timer,
   });
-  const handle = (await openCapability(cap, wiring)).service as McpServersHandle; // t0 auto-connects
+  const handle = (await provisionCapability(cap, wiring)).service as McpServersHandle; // t0 auto-connects
   const t0 = built[0]!;
 
   gated = true; // subsequent connects are held open until released/failed
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
   // The provision connects on create and hands back the handle, so the listener below sees
   // every transition from the first drop on (the initial connect is asserted by status).
   const transitions: McpServerView[] = [];
-  const opened = await openCapability(cap, wiring);
+  const opened = await provisionCapability(cap, wiring);
   const handle = opened.service as McpServersHandle;
   const unsub = handle.onStatusChange((v) => transitions.push(v));
   check("status: initial connect → connected", handle.list()[0]?.status === "connected");

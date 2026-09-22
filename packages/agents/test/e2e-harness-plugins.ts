@@ -58,10 +58,10 @@ async function main(): Promise<void> {
 
   try {
     const s1 = await harness.createSession();
-    const skills = await s1.listSkills();
+    const skills = await s1.skills.listSkills();
     check("self-drive: plugin skill loads via defaultCapabilities({pluginManager})", skills.some((s) => s.name === "greet"));
 
-    const mcp = await s1.listMcpServers();
+    const mcp = await s1.mcp?.list() ?? [];
     check("self-drive: plugin MCP server present (namespaced)", mcp.some((m) => m.name === "plugin-demo-plugin:weather"));
 
     const s2 = await harness.createSession();
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     // because the factory re-reads the manager each session.
     await pm.setEnabled("demo-plugin", false);
     const s3 = await harness.createSession();
-    const skills3 = await s3.listSkills();
+    const skills3 = await s3.skills.listSkills();
     check("self-drive: disabling a plugin removes its skill from the next session", !skills3.some((s) => s.name === "greet"));
   } finally {
     rmSync(home, { recursive: true, force: true });

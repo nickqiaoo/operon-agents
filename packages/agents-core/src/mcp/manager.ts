@@ -7,8 +7,8 @@ import type { MCPTool, MCPTransport } from "./types.ts";
 import type { MCPToolFilterStatic } from "./filter.ts";
 import type { McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { Capability, ProvisionContext, RunContext, Scope, Tool, ToolProvider } from "../index.ts";
-import { T } from "../scope/tokens.ts";
+import { provision, optional, type Capability, type ProvisionContext, type RunContext, type Scope, type Tool, type ToolProvider } from "../index.ts";
+import { Tokens } from "../scope/tokens.ts";
 import type { EventSink } from "../events/index.ts";
 import type { McpServerConfig } from "../config/schema.ts";
 
@@ -26,7 +26,7 @@ export type McpTransportKind = "stdio" | "http";
  * pushed out to a sandbox. On a single-tenant local host that is exactly right. On a server it
  * is four problems at once:
  *
- *  - LIFECYCLE. `T.McpServers` is "one set of connections per working directory", which holds
+ *  - LIFECYCLE. `Tokens.McpServers` is "one set of connections per working directory", which holds
  *    inside one process and stops holding the moment the server runs as more than one replica:
  *    each replica spawns its own children, and a rolling restart takes them with it.
  *  - FAULT DOMAIN. A leaking or crashing `npx`-launched server takes down a process that is
@@ -244,7 +244,7 @@ class McpServerController {
 
   async connect(ctx: McpConnectContext): Promise<void> {
     if (this.disposed) return;
-    this.session = { events: ctx.scope.get(T.Events), sessionId: ctx.sessionId };
+    this.session = { events: ctx.events, sessionId: ctx.sessionId };
     if (this.config.enabled === false) {
       this.setStatus("disabled");
       return;
@@ -478,16 +478,25 @@ export interface McpServersCapabilityOptions {
   readonly reconnectPolicy?: ReconnectPolicy;
   readonly keepAlive?: KeepAlivePolicy;
   readonly timer?: McpTimer;
+  /**
+   * Whether this session may view the workspace's shared servers (`Tokens.McpServers`). Default
+   * true: when the workspace has a set, the capability is a view over it and `configs` overlays it.
+   * Pass false to pin the session to its OWN servers — the workspace's set keeps running for
+   * everyone else, this session simply does not see it. Only meaningful to
+   * {@link mcpServersCapability}; `createMcpServers` never reads a scope.
+   */
+  readonly shareWorkspace?: boolean;
 }
 
 /**
- * What `connect` binds the controllers to: the scope whose `T.Events` receives status warnings
- * (a session's, or a workspace's — which has none, so warnings go through `onStatusChange`)
- * and the session id stamped on them. A `ProvisionContext` is one of these.
+ * What `connect` binds the controllers to: the sink that receives status warnings and the
+ * session id stamped on them. Both are what the caller ALREADY resolved — a workspace-level
+ * connect has no session and no sink of its own, and passes neither, so its warnings surface
+ * through `onStatusChange` instead.
  */
 export interface McpConnectContext {
-  readonly scope: Scope;
   readonly sessionId: string;
+  readonly events?: EventSink | undefined;
 }
 
 export interface McpServersHandle {
@@ -535,7 +544,7 @@ function assertTransportsPermitted(
 
 /**
  * The controller set behind a group of configured servers — buildable on its own so a WORKSPACE
- * can hold one set of connections for every session under it (`T.McpServers`), or a session can
+ * can hold one set of connections for every session under it (`Tokens.McpServers`), or a session can
  * own a private set (`mcpServersCapability`). Nothing connects until `handle.connect()`.
  *
  * Transport admission is checked HERE, while the set is being built, and not where the
@@ -604,52 +613,34 @@ export function createMcpServers(
 }
 
 /**
- * Session-owned MCP servers: the controllers are built and connected for THIS session and shut
- * down with it. For servers shared by every session of a workspace, register a
- * `createMcpServers()` handle as `T.McpServers` on the workspace scope and use
- * {@link mcpSessionCapability} instead.
- */
-export function mcpServersCapability(
-  configs: Record<string, McpServerConfig>,
-  options: McpServersCapabilityOptions = {},
-): Capability {
-  const handle = createMcpServers(configs, options);
-  return {
-    name: "mcp",
-    toolProviders: [...handle.toolProviders()],
-    provides: [
-      {
-        token: T.Mcp,
-        // Session-tier: connect all servers in parallel, fault-isolated (attempt() never throws).
-        create: async (ctx) => {
-          await handle.connect(ctx);
-          return handle;
-        },
-        dispose: () => handle.shutdown(),
-      },
-    ],
-  };
-}
-
-/**
- * The session-tier MCP capability: a VIEW over the workspace's shared servers (`T.McpServers`),
- * optionally with servers PRIVATE to this session layered on top.
+ * The session-tier MCP capability. It covers both topologies, deciding between them from what the
+ * scope actually holds rather than from which function the caller picked:
  *
- * The workspace half connects nothing and shuts nothing down — the workspace scope owns those
- * connections; this capability only hands the model their tools, exposes them as `T.Mcp` (so
- * `session.listMcpServers()` and friends work) and mirrors status changes into this session's
- * event stream as warnings.
+ *  - The workspace registered shared servers (`Tokens.McpServers`)? This is a VIEW over them.
+ *    The workspace half connects nothing and shuts nothing down — the workspace scope owns those
+ *    connections; this capability only hands the model their tools, exposes them as `Tokens.Mcp`
+ *    (so `session.mcp?.list() ?? []` and friends work) and mirrors status changes into this
+ *    session's event stream as warnings.
+ *  - It didn't? Then `configs` is all this session sees, and those controllers are built,
+ *    connected and shut down with the session, owned by it outright.
  *
- * `configs` (from `SessionCapabilityContext.mcpServers` — a REPL kernel keyed by conversation id,
- * say) is the OVERLAY: those servers are built, connected and shut down with THIS session. A name
- * in `configs` SHADOWS the workspace server of the same name for this session — the two would
+ * Both at once is the interesting case: `configs` (from `SessionCapabilityContext.mcpServers` — a
+ * REPL kernel keyed by conversation id, say) is then an OVERLAY on the shared set. A name in
+ * `configs` SHADOWS the workspace server of the same name for this session — the two would
  * otherwise produce identical `mcp__<name>__<tool>` tool names. Shadowing is a view-level
  * decision: the workspace connection itself keeps running for every other session.
+ *
+ * Either way only what this session OWNS is connected and shut down here; see `merge` below.
  */
-export function mcpSessionCapability(
+export function mcpServersCapability(
   configs: Record<string, McpServerConfig> = {},
   options: McpServersCapabilityOptions = {},
 ): Capability {
+  // The one decision that separates the two topologies, made here and honoured by the shape of
+  // the provision below: opting out means the workspace's set is never even declared.
+  const shareWorkspace = options.shareWorkspace !== false;
+  /** The workspace's set, bound when the provision resolves it. Undefined = this session has none. */
+  let shared: McpServersHandle | undefined;
   const ownNames = new Set(Object.keys(configs));
   const ownProviderIds = new Set([...ownNames].map(mcpProviderId));
   const own = ownNames.size > 0 ? createMcpServers(configs, options) : undefined;
@@ -660,7 +651,8 @@ export function mcpSessionCapability(
     {
       id: "mcp:workspace",
       listTools: async (ctx: RunContext): Promise<readonly Tool[]> => {
-        const shared = ctx.scope.get(T.McpServers);
+        // The set bound at provision time, not a fresh lookup: which servers this session views
+        // was decided once, by its configuration, and must not drift mid-run.
         if (shared === undefined) return [];
         const tools: Tool[] = [];
         for (const provider of shared.toolProviders()) {
@@ -673,7 +665,7 @@ export function mcpSessionCapability(
     },
   ];
 
-  /** The merged handle behind `T.Mcp`: overlay first, workspace for everything it doesn't name. */
+  /** The merged handle behind `Tokens.Mcp`: overlay first, workspace for everything it doesn't name. */
   const merge = (shared: McpServersHandle, overlay: McpServersHandle): McpServersHandle => ({
     list: () => [...overlay.list(), ...shared.list().filter((v) => !ownNames.has(v.name))],
     listTools: (name) => (ownNames.has(name) ? overlay.listTools(name) : shared.listTools(name)),
@@ -695,41 +687,70 @@ export function mcpSessionCapability(
     shutdown: () => overlay.shutdown(),
   });
 
+  /**
+   * What the provision does once its dependencies are in: bind the workspace set for this
+   * session's view, connect what this session OWNS, and subscribe for the rest.
+   */
+  const open = async (events: EventSink | undefined, workspaceSet: McpServersHandle | undefined, ctx: ProvisionContext): Promise<McpServersHandle> => {
+    shared = workspaceSet;
+    // Nothing shared and nothing of its own means this capability should never have been
+    // assembled — diagnose rather than hand back an empty handle.
+    if (shared === undefined && own === undefined) {
+      throw new Error(
+        "mcpServersCapability({ shareWorkspace: false }) was given no servers of its own, and it will not view the workspace's.",
+      );
+    }
+    // Session-owned controllers emit their own warnings once connected (they hold the
+    // session); the workspace ones have no session, so this session subscribes for them.
+    if (own !== undefined) await own.connect({ sessionId: ctx.sessionId, events });
+    if (shared !== undefined) {
+      const warn = (view: McpServerView): void => {
+        if (ownNames.has(view.name)) return;
+        if (view.status !== "failed" || view.error === undefined) return;
+        events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: `MCP server "${view.name}" failed: ${view.error}` });
+      };
+      // Servers that failed before this session existed: tell it once at open.
+      for (const view of shared.list()) warn(view);
+      unsubscribe = shared.onStatusChange(warn);
+    }
+    if (shared === undefined) return own!;
+    if (own === undefined) return shared;
+    return merge(shared, own);
+  };
+
+  const dispose = async (): Promise<void> => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    shared = undefined;
+    await own?.shutdown();
+  };
+
+  // Three shapes of the same provision, because the configuration decides whether the workspace
+  // set is a dependency at all — and, when it is, whether this session can do without it. A
+  // session with no servers of its own needs it; one with its own servers merely views it.
+  const provides = !shareWorkspace
+    ? [provision({ token: Tokens.Mcp, needs: { events: optional(Tokens.Events) }, create: ({ events }, ctx) => open(events, undefined, ctx), dispose })]
+    : own === undefined
+      ? [
+          provision({
+            token: Tokens.Mcp,
+            needs: { events: optional(Tokens.Events), workspaceServers: Tokens.McpServers },
+            create: ({ events, workspaceServers }, ctx) => open(events, workspaceServers, ctx),
+            dispose,
+          }),
+        ]
+      : [
+          provision({
+            token: Tokens.Mcp,
+            needs: { events: optional(Tokens.Events), workspaceServers: optional(Tokens.McpServers) },
+            create: ({ events, workspaceServers }, ctx) => open(events, workspaceServers, ctx),
+            dispose,
+          }),
+        ];
+
   return {
     name: "mcp",
     toolProviders: providers,
-    provides: [
-      {
-        token: T.Mcp,
-        create: async (ctx) => {
-          const shared = ctx.scope.get(T.McpServers);
-          // No shared servers and no overlay means this capability should never have been
-          // assembled — keep the original diagnostic rather than handing back an empty handle.
-          if (shared === undefined && own === undefined) return ctx.scope.require(T.McpServers);
-          // Session-owned controllers emit their own warnings once connected (they hold the
-          // session); the workspace ones have no session, so this session subscribes for them.
-          if (own !== undefined) await own.connect(ctx);
-          if (shared !== undefined) {
-            const events = ctx.scope.get(T.Events);
-            const warn = (view: McpServerView): void => {
-              if (ownNames.has(view.name)) return;
-              if (view.status !== "failed" || view.error === undefined) return;
-              events?.emit({ type: "warning", address: "main", sessionId: ctx.sessionId, message: `MCP server "${view.name}" failed: ${view.error}` });
-            };
-            // Servers that failed before this session existed: tell it once at open.
-            for (const view of shared.list()) warn(view);
-            unsubscribe = shared.onStatusChange(warn);
-          }
-          if (shared === undefined) return own!;
-          if (own === undefined) return shared;
-          return merge(shared, own);
-        },
-        dispose: async () => {
-          unsubscribe?.();
-          unsubscribe = undefined;
-          await own?.shutdown();
-        },
-      },
-    ],
+    provides,
   };
 }

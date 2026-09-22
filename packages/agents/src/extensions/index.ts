@@ -1,7 +1,7 @@
-import type { Capability } from "operon-agents-core";
+import { provision, optional, Tokens, type Capability } from "operon-agents-core";
 import type { ExtensionDefinition, ExtensionHost } from "./types.ts";
 import { ExtensionRuntime } from "./runtime.ts";
-import { HT } from "../tokens.ts";
+import { HarnessTokens } from "../tokens.ts";
 
 export { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionLoader, createExtensionLoader } from "./loader.ts";
@@ -78,14 +78,24 @@ export function extensionsCapability(
   return {
     name: "extensions",
     provides: [
-      {
-        token: HT.Extensions,
-        create: async (ctx) => {
-          await runtime.open(ctx);
+      provision({
+        token: HarnessTokens.Extensions,
+        // An extension can touch the whole session surface, so this list IS the blast radius —
+        // written down once, here, instead of discovered by reading the runtime for lookups.
+        needs: {
+          environment: Tokens.Environment,
+          events: Tokens.Events,
+          steer: Tokens.Steer,
+          controls: Tokens.SessionControls,
+          readLog: Tokens.SessionLog,
+          store: optional(Tokens.Store),
+        },
+        create: async (services, ctx) => {
+          await runtime.open(services, ctx);
           return runtime;
         },
         dispose: () => runtime.close(),
-      },
+      }),
     ],
     toolProviders: [{ id: "extensions", listTools: () => runtime.listTools() }],
     toolFilters: [runtime.filterTools],

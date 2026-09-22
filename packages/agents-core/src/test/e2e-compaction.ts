@@ -1,4 +1,4 @@
-import { testRunner, openTestSession, openCapability } from "./faux.ts";
+import { testRunner, openTestSession, provisionCapability } from "./faux.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,7 +123,7 @@ async function testFullCompaction(dir: string, environment: LocalEnvironment): P
   const entries: AgentRecord[] = [];
   for await (const e of store.readRecords()) entries.push(e);
   check("full: compaction record appended to durable log", entries.some((e) => e.type === "context.apply_compaction"));
-  check("full: committed compaction advances prompt-context invalidation revision", ((await openCapability(compaction)).service as CompactionService).revision > 0);
+  check("full: committed compaction advances prompt-context invalidation revision", ((await provisionCapability(compaction)).service as CompactionService).revision > 0);
   check("full: run completes", result.status === "completed");
 }
 
@@ -163,7 +163,7 @@ async function testMicroCompaction(dir: string, environment: LocalEnvironment): 
     (m) => m.role === "toolResult" && m.content.map(partText).join("").length > 100,
   ));
   check("micro: run completes", result.status === "completed");
-  check("micro: does not advance full-compaction prompt-context revision", ((await openCapability(compaction)).service as CompactionService).revision === 0);
+  check("micro: does not advance full-compaction prompt-context revision", ((await provisionCapability(compaction)).service as CompactionService).revision === 0);
 
   // The truncation must be JOURNALED (replaceHistory), not an in-place edit of the live
   // array: replay has to reproduce the same cleared bodies, or a resume would resurrect

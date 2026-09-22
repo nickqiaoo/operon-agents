@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, createMcpServers, defaultCapabilities, T, LocalEnvironment } from "../src/index.ts";
+import { createHarness, createMcpServers, defaultCapabilities, Tokens, LocalEnvironment } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -43,8 +43,8 @@ async function main(): Promise<void> {
         composed += 1;
         keys.push(ctx.key);
         const servers = createMcpServers({ srv: { transport: "http", url: "http://srv.example" } }, { transportFactory });
-        await servers.connect({ scope, sessionId: "" });
-        scope.register(T.McpServers, servers, { dispose: async () => { shutdowns += 1; await servers.shutdown(); } });
+        await servers.connect({ sessionId: "" });
+        scope.register(Tokens.McpServers, servers, { dispose: async () => { shutdowns += 1; await servers.shutdown(); } });
       },
       session: (scope) => defaultCapabilities({ scope }),
     });
@@ -53,24 +53,24 @@ async function main(): Promise<void> {
     const s2 = await harness.createSession({ workDir: dirA });
     check("share: two sessions in one directory compose the workspace once", composed === 1 && keys[0] === `dir::${dirA}`);
     check("share: the MCP servers connected once, not per session", connects === 1);
-    check("share: both sessions see the same T.McpServers", s1.core.get(T.McpServers) !== undefined && s1.core.get(T.McpServers) === s2.core.get(T.McpServers));
+    check("share: both sessions see the same Tokens.McpServers", s1.core.get(Tokens.McpServers) !== undefined && s1.core.get(Tokens.McpServers) === s2.core.get(Tokens.McpServers));
     check("share: the session scope hangs under the workspace scope", s1.core.scope.parent?.kind === "workspace" && s1.core.scope.parent === s2.core.scope.parent);
-    check("view: session.listMcpServers() reads the shared connections", s1.listMcpServers().some((v) => v.name === "srv" && v.status === "connected"));
-    check("view: the session-tier mcp service is the shared handle", s1.core.get(T.Mcp) === s1.core.get(T.McpServers));
-    check("view: the skill registry is workspace-shared too when registered (not here)", s1.core.get(T.SkillRegistry) === undefined);
+    check("view: session.mcp?.list() ?? [] reads the shared connections", (s1.mcp?.list() ?? []).some((v) => v.name === "srv" && v.status === "connected"));
+    check("view: the session-tier mcp service is the shared handle", s1.core.get(Tokens.Mcp) === s1.core.get(Tokens.McpServers));
+    check("view: the skill registry is workspace-shared too when registered (not here)", s1.core.get(Tokens.SkillRegistry) === undefined);
 
     const result = await s1.prompt("hi");
     check("run: a prompt completes over a workspace-backed session", result.status === "completed");
 
     const s3 = await harness.createSession({ workDir: dirB });
-    check("isolate: another directory gets its own workspace", composed === 2 && connects === 2 && s3.core.get(T.McpServers) !== s1.core.get(T.McpServers));
+    check("isolate: another directory gets its own workspace", composed === 2 && connects === 2 && s3.core.get(Tokens.McpServers) !== s1.core.get(Tokens.McpServers));
 
     const s4 = await harness.createSession({ workDir: dirA, environment: new LocalEnvironment(dirA) });
     check("isolate: a session with its own environment instance gets a private workspace", composed === 3 && keys[2] === `private::${s4.id}`);
 
     const s5 = await harness.createSession({ workDir: dirB, workspaceKey: "tenant-1" });
     const s6 = await harness.createSession({ workDir: dirA, workspaceKey: "tenant-1" });
-    check("key: an explicit workspaceKey shares across directories", composed === 4 && s5.core.get(T.McpServers) === s6.core.get(T.McpServers));
+    check("key: an explicit workspaceKey shares across directories", composed === 4 && s5.core.get(Tokens.McpServers) === s6.core.get(Tokens.McpServers));
 
     await s1.close();
     check("release: closing one session keeps the shared workspace alive", shutdowns === 0 && !s2.core.scope.parent!.closed);

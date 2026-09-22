@@ -2,6 +2,7 @@ import { z } from "zod";
 import { defineTool } from "../../tool/define.ts";
 import { ToolAccesses } from "../../tool/access.ts";
 import type { Tool, ToolResult } from "../../tool/types.ts";
+import { DEFAULT_ADDRESS } from "../../store/index.ts";
 import type { TodoItem, TodoStatus, TodoStore } from "./todo-store.ts";
 import { TODO_LIST_TOOL_NAME } from "./todo-store.ts";
 
@@ -48,12 +49,16 @@ export function todoListTool(store: TodoStore): Tool {
         approvalRule: TODO_LIST_TOOL_NAME,
         accesses: ToolAccesses.none(),
         display: { title },
-        run: async (): Promise<ToolResult> => {
+        run: async (ctx): Promise<ToolResult> => {
+          // Whose list this is: the frame running the call. A subagent plans its own work, and
+          // its result lands in its own shard, so the fold on resume puts it back where it came
+          // from. `address` is absent only in a hand-built context — treat that as the root.
+          const address = ctx.address ?? DEFAULT_ADDRESS;
           // Read mode carries the current list too, so a resumed/forked session reconstructs
           // from the latest TodoList result even when the last write was on a parent node.
-          if (args.todos === undefined) return todoResult(renderTodoList(store.get()), store.get());
+          if (args.todos === undefined) return todoResult(renderTodoList(store.get(address)), store.get(address));
 
-          const stored = store.set(args.todos);
+          const stored = store.set(address, args.todos);
           if (stored.length === 0) return todoResult("Todo list cleared.", stored);
           return todoResult(`Todo list updated.\n${renderTodoList(stored)}\n\n${TODO_LIST_WRITE_REMINDER}`, stored);
         },

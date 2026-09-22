@@ -147,13 +147,13 @@ export class SessionEventHandler {
     const { host } = this;
     let servers: readonly McpServerStatusSnapshot[];
     try {
-      const views = session.listMcpServers();
+      const views = session.mcp?.list() ?? [];
       servers = await Promise.all(
         views.map(async (view) => {
           let toolCount = 0;
           if (view.status === 'connected') {
             try {
-              toolCount = (await session.listMcpTools(view.name)).length;
+              toolCount = (await session.mcp?.listTools(view.name) ?? []).length;
             } catch {
               toolCount = 0;
             }

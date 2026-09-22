@@ -133,7 +133,7 @@ async function main(): Promise<void> {
       check("commands: /plugins <id> returns plugin info", info.ok && info.message === "Plugin demo-plugin.");
 
       const disableMcp = await commands.run("/plugins mcp disable demo-plugin weather", { session });
-      const disabledInfo = await session.getPluginInfo("demo-plugin");
+      const disabledInfo = await session.plugins.info("demo-plugin");
       check("commands: /plugins mcp disable toggles one server", disableMcp.ok && disabledInfo?.mcpServers[0]?.enabled === false);
 
       const list = await commands.run("/plugins list", { session });

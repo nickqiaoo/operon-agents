@@ -1,6 +1,7 @@
+import { provision } from "../capability.ts";
 import type { Capability } from "../capability.ts";
 import type { Environment } from "../../tool/environment.ts";
-import { T } from "../../scope/tokens.ts";
+import { Tokens } from "../../scope/tokens.ts";
 import { SkillRegistry } from "./registry.ts";
 import { resolveSkillRoots } from "./scanner.ts";
 import { skillTool } from "./skill-tool.ts";
@@ -50,7 +51,7 @@ export type {
 } from "./types.ts";
 
 export interface SkillsOptions {
-  /** A pre-built registry — e.g. the workspace's shared one (`T.SkillRegistry`). */
+  /** A pre-built registry — e.g. the workspace's shared one (`Tokens.SkillRegistry`). */
   readonly registry?: SkillRegistry;
   /** `false` = the registry is already loaded (a workspace scanned it once); skip the per-session
    *  scan and only bind this session to it. Default `true`. */
@@ -118,15 +119,16 @@ export function skillsCapability(options: SkillsOptions = {}): Capability {
     toolProviders: [flowSkillProvider(registry, options.flowExecutor)],
     injectors: [new SkillCatalogInjector(registry)],
     provides: [
-      {
-        token: T.Skills,
-        create: async (ctx) => {
+      provision({
+        token: Tokens.Skills,
+        needs: { environment: Tokens.Environment, events: Tokens.Events, steer: Tokens.Steer },
+        create: async ({ environment, events, steer }, ctx) => {
           sessionId = ctx.sessionId;
-          if (options.scan !== false) await loadSkillRoots(ctx.scope.require(T.Environment), registry, options);
-          service.attach({ sessionId: ctx.sessionId, events: ctx.scope.require(T.Events), steer: ctx.scope.require(T.Steer) });
+          if (options.scan !== false) await loadSkillRoots(environment, registry, options);
+          service.attach({ sessionId: ctx.sessionId, events, steer });
           return service;
         },
-      },
+      }),
     ],
   };
 }

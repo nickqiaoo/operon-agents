@@ -257,7 +257,7 @@ async function main(): Promise<void> {
       capabilities: [skillsCapability({ dynamicRoots: () => mgr.skillRoots() })],
     });
     try {
-      const skills = await skillSession.listSkills();
+      const skills = await skillSession.skills.listSkills();
       check("dynamicRoots bridge: enabled plugin skill loads into a session via skillsCapability", skills.some((s) => s.name === "greet"));
     } finally {
       await skillSession.close();
@@ -275,10 +275,10 @@ async function main(): Promise<void> {
       capabilities: [pluginsCapability(mgr2, () => undefined)],
     });
     try {
-      check("session facade: listPlugins reaches PluginManager service", (await session.listPlugins()).some((plugin) => plugin.id === "demo-plugin"));
-      await session.setPluginEnabled("demo-plugin", false);
-      check("session facade: setPluginEnabled persists through the manager", (await session.listPlugins())[0]?.enabled === false);
-      const info = await session.getPluginInfo("demo-plugin");
+      check("session facade: listPlugins reaches PluginManager service", (await session.plugins.summaries()).some((plugin) => plugin.id === "demo-plugin"));
+      await session.plugins.setEnabled("demo-plugin", false);
+      check("session facade: setPluginEnabled persists through the manager", (await session.plugins.summaries())[0]?.enabled === false);
+      const info = await session.plugins.info("demo-plugin");
       check("session facade: getPluginInfo returns diagnostics + MCP info", info?.mcpServers[0]?.runtimeName === "plugin-demo-plugin:weather");
     } finally {
       await session.close();

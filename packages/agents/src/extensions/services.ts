@@ -1,7 +1,7 @@
 /**
  * Extension services, by NAME, over the {@link Scope} tree.
  *
- * Framework objects are addressed by typed tokens (`T.Environment`, `T.Goal`, …). Extension
+ * Framework objects are addressed by typed tokens (`Tokens.Environment`, `Tokens.Goal`, …). Extension
  * services are the one place a string is the natural key: an extension is loaded by its id
  * (from a file, or by value), publishes its shared half's result under that id, and other
  * extensions name it in `uses`. This facade maps those ids onto tokens, so extension services

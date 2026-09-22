@@ -200,7 +200,7 @@ export type AgentEventBody =
   | { readonly type: "tool.call.delta"; readonly turnId: string; readonly toolCallId: string; readonly toolName?: string; readonly argumentsPart: string }
   | { readonly type: "tool.progress"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly update: ToolUpdate; readonly parentToolCallId?: string }
   // A running tool call has entered its detachable window: the UI may offer "move to background",
-  // which fires `session.detachTool(toolCallId)`. Emitted once when the call becomes detachable;
+  // which fires `session.require(Tokens.Background).detach(toolCallId)`. Emitted once when the call becomes detachable;
   // its later `tool.result` (carrying `details.movedToBackground` + `taskId` if detached) ends it.
   | { readonly type: "tool.detachable"; readonly toolCallId: string; readonly toolName: string }
   | { readonly type: "tool.result"; readonly toolCallId: string; readonly toolName: string; readonly result: ToolResult; readonly isError: boolean; readonly parentToolCallId?: string }

@@ -457,10 +457,12 @@ export class EditorKeyboardController {
   private cancelCurrentCompaction(): void {
     const session = this.host.session;
     if (session === undefined) return;
-    void session.cancelCompaction().catch((error: unknown) => {
+    try {
+      session.compaction.cancel();
+    } catch (error: unknown) {
       const message = formatErrorMessage(error);
       this.host.showError(`Failed to cancel compaction: ${message}`);
-    });
+    }
   }
 
   /**

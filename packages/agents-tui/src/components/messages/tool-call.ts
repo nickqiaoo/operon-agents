@@ -594,7 +594,7 @@ export class ToolCallComponent extends Container {
   /**
    * Fallback plan body used when the LLM uses plan-file mode and
    * `args.plan` is empty. `OperonTui` calls `setPlanInfo` with
-   * `session.getPlan()` content so the plan box can render while
+   * `session.plan.data()` content so the plan box can render while
    * approval is pending, and so rejected or revised results still show
    * the plan body even without a `## Approved Plan:` marker.
    */
@@ -1023,7 +1023,7 @@ export class ToolCallComponent extends Container {
   /**
    * Injects plan body/path asynchronously. Only ExitPlanMode cards use
    * this: plan-file mode leaves `args.plan` empty, so `OperonTui` fetches
-   * the plan via `session.getPlan()` and calls this method to render the
+   * the plan via `session.plan.data()` and calls this method to render the
    * plan box.
    */
   setPlanInfo(info: { plan?: string; path?: string }): void {

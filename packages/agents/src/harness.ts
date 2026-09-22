@@ -78,7 +78,6 @@ import {
   skillsCapability,
   SkillRegistry,
   mcpServersCapability,
-  mcpSessionCapability,
   pluginsCapability,
   userHooksCapability,
   type HookDef,
@@ -101,11 +100,12 @@ import {
   DEFAULT_ADDRESS,
   Scope,
   type CloseOptions,
-  T,
+  Tokens,
   envLogger,
   noopLogger,
 } from "operon-agents-core";
-import { HT } from "./tokens.ts";
+import { HarnessTokens } from "./tokens.ts";
+import type { SkillsService, CompactionService, BackgroundManager, McpServersHandle, GoalStore, PlanMode } from "operon-agents-core";
 import { createHash } from "node:crypto";
 import { ServiceUnavailableError, isProbeProperty } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
@@ -159,15 +159,15 @@ export interface HarnessSessionStatus {
 export interface DefaultCapabilitiesOptions {
   /**
    * The session scope being composed. When its workspace registered shared services —
-   * `T.McpServers` (one set of connections per working directory), `T.SkillRegistry` (one scan
-   * per working directory), `T.McpOAuth` — the bundle uses those instead of building per-session
+   * `Tokens.McpServers` (one set of connections per working directory), `Tokens.SkillRegistry` (one scan
+   * per working directory), `Tokens.McpOAuth` — the bundle uses those instead of building per-session
    * ones. Without it (or without those registrations) everything is built per session.
    */
   readonly scope?: Scope<"session">;
   /**
    * The session brought its own environment (`createSession({ environment })`). The workspace's shared
-   * `T.SkillRegistry` was scanned through the WORKSPACE's environment and does not describe this
-   * one, so the skill scan runs per session through `T.Environment` instead — the catalog follows
+   * `Tokens.SkillRegistry` was scanned through the WORKSPACE's environment and does not describe this
+   * one, so the skill scan runs per session through `Tokens.Environment` instead — the catalog follows
    * the filesystem the session's tools actually operate. Default false.
    */
   readonly ownEnvironment?: boolean;
@@ -178,7 +178,7 @@ export interface DefaultCapabilitiesOptions {
   /**
    * MCP servers private to the session being built — `SessionCapabilityContext.mcpServers`, i.e.
    * what the caller passed to `createSession({ mcpServers })`. They are layered OVER the
-   * workspace's shared servers (`T.McpServers`) and over `mcpServers` above: same name, the
+   * workspace's shared servers (`Tokens.McpServers`) and over `mcpServers` above: same name, the
    * session's wins for this session only. Built, connected and shut down with the session.
    */
   readonly sessionMcpServers?: Record<string, McpServerConfig>;
@@ -229,11 +229,11 @@ export interface DefaultCapabilitiesOptions {
  * isolated per session, mirroring a fresh-Session-per-create model.
  */
 export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
-  const manager = options.pluginManager ?? options.scope?.get(T.PluginManager);
+  const manager = options.pluginManager ?? options.scope?.get(Tokens.PluginManager);
   // A session on its own environment ignores the workspace's registry: it was scanned elsewhere.
-  const sharedSkills = options.ownEnvironment === true ? undefined : options.scope?.get(T.SkillRegistry);
-  const sharedMcp = options.scope?.has(T.McpServers) === true;
-  const oauthService = options.oauthService ?? options.scope?.get(T.McpOAuth);
+  const sharedSkills = options.ownEnvironment === true ? undefined : options.scope?.get(Tokens.SkillRegistry);
+  const sharedMcp = options.scope?.has(Tokens.McpServers) === true;
+  const oauthService = options.oauthService ?? options.scope?.get(Tokens.McpOAuth);
   // Shared registry so the plugin session-start injector can render a skill the skills capability
   // loaded (its roots include the plugin skill dirs below). A workspace-level registry was
   // scanned once for every session of the directory; a session-level one is scanned here.
@@ -256,24 +256,19 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     compactionCapability({ maxContextTokens: options.maxContextTokens ?? 200_000 }),
   ];
   // Cron is a local-only capability (Invariant 7): the server host doesn't install it.
-  // MCP: the workspace's shared connections when it has them (a view per session), else
-  // workspace servers + enabled plugin servers (namespaced, so they can't collide) per session.
   const sessionMcp = options.sessionMcpServers ?? {};
   const mcpOptions = {
     ...(oauthService !== undefined ? { oauthService } : {}),
     ...(options.allowedMcpTransports !== undefined ? { allowedTransports: options.allowedMcpTransports } : {}),
   };
-  if (sharedMcp) {
-    capabilities.push(mcpSessionCapability(sessionMcp, mcpOptions));
-  } else if (options.mcpServers !== undefined || manager !== undefined || Object.keys(sessionMcp).length > 0) {
-    // No workspace connections to view: everything this session sees is its own, session servers
-    // last so the same name still resolves to the session's.
-    capabilities.push(
-      mcpServersCapability(
-        { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}), ...sessionMcp },
-        mcpOptions,
-      ),
-    );
+  // With workspace connections, the capability is a VIEW over them and `configs` is this session's
+  // overlay. Without, everything this session sees is its own — session servers last, so the same
+  // name still resolves to the session's. One capability either way; it reads the scope itself.
+  const mcpConfigs = sharedMcp
+    ? sessionMcp
+    : { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}), ...sessionMcp };
+  if (sharedMcp || Object.keys(mcpConfigs).length > 0) {
+    capabilities.push(mcpServersCapability(mcpConfigs, mcpOptions));
   }
   // Plugins: load the manager + render the plugin's session-start skill from the shared registry
   // (skills opens before this, so by injection time the registry holds the plugin skills).
@@ -321,11 +316,11 @@ export interface HarnessOptions<TContext = unknown> {
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
   /**
    * Process-tier composition: register the objects that live for the whole harness on its scope
-   * — `T.SessionRepository` (disk locally, Pg/Redis on a server; in-memory when absent),
-   * `T.Logger` (the `AGENTS_LOG` env logger, else silent, when absent), `T.ModelRuntime` (lets
-   * extensions register providers at runtime; without it those actions throw), `T.EnvironmentFactory`
+   * — `Tokens.SessionRepository` (disk locally, Pg/Redis on a server; in-memory when absent),
+   * `Tokens.Logger` (the `AGENTS_LOG` env logger, else silent, when absent), `Tokens.ModelRuntime` (lets
+   * extensions register providers at runtime; without it those actions throw), `Tokens.EnvironmentFactory`
    * (a shared `Environment` or a per-session factory; sessions default to a `LocalEnvironment` at their
-   * own `workDir`), `T.PluginManager`, `T.Tracing`. Runs before the by-value extensions'
+   * own `workDir`), `Tokens.PluginManager`, `Tokens.Tracing`. Runs before the by-value extensions'
    * `harness` halves, so they can consume what it registers.
    */
   readonly harness?: (scope: Scope<"harness">) => void | Promise<void>;
@@ -333,15 +328,15 @@ export interface HarnessOptions<TContext = unknown> {
    * Workspace-tier composition — one scope per workspace key (the working directory locally; a
    * tenant / environment id on a server, via `createSession({ workspaceKey })`), shared by every
    * session under it and closed when the last of them closes. Register what a working directory
-   * owns: `T.McpServers` (one set of MCP connections for all its sessions), `T.SkillRegistry`
-   * (one skill scan), `T.McpOAuth`, `T.WorkspaceEnvironmentFactory`. `defaultCapabilities({ scope })`
+   * owns: `Tokens.McpServers` (one set of MCP connections for all its sessions), `Tokens.SkillRegistry`
+   * (one skill scan), `Tokens.McpOAuth`, `Tokens.WorkspaceEnvironmentFactory`. `defaultCapabilities({ scope })`
    * picks those up. A session that brings its own `environment` instance gets a private workspace.
    */
   readonly workspace?: (scope: Scope<"workspace">, ctx: WorkspaceContext) => void | Promise<void>;
   /**
    * Session-tier composition: called once per session being opened, with that session's scope
-   * (the opener has already registered `T.SessionId`, `T.Store`, `T.Events`, `T.Responder`,
-   * `T.PermissionOptions`, and `T.Environment` when the caller supplied one). Register anything else
+   * (the opener has already registered `Tokens.SessionId`, `Tokens.Store`, `Tokens.Events`, `Tokens.Responder`,
+   * `Tokens.PermissionOptions`, and `Tokens.Environment` when the caller supplied one). Register anything else
    * the session should own and return its capabilities. Defaults to `defaultCapabilities()`.
    * Always called fresh per session, so per-session state (goal/plan/todo/background/skills/mcp)
    * is isolated by construction.
@@ -1128,47 +1123,38 @@ export class HarnessSession<TContext = unknown> {
     return this.core.permissionModeSetting;
   }
 
-  createGoal(...args: Parameters<Session["createGoal"]>): ReturnType<Session["createGoal"]> {
-    return this.core.createGoal(...args);
+  // ── capability services ───────────────────────────────────────────────────────────────
+  // The same accessors the core `Session` exposes, forwarded. There used to be one wrapper
+  // method per operation here, mirroring one facade method per operation there — two layers
+  // that had to be kept in step by hand every time a capability grew an operation. Forwarding
+  // the SERVICE means a new operation needs no change in either layer.
+  get goal(): GoalStore {
+    return this.core.goal;
   }
-  getGoal(): ReturnType<Session["getGoal"]> {
-    return this.core.getGoal();
+  get plan(): PlanMode {
+    return this.core.plan;
   }
-  setPlanMode(...args: Parameters<Session["setPlanMode"]>): ReturnType<Session["setPlanMode"]> {
-    return this.core.setPlanMode(...args);
+  get skills(): SkillsService {
+    return this.core.skills;
   }
-  getPlan(): ReturnType<Session["getPlan"]> {
-    return this.core.getPlan();
+  get plugins(): PluginManager {
+    return this.core.plugins;
   }
-  compact(...args: Parameters<Session["compact"]>): ReturnType<Session["compact"]> {
-    return this.core.compact(...args);
+  get compaction(): CompactionService {
+    return this.core.compaction;
   }
-  listSkills(): ReturnType<Session["listSkills"]> {
-    return this.core.listSkills();
+  /** PROBE tier: absent without the background capability — see `Session.background`. */
+  get background(): BackgroundManager | undefined {
+    return this.core.background;
   }
-  activateSkill(name: string, args?: string): ReturnType<Session["activateSkill"]>;
-  activateSkill(request: ActivateSkillRequest): ReturnType<Session["activateSkill"]>;
-  activateSkill(nameOrRequest: string | ActivateSkillRequest, args?: string): ReturnType<Session["activateSkill"]> {
-    return (this.core.activateSkill as (...a: unknown[]) => ReturnType<Session["activateSkill"]>)(nameOrRequest, args);
+  /** PROBE tier: absent without an MCP capability. */
+  get mcp(): McpServersHandle | undefined {
+    return this.core.mcp;
   }
-  listPlugins(): ReturnType<Session["listPlugins"]> {
-    return this.core.listPlugins();
-  }
-  installPlugin(...args: Parameters<Session["installPlugin"]>): ReturnType<Session["installPlugin"]> {
-    return this.core.installPlugin(...args);
-  }
-  listBackgroundTasks(...args: Parameters<Session["listBackgroundTasks"]>): ReturnType<Session["listBackgroundTasks"]> {
-    return this.core.listBackgroundTasks(...args);
-  }
+
   // ── Conversation log (flat, linear) — read the record stream for transcript rendering ──
   getRecords(...args: Parameters<Session["getRecords"]>): ReturnType<Session["getRecords"]> {
     return this.core.getRecords(...args);
-  }
-  listSubagents(...args: Parameters<Session["listSubagents"]>): ReturnType<Session["listSubagents"]> {
-    return this.core.listSubagents(...args);
-  }
-  reconcileSubagents(...args: Parameters<Session["reconcileSubagents"]>): ReturnType<Session["reconcileSubagents"]> {
-    return this.core.reconcileSubagents(...args);
   }
 
   // ── context introspection — where the model's window is spent, as of the last turn ──
@@ -1182,7 +1168,7 @@ export class HarnessSession<TContext = unknown> {
   }
   /** The current todo list (the `TodoList` tool's latest state); empty without the todo capability. */
   getTodos(): readonly TodoItem[] {
-    return this.core.get(T.Todo)?.get() ?? [];
+    return this.core.get(Tokens.Todo)?.get() ?? [];
   }
   /** Every slash command this session answers to — the static registry plus the ones its
    *  capabilities and extensions contribute — for a UI's palette and autocompletion. */
@@ -1241,78 +1227,9 @@ export class HarnessSession<TContext = unknown> {
     }
   }
   private extensionRuntime(): ExtensionRuntime {
-    const runtime = this.core.get(HT.Extensions);
+    const runtime = this.core.get(HarnessTokens.Extensions);
     if (!runtime) throw new Error("this session has no extensions capability");
     return runtime;
-  }
-
-  // ── goal lifecycle ──
-  pauseGoal(...args: Parameters<Session["pauseGoal"]>): ReturnType<Session["pauseGoal"]> {
-    return this.core.pauseGoal(...args);
-  }
-  resumeGoal(...args: Parameters<Session["resumeGoal"]>): ReturnType<Session["resumeGoal"]> {
-    return this.core.resumeGoal(...args);
-  }
-  cancelGoal(...args: Parameters<Session["cancelGoal"]>): ReturnType<Session["cancelGoal"]> {
-    return this.core.cancelGoal(...args);
-  }
-  setGoalBudget(...args: Parameters<Session["setGoalBudget"]>): ReturnType<Session["setGoalBudget"]> {
-    return this.core.setGoalBudget(...args);
-  }
-
-  // ── plan + compaction ──
-  clearPlan(...args: Parameters<Session["clearPlan"]>): ReturnType<Session["clearPlan"]> {
-    return this.core.clearPlan(...args);
-  }
-  pendingCompaction(...args: Parameters<Session["pendingCompaction"]>): ReturnType<Session["pendingCompaction"]> {
-    return this.core.pendingCompaction(...args);
-  }
-  cancelCompaction(...args: Parameters<Session["cancelCompaction"]>): ReturnType<Session["cancelCompaction"]> {
-    return this.core.cancelCompaction(...args);
-  }
-
-  // ── background tasks ──
-  readBackgroundTaskOutput(...args: Parameters<Session["readBackgroundTaskOutput"]>): ReturnType<Session["readBackgroundTaskOutput"]> {
-    return this.core.readBackgroundTaskOutput(...args);
-  }
-  readBackgroundTaskOutputDelta(...args: Parameters<Session["readBackgroundTaskOutputDelta"]>): ReturnType<Session["readBackgroundTaskOutputDelta"]> {
-    return this.core.readBackgroundTaskOutputDelta(...args);
-  }
-  stopBackgroundTask(...args: Parameters<Session["stopBackgroundTask"]>): ReturnType<Session["stopBackgroundTask"]> {
-    return this.core.stopBackgroundTask(...args);
-  }
-  /** Move a running detachable tool call (bash/subagent/workflow) into a background task. */
-  detachTool(...args: Parameters<Session["detachTool"]>): ReturnType<Session["detachTool"]> {
-    return this.core.detachTool(...args);
-  }
-
-  // ── plugins (full lifecycle) ──
-  getPluginInfo(...args: Parameters<Session["getPluginInfo"]>): ReturnType<Session["getPluginInfo"]> {
-    return this.core.getPluginInfo(...args);
-  }
-  setPluginEnabled(...args: Parameters<Session["setPluginEnabled"]>): ReturnType<Session["setPluginEnabled"]> {
-    return this.core.setPluginEnabled(...args);
-  }
-  setPluginMcpServerEnabled(...args: Parameters<Session["setPluginMcpServerEnabled"]>): ReturnType<Session["setPluginMcpServerEnabled"]> {
-    return this.core.setPluginMcpServerEnabled(...args);
-  }
-  removePlugin(...args: Parameters<Session["removePlugin"]>): ReturnType<Session["removePlugin"]> {
-    return this.core.removePlugin(...args);
-  }
-  reloadPlugins(...args: Parameters<Session["reloadPlugins"]>): ReturnType<Session["reloadPlugins"]> {
-    return this.core.reloadPlugins(...args);
-  }
-
-  // ── MCP ──
-  listMcpTools(...args: Parameters<Session["listMcpTools"]>): ReturnType<Session["listMcpTools"]> {
-    return this.core.listMcpTools(...args);
-  }
-
-  listMcpServers(...args: Parameters<Session["listMcpServers"]>): ReturnType<Session["listMcpServers"]> {
-    return this.core.listMcpServers(...args);
-  }
-  reconnectMcpServer(...args: Parameters<Session["reconnectMcpServer"]>): ReturnType<Session["reconnectMcpServer"]> {
-    return this.core.reconnectMcpServer(...args);
   }
 
   /**
@@ -1408,10 +1325,10 @@ export class Harness<TContext = unknown> {
     this.scope = new Scope("harness");
     this.services = new ServiceRegistry(this.scope);
     // Defaults for the harness tier; the `harness` hook's registrations win over them.
-    this.scope.provide(T.Logger, () => envLogger() ?? noopLogger);
-    this.scope.provide(T.SessionRepository, () => new MemorySessionRepository());
-    if (options.eventPublication !== undefined) this.scope.register(T.EventPublication, options.eventPublication);
-    if (options.telemetry !== undefined) this.scope.register(T.Telemetry, options.telemetry, { owned: false });
+    this.scope.provide(Tokens.Logger, () => envLogger() ?? noopLogger);
+    this.scope.provide(Tokens.SessionRepository, () => new MemorySessionRepository());
+    if (options.eventPublication !== undefined) this.scope.register(Tokens.EventPublication, options.eventPublication);
+    if (options.telemetry !== undefined) this.scope.register(Tokens.Telemetry, options.telemetry, { owned: false });
     const agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
     this.toolPalette = Object.fromEntries(agentTools.map((tool) => [tool.schema.name, tool]));
     // The Agent/Workflow tools only appear when the run has subagents to spawn. Default the fleet
@@ -1477,7 +1394,7 @@ export class Harness<TContext = unknown> {
   /** The session repository, once the `harness` hook has had its say. */
   private async repository(): Promise<SessionRepository> {
     await this.sharedReady;
-    return this.scope.require(T.SessionRepository);
+    return this.scope.require(Tokens.SessionRepository);
   }
 
   /**
@@ -1644,7 +1561,7 @@ export class Harness<TContext = unknown> {
       // Reopening: orphaned background subagents (running from a dead process) → lost. A failure
       // here is an open failure: the session is torn down, not left registered and unreturned.
       try {
-        await session.reconcileSubagents();
+        await session.background?.reconcileSubagents() ?? [];
       } catch (error) {
         await session.close();
         throw error;
@@ -1668,7 +1585,7 @@ export class Harness<TContext = unknown> {
       const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
       // A fork copies the subagent ledger; its background "running" rows have no live task → lost.
       try {
-        await session.reconcileSubagents();
+        await session.background?.reconcileSubagents() ?? [];
       } catch (error) {
         await session.close();
         throw error;
@@ -1965,7 +1882,7 @@ export class Harness<TContext = unknown> {
    */
   private extensionHost(sessionId: string, scope: Scope<"session">): ExtensionHost {
     const self = this;
-    const runtime = this.scope.get(T.ModelRuntime);
+    const runtime = this.scope.get(Tokens.ModelRuntime);
     return {
       sessionId,
       newSession: (options) => self.createSession({ ...(options?.title !== undefined ? { title: options.title } : {}) }),
@@ -2032,23 +1949,21 @@ export class Harness<TContext = unknown> {
     let core: Session | undefined;
     try {
       scope = workspace.child("session");
-      scope.register(T.SessionId, id);
-      scope.register(T.StoreBackend, store, { owned: false }); // the repository owns the store's lifetime
       const events = new ListenerSink();
-      scope.register(T.Events, events);
+      scope.register(Tokens.Events, events);
       const responder = new MutableResponder();
-      scope.register(T.Responder, responder);
+      scope.register(Tokens.Responder, responder);
       // Environment: this call's override → the harness-level factory (resolved by Session.open) →
       // a LocalEnvironment at the session's own workDir. The session only OPERATES a caller-supplied
       // environment; the default one is its own.
       if (opts.environment !== undefined) {
-        if (typeof opts.environment === "function") scope.register(T.SessionEnvironmentFactory, opts.environment);
-        else scope.register(T.Environment, opts.environment, { owned: false });
-      } else if (!workspace.has(T.WorkspaceEnvironmentFactory) && !this.scope.has(T.EnvironmentFactory)) {
-        scope.provide(T.Environment, () => new LocalEnvironment(workDir));
+        if (typeof opts.environment === "function") scope.register(Tokens.SessionEnvironmentFactory, opts.environment);
+        else scope.register(Tokens.Environment, opts.environment, { owned: false });
+      } else if (!workspace.has(Tokens.WorkspaceEnvironmentFactory) && !this.scope.has(Tokens.EnvironmentFactory)) {
+        scope.provide(Tokens.Environment, () => new LocalEnvironment(workDir));
       }
-      scope.register(T.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
-      if (opts.eventPublication !== undefined) scope.register(T.SessionEventPublication, opts.eventPublication);
+      scope.register(Tokens.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
+      if (opts.eventPublication !== undefined) scope.register(Tokens.SessionEventPublication, opts.eventPublication);
       // ONE open-time log read, shared: the projection seeds from it, and Session.open
       // receives it as `preloadedLog` so its capability restore + context pre-build fold the
       // same records — same IO, and the same `Message` objects (no second parsed copy).
@@ -2073,7 +1988,9 @@ export class Harness<TContext = unknown> {
         },
         params,
       );
-      core = await Session.open(scope, { capabilities, preloadedLog, resumed });
+      // The id, the host signal and the store are arguments, not registry entries: nothing
+      // inherits them and nothing else shares them. The repository owns the store's lifetime.
+      core = await Session.open(scope, { capabilities, preloadedLog, resumed, sessionId: id, store });
       const agent =
         opts.agent ??
         this.options.agent ??
@@ -2124,7 +2041,7 @@ export class Harness<TContext = unknown> {
     built: { readonly projection?: SessionProjection; readonly core?: Session; readonly scope?: Scope<"session"> },
     cause: unknown,
   ): Promise<void> {
-    const logger = this.scope.get(T.Logger);
+    const logger = this.scope.get(Tokens.Logger);
     const attempt = async (step: string, run: () => void | Promise<void>): Promise<void> => {
       try {
         await run();
@@ -2186,7 +2103,7 @@ export class Harness<TContext = unknown> {
     return {
       disposeTimeoutMs: SCOPE_DISPOSE_TIMEOUT_MS,
       onDisposeError: (name, error) => {
-        this.scope.get(T.Logger)?.log("warn", `service "${name}" dispose failed/timed out`, {
+        this.scope.get(Tokens.Logger)?.log("warn", `service "${name}" dispose failed/timed out`, {
           service: name,
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(workspaceKey !== undefined ? { workspaceKey } : {}),

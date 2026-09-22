@@ -10,7 +10,6 @@
 import {
   createMcpServers,
   mcpServersCapability,
-  mcpSessionCapability,
   McpTransportNotPermittedError,
   type McpTransportKind,
 } from "../mcp/index.ts";
@@ -97,22 +96,19 @@ function main(): void {
     thrownBy(() => createMcpServers({ local: disabled }, { allowedTransports: HTTP_ONLY })) === undefined,
   );
 
-  // ── Both capability entry points, not just the bare handle ────────────────
+  // ── The capability entry point, not just the bare handle ─────────────────
+  // One function now covers both topologies, so a session's own servers are admitted by the
+  // same rule whether they stand alone or overlay a workspace's.
   check(
-    "mcpServersCapability refuses at build time",
+    "mcpServersCapability refuses a session's own stdio servers at build time",
     thrownBy(() => mcpServersCapability({ local: STDIO }, { allowedTransports: HTTP_ONLY })) instanceof
-      McpTransportNotPermittedError,
-  );
-  check(
-    "mcpSessionCapability refuses a session's own stdio overlay",
-    thrownBy(() => mcpSessionCapability({ local: STDIO }, { allowedTransports: HTTP_ONLY })) instanceof
       McpTransportNotPermittedError,
   );
   // A session that brings no servers of its own only views the workspace's; there is nothing
   // to admit, and building it must stay free of the rule.
   check(
-    "mcpSessionCapability with no overlay is unaffected",
-    thrownBy(() => mcpSessionCapability({}, { allowedTransports: HTTP_ONLY })) === undefined,
+    "mcpServersCapability with no overlay is unaffected",
+    thrownBy(() => mcpServersCapability({}, { allowedTransports: HTTP_ONLY })) === undefined,
   );
 
   const passed = checks.filter(([, ok]) => ok).length;

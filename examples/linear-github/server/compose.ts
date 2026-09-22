@@ -15,7 +15,7 @@ import {
   defineModel,
   DiskSessionRepository,
   sinkLogger,
-  T,
+  Tokens,
   token,
   type ChatModel,
   type TracingProcessor,
@@ -72,14 +72,14 @@ export async function composeServer(options: ServerOptions) {
       return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
     },
     harness: (scope) => {
-      scope.register(T.SessionRepository, repository);
+      scope.register(Tokens.SessionRepository, repository);
       if (options.log) {
-        scope.register(T.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
+        scope.register(Tokens.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
       }
       // Harness-scoped: one processor, every session bridges its events into it. Disposed with
       // the scope, which flushes what is still buffered before the process goes away.
       if (options.tracing !== undefined) {
-        scope.register(T.Tracing, options.tracing, { dispose: (tracing) => (tracing as TracingProcessor).shutdown() });
+        scope.register(Tokens.Tracing, options.tracing, { dispose: (tracing) => (tracing as TracingProcessor).shutdown() });
       }
     },
     // The builtin coding profile (files, shell, questions) plus the one tool that ships code.

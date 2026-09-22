@@ -80,6 +80,6 @@ export {
   testSessionScope,
   testProvisionContext,
   testRunContext,
-  openCapability,
+  provisionCapability,
 } from "../testing.ts";
 export type { TestSessionWiring, TestRunnerOptions, TestSessionOptions, TestCapabilityHandle } from "../testing.ts";

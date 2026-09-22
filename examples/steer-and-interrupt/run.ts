@@ -17,7 +17,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  createLocalSession,
+  createLocalHarness,
   defineModel,
   type AgentEvent,
   type ApprovalRequest,
@@ -35,13 +35,14 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 mkdirSync(WORK, { recursive: true });
 
-const session = await createLocalSession({
+const harness = await createLocalHarness({
   model: resolveModel(MODEL),
   homeDir: join(process.cwd(), ".agent-home"),
   workDir: WORK,
   permission: { mode: "manual" }, // every tool call routes to the approval handler
   appendSystemPrompt: "Prefer the file tools over shell when possible.",
 });
+const session = await harness.createSession();
 
 // 1. Human-in-the-loop: decide each tool call. In a real UI this awaits a click.
 session.setApprovalHandler((req: ApprovalRequest): ApprovalResponse => {
@@ -57,7 +58,7 @@ if (CANCEL) {
 } else {
   await steerDemo();
 }
-await session.close();
+await harness.close(); // closes the session, then cron, MCP and the log handle
 
 /** Stream a task and steer it as soon as the first tool call lands. */
 async function steerDemo(): Promise<void> {

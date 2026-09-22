@@ -1,5 +1,5 @@
 import type { Capability } from "../index.ts";
-import { T } from "../scope/tokens.ts";
+import { Tokens } from "../scope/tokens.ts";
 import { PluginManager } from "./manager.ts";
 import { PluginSessionStartInjector, type SessionStartSkillResolver } from "./injector.ts";
 
@@ -55,7 +55,7 @@ export function pluginsCapability(manager: PluginManager, resolveSkill: SessionS
     name: "plugins",
     provides: [
       {
-        token: T.Plugins,
+        token: Tokens.Plugins,
         create: async () => {
           await manager.load();
           return manager;

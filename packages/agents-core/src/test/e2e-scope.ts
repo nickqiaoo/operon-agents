@@ -2,7 +2,7 @@
  * Scope — the scoped service registry: tiers, parent lookup, overrides, defaults, handles that
  * survive a parent-level replace, and child-first / reverse-order teardown.
  */
-import { Scope, ServiceUnavailableError, token, resetTokenDeclarationsForTest } from "../index.ts";
+import { Scope, ServiceUnavailableError, Tokens, providerHintOf, token, resetTokenDeclarationsForTest } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -46,6 +46,38 @@ async function testLookupAndOverride(): Promise<void> {
     threw = error;
   }
   check("require: missing → ServiceUnavailableError naming the token", threw instanceof ServiceUnavailableError && threw.serviceName === "scope-test-absent");
+  check(
+    "require: a token without a providedBy hint fails with the bare name",
+    threw instanceof Error && threw.message === 'service "scope-test-absent" is not registered',
+  );
+
+  // The point of `providedBy`: a missing service says WHO registers it, so the stack trace
+  // names the fix. Checked on a real framework token, not a fixture, because the value of the
+  // hint is that every shipped token carries one.
+  threw = undefined;
+  try {
+    session.require(Tokens.Plan);
+  } catch (error) {
+    threw = error;
+  }
+  check(
+    "require: a capability's service names the capability that provides it",
+    threw instanceof Error && threw.message === 'service "plan" is not registered; it comes from the "plan" capability — pass it in `capabilities`',
+  );
+  threw = undefined;
+  try {
+    session.require(Tokens.ModelRuntime);
+  } catch (error) {
+    threw = error;
+  }
+  check(
+    "require: a harness service points at the harness scope, not at capabilities",
+    threw instanceof Error && threw.message.includes("the harness scope"),
+  );
+  check(
+    "providerHintOf: reachable by name alone, for the handle path that has no token",
+    providerHintOf("plan") === 'the "plan" capability — pass it in `capabilities`' && providerHintOf("scope-test-absent") === undefined,
+  );
   await session.close();
   await harness.close();
 }

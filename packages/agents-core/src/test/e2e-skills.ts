@@ -180,8 +180,8 @@ async function testSessionSkillService(environment: LocalEnvironment, roots: rea
     capabilities: [skillsCapability({ roots })],
   });
   try {
-    const skills = await session.listSkills();
-    const result = await session.activateSkill("greeter", "World");
+    const skills = await session.skills.listSkills();
+    const result = await session.skills.activateSkill({ name: "greeter", args: "World" });
     const queued = steer.drainSteering();
     const steered = queued.map((s) => s.message);
     const text = reminderText(steered);
@@ -236,7 +236,7 @@ async function testDefaultRootsMerge(environment: LocalEnvironment, dir: string)
     capabilities: [skillsCapability({ roots: pluginRoots, includeDefaultRoots: true, projectDir, userHomeDir })],
   });
   try {
-    const names = (await session.listSkills()).map((s) => s.name);
+    const names = (await session.skills.listSkills()).map((s) => s.name);
     check("roots: skillsCapability({ includeDefaultRoots }) loads local + plugin skills", names.includes("greeter") && names.includes("tracker"));
   } finally {
     await session.close();
@@ -249,7 +249,7 @@ async function testDefaultRootsMerge(environment: LocalEnvironment, dir: string)
     capabilities: [skillsCapability({ roots: pluginRoots, projectDir, userHomeDir })],
   });
   try {
-    const names = (await isolated.listSkills()).map((s) => s.name);
+    const names = (await isolated.skills.listSkills()).map((s) => s.name);
     check("roots: without the flag the capability stays isolated to its roots", names.includes("tracker") && !names.includes("greeter"));
   } finally {
     await isolated.close();

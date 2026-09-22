@@ -140,7 +140,7 @@ export type AgentRecordBody =
  *   state (see capabilities/background/persist.ts). This is what lets a task orphaned by a dead
  *   process be reconciled to `lost` on reopen. The spawn ack + settle notification stay in the
  *   log as the model-facing conversation record, but are no longer the reconcile source of
- *   truth. `session.listSubagents()`/`listWorkflows()` PROJECT that task store — a foreground
+ *   truth. `session.background?.listSubagents() ?? []`/`listWorkflows()` PROJECT that task store — a foreground
  *   subagent/workflow is a plain tool call (conversation + its own shard), never a task.
  * - KV state (②) may hold only (a) handles to external systems (`environment`), (b)
  *   rebuildable foreground control state (`interrupt`), (c) capability current-state (goal/plan/permission/

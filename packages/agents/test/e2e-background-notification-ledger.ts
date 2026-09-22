@@ -1,4 +1,4 @@
-import { T } from "operon-agents-core";
+import { Tokens } from "operon-agents-core";
 /**
  * The settle-notification ledger: a background result that was queued but never reached the
  * conversation is redelivered on reopen.
@@ -64,13 +64,13 @@ async function confirmedSettleIsNotRedelivered(): Promise<void> {
     fauxAssistantMessage("nothing new", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(T.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
 
   const settle = Promise.withResolvers<{ agentStatus: string }>();
-  const taskId = session.core.require(T.Background).registerTask(
+  const taskId = session.core.require(Tokens.Background).registerTask(
     new AgentBackgroundTask(settle.promise, "confirmed helper", { agentId: "helper-ok", address: "main/helper-ok" }),
   );
 
@@ -87,7 +87,7 @@ async function confirmedSettleIsNotRedelivered(): Promise<void> {
   const reopened = await harness.resumeSession(session.id);
   const afterEvents: AgentEvent[] = [];
   reopened.onEvent((event) => afterEvents.push(event));
-  await reopened.reconcileSubagents();
+  await reopened.background?.reconcileSubagents() ?? [];
   await waitFor(() => settleMessages(afterEvents).length > 0, 300);
   check("confirmed: reopening resends nothing", settleMessages(afterEvents).length === 0);
 
@@ -103,7 +103,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
     fauxAssistantMessage("acted on the recovered result", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(T.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -133,7 +133,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
   const reopened = await harness.resumeSession(sessionId);
   const events: AgentEvent[] = [];
   reopened.onEvent((event) => events.push(event));
-  await reopened.reconcileSubagents();
+  await reopened.background?.reconcileSubagents() ?? [];
 
   const resent = await waitFor(() => settleMessages(events).length === 1);
   check("unconfirmed: the settle was redelivered on reopen", resent);
@@ -147,7 +147,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
   check("unconfirmed: it names the read that reaches the shard", text.includes("BackgroundOutput(task_id="));
   check(
     "unconfirmed: the named read returns the recovered result",
-    (await reopened.core.require(T.Background).readOutput("agent_lost_notice")).content === "recovered helper result",
+    (await reopened.core.require(Tokens.Background).readOutput("agent_lost_notice")).content === "recovered helper result",
   );
   check("unconfirmed: the redelivery woke the idle session on its own", await waitFor(() => events.some((e) => e.type === "turn.ended")));
 
@@ -160,7 +160,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
   const twice = await harness.resumeSession(sessionId);
   const againEvents: AgentEvent[] = [];
   twice.onEvent((event) => againEvents.push(event));
-  await twice.reconcileSubagents();
+  await twice.background?.reconcileSubagents() ?? [];
   await waitFor(() => settleMessages(againEvents).length > 0, 300);
   check("unconfirmed: a second reopen resends nothing", settleMessages(againEvents).length === 0);
 
@@ -180,7 +180,7 @@ async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {
     fauxAssistantMessage("read the log", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(T.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -204,7 +204,7 @@ async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {
   const reopened = await harness.resumeSession(sessionId);
   const events: AgentEvent[] = [];
   reopened.onEvent((event) => events.push(event));
-  await reopened.reconcileSubagents();
+  await reopened.background?.reconcileSubagents() ?? [];
 
   await waitFor(() => settleMessages(events).length === 1);
   const appended = settleMessages(events)[0];
@@ -226,7 +226,7 @@ async function unstampedRecordsAreLeftAlone(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("started", { stopReason: "stop" })]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(T.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -250,7 +250,7 @@ async function unstampedRecordsAreLeftAlone(): Promise<void> {
   const reopened = await harness.resumeSession(sessionId);
   const events: AgentEvent[] = [];
   reopened.onEvent((event) => events.push(event));
-  await reopened.reconcileSubagents();
+  await reopened.background?.reconcileSubagents() ?? [];
   await waitFor(() => settleMessages(events).length > 0, 300);
   check("unstamped: no stamps ⇒ nothing was owed ⇒ nothing resent", settleMessages(events).length === 0);
 

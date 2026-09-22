@@ -1,5 +1,5 @@
-import { BoundaryInjector, type Capability, type ProvisionContext, type InjectionContext, type InjectionResult } from "../index.ts";
-import { T } from "../scope/tokens.ts";
+import { BoundaryInjector, provision, optional, type Capability, type ProvisionContext, type InjectionContext, type InjectionResult, type EventSink } from "../index.ts";
+import { Tokens } from "../scope/tokens.ts";
 import type { MCPServer } from "./server.ts";
 import { hasResources } from "./server.ts";
 import { mcpToolProvider } from "./provider.ts";
@@ -36,6 +36,19 @@ class McpResourcesInjector extends BoundaryInjector {
   }
 }
 
+/**
+ * MCP servers the caller BUILT, rather than configured: for an `MCPServer` implementation that no
+ * `McpServerConfig` can describe — in-process, a custom protocol, a test double. The instances are
+ * yours; connecting them at session open and closing them at session close is this capability's
+ * job (see `connectAll` / `closeAll`).
+ *
+ * The split from {@link mcpServersCapability} is recipe vs finished good, and it decides what is
+ * possible, not just what is convenient: a controller reconnects by rebuilding its server from the
+ * config it holds, so a configured server gets status, reconnect, keep-alive and OAuth. An
+ * instance handed in from outside cannot be rebuilt, so it gets none of that — it provides
+ * `Tokens.McpRaw` rather than `Tokens.Mcp`, and `session.mcp?.list() ?? []` / `reconnectMcpServer()`
+ * do not cover it. Its tools reach the model exactly the same way.
+ */
 export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabilityOptions = {}): Capability {
   let resources: CollectedResource[] = [];
 
@@ -43,13 +56,12 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
     name: "mcp",
     toolProviders: servers.map((server) => mcpToolProvider(server)),
     ...(options.injectResources ? { injectors: [new McpResourcesInjector(() => resources)] } : {}),
-    provides: [{ token: T.McpRaw, create: connectAll, dispose: closeAll }],
+    provides: [provision({ token: Tokens.McpRaw, needs: { events: optional(Tokens.Events) }, create: connectAll, dispose: closeAll })],
   };
 
   // Connect every server in parallel, fault-isolated — session open would otherwise cost
   // the SUM of each server's startup (matching `mcpServersCapability`, which already does).
-  async function connectAll(ctx: ProvisionContext): Promise<readonly MCPServer[]> {
-    const events = ctx.scope.get(T.Events);
+  async function connectAll({ events }: { readonly events: EventSink | undefined }, ctx: ProvisionContext): Promise<readonly MCPServer[]> {
     {
       const perServer = await Promise.all(
         servers.map(async (server): Promise<readonly CollectedResource[]> => {

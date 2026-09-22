@@ -713,7 +713,7 @@ export class StreamingUIController {
       const session = this.host.requireSession();
       void (async () => {
         try {
-          const plan = await session.getPlan();
+          const plan = await session.plan.data();
           tc.setPlanInfo(plan === null ? {} : { plan: plan.content, path: plan.path });
         } catch {
           tc.setPlanInfo({});

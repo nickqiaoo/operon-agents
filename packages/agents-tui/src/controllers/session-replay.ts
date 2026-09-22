@@ -69,7 +69,7 @@ export class SessionReplayRenderer {
 
   private async loadBackgroundTasks(session: HarnessSession): Promise<readonly BackgroundTaskInfo[]> {
     try {
-      return await session.listBackgroundTasks({ activeOnly: false });
+      return session.background?.list(false) ?? [];
     } catch {
       return [];
     }

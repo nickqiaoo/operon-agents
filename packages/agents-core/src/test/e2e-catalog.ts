@@ -258,7 +258,7 @@ async function testSessionFlow(): Promise<void> {
     await run("slack upgraded");
 
     // Turn 7 — manual compaction, then the model calls a never-loaded tool from memory.
-    await session.compact();
+    session.compaction.request();
     faux.setResponses([
       (context) => {
         check("t7: compaction summary request carries no tools", context.tools === undefined);

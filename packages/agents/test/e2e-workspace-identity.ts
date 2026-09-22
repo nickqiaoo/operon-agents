@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
-import { createHarness, LocalEnvironment, MemorySessionRepository, T } from "../src/index.ts";
+import { createHarness, LocalEnvironment, MemorySessionRepository, Tokens } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -26,7 +26,7 @@ async function main(): Promise<void> {
       model: faux.getChatModel()!,
       workDir: work,
       permission: { mode: "yolo" },
-      harness: (scope) => scope.register(T.SessionRepository, new MemorySessionRepository(), { owned: false }),
+      harness: (scope) => scope.register(Tokens.SessionRepository, new MemorySessionRepository(), { owned: false }),
       workspace: (_scope, ctx) => {
         composed.push(ctx.key);
       },

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { ApprovalResponse } from "../permission/types.ts";
 import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/index.ts";
 import type { ToolInputRequest } from "../tool/types.ts";
@@ -13,10 +13,10 @@ export interface AgentDefinitionReference {
   readonly name: string;
 }
 
-/** Locates and validates the assistant batch whose execution is being continued. */
+/** Locates the assistant batch whose execution is being continued. Any one call id from
+ *  the batch identifies it, since the batch is the message that emitted that call. */
 export interface InterruptionAnchor {
   readonly toolCallId: string;
-  readonly assistantDigest: string;
 }
 
 export interface InterruptionExecution {
@@ -101,29 +101,21 @@ export function interruptionAnchor(message: AssistantMessage, preferredToolCallI
   if (!calls.some((call) => call.id === toolCallId)) {
     throw new Error(`Cannot interrupt: tool call "${toolCallId}" is not present in the assistant batch.`);
   }
-  return { toolCallId, assistantDigest: digestAssistantToolCalls(message) };
+  return { toolCallId };
 }
 
-export function digestAssistantToolCalls(message: AssistantMessage): string {
-  const canonical = stableStringify(
-    assistantToolCalls(message).map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
-  );
-  return createHash("sha256").update(canonical).digest("hex");
-}
-
-/** Finds the exact assistant batch in a replayed shard and rejects stale/mismatched logs. */
+/**
+ * Finds the anchored assistant batch in a replayed shard. The batch is matched by call id
+ * alone: the three history mutators in `ConversationContext` only append, drop a prefix, or
+ * swap tool-result bodies, so a message that still carries this call id still carries the
+ * arguments it was paused on. A store that hands back something else is a broken store, and
+ * the resume trusts it the same way every other read does.
+ */
 export function findAnchoredAssistant(messages: readonly Message[], anchor: InterruptionAnchor): AssistantMessage {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.role !== "assistant") continue;
-    if (!assistantToolCalls(message).some((call) => call.id === anchor.toolCallId)) continue;
-    const digest = digestAssistantToolCalls(message);
-    if (digest !== anchor.assistantDigest) {
-      throw new Error(
-        `Cannot resume: assistant batch for tool call "${anchor.toolCallId}" changed (digest mismatch).`,
-      );
-    }
-    return message;
+    if (assistantToolCalls(message).some((call) => call.id === anchor.toolCallId)) return message;
   }
   throw new Error(`Cannot resume: tool call "${anchor.toolCallId}" was not found in the replayed log.`);
 }
@@ -287,16 +279,6 @@ export function getInterruptionState(result: object): InterruptionState | undefi
 
 function assistantToolCalls(message: AssistantMessage): ToolCall[] {
   return message.content.filter((part): part is ToolCall => part.type === "toolCall");
-}
-
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
-    .join(",")}}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

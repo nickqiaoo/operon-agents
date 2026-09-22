@@ -244,60 +244,67 @@ export interface SessionInvokeResult {
 }
 
 /**
- * The whitelist of `HarnessSession` methods reachable through `session/invoke`.
- * Run-driving (prompt/steer/follow_up/cancel), lifecycle (close), and handler registration
- * are deliberately excluded — they are first-class methods or host-side concerns.
+ * The whitelist of operations reachable through `session/invoke`.
+ *
+ * `"<service>.<op>"` names an operation on one of the session's capability services
+ * (`session.goal.create`); a bare name is a method on the session itself. Run-driving
+ * (prompt/steer/follow_up/cancel), lifecycle (close) and handler registration are deliberately
+ * excluded — they are first-class methods or host-side concerns.
+ *
+ * This list stays explicit, one entry per reachable operation: it is a security boundary, so a
+ * new capability operation should have to be named here to become remotely callable.
  */
 export const INVOKABLE_METHODS = [
-  // runtime settings
+  // runtime settings — on the session itself
   "setModel",
   "setThinking",
   "setPermissionMode",
   // goal
-  "createGoal",
-  "getGoal",
-  "pauseGoal",
-  "resumeGoal",
-  "cancelGoal",
-  "setGoalBudget",
+  "goal.create",
+  "goal.snapshot",
+  "goal.pause",
+  "goal.resume",
+  "goal.cancel",
+  "goal.changeBudget",
   // plan
-  "setPlanMode",
-  "getPlan",
-  "clearPlan",
+  "plan.setEnabled",
+  "plan.data",
   // compaction
-  "compact",
-  "pendingCompaction",
-  "cancelCompaction",
+  "compaction.request",
+  "compaction.pending",
+  "compaction.cancel",
   // skills
-  "listSkills",
-  "activateSkill",
+  "skills.listSkills",
+  "skills.activateSkill",
   // plugins
-  "listPlugins",
-  "getPluginInfo",
-  "installPlugin",
-  "setPluginEnabled",
-  "setPluginMcpServerEnabled",
-  "removePlugin",
-  "reloadPlugins",
-  // background tasks
-  "listBackgroundTasks",
-  "readBackgroundTaskOutput",
-  "readBackgroundTaskOutputDelta",
-  "stopBackgroundTask",
-  "detachTool",
+  "plugins.summaries",
+  "plugins.info",
+  "plugins.installSummary",
+  "plugins.setEnabled",
+  "plugins.setMcpServerEnabled",
+  "plugins.remove",
+  "plugins.reload",
+  // background tasks, subagents and workflow runs — one ledger, three views
+  "background.list",
+  "background.readOutput",
+  "background.readOutputDelta",
+  "background.stop",
+  "background.detach",
+  "background.listSubagents",
+  "background.reconcileSubagents",
+  "background.listWorkflows",
+  "background.getWorkflow",
   // slash commands — the serializable control surface for extensions (cron et al.):
   // per-feature cron RPCs are gone with the capability, /cron rides this instead.
   "runCommand",
   // conversation log
   "getRecords",
-  // subagents
-  "listSubagents",
-  "reconcileSubagents",
   // context introspection
   "getContextBreakdown",
   // mcp
-  "listMcpServers",
-  "reconnectMcpServer",
+  "mcp.list",
+  "mcp.listTools",
+  "mcp.reconnect",
 ] as const;
 
 export type InvokableMethod = (typeof INVOKABLE_METHODS)[number];

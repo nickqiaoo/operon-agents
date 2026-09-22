@@ -81,6 +81,26 @@ export class PlanMode {
     this.filePath = latest?.planFilePath ?? null;
   }
 
+  /** Set by the capability's provision; absent in a bare PlanMode (tests, replay). */
+  private announce: ((snapshot: PlanData) => Promise<void>) | undefined;
+
+  /** Where entering or leaving plan mode becomes a `plan.updated` event. See `GoalStore`. */
+  attachAnnouncer(announce: (snapshot: PlanData) => Promise<void>): void {
+    this.announce = announce;
+  }
+
+  /**
+   * Enter or leave plan mode, and announce the result. Idempotent: asking for the state it is
+   * already in changes nothing, but still answers with the current plan.
+   */
+  async setEnabled(enabled: boolean, options: { readonly createFile?: boolean } = {}): Promise<PlanData> {
+    if (enabled && !this.isActive) await this.enter(options.createFile ?? true);
+    else if (!enabled && this.isActive) this.exit();
+    const snapshot = await this.data();
+    await this.announce?.(snapshot);
+    return snapshot;
+  }
+
   async data(): Promise<PlanData> {
     if (!this.planId || !this.filePath || !this.environment) return null;
     let content = "";

@@ -16,6 +16,7 @@ import { findAgentByName } from "./graph.ts";
 import { deriveChild, emitRunEvent, runCtxFor } from "./run-support.ts";
 import type { RunState, SubagentSpawner } from "./runner.ts";
 import { toolSource } from "../capabilities/tool-provider.ts";
+import { DEFAULT_ADDRESS } from "../store/index.ts";
 
 /** The engine call a spawner runs child agents through (`Engine.run`, injected). */
 export type RunAgentFn<TContext> = SubagentSpawner<TContext>["run"];
@@ -99,7 +100,10 @@ function finish<TContext>(
   deferredToolNames: ReadonlySet<string>,
   deferEnabled: boolean,
 ): RunToolset {
-  const filtered = state.capabilities.applyToolFilters(tools);
+  const filtered = state.capabilities.applyToolFilters(tools, {
+    address: state.address,
+    isRootAgent: state.address === DEFAULT_ADDRESS,
+  });
   const enabled = deferEnabled && filtered.some((tool) => tool.schema.name === "SearchTool");
   if (filtered === tools) return { tools, deferredToolNames, deferEnabled: enabled };
   const surviving = new Set(filtered.map((tool) => tool.schema.name));

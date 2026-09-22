@@ -342,7 +342,7 @@ export class OperonTui {
     if (session === undefined) return;
     let skills: readonly SkillSummary[];
     try {
-      skills = await session.listSkills();
+      skills = await session.skills.listSkills();
     } catch {
       return;
     }
@@ -864,7 +864,7 @@ export class OperonTui {
   ): Promise<void> {
     const knownEntryIds = new Set(this.state.transcriptEntries.map((entry) => entry.id));
     for (const activation of activations) {
-      await session.activateSkill(activation.skillName, activation.args ?? '');
+      await session.skills.activateSkill({ name: activation.skillName, args: activation.args ?? '' });
     }
     // The cards appended during the activations belong to this submission.
     for (const entry of this.state.transcriptEntries) {
@@ -1042,7 +1042,7 @@ export class OperonTui {
       return;
     }
     this.beginSessionRequest();
-    void session.activateSkill(skillName, skillArgs).catch((error: unknown) => {
+    void session.skills.activateSkill({ name: skillName, args: skillArgs }).catch((error: unknown) => {
       this.failSessionRequest(`Skill "${skillName}" failed: ${formatErrorMessage(error)}`);
     });
   }
@@ -1099,7 +1099,7 @@ export class OperonTui {
   steerSkillActivation(session: HarnessSession, skillName: string, skillArgs: string): void {
     // Ctrl-S on a queued slash-skill item: the activation fires into the running turn. No
     // beginSessionRequest — the live pane belongs to that turn.
-    void session.activateSkill(skillName, skillArgs).catch((error: unknown) => {
+    void session.skills.activateSkill({ name: skillName, args: skillArgs }).catch((error: unknown) => {
       this.showError(`Skill "${skillName}" failed: ${formatErrorMessage(error)}`);
     });
   }
@@ -1260,7 +1260,7 @@ export class OperonTui {
     if (split !== undefined) session.setModel(defineModel({ provider: split.provider, model: split.model }));
     session.setThinking(appState.thinkingLevel);
     await session.setPermissionMode(appState.permissionMode);
-    if (appState.planMode) await session.setPlanMode(true);
+    if (appState.planMode) await session.plan.setEnabled(true);
   }
 
   async setSession(session: HarnessSession): Promise<void> {
@@ -2229,7 +2229,7 @@ export class OperonTui {
     }
     let detached = 0;
     for (const target of targets) {
-      if (session.detachTool(target.id)) detached += 1;
+      if (session.background?.detach(target.id) === true) detached += 1;
     }
     this.showDetachHint(
       detached === 0

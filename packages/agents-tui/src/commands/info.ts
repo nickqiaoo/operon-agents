@@ -17,9 +17,9 @@ export async function showStatusReport(host: SlashCommandHost): Promise<void> {
   let skills = 0;
   let plugins = 0;
   if (session !== undefined) {
-    mcpServers = session.listMcpServers().length;
-    skills = (await session.listSkills().catch(() => [])).length;
-    plugins = (await session.listPlugins().catch(() => [])).length;
+    mcpServers = (session.mcp?.list() ?? []).length;
+    skills = session.skills.listSkills().length;
+    plugins = session.plugins.summaries().length;
   }
   host.state.transcriptContainer.addChild(
     new StatusPanelComponent({
@@ -49,11 +49,11 @@ export async function showMcpServers(host: SlashCommandHost): Promise<void> {
   let servers: McpServerStatusSnapshot[];
   try {
     servers = await Promise.all(
-      session.listMcpServers().map(async (view) => ({
+      (session.mcp?.list() ?? []).map(async (view) => ({
         name: view.name,
         transport: view.transport,
         status: view.status,
-        toolCount: view.status === 'connected' ? (await session.listMcpTools(view.name).catch(() => [])).length : 0,
+        toolCount: view.status === 'connected' ? (await session.mcp?.listTools(view.name).catch(() => []) ?? []).length : 0,
         ...(view.error !== undefined ? { error: view.error } : {}),
       })),
     );

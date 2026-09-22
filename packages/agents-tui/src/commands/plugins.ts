@@ -25,32 +25,32 @@ export async function handlePluginsCommand(host: SlashCommandHost, args: string)
       return;
     case 'install':
       await runPluginAction(host, session, subject, 'Usage: /plugins install <github-repo | path | zip-url>', async (source) => {
-        const plugin = await session.installPlugin(source);
+        const plugin = await session.plugins.installSummary(source);
         return `Installed ${plugin.displayName} (${plugin.id}).`;
       });
       return;
     case 'remove':
     case 'uninstall':
       await runPluginAction(host, session, subject, 'Usage: /plugins remove <plugin-id>', async (id) => {
-        await session.removePlugin(id);
+        await session.plugins.remove(id);
         return `Removed ${id}.`;
       });
       return;
     case 'enable':
       await runPluginAction(host, session, subject, 'Usage: /plugins enable <plugin-id>', async (id) => {
-        await session.setPluginEnabled(id, true);
+        await session.plugins.setEnabled(id, true);
         return `Enabled ${id}.`;
       });
       return;
     case 'disable':
       await runPluginAction(host, session, subject, 'Usage: /plugins disable <plugin-id>', async (id) => {
-        await session.setPluginEnabled(id, false);
+        await session.plugins.setEnabled(id, false);
         return `Disabled ${id}.`;
       });
       return;
     case 'reload':
       try {
-        const summary = await session.reloadPlugins();
+        const summary = await session.plugins.reload();
         const parts = [`+${String(summary.added.length)}`, `-${String(summary.removed.length)}`];
         if (summary.errors.length > 0) parts.push(`${String(summary.errors.length)} failed`);
         host.showStatus(`Reloaded plugins (${parts.join(' ')}).`, summary.errors.length > 0 ? 'warning' : 'success');
@@ -92,7 +92,7 @@ async function runPluginAction(
 async function showPluginsPicker(host: SlashCommandHost, session: HarnessSession): Promise<void> {
   let plugins: readonly PluginSummary[];
   try {
-    plugins = await session.listPlugins();
+    plugins = await session.plugins.summaries();
   } catch (error) {
     host.showError(error instanceof ServiceUnavailableError ? NO_PLUGINS_MESSAGE : `Failed to list plugins: ${formatErrorMessage(error)}`);
     return;
@@ -118,7 +118,7 @@ async function showPluginsPicker(host: SlashCommandHost, session: HarnessSession
     onToggle: (id, enabled) => {
       void (async () => {
         try {
-          await session.setPluginEnabled(id, enabled);
+          await session.plugins.setEnabled(id, enabled);
           await host.refreshSkillCommands(session);
           await host.refreshSessionCommands(session);
         } catch (error) {
@@ -129,7 +129,7 @@ async function showPluginsPicker(host: SlashCommandHost, session: HarnessSession
     onRemove: (id) => {
       host.restoreEditor();
       void runPluginAction(host, session, id, 'Usage: /plugins remove <plugin-id>', async (target) => {
-        await session.removePlugin(target);
+        await session.plugins.remove(target);
         return `Removed ${target}.`;
       });
     },

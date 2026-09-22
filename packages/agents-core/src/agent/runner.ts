@@ -11,7 +11,7 @@ import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Capability, RunContext } from "../capabilities/capability.ts";
 import { Scope } from "../scope/scope.ts";
-import { T } from "../scope/tokens.ts";
+import { Tokens } from "../scope/tokens.ts";
 import { assembleCapabilities, type AssembledCapabilities } from "../capabilities/assembler.ts";
 import { computeContextBreakdown } from "./context-report.ts";
 import {
@@ -70,7 +70,7 @@ export interface RunnerConfig<TContext = unknown> {
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
   /**
    * Called once per session the Runner opens on its own (no `RunOptions.session`): register
-   * this session's objects (`T.Store`, `T.Environment`, `T.PermissionOptions`, …) on `scope` and
+   * this session's objects (`Tokens.Store`, `Tokens.Environment`, `Tokens.PermissionOptions`, …) on `scope` and
    * return its capabilities. A caller-supplied session is never passed through here.
    */
   readonly session?: (scope: Scope<"session">, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
@@ -380,7 +380,7 @@ export class Runner<TContext = unknown> {
     return this.withLease(baseOpts, async (lease) => {
       const { session, owned } = await this.acquireSession(baseOpts, undefined, lease);
       // Reopening a session: orphaned background subagents (running from a dead process) → lost.
-      await session.reconcileSubagents();
+      await session.background?.reconcileSubagents() ?? [];
       try {
         return await session.withRunLock(async () => {
           baseOpts?.signal?.throwIfAborted();
@@ -449,17 +449,19 @@ export class Runner<TContext = unknown> {
       return { session: opts.session, owned: false };
     }
     const scope = this.scope.child("session");
-    if (opts?.sessionId !== undefined) scope.register(T.SessionId, opts.sessionId);
     // Losing the lease cancels the run: a holder that can no longer renew has, by definition,
     // been superseded, and must stop before its writes race the node that took over. Only the
     // session this runner owns is wired up — a caller-supplied session keeps its own signal.
     const signal = mergeSignals(opts?.signal, lease?.signal);
-    if (signal !== undefined) scope.register(T.HostSignal, signal, { owned: false });
     // A one-shot pull stream IS the session's event bus (Invariant 4); it wins over the hook's.
-    if (eventsOverride !== undefined) scope.register(T.Events, eventsOverride, { owned: false });
+    if (eventsOverride !== undefined) scope.register(Tokens.Events, eventsOverride, { owned: false });
     try {
       const capabilities = (await this.config.session?.(scope, { sessionId: opts?.sessionId })) ?? [];
-      const session = await Session.open(scope, { capabilities });
+      const session = await Session.open(scope, {
+        capabilities,
+        ...(opts?.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      });
       return { session, owned: true };
     } catch (error) {
       // The scope is ours: a hook or open that fails must not leave it (and whatever it already
@@ -584,7 +586,7 @@ export class Runner<TContext = unknown> {
     // A normal post-crash continuation is a fresh prompt (for example "continue"), not the
     // HITL-specific Runner.resume path. Reconcile durable task ghosts before request recovery
     // inspects them so BackgroundOutput is given the truthful terminal `lost` status.
-    await session.reconcileSubagents();
+    await session.background?.reconcileSubagents() ?? [];
     if (session.store && (await session.store.getState(INTERRUPTION_STATE_KEY)) !== null) {
       throw new Error("This session has an interrupted run. Resume or resolve it before starting a new prompt.");
     }
@@ -743,7 +745,6 @@ export class Runner<TContext = unknown> {
     const upstream = opts?.signal ?? session.signal;
     const signal = AbortSignal.any([upstream, runController.signal]);
     const ctx: Omit<RunContext, "injection" | "gates"> = {
-      scope: session.scope,
       sessionId: session.id,
       signal,
       // Same session controls, except `abort` is scoped to this run rather than the session.
@@ -901,7 +902,7 @@ class Engine<TContext> {
           tools: visibleTools,
           messages: context.messages,
           injectionTokens,
-          compactBufferTokens: state.session.compaction?.reservedContextTokens ?? 0,
+          compactBufferTokens: state.session.compactionView?.reservedContextTokens ?? 0,
           capturedAt: Date.now(),
         }),
       );
