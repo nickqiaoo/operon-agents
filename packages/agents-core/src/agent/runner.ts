@@ -741,9 +741,20 @@ export class Runner<TContext = unknown> {
         },
       },
     };
-    const capabilities = await assembleCapabilities(session.capabilities, ctx);
-    const permission = session.permission;
     const frame = interruption?.frames[interruption.rootFrameId];
+    const runAddress = frame?.address ?? initialAddress;
+    const capabilities = await assembleCapabilities(session.capabilities, ctx, {
+      // A detachable hook that fails mid-run is announced as it happens, not after the run.
+      report: (diagnostic) => {
+        void session.events.emit({
+          type: diagnostic.level === "error" ? "error" : "warning",
+          message: `[capability ${diagnostic.capability}/${diagnostic.phase}] ${diagnostic.message}`,
+          address: runAddress,
+          sessionId: session.id,
+        });
+      },
+    });
+    const permission = session.permission;
     const state: RunState<TContext> = {
       runId: interruption?.runId ?? newInterruptionId("run"),
       frameId: frame?.frameId ?? newInterruptionId("frame"),
@@ -755,7 +766,7 @@ export class Runner<TContext = unknown> {
       usage: frame?.execution.usage ?? emptyUsage(),
       turns: frame?.execution.turns ?? 0,
       maxTurns: frame?.execution.maxTurns ?? opts?.maxTurns ?? this.config.maxTurns ?? 16,
-      address: frame?.address ?? initialAddress,
+      address: runAddress,
       events: session.events,
       environment: session.environment,
       store: session.store,

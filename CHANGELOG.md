@@ -47,6 +47,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scope, state gets a key — is written down in
   [docs/state-and-lifetime.md](./docs/state-and-lifetime.md).
 
+- **A detachable capability's hooks can fail without failing the run** (`operon-agents-core`).
+  `CapabilityContract` promised that a `detachable` capability's hooks are timed and isolated,
+  but only extensions got that — through their own runtime. The assembler now wraps every hook
+  of a `detachable` capability: each call has a budget (`Capability.hookTimeoutMs`, default 30s),
+  and a throw or an overrun is announced as a `warning` event when it happens and read as "no
+  opinion" (`undefined`), which every hook slot already treats as "carry on unchanged". An
+  `invariant` capability's hooks are used as written. `CapabilityDiagnostic.phase` gains `"hook"`,
+  and `assembleCapabilities` takes a `report` callback for mid-run diagnostics.
+
 - **Capability services replace the session facade** (`operon-agents-core`, `operon-agents`).
   `Session` had 34 methods that each looked a capability service up and forwarded one call to it
   — `session.createGoal`, `session.listSkills`, `session.stopBackgroundTask`, … — and

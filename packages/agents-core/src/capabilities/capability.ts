@@ -182,6 +182,14 @@ export interface Capability {
    *  that fails OPEN, which is how a dangerous tool runs anyway. */
   readonly policies?: readonly PermissionPolicy[];
   readonly hooks?: Partial<LoopHooks>;
+  /**
+   * Per-call budget for each of this capability's `hooks`, `detachable` only. A hook that throws
+   * or overruns is reported as a warning and treated as having returned nothing — the run goes on
+   * as if the capability had no opinion this time. Defaults to 30s: hooks block the loop, so they
+   * get room for real work (a network call, a subprocess) but not an unbounded stall.
+   * `invariant` hooks are never wrapped — their failure IS the run's failure.
+   */
+  readonly hookTimeoutMs?: number;
   readonly injectors?: readonly Injector[];
   /**
    * What this capability publishes to the session, reachable as `session.service(name)` and
@@ -249,7 +257,7 @@ export interface CapabilityRegistration<Config = unknown, Shared = void> {
 
 export interface CapabilityDiagnostic {
   readonly capability: string;
-  readonly phase: "register" | "start" | "stop";
+  readonly phase: "register" | "start" | "hook" | "stop";
   readonly level: "warn" | "error";
   readonly message: string;
 }

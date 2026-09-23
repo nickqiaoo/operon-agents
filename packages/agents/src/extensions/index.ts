@@ -77,6 +77,9 @@ export function extensionsCapability(
     name: "extensions",
     // The extensions this carries are each detachable by construction; so is carrying them.
     contract: "detachable",
+    // The runtime already gives every handler its own budget and isolates its failure; an outer
+    // deadline would only cut a chain of individually-healthy handlers short.
+    hookTimeoutMs: Number.POSITIVE_INFINITY,
     service: runtime,
     // An extension can touch the whole session surface, so this list IS the blast radius —
     // written down once, here, instead of discovered by reading the runtime for lookups.

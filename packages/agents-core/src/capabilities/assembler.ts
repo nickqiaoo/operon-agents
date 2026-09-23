@@ -6,12 +6,21 @@ import type { ToolProvider } from "./tool-provider.ts";
 
 const STOP_TIMEOUT_MS = 5_000;
 const START_TIMEOUT_MS = 10_000;
+/** Default per-call budget for a `detachable` capability's hooks (see `Capability.hookTimeoutMs`). */
+const HOOK_TIMEOUT_MS = 30_000;
 
 export interface AssembleCapabilitiesOptions {
   /** Max time to wait for a single capability's start(). Default 10s. */
   readonly startTimeoutMs?: number;
   /** Max time to wait for a single capability's stop(). Default 5s. */
   readonly stopTimeoutMs?: number;
+  /**
+   * Where a diagnostic raised MID-RUN goes — a `detachable` hook that threw or overran. Such a
+   * failure is reported when it happens rather than at the end of the run, because the run may
+   * be long and the failure explains what it is doing now. Without a reporter it joins
+   * `diagnostics` like the rest.
+   */
+  readonly report?: (diagnostic: CapabilityDiagnostic) => void;
 }
 
 export class AssembledCapabilities {
@@ -33,10 +42,12 @@ export class AssembledCapabilities {
   private readonly started: Capability[] = [];
   private readonly ctx: RunContext;
   private readonly stopTimeoutMs: number;
+  private readonly reporter: ((diagnostic: CapabilityDiagnostic) => void) | undefined;
 
   constructor(base: Omit<RunContext, "injection" | "gates">, options: AssembleCapabilitiesOptions = {}) {
     this.ctx = { ...base, injection: this.injection, gates: this.gates };
     this.stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
+    this.reporter = options.report;
   }
 
   /** The run context handed to every capability's `start` and tool provider. */
@@ -89,14 +100,58 @@ export class AssembledCapabilities {
     // Session.buildPermissionManager (the manager is session-lived), not per run.
 
     if (capability.hooks) {
+      // What the contract promises: a `detachable` capability's hook can fail or stall without
+      // taking the run with it. An `invariant` one is used as written.
+      const hooks = capability.contract === "detachable" ? this.isolate(capability, capability.hooks) : capability.hooks;
       // Run-tier hooks are driven by the Runner itself, not composed into the step environment.
-      const { shouldContinueAfterStop, beforeRun, ...loopHooks } = capability.hooks;
+      const { shouldContinueAfterStop, beforeRun, ...loopHooks } = hooks;
       if (Object.keys(loopHooks).length > 0) this.loopHookParts.push(loopHooks);
       if (shouldContinueAfterStop) this.boundaryContinuations.push(shouldContinueAfterStop);
       if (beforeRun) this.runStarts.push(beforeRun);
     }
 
     this.injection.registerAll(capability.injectors ?? []);
+  }
+
+  /**
+   * Wrap every hook of a `detachable` capability: each call gets the capability's budget, and a
+   * throw or an overrun becomes a warning plus "no opinion" (`undefined`) — which every hook slot
+   * already reads as "carry on unchanged". The overrunning call is not cancelled (a hook has no
+   * signal of its own); it is simply no longer waited for, and whatever it returns is dropped.
+   */
+  private isolate(capability: Capability, hooks: Partial<LoopHooks>): Partial<LoopHooks> {
+    const timeoutMs = capability.hookTimeoutMs ?? HOOK_TIMEOUT_MS;
+    const wrapped: Record<string, unknown> = {};
+    for (const [slot, hook] of Object.entries(hooks) as [string, ((ctx: unknown) => unknown) | undefined][]) {
+      if (hook === undefined) continue;
+      wrapped[slot] = async (ctx: unknown) => {
+        try {
+          return await withTimeout(Promise.resolve(hook(ctx)), timeoutMs);
+        } catch (error) {
+          this.report({
+            capability: capability.name,
+            phase: "hook",
+            level: "warn",
+            message: `${slot} failed/timed out; ignored for this call: ${messageOf(error)}`,
+          });
+          return undefined;
+        }
+      };
+    }
+    return wrapped as Partial<LoopHooks>;
+  }
+
+  private report(diagnostic: CapabilityDiagnostic): void {
+    if (this.reporter === undefined) {
+      this.diagnostics.push(diagnostic);
+      return;
+    }
+    try {
+      this.reporter(diagnostic);
+    } catch {
+      // A reporter that throws must not turn an isolated failure back into a run failure.
+      this.diagnostics.push(diagnostic);
+    }
   }
 
   markStarted(capability: Capability): void {
@@ -182,6 +237,8 @@ function messageOf(error: unknown): string {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, cancel?: AbortController): Promise<T> {
+  // `Infinity` means "no deadline" — handed to setTimeout it would overflow and fire at once.
+  if (!Number.isFinite(ms)) return promise;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       const error = new Error(`timed out after ${ms}ms`);

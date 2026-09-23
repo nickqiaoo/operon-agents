@@ -11,12 +11,15 @@
  *  - stop() fault isolation + timeout, reverse order.
  *  - duplicate capability names are rejected with a diagnostic, not a silent overwrite.
  *  - listTools() isolates a failing toolProvider from the others.
+ *  - a `detachable` capability's hooks are timed and isolated (throw/overrun → warning +
+ *    undefined); an `invariant` one's are not; `report` receives mid-run failures directly.
  */
 import { NullEnvironment, type Tool } from "../index.ts";
 import { assembleCapabilities, type AssembleCapabilitiesOptions } from "../internal.ts";
 import type { Capability, RunContext } from "../capabilities/capability.ts";
 import { testRunContext } from "./faux.ts";
 import type { ToolProvider } from "../capabilities/tool-provider.ts";
+import type { LoopHooks } from "../loop/types.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -165,6 +168,111 @@ async function main(): Promise<void> {
     const tools = await assembled.listTools();
     check("listTools(): failing provider produces a diagnostic instead of throwing", assembled.diagnostics.some((d) => d.capability === "failing"));
     check("listTools(): other provider's tools still come through", tools.some((t) => t.schema.name === "FromProvider"));
+  }
+
+  // ── detachable hooks: a throw or an overrun is "no opinion", reported, never fatal ──
+  {
+    const stepCtx = {} as Parameters<NonNullable<LoopHooks["beforeStep"]>>[0];
+    const healthy: Capability = {
+      name: "healthy",
+      contract: "detachable",
+      hooks: { beforeStep: async () => ({ system: "rewritten" }) },
+    };
+    const throwing: Capability = {
+      name: "throwing",
+      contract: "detachable",
+      hooks: {
+        beforeStep: async () => {
+          throw new Error("hook boom");
+        },
+        shouldContinueAfterStop: async () => {
+          throw new Error("continuation boom");
+        },
+      },
+    };
+    const stalling: Capability = {
+      name: "stalling",
+      contract: "detachable",
+      hookTimeoutMs: 40,
+      hooks: { beforeStep: () => new Promise(() => undefined) },
+    };
+    const assembled = await assemble([healthy, throwing, stalling]);
+    const [healthyPart, throwingPart, stallingPart] = assembled.loopHookParts;
+    check("detachable hook: a healthy hook's result passes through", (await healthyPart!.beforeStep!(stepCtx))?.system === "rewritten");
+    let threw = false;
+    let result: unknown = "unset";
+    try {
+      result = await throwingPart!.beforeStep!(stepCtx);
+    } catch {
+      threw = true;
+    }
+    check("detachable hook: a throwing hook does not throw out of the run", !threw);
+    check("detachable hook: a throwing hook reads as no opinion (undefined)", result === undefined);
+    check(
+      "detachable hook: the throw is a phase:hook warning naming the capability and slot",
+      assembled.diagnostics.some((d) => d.capability === "throwing" && d.phase === "hook" && d.level === "warn" && d.message.includes("beforeStep") && d.message.includes("hook boom")),
+    );
+    const continuation = await assembled.boundaryContinuations[0]!({} as Parameters<NonNullable<LoopHooks["shouldContinueAfterStop"]>>[0]);
+    check("detachable hook: run-tier slots (shouldContinueAfterStop) are isolated too", continuation === undefined);
+    const startedAt = Date.now();
+    const stalled = await stallingPart!.beforeStep!(stepCtx);
+    const elapsed = Date.now() - startedAt;
+    check("detachable hook: an overrun is abandoned at hookTimeoutMs", stalled === undefined && elapsed >= 35 && elapsed < 1_000);
+    check("detachable hook: the overrun is reported as timed out", assembled.diagnostics.some((d) => d.capability === "stalling" && /timed out/.test(d.message)));
+  }
+
+  // ── invariant hooks are used as written: their failure IS the run's failure ──
+  {
+    const invariant: Capability = {
+      name: "invariant-hook",
+      contract: "invariant",
+      hooks: {
+        beforeStep: async () => {
+          throw new Error("invariant boom");
+        },
+      },
+    };
+    const assembled = await assemble([invariant]);
+    let message = "";
+    try {
+      await assembled.loopHookParts[0]!.beforeStep!({} as Parameters<NonNullable<LoopHooks["beforeStep"]>>[0]);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    check("invariant hook: a throw propagates unchanged", message === "invariant boom");
+    check("invariant hook: nothing is swallowed into diagnostics", !assembled.diagnostics.some((d) => d.capability === "invariant-hook"));
+  }
+
+  // ── a reporter receives mid-run failures as they happen; Infinity means no deadline ──
+  {
+    const reported: string[] = [];
+    const failing: Capability = {
+      name: "reported",
+      contract: "detachable",
+      hooks: {
+        afterStep: async () => {
+          throw new Error("late");
+        },
+      },
+    };
+    const slow: Capability = {
+      name: "unbounded",
+      contract: "detachable",
+      hookTimeoutMs: Number.POSITIVE_INFINITY,
+      hooks: {
+        afterStep: async () => {
+          await delay(30);
+          return { stopTurn: true };
+        },
+      },
+    };
+    const assembled = await assemble([failing, slow], { report: (d) => reported.push(`${d.capability}/${d.phase}`) });
+    const stepCtx = {} as Parameters<NonNullable<LoopHooks["afterStep"]>>[0];
+    await assembled.loopHookParts[0]!.afterStep!(stepCtx);
+    check("reporter: a hook failure is handed to report() when it happens", reported.includes("reported/hook"));
+    check("reporter: a reported failure is not also queued in diagnostics", !assembled.diagnostics.some((d) => d.capability === "reported"));
+    const slowResult = await assembled.loopHookParts[1]!.afterStep!(stepCtx);
+    check("hookTimeoutMs Infinity: no deadline is imposed (and none fires at once)", slowResult?.stopTurn === true);
   }
 
   const failed = checks.filter(([, passed]) => !passed);
