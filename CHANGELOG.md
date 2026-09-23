@@ -73,6 +73,20 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SessionContext` is now built per capability — the three data members are its own view — so a
   hand-built context (tests) must supply them; `testSessionContext` does.
 
+- **A capability can join or leave a session that is already open** (`operon-agents-core`).
+  `Session.attachCapability(capability)` opens a `detachable` capability in a live session and
+  `detachCapability(name)` closes and removes one. With no run in flight the change is immediate;
+  otherwise it waits until the last run has stopped its capabilities, so a run never sees its set
+  change under it and the next run assembles the new one. An attach rejects — leaving nothing
+  behind — when `openSession` throws, when the name is taken or not a colon-free slug, or when the
+  capability is `invariant` (its policies were folded into the permission manager at open, so it
+  can neither come nor go). Nothing reaches the teardown of a closing session half-applied.
+
+  To know when a run is over, the Runner now tells the session (`enterRun` / `exitRun`) — which
+  also closed two ways a run could leak its started capabilities: a journal flush that failed at
+  the end of the run skipped `stop()`, and a failure between assembly and the run's main body
+  (replaying the conversation, writing the resume state) skipped the whole teardown.
+
 - **Capability services replace the session facade** (`operon-agents-core`, `operon-agents`).
   `Session` had 34 methods that each looked a capability service up and forwarded one call to it
   — `session.createGoal`, `session.listSkills`, `session.stopBackgroundTask`, … — and

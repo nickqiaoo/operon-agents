@@ -208,6 +208,13 @@ export interface SessionPort {
   registerFrameBus(address: string, bus: SteerBus): () => void;
 }
 
+/** An attach or detach waiting for a moment with no run in flight. */
+interface PendingCapabilityChange {
+  readonly apply: () => Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+}
+
 /**
  * Service access on a session has two tiers, one rule each:
  *  - PROBE — `session.service("x")` returns `undefined` when that capability is not open
@@ -276,6 +283,14 @@ export class Session implements SessionPort {
   private closing: Promise<void> | undefined;
   private runChain: Promise<void> = Promise.resolve();
   private readonly pendingDiagnostics: CapabilityDiagnostic[] = [];
+  /** Builds the context a capability is opened with; set by `openCapabilities`, reused by attach. */
+  private contextFor: ((owner: string) => SessionContext) | undefined;
+  /** Runs currently holding an assembly of `capabilities` — see `enterRun` / `exitRun`. */
+  private activeRuns = 0;
+  /** Attach/detach requests waiting for a moment with no run in flight. */
+  private readonly pendingChanges: PendingCapabilityChange[] = [];
+  /** Serializes applied changes, and lets `close()` wait for the one in progress. */
+  private changeChain: Promise<void> = Promise.resolve();
   // Most-recent per-turn context-window breakdown, stamped by the Runner at each turn boundary.
   // Undefined until the first turn assembles a request.
   private lastContextBreakdown?: ContextBreakdown;
@@ -398,12 +413,12 @@ export class Session implements SessionPort {
       ...(this.store !== undefined ? { store: this.store } : {}),
       ...(this.logger !== undefined ? { logger: this.logger } : {}),
     };
-    const contextFor = (owner: string): SessionContext => ({
+    const contextFor = (this.contextFor = (owner: string): SessionContext => ({
       ...shared,
       state: data.stateFor(owner),
       records: data.recordsFor(owner),
       record: data.recorderFor(owner),
-    });
+    }));
     const opened: Capability[] = [];
     const seen = new Set<string>();
     for (const cap of this.allCapabilities) {
@@ -477,6 +492,101 @@ export class Session implements SessionPort {
     this.store.appendRecord({ time: Date.now(), address: DEFAULT_ADDRESS, ...body } as AgentRecord).catch((error: unknown) => {
       this.logger.log("warn", "capability record failed to persist", { error: messageOf(error) });
     });
+  }
+
+  // ==========================================================================
+  // Capabilities added and removed while the session is open
+  // ==========================================================================
+
+  /**
+   * Open `capability` in this live session. With no run in flight that is immediate; otherwise it
+   * waits for the last run to stop, so a run never sees its capability set change under it — the
+   * next run assembles with it. Resolves once `openSession` has run and the capability is part of
+   * the session; rejects, leaving nothing behind, when it throws.
+   *
+   * Only a `detachable` capability can come and go: an `invariant` one (permission, compaction)
+   * is part of the session from open — its policies were folded into the permission manager then.
+   */
+  attachCapability(capability: Capability): Promise<void> {
+    return this.submitChange(() => this.attachNow(capability));
+  }
+
+  /** Close and remove a `detachable` capability, at the same quiet point `attachCapability` uses. */
+  detachCapability(name: string): Promise<void> {
+    return this.submitChange(() => this.detachNow(name));
+  }
+
+  /** @internal The Runner is about to assemble `capabilities` for a run. Pair with `exitRun`. */
+  enterRun(): void {
+    this.activeRuns += 1;
+  }
+
+  /** @internal The run has stopped its capabilities. The last one out applies queued changes. */
+  async exitRun(): Promise<void> {
+    this.activeRuns = Math.max(0, this.activeRuns - 1);
+    if (this.activeRuns === 0) await this.drainChanges();
+  }
+
+  private submitChange(apply: () => Promise<void>): Promise<void> {
+    if (this.closing !== undefined || !this.isOpen) return Promise.reject(new Error("session is closed"));
+    return new Promise<void>((resolve, reject) => {
+      this.pendingChanges.push({ apply, resolve, reject });
+      if (this.activeRuns === 0) void this.drainChanges();
+    });
+  }
+
+  private drainChanges(): Promise<void> {
+    const next = this.changeChain.then(async () => {
+      while (this.pendingChanges.length > 0 && this.activeRuns === 0) {
+        const change = this.pendingChanges.shift()!;
+        try {
+          if (this.closing !== undefined) throw new Error("session is closed");
+          await change.apply();
+          change.resolve();
+        } catch (error) {
+          change.reject(error);
+        }
+      }
+    });
+    this.changeChain = next.catch(() => undefined);
+    return this.changeChain;
+  }
+
+  private async attachNow(capability: Capability): Promise<void> {
+    const name = capability.name;
+    // Colon-free: the name partitions state and records (`extension:<name>:`), and a colon would
+    // let one capability's partition swallow another's.
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) {
+      throw new Error(`capability name "${name}" must be a slug ([A-Za-z0-9_.-], no colons)`);
+    }
+    if (capability.contract === "invariant") {
+      throw new Error(`capability "${name}" is invariant: it is part of the session from open and cannot be attached later`);
+    }
+    if (this.provisionedCapabilities.some((open) => open.name === name)) {
+      throw new Error(`a capability named "${name}" is already open in this session`);
+    }
+    await capability.openSession?.(this.contextFor!(name));
+    if (capability.service !== undefined) this.services.set(name, capability.service);
+    this.provisionedCapabilities = [...this.provisionedCapabilities, capability];
+    this.openedForClose = [...this.openedForClose, capability];
+  }
+
+  private async detachNow(name: string): Promise<void> {
+    const capability = this.provisionedCapabilities.find((open) => open.name === name);
+    if (capability === undefined) throw new Error(`no capability named "${name}" is open in this session`);
+    if (capability.contract === "invariant") {
+      throw new Error(`capability "${name}" is invariant and cannot be detached`);
+    }
+    // Out of the session first — nothing assembles it again — then torn down.
+    this.provisionedCapabilities = this.provisionedCapabilities.filter((open) => open !== capability);
+    this.openedForClose = this.openedForClose.filter((open) => open !== capability);
+    if (this.services.get(name) === capability.service) this.services.delete(name);
+    if (capability.closeSession === undefined) return;
+    try {
+      await withTimeout(Promise.resolve(capability.closeSession()), CLOSE_TIMEOUT_MS);
+    } catch (error) {
+      this.logger.log("warn", `capability "${name}" closeSession failed/timed out on detach`, { capability: name, phase: "stop", error: messageOf(error) });
+    }
   }
 
   /** Close capabilities in reverse open order, each fault-isolated: used to undo a failed open. */
@@ -858,6 +968,10 @@ export class Session implements SessionPort {
 
   private async runClose(): Promise<void> {
     this.isOpen = false;
+    // Nothing queued will be applied now; one already being applied finishes first, so the
+    // capability it opens is on the list the teardown below walks.
+    for (const change of this.pendingChanges.splice(0)) change.reject(new Error("session is closed"));
+    await this.changeChain;
     this.systemPromptContexts.clear();
     this.unsubscribeTracing?.();
     this.unsubscribeTelemetry?.();

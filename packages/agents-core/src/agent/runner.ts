@@ -390,10 +390,17 @@ export class Runner<TContext = unknown> {
           }
           session.setConversationHead({ agentKey: active.name, address: rootFrame.address });
           const state = await this.beginRun(session, baseOpts, updated);
-          await store.putState(INTERRUPTION_STATE_KEY, updated);
-          // History is the log's job — replay it (the active agent's shard) to rebuild context.
-          const context = await replayContext(store, rootFrame.address);
-          session.setLiveContext(rootFrame.address, context);
+          let context: ConversationContext;
+          try {
+            await store.putState(INTERRUPTION_STATE_KEY, updated);
+            // History is the log's job — replay it (the active agent's shard) to rebuild context.
+            context = await replayContext(store, rootFrame.address);
+            session.setLiveContext(rootFrame.address, context);
+          } catch (error) {
+            // The run's capabilities are started: stop them before the error leaves.
+            await this.settleRun(session, state, undefined);
+            throw error;
+          }
           try {
             const resumeFrom = findAnchoredAssistant(context.messages, rootFrame.anchor);
             const result = await this.engine.run(active, context, state, resumeFrom);
@@ -579,35 +586,46 @@ export class Runner<TContext = unknown> {
     const head = await this.resolveConversationHead(session, rootAgent);
     const agent = head.agent;
     const state = await this.beginRun(session, opts, undefined, head.address);
-    // Live runs tolerate duplicate names (edges resolve by object), but durable name-keyed
-    // resolution (resume) fails closed on them — warn now, not mid-recovery.
-    const duplicates = duplicateAgentNames(rootAgent);
-    if (duplicates.length > 0) {
-      emitRunEvent(state, {
-        type: "warning",
-        message: `Agent graph contains duplicate agent names (${duplicates.join(", ")}). Interrupted runs referencing these names cannot be resumed — give agents unique names.`,
-      });
+    // From here the run holds started capabilities: whatever throws before the main `try` below
+    // must still stop them, or they never are — and the session never reaches a quiet point.
+    let context!: ConversationContext;
+    let runStart!: { input: Message[]; handled?: { output?: string } };
+    try {
+      // Live runs tolerate duplicate names (edges resolve by object), but durable name-keyed
+      // resolution (resume) fails closed on them — warn now, not mid-recovery.
+      const duplicates = duplicateAgentNames(rootAgent);
+      if (duplicates.length > 0) {
+        emitRunEvent(state, {
+          type: "warning",
+          message: `Agent graph contains duplicate agent names (${duplicates.join(", ")}). Interrupted runs referencing these names cannot be resumed — give agents unique names.`,
+        });
+      }
+      // Continue the conversation. A long-lived session keeps its live context, so we append to it
+      // (O(1)) instead of replaying the whole log every turn. Model-visible reminders are ordinary
+      // append-only context records, so the live prefix is exactly what a cold replay reconstructs.
+      // A cold run (new session, or after a log rewrite) replays the log once and caches it. No
+      // store means the same append-only behavior, held only in memory.
+      const live = session.liveContext(state.address);
+      if (live !== undefined) {
+        context = live;
+      } else {
+        context = state.store
+          ? await replayContext(state.store, state.address)
+          : new ConversationContext({
+              store: state.store,
+              address: state.address,
+              onHistoryChange: historyChangeEmitter(state.events, state.sessionId),
+            });
+        session.setLiveContext(state.address, context);
+      }
+      // Capability interception of the caller's input, BEFORE guardrails and before anything is
+      // journaled: a rewrite here is what the run (and its replay) sees as the prompt. Guardrails
+      // then judge what actually enters history, not what the caller originally sent.
+      runStart = await this.applyRunStarts(state, agent.name, toMessages(input));
+    } catch (error) {
+      await this.settleRun(session, state, context as ConversationContext | undefined);
+      throw error;
     }
-    // Continue the conversation. A long-lived session keeps its live context, so we append to it
-    // (O(1)) instead of replaying the whole log every turn. Model-visible reminders are ordinary
-    // append-only context records, so the live prefix is exactly what a cold replay reconstructs.
-    // A cold run (new session, or after a log rewrite) replays the log once and caches it. No
-    // store means the same append-only behavior, held only in memory.
-    let context = session.liveContext(state.address);
-    if (context === undefined) {
-      context = state.store
-        ? await replayContext(state.store, state.address)
-        : new ConversationContext({
-            store: state.store,
-            address: state.address,
-            onHistoryChange: historyChangeEmitter(state.events, state.sessionId),
-          });
-      session.setLiveContext(state.address, context);
-    }
-    // Capability interception of the caller's input, BEFORE guardrails and before anything is
-    // journaled: a rewrite here is what the run (and its replay) sees as the prompt. Guardrails
-    // then judge what actually enters history, not what the caller originally sent.
-    const runStart = await this.applyRunStarts(state, agent.name, toMessages(input));
     const messages = runStart.input;
     let inputAccepted = false;
     try {
@@ -711,11 +729,21 @@ export class Runner<TContext = unknown> {
    * at a new shard (session.setLiveContext), and that shard's context is what holds the
    * run's latest unflushed writes — then stop capabilities and surface their diagnostics.
    */
-  private async settleRun(session: Session, state: RunState<TContext>, context: ConversationContext): Promise<void> {
-    await (session.liveContext(state.address) ?? context).flush();
-    await state.capabilities.stop();
-    await session.flushEvents();
-    this.reportDiagnostics(state);
+  private async settleRun(session: Session, state: RunState<TContext>, context: ConversationContext | undefined): Promise<void> {
+    // Each step runs even when the one before it throws: a failed flush must still stop the
+    // capabilities, and the session must always learn the run is over — that is the quiet point
+    // a queued attach/detach waits for.
+    try {
+      await (session.liveContext(state.address) ?? context)?.flush();
+    } finally {
+      try {
+        await state.capabilities.stop();
+        await session.flushEvents();
+      } finally {
+        await session.exitRun();
+        this.reportDiagnostics(state);
+      }
+    }
   }
 
   private async beginRun(
@@ -743,7 +771,9 @@ export class Runner<TContext = unknown> {
     };
     const frame = interruption?.frames[interruption.rootFrameId];
     const runAddress = frame?.address ?? initialAddress;
-    const capabilities = await assembleCapabilities(session.capabilities, ctx, {
+    // Counted from before assembly, so an attach requested while this run assembles waits for it.
+    session.enterRun();
+    const assembling = assembleCapabilities(session.capabilities, ctx, {
       // A detachable hook that fails mid-run is announced as it happens, not after the run.
       report: (diagnostic) => {
         void session.events.emit({
@@ -754,6 +784,13 @@ export class Runner<TContext = unknown> {
         });
       },
     });
+    let capabilities: Awaited<typeof assembling>;
+    try {
+      capabilities = await assembling;
+    } catch (error) {
+      await session.exitRun();
+      throw error;
+    }
     const permission = session.permission;
     const state: RunState<TContext> = {
       runId: interruption?.runId ?? newInterruptionId("run"),
