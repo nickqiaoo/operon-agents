@@ -56,6 +56,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `invariant` capability's hooks are used as written. `CapabilityDiagnostic.phase` gains `"hook"`,
   and `assembleCapabilities` takes a `report` callback for mid-run diagnostics.
 
+  The Runner no longer swallows a `beforeRun` hook's throw on top of that. It used to skip any
+  failing input hook with a warning — an invariant one included, which its contract forbids. A
+  detachable hook is isolated by the assembler anyway; an invariant one's throw now fails the run,
+  with the run's capabilities stopped as for any other failure.
+
 - **A capability reaches what only extensions could** (`operon-agents-core`). Four things an
   extension got from its own runtime are now plain parts of a capability, so a behaviour no
   longer has to be written as an extension to use them:

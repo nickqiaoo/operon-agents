@@ -9,7 +9,9 @@
  *  - refusals: invariant, duplicate, non-slug name, unknown detach, closed session; a throwing
  *    `openSession` rejects and leaves nothing behind;
  *  - detach closes the capability and withdraws its service; its state outlives it;
- *  - a run whose teardown throws still stops its capabilities and releases the session.
+ *  - a run whose teardown throws still stops its capabilities and releases the session;
+ *  - `beforeRun`: an invariant hook's throw fails the run (and still releases everything), a
+ *    detachable one's is reported and the prompt goes through unchanged.
  */
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { defineAgent, MemoryStore, type Capability, type SessionContext, type Tool } from "../index.ts";
@@ -224,6 +226,57 @@ async function main(): Promise<void> {
       delay(500),
     ]);
     check("failed flush: the session is quiet again — an attach applies at once", opened);
+    await session.close();
+  }
+
+  // ── beforeRun: an invariant hook's throw fails the run, before its main body ──
+  {
+    let stopped = false;
+    const failing: Capability = {
+      name: "strict-input",
+      contract: "invariant",
+      hooks: {
+        beforeRun: async () => {
+          throw new Error("input refused");
+        },
+      },
+      stop: () => {
+        stopped = true;
+      },
+    };
+    const session = await openTestSession({ permission: { mode: "yolo" }, capabilities: [failing] });
+    check("invariant beforeRun: the throw fails the run", await rejects(runner.run(agent, "x", { session }), /input refused/));
+    check("invariant beforeRun: the run's capabilities were still stopped", stopped);
+    let opened = false;
+    await Promise.race([
+      session.attachCapability({ name: "after-refusal", contract: "detachable", openSession: () => void (opened = true) }),
+      delay(500),
+    ]);
+    check("invariant beforeRun: the session is quiet again — an attach applies at once", opened);
+    await session.close();
+  }
+
+  // ── beforeRun: a detachable hook's throw is reported and the prompt goes through unchanged ──
+  {
+    const warnings: string[] = [];
+    const flaky: Capability = {
+      name: "flaky-input",
+      contract: "detachable",
+      hooks: {
+        beforeRun: async () => {
+          throw new Error("rewrite failed");
+        },
+      },
+    };
+    const session = await openTestSession({ permission: { mode: "yolo" }, capabilities: [flaky] });
+    session.events.subscribe((event) => {
+      if (event.type === "warning") warnings.push(event.message);
+    });
+    faux.setResponses([fauxAssistantMessage("answered", { stopReason: "stop" })]);
+    const result = await runner.run(agent, "original prompt", { session });
+    check("detachable beforeRun: the run completes", result.output.includes("answered"));
+    check("detachable beforeRun: the prompt reaches the model unchanged", JSON.stringify(result.messages).includes("original prompt"));
+    check("detachable beforeRun: the failure is a warning naming the capability", warnings.some((w) => w.includes("flaky-input") && w.includes("rewrite failed")));
     await session.close();
   }
 

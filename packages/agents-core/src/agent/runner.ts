@@ -692,8 +692,9 @@ export class Runner<TContext = unknown> {
   }
 
   /**
-   * Chain the capabilities' run-tier input hooks. Each sees the previous one's rewrite; a hook
-   * that throws is skipped (fault isolation — a broken capability must not sink the prompt).
+   * Chain the capabilities' run-tier input hooks. Each sees the previous one's rewrite. A broken
+   * detachable capability does not sink the prompt — its hook is isolated at assembly — while an
+   * invariant one does, as its contract says.
    */
   private async applyRunStarts(
     state: RunState<TContext>,
@@ -701,24 +702,20 @@ export class Runner<TContext = unknown> {
     input: readonly Message[],
   ): Promise<{ input: Message[]; handled?: { output?: string } }> {
     let current = input;
+    // No catch here: a detachable capability's hook is already isolated by the assembler (a throw
+    // is reported and reads as "no change"), so what can still throw is an invariant one — and
+    // its failure is the run's.
     for (const hook of state.capabilities.runStarts) {
-      try {
-        const result = await hook({
-          sessionId: state.sessionId,
-          address: state.address,
-          agent: agentName,
-          signal: state.signal,
-          input: current,
-        });
-        // First claim wins: once a hook answers the prompt there is nothing left to rewrite.
-        if (result?.handled !== undefined) return { input: [...current], handled: result.handled };
-        if (result?.input !== undefined) current = result.input;
-      } catch (error) {
-        emitRunEvent(state, {
-          type: "warning",
-          message: `beforeRun hook failed; input left unchanged: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
+      const result = await hook({
+        sessionId: state.sessionId,
+        address: state.address,
+        agent: agentName,
+        signal: state.signal,
+        input: current,
+      });
+      // First claim wins: once a hook answers the prompt there is nothing left to rewrite.
+      if (result?.handled !== undefined) return { input: [...current], handled: result.handled };
+      if (result?.input !== undefined) current = result.input;
     }
     return { input: [...current] };
   }
