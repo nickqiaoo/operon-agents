@@ -100,7 +100,7 @@ export type ModelProvider = Parameters<ModelRuntime["models"]["setProvider"]>[0]
 
 /**
  * Operations that exist above the agent loop: other sessions, and the model provider registry.
- * Supplied by `Harness` when it builds the extensions capability. This is exactly why the
+ * Supplied by `Harness` when it builds an extension's capability. This is exactly why the
  * extension runtime lives in `operon-agents` and not in core — core has no concept of "another
  * session", so an interface defined down there would have been half stubs.
  *

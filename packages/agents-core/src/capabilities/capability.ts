@@ -203,6 +203,9 @@ export interface CapabilityGates {
  */
 export type CapabilityContract = "invariant" | "detachable";
 
+/** Why `closeSession` runs: the session is closing, or the capability alone is being detached. */
+export type CloseReason = "close" | "detach";
+
 /**
  * A part of the engine, assembled into one session. Two tiers of lifecycle:
  *  - SESSION — `openSession` / `closeSession`: the session-lived wiring, driven by `Session.open`
@@ -250,8 +253,9 @@ export interface Capability {
    * is absent for the session (logged, run continues); an `invariant` one fails the open.
    */
   openSession?(ctx: SessionContext): Promise<void> | void;
-  /** Session-lived teardown, in reverse registration order. */
-  closeSession?(): Promise<void> | void;
+  /** Session-lived teardown, in reverse registration order. `reason` says whether the whole
+   *  session is closing or only this capability is leaving it (`Session.detachCapability`). */
+  closeSession?(reason: CloseReason): Promise<void> | void;
   /** Per-run startup. `signal` aborts when the assembler's start timeout expires — the
    *  timeout itself still wins the race (the capability is marked absent), but a
    *  signal-respecting implementation can release whatever it was holding. */
@@ -260,45 +264,6 @@ export interface Capability {
    *  wait past the timeout either way, so use the signal to abandon slow flushes
    *  instead of leaking them into the background. */
   stop?(signal?: AbortSignal): Promise<void> | void;
-}
-
-/** What a definition's process-shared half is handed. Aborts when the harness is torn down. */
-export interface CapabilityHostContext {
-  readonly signal: AbortSignal;
-}
-
-/**
- * The reusable half of a capability: what it is, how its configuration is validated, and how to
- * build one instance per session. Code configuration and a loaded file both produce THIS — the
- * single entry point, so there is no second assembly path with its own lifecycle to keep in
- * step with this one.
- *
- * The split matters. A definition is shared by every session; the `Capability` that `create`
- * returns — with its injectors, its closures, its `service` — belongs to exactly one. A module
- * that builds a stateful capability at import time and hands the same object to everyone has
- * session A's state showing up in session B, which is why `create` exists at all.
- *
- * `shared` is the escape hatch for what genuinely cannot be per-session (a connection pool, one
- * scan of a directory). It runs ONCE, when the harness starts — not lazily inside whichever
- * session happened to open first, so nothing about it depends on who got there first.
- */
-export interface CapabilityDefinition<Config = unknown, Shared = void> {
-  readonly id: string;
-  /** See {@link CapabilityContract}. A loader must refuse an `invariant` definition. */
-  readonly contract: CapabilityContract;
-  /** Validate (and narrow) the configuration before anything is built from it. */
-  parseConfig(value: unknown): Config;
-  /** The process-shared half: once per harness, before any session opens. */
-  shared?(config: Config, host: CapabilityHostContext): Shared | Promise<Shared>;
-  /** The per-session half: one fresh `Capability` per session. */
-  create(config: Config, ctx: { readonly shared: Shared }): Capability;
-}
-
-/** A definition plus the configuration it was registered with, and where it came from. */
-export interface CapabilityRegistration<Config = unknown, Shared = void> {
-  readonly definition: CapabilityDefinition<Config, Shared>;
-  readonly config: unknown;
-  readonly source: { readonly kind: "code" } | { readonly kind: "file"; readonly path: string; readonly version?: string };
 }
 
 export interface CapabilityDiagnostic {

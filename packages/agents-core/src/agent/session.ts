@@ -583,7 +583,7 @@ export class Session implements SessionPort {
     if (this.services.get(name) === capability.service) this.services.delete(name);
     if (capability.closeSession === undefined) return;
     try {
-      await withTimeout(Promise.resolve(capability.closeSession()), CLOSE_TIMEOUT_MS);
+      await withTimeout(Promise.resolve(capability.closeSession("detach")), CLOSE_TIMEOUT_MS);
     } catch (error) {
       this.logger.log("warn", `capability "${name}" closeSession failed/timed out on detach`, { capability: name, phase: "stop", error: messageOf(error) });
     }
@@ -594,7 +594,7 @@ export class Session implements SessionPort {
     for (const cap of [...opened].reverse()) {
       if (cap.closeSession === undefined) continue;
       try {
-        await withTimeout(Promise.resolve(cap.closeSession()), CLOSE_TIMEOUT_MS);
+        await withTimeout(Promise.resolve(cap.closeSession("close")), CLOSE_TIMEOUT_MS);
       } catch (error) {
         this.logger.log("warn", `capability "${cap.name}" closeSession failed while undoing a failed open`, {
           capability: cap.name,
@@ -1006,7 +1006,7 @@ export class Session implements SessionPort {
     for (const cap of [...this.openedForClose].reverse()) {
       if (cap.closeSession === undefined) continue;
       try {
-        await withTimeout(Promise.resolve(cap.closeSession()), CLOSE_TIMEOUT_MS);
+        await withTimeout(Promise.resolve(cap.closeSession("close")), CLOSE_TIMEOUT_MS);
       } catch (error) {
         this.pendingDiagnostics.push({ capability: cap.name, phase: "stop", level: "warn", message: `closeSession failed/timed out: ${messageOf(error)}` });
         this.logger.log("warn", `capability "${cap.name}" closeSession failed/timed out`, { capability: cap.name, phase: "stop", error: messageOf(error) });

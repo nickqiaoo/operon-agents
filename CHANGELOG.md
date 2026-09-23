@@ -154,6 +154,28 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Test helpers: `testHarnessScope`, `testSessionScope` and `wireTestSession` are replaced by
     `sessionOptionsFrom` and `testSessionContext` (`operon-agents-core/internal`).
 
+- **Each extension is its own capability** (`operon-agents`). The extension API is unchanged —
+  `ExtensionDefinition`, `session(api, ctx)`, the `harness` half, `uses`, `params` and every event
+  keep their shape. What changed is underneath: an extension used to be one of N guests inside a
+  single `extensions` capability with its own handler table, timeouts, attach queue, state and
+  command registry. Each is now mounted as its own `detachable` capability, named by its id, so it
+  is assembled, isolated, attached and detached exactly like `goal` or `plan`; `ExtensionRuntime`
+  keeps only the translation between the engine and the extension API. `attachExtension` /
+  `detachExtension` are `Session.attachCapability` / `detachCapability` underneath, and an
+  extension's state and records are the engine's per-capability data under the same
+  `extension:<id>:` prefix, so existing sessions read back.
+
+  **Breaking**:
+  - `extensionsCapability(definitions)` returns `Capability[]` — spread it into `capabilities`.
+    `extensionCapability(definition)` builds one.
+  - `session.service("extensions")` is gone. `session.service(id)` is what that extension
+    published with `api.expose` (as `extensionHandle(id)` always was).
+  - An extension's id may not be the name of a capability the session already has (`goal`,
+    `plan`, …): the session refuses to open, naming it, rather than one displacing the other.
+  - `actions.record` journals into the session's main conversation rather than the shard of
+    whichever frame was active, and works outside a run too.
+  - `Capability.closeSession` receives why it runs: `"close"` or `"detach"`.
+
 - **`mcpSessionCapability` is folded into `mcpServersCapability`** (`operon-agents-core`). The two
   had converged: the session one already handled "no shared connections to view" by owning its
   servers outright, which is exactly what the other did. The topology now follows from what the

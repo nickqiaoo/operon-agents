@@ -239,7 +239,7 @@ which is why an outer ring is required:
 | **Another session** | `ExtensionHost.newSession / fork / openSession / listSessions`; the peers spawn factory |
 | **A process-level shared instance** | `HarnessParts`, what the `harness` hook returns (§5.7); extension services sit beside it by id in `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
 | **A per-directory shared instance** | does not exist. Share it with the whole process, or build it per session (§5.7) |
-| **Extension runtime** | `ExtensionRuntime` (`extensions/runtime.ts`) projects capability hooks **one by one** into extension events, giving each hook a timeout and fault isolation |
+| **Extension runtime** | `extensionCapability` (`extensions/index.ts`) mounts each extension as its own `detachable` capability, named by its id; `ExtensionRuntime` (`extensions/runtime.ts`) translates between the engine and the extension API — `api` registrations into capability parts, hook slots **one by one** into extension events, each handler under its own budget. Assembly, attach/detach at a run boundary, state and records are the engine's, as for any capability |
 | **File loading** | `extensions/loader.ts`: file → import → value → attach; manual approval accounted by mtime |
 | **Model provider registry** | `HarnessParts.modelRuntime`, returned by the `harness` hook |
 | **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalEnvironment, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |

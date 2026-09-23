@@ -115,7 +115,7 @@ import type {
 } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
+import { extensionCapability, extensionRuntimeOf, extensionsCapability, HarnessExtensionManager, type ExtensionRuntime, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
 import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult, type TodoItem } from "operon-agents-core";
 
 export type ApprovalHandler = (
@@ -638,6 +638,9 @@ export class HarnessSession<TContext = unknown> {
   private wakeScheduled = false;
   /** Per-session turn cap; the Runner's own config is the fallback. */
   private readonly maxTurns: number | undefined;
+  /** Builds the capability an extension attached to THIS session runs as — bound to the
+   *  session's harness reach and its per-session params. */
+  private readonly mountExtension: (definition: ExtensionDefinition) => Capability;
 
   constructor(args: {
     core: Session;
@@ -650,6 +653,7 @@ export class HarnessSession<TContext = unknown> {
     context?: TContext;
     maxTurns?: number;
     interrupted?: boolean;
+    mountExtension: (definition: ExtensionDefinition) => Capability;
     onClosed: (id: string) => void | Promise<void>;
   }) {
     this.core = args.core;
@@ -664,6 +668,7 @@ export class HarnessSession<TContext = unknown> {
     this.maxTurns = args.maxTurns;
     this.lastRunInterrupted = args.interrupted ?? false;
     this.onClosed = args.onClosed;
+    this.mountExtension = args.mountExtension;
     // Nothing drains a queue that fills while the session sits idle — the run loop's
     // turn-boundary drain only exists while a run is in flight. Without this, a background
     // task settling minutes after its spawning turn ended (the normal case: spawning to the
@@ -1181,28 +1186,26 @@ export class HarnessSession<TContext = unknown> {
    * register it in `createHarness({ extensions })`, which every open re-evaluates). A definition
    * with a `harness` half is accepted only once registered — its service must already exist.
    */
-  attachExtension(definition: ExtensionDefinition): Promise<void> {
-    return this.extensionRuntime().attach(definition);
+  async attachExtension(definition: ExtensionDefinition): Promise<void> {
+    await this.core.attachCapability(this.mountExtension(definition));
   }
   /** Remove an extension mid-session: `session.end("detach")` fires, then its scope unwinds. */
-  detachExtension(extensionId: string): Promise<void> {
-    return this.extensionRuntime().detach(extensionId);
+  async detachExtension(extensionId: string): Promise<void> {
+    if (this.extensionRuntime(extensionId) === undefined) throw new Error(`unknown extension "${extensionId}"`);
+    await this.core.detachCapability(extensionId);
   }
-  /** Ids of currently attached extensions; empty when the session has no extensions capability. */
+  /** Ids of currently attached extensions, in mount order. */
   attachedExtensionIds(): readonly string[] {
-    try {
-      return this.extensionRuntime().attachedIds();
-    } catch {
-      return [];
-    }
+    return this.attachedExtensions().map((extension) => extension.id);
   }
-  /** Currently attached extensions with what each `uses`; empty without an extensions capability. */
+  /** Currently attached extensions with what each `uses`. */
   attachedExtensions(): readonly { readonly id: string; readonly uses: readonly string[] }[] {
-    try {
-      return this.extensionRuntime().attachedExtensions();
-    } catch {
-      return [];
+    const out: { readonly id: string; readonly uses: readonly string[] }[] = [];
+    for (const capability of this.core.capabilities) {
+      const runtime = extensionRuntimeOf(capability);
+      if (runtime !== undefined) out.push({ id: runtime.id, uses: runtime.definition.uses ?? [] });
     }
+    return out;
   }
   /** Run a slash command against this session: the static registry plus capability-contributed
    *  dynamic commands (extensions' `registerCommand`). Commands are the SERIALIZABLE control
@@ -1215,16 +1218,11 @@ export class HarnessSession<TContext = unknown> {
    *  is absent, detached, or exposed nothing. The generic replacement for per-feature session
    *  facade methods (e.g. cron's — see `cronExtension`). */
   extensionHandle<T = unknown>(extensionId: string): T | undefined {
-    try {
-      return this.extensionRuntime().exposedHandle<T>(extensionId);
-    } catch {
-      return undefined;
-    }
+    return this.extensionRuntime(extensionId)?.exposedHandle<T>();
   }
-  private extensionRuntime(): ExtensionRuntime {
-    const runtime = this.core.service<ExtensionRuntime>("extensions");
-    if (!runtime) throw new Error("this session has no extensions capability");
-    return runtime;
+  private extensionRuntime(extensionId: string): ExtensionRuntime | undefined {
+    const capability = this.core.capabilities.find((open) => open.name === extensionId);
+    return capability === undefined ? undefined : extensionRuntimeOf(capability);
   }
 
   /**
@@ -1866,11 +1864,17 @@ export class Harness<TContext = unknown> {
     // Every definition registered on this harness: by value (`extensions`, harness halves
     // included — their per-session `session` is mounted here like any other), then from files.
     const extensions = [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
+    // An extension is mounted under its id, so one named like a capability the session already
+    // has would displace it — refused by name rather than resolved by order.
+    const baseNames = new Set(base.map((capability) => capability.name));
+    for (const definition of extensions) {
+      if (baseNames.has(definition.id)) {
+        throw new Error(`extension "${definition.id}" has the name of one of this session's capabilities; give it another id`);
+      }
+    }
     // Put extension transforms first. Shell PreToolUse remains in the staged permission policy,
     // so it evaluates the final rewritten args before normal authorization.
-    // Installed even when empty: the runtime must exist for `attachExtension` to have
-    // somewhere to land on sessions born without extensions.
-    return [extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId), params }), ...base];
+    return [...extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId), params }), ...base];
   }
 
   /**
@@ -1998,6 +2002,12 @@ export class Harness<TContext = unknown> {
           ? { maxTurns: opts.maxTurns ?? this.options.maxTurns }
           : {},
         interrupted,
+        mountExtension: (definition) => {
+          if (params?.[definition.id] === false) {
+            throw new Error(`extension "${definition.id}" is opted out for this session (params["${definition.id}"] is false)`);
+          }
+          return extensionCapability(definition, { host: this.extensionHost(id), params: params?.[definition.id], startReason: "attach" });
+        },
         onClosed: (sid) => {
           // Only THIS instance's registration goes — a later open under the same id (a resume
           // that waited for this close) must keep its own.

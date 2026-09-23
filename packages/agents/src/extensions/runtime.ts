@@ -1,9 +1,10 @@
-import { randomBytes } from "node:crypto";
 import type { Environment, EventSink, SteerBus } from "operon-agents-core";
 import { ServiceUnavailableError, isProbeProperty } from "./services.ts";
 import type { AgentRecord, HeadlessCommand } from "operon-agents-core";
 import type {
   AssistantMessage,
+  CapabilityProviderHooks,
+  ProviderHookContext,
   RunContext,
   CompactionGate,
   ChatModel,
@@ -36,7 +37,6 @@ import type {
   ExtensionHost,
   ExtensionHandler,
   ExtensionModelRequestResult,
-  ProviderHeaders,
   ExtensionResultMap,
   ExtensionSessionEventContext,
   ExtensionState,
@@ -48,7 +48,6 @@ import type {
   SessionEndReason,
   SessionStartReason,
   ExtensionCommand,
-  ExtensionRecordEntry,
 } from "./types.ts";
 
 /** Decision points block the loop, so they get room to do real work (network, subprocess). */
@@ -80,11 +79,6 @@ interface StepOrigin {
   readonly model: ChatModel;
 }
 
-/** A queued attach/detach, applied at the next quiet point (idle, or the run's stop). */
-type PendingChange =
-  | { readonly kind: "attach"; readonly definition: ExtensionDefinition; readonly resolve: () => void; readonly reject: (error: unknown) => void }
-  | { readonly kind: "detach"; readonly id: string; readonly resolve: () => void; readonly reject: (error: unknown) => void };
-
 /**
  * The session services the extensions capability declares (see `extensionsCapability`). Named
  * here because this is where they are used; the declaration that fills it lives next to the
@@ -99,38 +93,35 @@ export interface ExtensionServices {
   readonly store: SessionStore | undefined;
 }
 
+/**
+ * One extension, running in one session. `extensionCapability` wraps it as that session's
+ * capability, so everything around the extension — assembly, hook isolation, attach and detach
+ * at a run boundary, its state and records — is the engine's, the same as for any capability.
+ * What is left here is the translation the extension API exists for: `api` registrations into
+ * capability parts, and the engine's decision points into the extension's event vocabulary.
+ */
 export class ExtensionRuntime {
-  private readonly definitions: ExtensionDefinition[];
+  readonly definition: ExtensionDefinition;
   private readonly handlers = new Map<ExtensionEventName, RegisteredHandler[]>();
-  private readonly tools = new Map<string, { readonly extensionId: string; readonly tool: Tool }>();
-  /** Stable reference: `extensionsCapability` hands this array to the assembler, and `session`
+  private readonly tools = new Map<string, Tool>();
+  /** Stable reference: `extensionCapability` hands this array to the assembler, and `session`
    *  (which runs at openSession, before any run assembles) fills it in place. */
   private readonly injectors: Injector[] = [];
-  /** Slash commands by normalized name — surfaced to the session's registry via the
-   *  `sessionCommands()` duck protocol. Two extensions claiming one name fail closed. */
-  private readonly extCommands = new Map<string, { extensionId: string; command: HeadlessCommand }>();
-  /** Host-facing control surfaces published via `api.expose`, by extension id. */
-  private readonly exposedHandles = new Map<string, unknown>();
-  /** Records read path: open-time snapshot buckets (built lazily off the session's shared
-   *  memoized log read — zero extra traversal) + everything recorded this session. */
-  private recordSnapshot: Map<string, ExtensionRecordEntry[]> | undefined;
-  private readonly recordWrites = new Map<string, ExtensionRecordEntry[]>();
-  /** Per-extension teardown: session()'s cleanup + every registration, undone in reverse. */
-  private readonly scopes = new Map<string, () => void | Promise<void>>();
-  /** Extensions whose contributions are currently honored. An id leaves on detach (and on
-   *  session() failure), which turns every `actions`/`api` closure the extension still holds
-   *  into a warn-and-noop — a detached extension must not keep steering the session. */
-  private readonly live = new Set<string>();
-  /** Changes wait here until a quiet point: mid-run requests apply at the run's stop
-   *  boundary, so a turn never sees its toolset change underneath it. */
-  private pending: PendingChange[] = [];
-  /** Serializes flushes so concurrent attach/detach apply strictly in submission order. */
-  private flushChain: Promise<void> = Promise.resolve();
-  private readonly memoryState = new Map<string, unknown>();
-  /** The session binding: the services the capability DECLARED, plus the session's id/signal/scope. */
+  /** Slash commands, filled in place by `api.registerCommand` — the capability's `commands`. */
+  readonly commands: HeadlessCommand[] = [];
+  /** The host-facing control surface published via `api.expose`. */
+  private exposed: unknown;
+  /** `session()`'s cleanup plus every registration, undone in reverse. */
+  private teardown: (() => void | Promise<void>) | undefined;
+  /** False until `session` has run, and again once the extension is closed: every `actions` /
+   *  `api` closure it still holds turns into a warn-and-noop — a detached extension must not
+   *  keep steering the session. */
+  private live = false;
+  /** The session binding: the services the capability DECLARED, plus the session's id/signal. */
   private session: (SessionContext & ExtensionServices) | undefined;
   private run: RunContext | undefined;
-  /** The conversation shard the in-flight decision point belongs to; backs `actions.record`. */
+  /** The conversation shard the in-flight decision point belongs to — the address a
+   *  `compaction.before` handler is told about. */
   private activeContext: ConversationContext | undefined;
   /** Snapshot of the last assembled registry, refreshed once per turn by `filterTools`. */
   private allToolNames: readonly string[] = [];
@@ -140,216 +131,102 @@ export class ExtensionRuntime {
 
   /** Harness reach. Absent when the capability is built standalone (bare Runner / tests). */
   private readonly host: ExtensionHost | undefined;
-  /** This session's per-session extension arguments, by extension id. A value of `false` means
-   *  "skip this extension for this session"; any other value is passed to `session` as `params`. */
-  private readonly params: Readonly<Record<string, unknown>>;
+  /** This session's argument for the extension (`createSession({ params: { [id]: … } })`). */
+  private readonly params: unknown;
+  /** What `session.start` reports: `attach` for an extension added to a live session. */
+  private readonly startReason: SessionStartReason;
 
-  constructor(definitions: readonly ExtensionDefinition[], host?: ExtensionHost, params: Readonly<Record<string, unknown>> = {}) {
-    this.host = host;
-    this.params = params;
-    const seen = new Set<string>();
-    for (const definition of definitions) {
-      if (!definition.id.trim()) throw new Error("extension id must not be empty");
-    // Slug only, colons forbidden: records and state scope by the "extension:<id>:" prefix,
-    // so an id containing ":" would make one extension's bucket swallow another's.
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(definition.id)) {
-      throw new Error(`extension id "${definition.id}" must be a slug ([A-Za-z0-9_.-], no colons)`);
-    }
-      if (seen.has(definition.id)) throw new Error(`duplicate extension id "${definition.id}"`);
-      seen.add(definition.id);
-    }
-    // A session that opted an extension out (`params[id] === false`) never carries it: not in
-    // the definition list, never set up, never reported as attached.
-    this.definitions = definitions.filter((definition) => params[definition.id] !== false);
-  }
-
-  // ==========================================================================
-  // Lifecycle
-  // ==========================================================================
-
-  async open(services: ExtensionServices, ctx: SessionContext, reason: SessionStartReason = "open"): Promise<void> {
-    this.session = { ...ctx, ...services };
-    for (const definition of this.definitions) {
-      await this.setupExtension(definition);
-    }
-    for (const registered of [...this.handlersFor("session.start")]) {
-      await this.invoke("session.start", registered, { ...this.sessionContext(registered.extensionId), reason });
-    }
-  }
-
-  attachRun(ctx: RunContext): void {
-    this.run = ctx;
-  }
-
-  async detachRun(): Promise<void> {
-    this.run = undefined;
-    this.activeContext = undefined;
-    // The run just ended — this is the quiet point mid-run attach/detach requests wait for.
-    await this.flushPending();
-  }
-
-  async close(reason: SessionEndReason = "close"): Promise<void> {
-    if (this.session) {
-      for (const registered of [...this.handlersFor("session.end")]) {
-        await this.invoke("session.end", registered, { ...this.sessionContext(registered.extensionId), reason });
-      }
-    }
-    for (const [id, scope] of [...this.scopes].reverse()) {
-      try {
-        await scope();
-      } catch (error) {
-        await this.warn(id, `teardown failed: ${messageOf(error)}`);
-      }
-    }
-    this.scopes.clear();
-    this.live.clear();
-    this.extCommands.clear();
-    this.exposedHandles.clear();
-    this.recordSnapshot = undefined;
-    this.recordWrites.clear();
-    for (const entry of this.pending.splice(0)) entry.reject(new Error("session closed"));
-    this.injectors.length = 0;
-    this.session = undefined;
-  }
-
-  // ==========================================================================
-  // Hot attach / detach — host API, applied at the next quiet point
-  // ==========================================================================
-
-  /**
-   * Add an extension to the live session. Resolves once its `session` has run and its
-   * contributions are in place — with no run in flight that is immediately; mid-run it is
-   * the current run's stop boundary, so an in-flight turn never sees its registry change.
-   * Rejects on duplicate/empty id or when `session` throws.
-   */
-  attach(definition: ExtensionDefinition): Promise<void> {
-    return this.submit({ kind: "attach", definition });
-  }
-
-  /** Ids of currently attached extensions — the reshape coordinator's affected-set probe. */
-  attachedIds(): readonly string[] {
-    return [...this.live];
-  }
-
-  /** Currently attached extensions with what each declared it `uses` — the unload consumer scan. */
-  attachedExtensions(): readonly { readonly id: string; readonly uses: readonly string[] }[] {
-    return this.definitions.filter((definition) => this.live.has(definition.id)).map((definition) => ({ id: definition.id, uses: definition.uses ?? [] }));
-  }
-
-  /** The duck protocol the session's command registry consumes: dynamic commands contributed
-   *  by attached extensions (`api.registerCommand`). */
-  sessionCommands(): readonly HeadlessCommand[] {
-    return [...this.extCommands.values()].map((entry) => entry.command);
-  }
-
-  /** The control surface `extensionId` published via `api.expose`; undefined when absent
-   *  (never attached, detached, or nothing exposed). */
-  exposedHandle<T = unknown>(extensionId: string): T | undefined {
-    return this.exposedHandles.get(extensionId) as T | undefined;
-  }
-
-  /** Remove an extension: its `session.end` fires, then its whole scope is torn down. */
-  detach(id: string): Promise<void> {
-    return this.submit({ kind: "detach", id });
-  }
-
-  private submit(change: { kind: "attach"; definition: ExtensionDefinition } | { kind: "detach"; id: string }): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.pending.push({ ...change, resolve, reject } as PendingChange);
-      if (this.run === undefined) void this.flushPending();
-    });
-  }
-
-  private flushPending(): Promise<void> {
-    const next = this.flushChain.then(() => this.drainPending());
-    this.flushChain = next.catch(() => undefined);
-    return next;
-  }
-
-  private async drainPending(): Promise<void> {
-    while (this.pending.length > 0) {
-      const entry = this.pending.shift();
-      if (!entry) break;
-      try {
-        if (entry.kind === "attach") await this.attachNow(entry.definition);
-        else await this.detachNow(entry.id);
-        entry.resolve();
-      } catch (error) {
-        entry.reject(error);
-      }
-    }
-  }
-
-  private async attachNow(definition: ExtensionDefinition): Promise<void> {
+  constructor(
+    definition: ExtensionDefinition,
+    options: { readonly host?: ExtensionHost; readonly params?: unknown; readonly startReason?: SessionStartReason } = {},
+  ) {
     if (!definition.id.trim()) throw new Error("extension id must not be empty");
     // Slug only, colons forbidden: records and state scope by the "extension:<id>:" prefix,
     // so an id containing ":" would make one extension's bucket swallow another's.
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(definition.id)) {
       throw new Error(`extension id "${definition.id}" must be a slug ([A-Za-z0-9_.-], no colons)`);
     }
-    if (this.params[definition.id] === false) {
-      throw new Error(`extension "${definition.id}" is opted out for this session (params["${definition.id}"] is false)`);
-    }
-    if (this.definitions.some((existing) => existing.id === definition.id)) {
-      throw new Error(`duplicate extension id "${definition.id}"`);
-    }
-    this.definitions.push(definition);
-    // Not open yet: `open()` will run session() with everything else.
-    if (!this.session) return;
-    const ok = await this.setupExtension(definition);
-    if (!ok) {
-      const index = this.definitions.findIndex((existing) => existing.id === definition.id);
-      if (index >= 0) this.definitions.splice(index, 1);
-      throw new Error(`extension "${definition.id}" session() failed`);
-    }
-    for (const registered of [...this.handlersFor("session.start")]) {
-      if (registered.extensionId !== definition.id) continue;
-      await this.invoke("session.start", registered, { ...this.sessionContext(definition.id), reason: "attach" });
-    }
-    await this.logChange("attached", definition.id);
+    this.definition = definition;
+    this.host = options.host;
+    this.params = options.params;
+    this.startReason = options.startReason ?? "open";
   }
 
-  private async detachNow(id: string): Promise<void> {
-    const index = this.definitions.findIndex((existing) => existing.id === id);
-    if (index < 0) throw new Error(`unknown extension "${id}"`);
-    // Notify while its handlers are still registered.
-    if (this.session && this.live.has(id)) {
+  get id(): string {
+    return this.definition.id;
+  }
+
+  // ==========================================================================
+  // Lifecycle
+  // ==========================================================================
+
+  /** Run `session` and fire `session.start`. Throws when `session` does — the capability is then
+   *  absent from the session, with nothing it registered left behind. */
+  async open(services: ExtensionServices, ctx: SessionContext): Promise<void> {
+    this.session = { ...ctx, ...services };
+    if (!(await this.setupExtension(this.definition))) throw new Error(`extension "${this.id}" session() failed`);
+    for (const registered of [...this.handlersFor("session.start")]) {
+      await this.invoke("session.start", registered, { ...this.sessionContext(this.id), reason: this.startReason });
+    }
+    if (this.startReason === "attach") await this.logChange("attached");
+  }
+
+  attachRun(ctx: RunContext): void {
+    this.run = ctx;
+  }
+
+  detachRun(): void {
+    this.run = undefined;
+    this.activeContext = undefined;
+  }
+
+  /** Fire `session.end` while the handlers are still registered, then unwind everything. */
+  async close(reason: SessionEndReason = "close"): Promise<void> {
+    if (this.session && this.live) {
       for (const registered of [...this.handlersFor("session.end")]) {
-        if (registered.extensionId !== id) continue;
-        await this.invoke("session.end", registered, { ...this.sessionContext(id), reason: "detach" });
+        await this.invoke("session.end", registered, { ...this.sessionContext(this.id), reason });
       }
     }
-    this.definitions.splice(index, 1);
-    this.live.delete(id);
-    const scope = this.scopes.get(id);
-    this.scopes.delete(id);
-    if (scope) {
+    this.live = false;
+    const teardown = this.teardown;
+    this.teardown = undefined;
+    if (teardown) {
       try {
-        await scope();
+        await teardown();
       } catch (error) {
-        await this.warn(id, `teardown failed: ${messageOf(error)}`);
+        await this.warn(this.id, `teardown failed: ${messageOf(error)}`);
       }
     }
-    if (this.session) await this.logChange("detached", id);
+    if (reason === "detach") await this.logChange("detached");
+    this.commands.length = 0;
+    this.exposed = undefined;
+    this.injectors.length = 0;
+    // The session binding stays: a closure the extension stashed must still be able to say, into
+    // the event stream, that it was ignored because the extension is gone.
+  }
+
+  /** The control surface published via `api.expose`; undefined when nothing is (or it was
+   *  disposed, or the extension is closed). */
+  exposedHandle<T = unknown>(): T | undefined {
+    return this.exposed as T | undefined;
   }
 
   /** Runs one extension's `session` and files its scope. Failure ⇒ skipped, contributions undone. */
   private async setupExtension(definition: ExtensionDefinition): Promise<boolean> {
-    const params = this.params[definition.id];
+    const params = this.params;
     // A definition with a shared half reaches a session only after that half ran — the harness
-    // ran `harness` once, or this session's workspace ran `workspace` — and registered the result
-    // under the id where the session's scope chain finds it. Not registered ⇒ it was handed to a
-    // session directly instead of being registered — a programming error, so it throws rather
-    // than being skipped.
+    // ran `harness` once and registered the result under the id. Not registered ⇒ it was handed
+    // to a session directly instead of being registered — a programming error, so it throws
+    // rather than being skipped.
     const sharedHalf = definition.harness !== undefined;
     if (sharedHalf && this.host?.services?.has(definition.id) !== true) {
       throw new Error(
-        `extension "${definition.id}" has a shared half but no service "${definition.id}" is reachable from this session — its harness/workspace half never ran. Register it in createHarness({ extensions }) or load it from extensionDir; a definition with a shared half cannot be handed to a session directly`,
+        `extension "${definition.id}" has a shared half but no service "${definition.id}" is reachable from this session — its harness half never ran. Register it in createHarness({ extensions }) or load it from extensionDir; a definition with a shared half cannot be handed to a session directly`,
       );
     }
     const shared = sharedHalf ? this.serviceHandle(definition.id, definition.id) : undefined;
     const registrations: Array<() => void> = [];
-    this.live.add(definition.id);
+    this.live = true;
     try {
       // `uses`: checked at registration, re-checked here (a provider may have unloaded since)
       // and handed in resolved — an extension never looks a service up by name.
@@ -359,13 +236,13 @@ export class ExtensionRuntime {
         services[name] = this.serviceHandle(definition.id, name);
       }
       const teardown = await definition.session(this.apiFor(definition, registrations), { shared, params, services });
-      this.scopes.set(definition.id, async () => {
+      this.teardown = async () => {
         if (teardown) await teardown();
         for (const dispose of [...registrations].reverse()) dispose();
-      });
+      };
       return true;
     } catch (error) {
-      this.live.delete(definition.id);
+      this.live = false;
       for (const dispose of [...registrations].reverse()) dispose();
       await this.warn(definition.id, `session() failed; extension skipped: ${messageOf(error)}`);
       return false;
@@ -376,7 +253,8 @@ export class ExtensionRuntime {
    * Durable audit trail: replay needs "tool X only exists after record N" to reconstruct the
    * capability timeline. Rides the `custom` record type — audit-only, ignored by reducers.
    */
-  private async logChange(kind: "attached" | "detached", extensionId: string): Promise<void> {
+  private async logChange(kind: "attached" | "detached"): Promise<void> {
+    const extensionId = this.id;
     const store = this.session?.store;
     if (!store) return;
     try {
@@ -387,7 +265,7 @@ export class ExtensionRuntime {
   }
 
   listTools(): readonly Tool[] {
-    return [...this.tools.values()].map((entry) => entry.tool);
+    return [...this.tools.values()];
   }
 
   listInjectors(): readonly Injector[] {
@@ -556,78 +434,57 @@ export class ExtensionRuntime {
         changed = true;
       }
     }
-    // Fold the provider-tier callbacks into the request pi-ai will actually send. They cannot be
-    // driven from here — pi-ai invokes them from inside its HTTP path — so the only way to reach
-    // them is to ride along on `providerOptions`.
-    const withProvider = this.withProviderHooks(current, origin);
-    if (withProvider !== undefined) {
-      current = withProvider;
-      changed = true;
-    }
     return changed ? { request: current } : undefined;
   }
 
   /**
-   * Attach `transformHeaders` / `onPayload` / `onResponse` when anything is listening. Returns
-   * `undefined` when nothing is, so a request with no provider-tier extensions is left byte-identical.
-   *
-   * These fire once per HTTP ATTEMPT, so a retry re-runs them — the contract tells handlers to be
-   * idempotent, and the runtime does not try to dedupe on their behalf.
+   * The capability's provider hooks — `provider.headers` / `payload` / `response`. The engine
+   * composes them into the request with every other capability's, so two extensions rewriting
+   * headers both take effect instead of the second replacing the first. They fire once per HTTP
+   * ATTEMPT, so a retry re-runs them — the contract tells handlers to be idempotent, and the
+   * runtime does not try to dedupe on their behalf.
    */
-  private withProviderHooks(request: LlmRequest, origin: StepOrigin): LlmRequest | undefined {
-    const headerHandlers = this.handlersFor("provider.headers");
-    const payloadHandlers = this.handlersFor("provider.payload");
-    const responseHandlers = this.handlersFor("provider.response");
-    if (headerHandlers.length === 0 && payloadHandlers.length === 0 && responseHandlers.length === 0) {
-      return undefined;
-    }
-    const base = { turnId: origin.turnId, stepNumber: origin.stepNumber };
-    const providerOptions: Record<string, unknown> = { ...request.providerOptions };
-
-    if (headerHandlers.length > 0) {
-      providerOptions.transformHeaders = async (headers: ProviderHeaders): Promise<ProviderHeaders> => {
-        let current = headers;
-        for (const registered of headerHandlers) {
-          const result = await this.invoke("provider.headers", registered, {
-            ...this.eventContext(registered.extensionId, origin),
-            ...base,
-            headers: current,
-          });
-          if (result?.headers !== undefined) current = result.headers;
+  readonly providerHooks: CapabilityProviderHooks = {
+    headers: async (headers, ctx) => {
+      let current = headers;
+      for (const registered of this.handlersFor("provider.headers")) {
+        const result = await this.invoke("provider.headers", registered, { ...this.providerContext(ctx), headers: current });
+        if (result?.headers !== undefined) current = result.headers;
+      }
+      return current;
+    },
+    payload: async (payload, ctx) => {
+      let current = payload;
+      let changed = false;
+      for (const registered of this.handlersFor("provider.payload")) {
+        const result = await this.invoke("provider.payload", registered, { ...this.providerContext(ctx), payload: current });
+        if (result !== undefined && "payload" in result) {
+          current = result.payload;
+          changed = true;
         }
-        return current;
-      };
-    }
+      }
+      return changed ? { payload: current } : undefined;
+    },
+    response: async (response, ctx) => {
+      for (const registered of this.handlersFor("provider.response")) {
+        await this.invoke("provider.response", registered, { ...this.providerContext(ctx), status: response.status, headers: response.headers });
+      }
+    },
+  };
 
-    if (payloadHandlers.length > 0) {
-      providerOptions.onPayload = async (payload: unknown): Promise<unknown> => {
-        let current = payload;
-        for (const registered of payloadHandlers) {
-          const result = await this.invoke("provider.payload", registered, {
-            ...this.eventContext(registered.extensionId, origin),
-            ...base,
-            payload: current,
-          });
-          if (result !== undefined && "payload" in result) current = result.payload;
-        }
-        return current;
-      };
-    }
+  /** Whether any provider-tier handler is registered — the capability omits `provider` otherwise,
+   *  so a request with no provider-tier extension is left byte-identical. */
+  hasProviderHandlers(): boolean {
+    return this.handlersFor("provider.headers").length + this.handlersFor("provider.payload").length + this.handlersFor("provider.response").length > 0;
+  }
 
-    if (responseHandlers.length > 0) {
-      providerOptions.onResponse = async (response: { status: number; headers: Record<string, string> }): Promise<void> => {
-        for (const registered of responseHandlers) {
-          await this.invoke("provider.response", registered, {
-            ...this.eventContext(registered.extensionId, origin),
-            ...base,
-            status: response.status,
-            headers: response.headers,
-          });
-        }
-      };
-    }
-
-    return { ...request, providerOptions };
+  private providerContext(ctx: ProviderHookContext): ExtensionEventContext & { readonly turnId: string; readonly stepNumber: number } {
+    const session = this.requireSession();
+    return {
+      ...this.eventContext(this.id, { ...(ctx.address !== undefined ? { address: ctx.address } : {}), signal: session.signal }),
+      turnId: ctx.turnId,
+      stepNumber: ctx.stepNumber,
+    };
   }
 
   async afterModelResponse(
@@ -750,7 +607,7 @@ export class ExtensionRuntime {
   private apiFor(definition: ExtensionDefinition, registrations: Array<() => void>): ExtensionAPI {
     return {
       on: (event, handler) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, `on("${event}") ignored: extension is detached.`);
           return () => undefined;
         }
@@ -770,7 +627,7 @@ export class ExtensionRuntime {
         return dispose;
       },
       onEvent: (listener) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, "onEvent() ignored: extension is detached.");
           return () => undefined;
         }
@@ -792,26 +649,24 @@ export class ExtensionRuntime {
         // A plain spec (file extensions — no framework imports, so no `tool()` helper) is
         // expanded here; a real Tool passes through untouched.
         const tool = "schema" in toolOrSpec ? toolOrSpec : toolFromSpec(toolOrSpec);
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, `registerTool("${tool.schema.name}") ignored: extension is detached.`);
           return () => undefined;
         }
         const name = tool.schema.name;
-        const existing = this.tools.get(name);
-        if (existing) {
-          throw new Error(`extension tool "${name}" from "${definition.id}" collides with "${existing.extensionId}"`);
-        }
-        this.tools.set(name, { extensionId: definition.id, tool });
-        // Core's toolset assembly reads this tag to fail a name collision closed, naming us.
+        if (this.tools.has(name)) throw new Error(`extension "${definition.id}" registered tool "${name}" twice`);
+        this.tools.set(name, tool);
+        // Core's toolset assembly reads this tag to fail a collision with ANOTHER capability's
+        // tool closed, naming us.
         tagToolSource(tool, definition.id);
         const dispose = () => {
-          if (this.tools.get(name)?.tool === tool) this.tools.delete(name);
+          if (this.tools.get(name) === tool) this.tools.delete(name);
         };
         registrations.push(dispose);
         return dispose;
       },
       registerInjector: (injector) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, `registerInjector("${injector.id}") ignored: extension is detached.`);
           return () => undefined;
         }
@@ -824,14 +679,13 @@ export class ExtensionRuntime {
         return dispose;
       },
       registerCommand: (command) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, `registerCommand("/${command.name}") ignored: extension is detached.`);
           return () => undefined;
         }
         const key = command.name.trim().toLowerCase();
-        const existing = this.extCommands.get(key);
-        if (existing) {
-          throw new Error(`extension command "/${key}" from "${definition.id}" collides with "${existing.extensionId}"`);
+        if (this.commands.some((existing) => existing.name.trim().toLowerCase() === key)) {
+          throw new Error(`extension "${definition.id}" registered command "/${key}" twice`);
         }
         const headless: HeadlessCommand = {
           name: command.name,
@@ -839,15 +693,16 @@ export class ExtensionRuntime {
           description: command.description,
           run: async (_ctx, args) => command.run(args),
         };
-        this.extCommands.set(key, { extensionId: definition.id, command: headless });
+        this.commands.push(headless);
         const dispose = () => {
-          if (this.extCommands.get(key)?.command === headless) this.extCommands.delete(key);
+          const index = this.commands.indexOf(headless);
+          if (index >= 0) this.commands.splice(index, 1);
         };
         registrations.push(dispose);
         return dispose;
       },
       emitEvent: (name, data) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, `emitEvent("${name}") ignored: extension is detached.`);
           return;
         }
@@ -866,26 +721,23 @@ export class ExtensionRuntime {
         });
       },
       expose: (handle) => {
-        if (!this.live.has(definition.id)) {
+        if (!this.live) {
           void this.warn(definition.id, "expose() ignored: extension is detached.");
           return () => undefined;
         }
-        this.exposedHandles.set(definition.id, handle);
+        this.exposed = handle;
         const dispose = () => {
-          if (this.exposedHandles.get(definition.id) === handle) this.exposedHandles.delete(definition.id);
+          if (this.exposed === handle) this.exposed = undefined;
         };
         registrations.push(dispose);
         return dispose;
       },
-      records: async () => {
-        const snapshot = (await this.ensureRecordSnapshot()).get(definition.id) ?? [];
-        const writes = this.recordWrites.get(definition.id) ?? [];
-        return [...snapshot, ...writes];
-      },
+      // The engine keeps both, partitioned by this capability's name — the extension's id.
+      records: () => this.requireSession().records(),
       state: {
-        get: (key) => this.stateFor(definition.id, this.session?.store).get(key),
-        set: (key, value) => this.stateFor(definition.id, this.session?.store).set(key, value),
-        delete: (key) => this.stateFor(definition.id, this.session?.store).delete(key),
+        get: (key) => this.requireSession().state.get(key),
+        set: (key, value) => this.requireSession().state.set(key, value),
+        delete: (key) => this.requireSession().state.delete(key),
       },
       actions: this.actionsFor(definition.id),
     };
@@ -910,18 +762,18 @@ export class ExtensionRuntime {
     return new Proxy(Object.create(null) as object, {
       get(_target, prop) {
         if (isProbeProperty(prop)) return undefined;
-        if (!runtime.live.has(extensionId)) return dead();
+        if (!runtime.live) return dead();
         const inner = (services.handle(name) as Record<string, unknown>)[prop as string];
         if (typeof inner !== "function") return inner;
         return (...args: unknown[]) => {
-          if (!runtime.live.has(extensionId)) return dead()();
+          if (!runtime.live) return dead()();
           return (inner as (...a: unknown[]) => unknown)(...args);
         };
       },
       // Forward `in` so consumers can probe registration ("route" in handle) through the
       // collar; a detached extension's probe reads false like a dead handle's.
       has: (_target, prop) => {
-        if (!runtime.live.has(extensionId)) return false;
+        if (!runtime.live) return false;
         return Reflect.has(services.handle(name) as object, prop);
       },
     }) as T;
@@ -951,7 +803,7 @@ export class ExtensionRuntime {
     return new Proxy(actions, {
       get(target, prop, receiver) {
         const value = Reflect.get(target, prop, receiver);
-        if (typeof value !== "function" || runtime.live.has(extensionId)) return value;
+        if (typeof value !== "function" || runtime.live) return value;
         return (..._args: unknown[]) => {
           void runtime.warn(extensionId, `${String(prop)}() ignored: extension is detached.`);
           if (ExtensionRuntime.PROMISE_ACTIONS.has(String(prop))) {
@@ -970,18 +822,15 @@ export class ExtensionRuntime {
     return this.revocable(extensionId, {
       steer: (content, options) => runtime.enqueue(extensionId, content, "steering", options?.metadata),
       followUp: (content, options) => runtime.enqueue(extensionId, content, "follow_up", options?.metadata),
+      // Journaled by the engine into the main conversation as `extension:<id>:<name>`, and seen
+      // by `records()` straight away.
       record: (name, data) => {
-        const context = runtime.activeContext;
-        if (!context) {
-          void runtime.warn(extensionId, `record("${name}") ignored: no active conversation.`);
+        const session = runtime.session;
+        if (!session) {
+          void runtime.warn(extensionId, `record("${name}") ignored: no open session.`);
           return;
         }
-        context.record({ type: "custom", name: `extension:${extensionId}:${name}`, data });
-        // Mirror into the in-memory bucket so `records()` sees this session's writes without
-        // re-reading the log (the open-time memoized read predates them).
-        const bucket = runtime.recordWrites.get(extensionId) ?? [];
-        if (!runtime.recordWrites.has(extensionId)) runtime.recordWrites.set(extensionId, bucket);
-        bucket.push({ name, ...(data !== undefined ? { data } : {}) });
+        session.record(name, data);
       },
       abort: (reason) => {
         const controls = runtime.controls();
@@ -1119,12 +968,12 @@ export class ExtensionRuntime {
       signal: session.signal,
       environment: session.environment,
       store,
-      state: this.stateFor(extensionId, store),
+      state: session.state,
       actions: this.actionsFor(extensionId),
     };
   }
 
-  private eventContext(extensionId: string, origin: StepOrigin): ExtensionEventContext {
+  private eventContext(extensionId: string, origin: Pick<StepOrigin, "address" | "signal">): ExtensionEventContext {
     const session = this.requireSession();
     const store = session.store;
     return {
@@ -1134,54 +983,8 @@ export class ExtensionRuntime {
       signal: origin.signal,
       environment: session.environment,
       store,
-      state: this.stateFor(extensionId, store),
+      state: session.state,
       actions: this.actionsFor(extensionId),
-    };
-  }
-
-  /** Open-time record buckets, built ONCE off the session's shared memoized log read — the
-   *  same single read goal/plan/todo fold from, so `records()` adds zero log traversals. One
-   *  filter pass buckets every extension's records; ids are colon-free slugs so the
-   *  "extension:<id>:" prefix parse is unambiguous. */
-  private async ensureRecordSnapshot(): Promise<Map<string, ExtensionRecordEntry[]>> {
-    if (this.recordSnapshot !== undefined) return this.recordSnapshot;
-    const buckets = new Map<string, ExtensionRecordEntry[]>();
-    const log: readonly AgentRecord[] = (await this.session?.readLog?.()) ?? [];
-    for (const record of log) {
-      if (record.type !== "custom") continue;
-      const full = (record as { readonly name?: unknown }).name;
-      if (typeof full !== "string" || !full.startsWith("extension:")) continue;
-      const rest = full.slice("extension:".length);
-      const sep = rest.indexOf(":");
-      if (sep <= 0) continue;
-      const id = rest.slice(0, sep);
-      const data = (record as { readonly data?: unknown }).data;
-      const bucket = buckets.get(id) ?? [];
-      if (!buckets.has(id)) buckets.set(id, bucket);
-      bucket.push({ name: rest.slice(sep + 1), ...(data !== undefined ? { data } : {}) });
-    }
-    this.recordSnapshot = buckets;
-    return buckets;
-  }
-
-  private stateFor(extensionId: string, store: SessionStore | undefined): ExtensionState {
-    const prefix = `extension:${extensionId}:`;
-    return {
-      get: async <T>(key: string) => {
-        const full = prefix + key;
-        const value = store ? await store.getState(full) : this.memoryState.get(full) ?? null;
-        return value as T | null;
-      },
-      set: async (key, value) => {
-        const full = prefix + key;
-        if (store) await store.putState(full, value);
-        else this.memoryState.set(full, value);
-      },
-      delete: async (key) => {
-        const full = prefix + key;
-        if (store) await store.deleteState(full);
-        else this.memoryState.delete(full);
-      },
     };
   }
 

@@ -208,10 +208,57 @@ async function registryStability(): Promise<void> {
   faux.unregister();
 }
 
+/** Each extension is its own capability: named by its id, one per extension, never displacing
+ *  a capability the session already has. */
+async function oneCapabilityPerExtension(): Promise<void> {
+  const faux = registerFauxProvider();
+  faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
+  const handle = { ping: () => "pong" };
+  const harness = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    extensions: [
+      { id: "ext-one", session: (api) => void api.expose(handle) },
+      { id: "ext-two", session: () => undefined },
+    ],
+  });
+  const session = await harness.createSession();
+  const names = session.core.capabilities.map((capability) => capability.name);
+  check("per-extension: each extension is a capability named by its id", names.includes("ext-one") && names.includes("ext-two"));
+  check("per-extension: extensions come first, in registration order", names.indexOf("ext-one") === 0 && names.indexOf("ext-two") === 1);
+  check("per-extension: session.service(id) is what the extension exposed", session.core.service("ext-one") === handle);
+  check("per-extension: extensionHandle(id) agrees", session.extensionHandle("ext-one") === handle);
+  check("per-extension: attachedExtensionIds lists only extensions", session.attachedExtensionIds().join() === "ext-one,ext-two");
+  let detachError = "";
+  try {
+    await session.detachExtension("goal");
+  } catch (error) {
+    detachError = (error as Error).message;
+  }
+  check("per-extension: detachExtension refuses a capability that is not an extension", /unknown extension "goal"/.test(detachError));
+  await harness.close();
+
+  const clashing = createHarness({
+    model: faux.getChatModel()!,
+    permission: { mode: "yolo" },
+    extensions: [{ id: "goal", session: () => undefined }],
+  });
+  let openError = "";
+  try {
+    await clashing.createSession();
+  } catch (error) {
+    openError = (error as Error).message;
+  }
+  check("per-extension: an id that names a session capability is refused by name", /extension "goal" has the name of one of this session's capabilities/.test(openError));
+  await clashing.close();
+  faux.unregister();
+}
+
 await attachLifecycle();
 await midRunDeferred();
 await errorPaths();
 await registryStability();
+await oneCapabilityPerExtension();
 
 const passed = checks.filter(([, ok]) => ok).length;
 console.log(`\n${passed}/${checks.length} checks passed`);

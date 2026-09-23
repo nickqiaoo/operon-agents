@@ -134,7 +134,7 @@ async function coreSurface(): Promise<void> {
     store,
     events,
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   }).run(agent, "go");
 
   const toolMessage = result.messages.find(
@@ -202,7 +202,7 @@ async function interventions(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events,
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   }).run(agent, "go");
 
   const toolText = textOf(result.messages.filter((m) => m.role === "toolResult"), "toolResult");
@@ -241,7 +241,7 @@ async function runTierHooks(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   }).run(agent, "go");
 
   check("run.start rewrites the input before it is journaled", textOf(result.messages, "user").includes("REWRITTEN_FOR_run-tier"));
@@ -267,7 +267,7 @@ async function runTierHooks(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([terminating])],
+    capabilities: [...extensionsCapability([terminating])],
   }).run(defineAgent({ name: "terminate-test", model: model2, instructions: "x" }), "go");
 
   check("tool.call terminate ends the turn after the denial", !textOf(stopResult.messages, "assistant").includes("MODEL_REACTED_TO_DENIAL"));
@@ -306,7 +306,7 @@ async function toolGating(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   });
   const runner = testRunner({});
   const agent = defineAgent({ name: "gating", model, instructions: "x" });
@@ -357,7 +357,7 @@ async function abortControl(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   });
   const runner = testRunner({});
   const agent = defineAgent({ name: "abort-test", model, instructions: "x" });
@@ -413,7 +413,7 @@ async function collision(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events,
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   }).run(agent, "go");
 
   const text = textOf(result.messages.filter((m) => m.role === "toolResult"), "toolResult");
@@ -522,13 +522,15 @@ async function providerHooks(): Promise<void> {
   let chainedHeaders: Record<string, string | null> | undefined;
   let chainedPayload: Record<string, unknown> | undefined;
 
-  // A plain capability registered AFTER the extensions one sees the request it assembled. The
-  // callbacks are driven from HERE, in-run, because that is when pi-ai would call them — after
-  // the run, `close()` has disposed every handler registration and the chains are empty.
+  // A plain capability sees the request that was actually sent — provider hooks are folded in
+  // after every capability's `beforeModelRequest`, so none can replace them. The callbacks are
+  // driven from HERE, in-run, because that is when pi-ai would call them — after the run,
+  // `close()` has disposed every handler registration and the chains are empty.
   const probe: Capability = {
     name: "probe",
+    contract: "detachable",
     hooks: {
-      beforeModelRequest: async (ctx) => {
+      afterModelResponse: async (ctx) => {
         sentRequest = ctx.request;
         const options = ctx.request.providerOptions as {
           transformHeaders?: (h: Record<string, string | null>) => Promise<Record<string, string | null>>;
@@ -545,7 +547,7 @@ async function providerHooks(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([first, second]), probe],
+    capabilities: [...extensionsCapability([first, second]), probe],
   }).run(defineAgent({ name: "provider-test", model, instructions: "x" }), "go");
 
   const options = sentRequest?.providerOptions as
@@ -581,7 +583,7 @@ async function providerHooks(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([{ id: "noop-ext", session: () => undefined }]), bareProbe],
+    capabilities: [...extensionsCapability([{ id: "noop-ext", session: () => undefined }]), bareProbe],
   }).run(defineAgent({ name: "bare-test", model: faux2.getChatModel()!, instructions: "x" }), "go");
 
   const bareOptions = bareRequest?.providerOptions;
@@ -623,7 +625,7 @@ async function handledInput(): Promise<void> {
     environment: new LocalEnvironment(process.cwd()),
     events: new ListenerSink(),
     permission: { mode: "yolo" },
-    capabilities: [extensionsCapability([extension])],
+    capabilities: [...extensionsCapability([extension])],
   });
   const runner = testRunner({});
   const agent = defineAgent({ name: "handled-test", model, instructions: "x" });
@@ -660,7 +662,7 @@ async function compactionGate(): Promise<void> {
       environment: new LocalEnvironment(process.cwd()),
       events: new ListenerSink(),
       permission: { mode: "yolo" },
-      capabilities: [extensionsCapability([extension]), compactionCapability({ maxContextTokens: 48_000 })],
+      capabilities: [...extensionsCapability([extension]), compactionCapability({ maxContextTokens: 48_000 })],
     });
     const runner = testRunner({});
     const agent = defineAgent({ name: "gate-test", model, instructions: "x" });

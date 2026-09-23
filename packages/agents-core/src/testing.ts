@@ -162,5 +162,5 @@ export function testRunContext(wiring: TestSessionWiring = {}): RunContext {
 export async function provisionCapability(cap: Capability, wiring: TestSessionWiring = {}): Promise<TestCapabilityHandle> {
   const ctx = testSessionContext(wiring);
   await cap.openSession?.(ctx);
-  return { ctx, service: cap.service, close: async () => await cap.closeSession?.() };
+  return { ctx, service: cap.service, close: async () => await cap.closeSession?.("close") };
 }
