@@ -56,6 +56,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `invariant` capability's hooks are used as written. `CapabilityDiagnostic.phase` gains `"hook"`,
   and `assembleCapabilities` takes a `report` callback for mid-run diagnostics.
 
+- **A capability reaches what only extensions could** (`operon-agents-core`). Four things an
+  extension got from its own runtime are now plain parts of a capability, so a behaviour no
+  longer has to be written as an extension to use them:
+  - `SessionContext.state` — durable key/value state, partitioned by capability name. It lives
+    under the `extension:<name>:` prefix extensions already used, so their state reads back.
+  - `SessionContext.records()` / `record(name, data?)` — named records in the main
+    conversation: earlier processes first, then this session's, never counted twice. `record`
+    works at any point in the session, not only during a run.
+  - `Capability.commands` — slash commands the capability adds to the session's command set.
+  - `Capability.provider` — `headers` / `payload` / `response` hooks on the HTTP request. They
+    compose across capabilities (and after any callback already in `providerOptions`) instead of
+    the last writer silently replacing the rest, and a detachable capability's are isolated like
+    its loop hooks, with `response` capped at 1s since it runs before the body streams.
+
+  `SessionContext` is now built per capability — the three data members are its own view — so a
+  hand-built context (tests) must supply them; `testSessionContext` does.
+
 - **Capability services replace the session facade** (`operon-agents-core`, `operon-agents`).
   `Session` had 34 methods that each looked a capability service up and forwarded one call to it
   — `session.createGoal`, `session.listSkills`, `session.stopBackgroundTask`, … — and

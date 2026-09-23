@@ -54,6 +54,7 @@ export { setSessionCloseTimeoutsForTest } from "./agent/session.ts";
 // ── capabilities: the assembler (Runner-internal wiring) ─────────────────────
 export { assembleCapabilities, AssembledCapabilities } from "./capabilities/assembler.ts";
 export type { AssembleCapabilitiesOptions } from "./capabilities/assembler.ts";
+export { withProviderHooks } from "./agent/compose-hooks.ts";
 
 // ── testing: wiring helpers (a flat options bag → session options / context) ─────────────────
 export {

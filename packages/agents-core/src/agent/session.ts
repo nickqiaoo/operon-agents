@@ -24,11 +24,12 @@ import type { ActivateSkillRequest, SkillActivationResult, SkillSummary } from "
 import type { PluginInfo, PluginSummary, ReloadSummary } from "../plugins/index.ts";
 import { type EventSink, joinAddress, ListenerSink, SessionEventPublisher } from "../events/index.ts";
 import { type Logger, envLogger, noopLogger } from "../logging/index.ts";
-import { type AgentRecord, DEFAULT_ADDRESS, type SessionStore } from "../store/index.ts";
+import { type AgentRecord, type AgentRecordBody, DEFAULT_ADDRESS, type SessionStore } from "../store/index.ts";
 import { eventSinkTracingBridge, type TracingProcessor } from "../tracing/index.ts";
 import { subscribeTelemetryProjection } from "../telemetry/projection.ts";
 import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
+import { CapabilityData } from "../capabilities/capability-data.ts";
 import type { McpServerView, MCPTool } from "../mcp/index.ts";
 import { SteerBus, type SteerContent, type SteerOptions, type SteerOrigin, type SteerReceipt } from "../loop/steer.ts";
 import type { Capability, CapabilityDiagnostic, SessionContext, SessionControls } from "../capabilities/capability.ts";
@@ -365,9 +366,9 @@ export class Session implements SessionPort {
   /**
    * Build every capability's declared services and register them.
    *
-   * Not "open": a capability has no open/close pair — its services are torn down by
-   * `scope.close()`, not by a matching call here. What it has is `provides`, so this is the verb
-   * for it. The per-RUN pair is `start`/`stop`, which the assembler drives.
+   * Each capability is handed its own view of the session: the shared objects plus a
+   * `state` / `records` / `record` partitioned by its name. The per-RUN pair is `start`/`stop`,
+   * which the assembler drives.
    */
   private async openCapabilities(): Promise<void> {
     // Shared restore: read the log at most once and let every log-fold capability
@@ -381,7 +382,12 @@ export class Session implements SessionPort {
       if (log === undefined) log = await readLog(this.store);
       return log;
     };
-    const ctx: SessionContext = {
+    const data = new CapabilityData({
+      ...(this.store !== undefined ? { store: this.store } : {}),
+      readLog: logRecords,
+      append: (body) => this.appendToMain(body),
+    });
+    const shared = {
       sessionId: this.id,
       environment: this.environment,
       events: this.events,
@@ -392,6 +398,12 @@ export class Session implements SessionPort {
       ...(this.store !== undefined ? { store: this.store } : {}),
       ...(this.logger !== undefined ? { logger: this.logger } : {}),
     };
+    const contextFor = (owner: string): SessionContext => ({
+      ...shared,
+      state: data.stateFor(owner),
+      records: data.recordsFor(owner),
+      record: data.recorderFor(owner),
+    });
     const opened: Capability[] = [];
     const seen = new Set<string>();
     for (const cap of this.allCapabilities) {
@@ -409,7 +421,7 @@ export class Session implements SessionPort {
         // A capability that throws here is absent for the session — its per-run assembly too,
         // since it is not pushed onto `opened`. An `invariant` one is not allowed to be absent,
         // so its failure fails the open instead.
-        await cap.openSession?.(ctx);
+        await cap.openSession?.(contextFor(cap.name));
       } catch (error) {
         // An `invariant` capability may not be absent, so its failure fails the open — but the
         // capabilities already opened are this session's, and nobody else will close them. Undo
@@ -447,6 +459,24 @@ export class Session implements SessionPort {
       this.setLiveContext(DEFAULT_ADDRESS, context);
     }
     this.isOpen = true;
+  }
+
+  /**
+   * Journal a capability's record into the main conversation. Through its live context when
+   * there is one, so the record keeps its place in the context's write order; straight to the
+   * store before the first run has built it. A storeless session with no context keeps nothing
+   * durable — `records()` still sees the write, from memory.
+   */
+  private appendToMain(body: AgentRecordBody): void {
+    const context = this.liveContext(DEFAULT_ADDRESS);
+    if (context !== undefined) {
+      context.record(body);
+      return;
+    }
+    if (this.store === undefined) return;
+    this.store.appendRecord({ time: Date.now(), address: DEFAULT_ADDRESS, ...body } as AgentRecord).catch((error: unknown) => {
+      this.logger.log("warn", "capability record failed to persist", { error: messageOf(error) });
+    });
   }
 
   /** Close capabilities in reverse open order, each fault-isolated: used to undo a failed open. */

@@ -10,6 +10,9 @@ export type {
   CapabilityDefinition,
   CapabilityHostContext,
   CapabilityRegistration,
+  CapabilityProviderHooks,
+  ProviderHeaders,
+  ProviderHookContext,
   RunContext,
   SessionContext,
   SessionControls,
@@ -18,6 +21,7 @@ export type {
 export type { Injector, InjectionContext, InjectionResult, InjectionAppender } from "./injection.ts";
 export { BoundaryInjector, InjectionManager, systemReminder } from "./injection.ts";
 export { readLog, readSessionLog } from "./capability-state.ts";
+export type { CapabilityRecord, CapabilityState } from "./capability-data.ts";
 // The capability SERVICES themselves — what `session.goal`, `session.skills`, … hand back, so a
 // host can name the type it is holding.
 export type { SkillsService } from "./skills/service.ts";

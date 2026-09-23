@@ -13,6 +13,8 @@ import type { EventSink } from "../events/index.ts";
 import type { AgentRecord, SessionStore } from "../store/index.ts";
 import type { SteerBus } from "../loop/steer.ts";
 import type { Logger } from "../logging/index.ts";
+import type { HeadlessCommand } from "../commands/index.ts";
+import type { CapabilityRecord, CapabilityState } from "./capability-data.ts";
 
 /**
  * The narrow slice of the owning Session a capability may ACT on (as opposed to observe).
@@ -61,6 +63,18 @@ export interface SessionContext {
    * Use `readSessionLog(ctx)` — it falls back to a direct read when this is absent.
    */
   readonly logRecords?: () => Promise<readonly AgentRecord[]>;
+  /**
+   * THIS capability's durable key/value state — partitioned by its name, so two capabilities
+   * never see each other's keys. Store-backed; in memory for a storeless session.
+   */
+  readonly state: CapabilityState;
+  /** THIS capability's records: those from earlier processes, then this session's, in order. */
+  records(): Promise<readonly CapabilityRecord[]>;
+  /**
+   * Journal a named record for THIS capability into the session's main conversation. Usable at
+   * any point in the session — open, a hook, between runs — and read back by `records()`.
+   */
+  record(name: string, data?: unknown): void;
 }
 
 /**
@@ -141,6 +155,34 @@ export interface CompactionGateResult {
 
 export type CompactionGate = (ctx: CompactionGateContext) => Promise<CompactionGateResult | undefined>;
 
+/** Request headers as the provider layer passes them; `null` deletes a header. */
+export type ProviderHeaders = Record<string, string | null>;
+
+/** Which step a provider hook fires for. */
+export interface ProviderHookContext {
+  readonly turnId: string;
+  readonly stepNumber: number;
+  /** The frame the request belongs to (`main`, or `main/<agentId>` for a subagent). */
+  readonly address?: string;
+}
+
+/**
+ * Hooks BELOW the loop, on the HTTP request itself. They fire once per ATTEMPT — a retried
+ * request runs them again — so they must be idempotent. Every capability's hooks compose: each
+ * sees what the previous one returned, rather than the last one to write `providerOptions`
+ * silently replacing the rest.
+ */
+export interface CapabilityProviderHooks {
+  /** Rewrite the request headers. Return the new set, or nothing to leave them unchanged. */
+  headers?(headers: ProviderHeaders, ctx: ProviderHookContext): ProviderHeaders | undefined | void | Promise<ProviderHeaders | undefined | void>;
+  /** Rewrite the serialized body, whatever shape this provider uses. Return `{ payload }` to
+   *  replace it (an object, so that "replace with undefined" and "no change" differ). */
+  payload?(payload: unknown, ctx: ProviderHookContext): { readonly payload: unknown } | undefined | void | Promise<{ readonly payload: unknown } | undefined | void>;
+  /** Observe the response status and headers — after they arrive, BEFORE the body streams, so
+   *  a slow observer is latency on every token. A detachable one gets at most 1s. */
+  response?(response: { readonly status: number; readonly headers: Record<string, string> }, ctx: ProviderHookContext): void | Promise<void>;
+}
+
 export interface CapabilityGates {
   compaction?: CompactionGate;
 }
@@ -190,6 +232,10 @@ export interface Capability {
    * `invariant` hooks are never wrapped — their failure IS the run's failure.
    */
   readonly hookTimeoutMs?: number;
+  /** See {@link CapabilityProviderHooks}. Isolated like `hooks` when `detachable`. */
+  readonly provider?: CapabilityProviderHooks;
+  /** Slash commands this capability adds to the session's command set. */
+  readonly commands?: readonly HeadlessCommand[];
   readonly injectors?: readonly Injector[];
   /**
    * What this capability publishes to the session, reachable as `session.service(name)` and

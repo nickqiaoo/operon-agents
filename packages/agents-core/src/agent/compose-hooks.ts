@@ -8,6 +8,8 @@ import type {
   PrepareToolExecutionResult,
 } from "../loop/types.ts";
 import type { Tool, ToolResult } from "../tool/types.ts";
+import type { LlmRequest } from "../llm/model.ts";
+import type { CapabilityProviderHooks, ProviderHeaders, ProviderHookContext } from "../capabilities/capability.ts";
 import type { ConversationContext } from "../loop/context.ts";
 import type { Agent } from "./agent.ts";
 import { toolInputGuardrailHook, toolOutputGuardrailHook } from "./guardrail.ts";
@@ -28,6 +30,14 @@ export function buildRunHooks<TContext>(
 ): LoopHooks {
   const ctx = runCtxFor(state);
   const parts: Array<Partial<LoopHooks> | undefined> = [...state.capabilities.loopHookParts];
+  const providerHooks = state.capabilities.providerHooks;
+  if (providerHooks.length > 0) {
+    parts.push({
+      beforeModelRequest: async ({ request, turnId, stepNumber, address }) => ({
+        request: withProviderHooks(request, providerHooks, { turnId, stepNumber, ...(address !== undefined ? { address } : {}) }),
+      }),
+    });
+  }
   parts.push({ authorizeToolExecution: buildAuthorizer(state, context, tools) });
   if (active.guardrails.toolInput && active.guardrails.toolInput.length > 0) {
     parts.push({ prepareToolExecution: toolInputGuardrailHook(active, ctx, active.guardrails.toolInput) });
@@ -44,6 +54,46 @@ export function buildRunHooks<TContext>(
     },
   });
   return composeLoopHooks(parts);
+}
+
+/**
+ * Fold every capability's provider hooks into the request's `providerOptions` callbacks — the
+ * only way to reach them, since the provider layer invokes them from inside its HTTP path. A
+ * callback already on the request (set by a `beforeModelRequest` hook) runs FIRST and is kept,
+ * so nothing that wrote `providerOptions` directly is silently replaced.
+ */
+export function withProviderHooks(request: LlmRequest, hooks: readonly CapabilityProviderHooks[], ctx: ProviderHookContext): LlmRequest {
+  const options: Record<string, unknown> = { ...request.providerOptions };
+  const headerHooks = hooks.map((h) => h.headers).filter(isDefined);
+  const payloadHooks = hooks.map((h) => h.payload).filter(isDefined);
+  const responseHooks = hooks.map((h) => h.response).filter(isDefined);
+  if (headerHooks.length > 0) {
+    const prior = options.transformHeaders as ((headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>) | undefined;
+    options.transformHeaders = async (headers: ProviderHeaders): Promise<ProviderHeaders> => {
+      let current = prior !== undefined ? await prior(headers) : headers;
+      for (const hook of headerHooks) current = (await hook(current, ctx)) ?? current;
+      return current;
+    };
+  }
+  if (payloadHooks.length > 0) {
+    const prior = options.onPayload as ((payload: unknown) => unknown) | undefined;
+    options.onPayload = async (payload: unknown): Promise<unknown> => {
+      let current = prior !== undefined ? await prior(payload) : payload;
+      for (const hook of payloadHooks) {
+        const result = await hook(current, ctx);
+        if (result !== undefined && result !== null) current = result.payload;
+      }
+      return current;
+    };
+  }
+  if (responseHooks.length > 0) {
+    const prior = options.onResponse as ((response: { status: number; headers: Record<string, string> }) => unknown) | undefined;
+    options.onResponse = async (response: { status: number; headers: Record<string, string> }): Promise<void> => {
+      if (prior !== undefined) await prior(response);
+      for (const hook of responseHooks) await hook(response, ctx);
+    };
+  }
+  return { ...request, providerOptions: options };
 }
 
 function buildAuthorizer<TContext>(

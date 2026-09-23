@@ -432,12 +432,10 @@ export interface ExtensionCompactionBeforeResult {
 // Provider (HTTP) decision points
 // ============================================================================
 
-/**
- * Headers a provider request carries. `null` deletes a header pi would otherwise send.
- * Mirrors pi-ai's `ProviderHeaders`, spelled out here so the extension contract does not
- * depend on a type core has no reason to re-export.
- */
-export type ProviderHeaders = Record<string, string | null>;
+/** Headers a provider request carries (`null` deletes a header) — core's type, the one
+ *  capability provider hooks use too. */
+export type { ProviderHeaders } from "operon-agents-core";
+import type { ProviderHeaders } from "operon-agents-core";
 
 /**
  * These three fire BELOW the loop: the runtime folds them into the request's

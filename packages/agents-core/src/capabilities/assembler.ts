@@ -1,6 +1,15 @@
 import type { BeforeRunHook, LoopHooks, ShouldContinueAfterStopHook } from "../loop/types.ts";
 import type { Tool } from "../tool/types.ts";
-import type { AssembledGates, Capability, RunContext, CapabilityDiagnostic, CompactionGate, ToolFilter, ToolFilterContext } from "./capability.ts";
+import type {
+  AssembledGates,
+  Capability,
+  CapabilityProviderHooks,
+  RunContext,
+  CapabilityDiagnostic,
+  CompactionGate,
+  ToolFilter,
+  ToolFilterContext,
+} from "./capability.ts";
 import { InjectionManager } from "./injection.ts";
 import type { ToolProvider } from "./tool-provider.ts";
 
@@ -8,6 +17,8 @@ const STOP_TIMEOUT_MS = 5_000;
 const START_TIMEOUT_MS = 10_000;
 /** Default per-call budget for a `detachable` capability's hooks (see `Capability.hookTimeoutMs`). */
 const HOOK_TIMEOUT_MS = 30_000;
+/** `provider.response` runs before the body streams: a slow observer is latency on every token. */
+const RESPONSE_HOOK_TIMEOUT_MS = 1_000;
 
 export interface AssembleCapabilitiesOptions {
   /** Max time to wait for a single capability's start(). Default 10s. */
@@ -35,6 +46,8 @@ export class AssembledCapabilities {
    */
   readonly gates: AssembledGates = { compaction: [] as CompactionGate[] };
   readonly injection = new InjectionManager();
+  /** Every started capability's provider hooks, in order — already isolated when detachable. */
+  readonly providerHooks: CapabilityProviderHooks[] = [];
 
   private readonly staticTools: Tool[] = [];
   private readonly toolProviders: ToolProvider[] = [];
@@ -110,6 +123,10 @@ export class AssembledCapabilities {
       if (beforeRun) this.runStarts.push(beforeRun);
     }
 
+    if (capability.provider) {
+      this.providerHooks.push(capability.contract === "detachable" ? this.isolateProvider(capability, capability.provider) : capability.provider);
+    }
+
     this.injection.registerAll(capability.injectors ?? []);
   }
 
@@ -122,23 +139,38 @@ export class AssembledCapabilities {
   private isolate(capability: Capability, hooks: Partial<LoopHooks>): Partial<LoopHooks> {
     const timeoutMs = capability.hookTimeoutMs ?? HOOK_TIMEOUT_MS;
     const wrapped: Record<string, unknown> = {};
-    for (const [slot, hook] of Object.entries(hooks) as [string, ((ctx: unknown) => unknown) | undefined][]) {
-      if (hook === undefined) continue;
-      wrapped[slot] = async (ctx: unknown) => {
-        try {
-          return await withTimeout(Promise.resolve(hook(ctx)), timeoutMs);
-        } catch (error) {
-          this.report({
-            capability: capability.name,
-            phase: "hook",
-            level: "warn",
-            message: `${slot} failed/timed out; ignored for this call: ${messageOf(error)}`,
-          });
-          return undefined;
-        }
-      };
+    for (const [slot, hook] of Object.entries(hooks) as [string, ((...args: unknown[]) => unknown) | undefined][]) {
+      if (hook !== undefined) wrapped[slot] = this.guard(capability, slot, hook, timeoutMs);
     }
     return wrapped as Partial<LoopHooks>;
+  }
+
+  /** The same guard for the hooks below the loop. `response` never gets more than 1s. */
+  private isolateProvider(capability: Capability, hooks: CapabilityProviderHooks): CapabilityProviderHooks {
+    const timeoutMs = capability.hookTimeoutMs ?? HOOK_TIMEOUT_MS;
+    const guard = <F extends (...args: never[]) => unknown>(slot: string, hook: F | undefined, ms: number): F | undefined =>
+      hook === undefined ? undefined : (this.guard(capability, slot, hook as unknown as (...args: unknown[]) => unknown, ms) as unknown as F);
+    const headers = guard("provider.headers", hooks.headers?.bind(hooks), timeoutMs);
+    const payload = guard("provider.payload", hooks.payload?.bind(hooks), timeoutMs);
+    const response = guard("provider.response", hooks.response?.bind(hooks), Math.min(timeoutMs, RESPONSE_HOOK_TIMEOUT_MS));
+    return { ...(headers ? { headers } : {}), ...(payload ? { payload } : {}), ...(response ? { response } : {}) };
+  }
+
+  /** One call, budgeted: a throw or an overrun is reported and becomes `undefined`. */
+  private guard(capability: Capability, slot: string, fn: (...args: unknown[]) => unknown, timeoutMs: number): (...args: unknown[]) => Promise<unknown> {
+    return async (...args: unknown[]) => {
+      try {
+        return await withTimeout(Promise.resolve(fn(...args)), timeoutMs);
+      } catch (error) {
+        this.report({
+          capability: capability.name,
+          phase: "hook",
+          level: "warn",
+          message: `${slot} failed/timed out; ignored for this call: ${messageOf(error)}`,
+        });
+        return undefined;
+      }
+    };
   }
 
   private report(diagnostic: CapabilityDiagnostic): void {

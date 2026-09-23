@@ -8,7 +8,7 @@
 import { Runner, type RunnerConfig } from "./agent/runner.ts";
 import { Session, type SessionOpenOptions } from "./agent/session.ts";
 import type { Environment, EnvironmentFactory } from "./tool/environment.ts";
-import type { SessionStore, AgentRecord } from "./store/index.ts";
+import { DEFAULT_ADDRESS, type SessionStore, type AgentRecord } from "./store/index.ts";
 import { ListenerSink, type EventSink, type EventPublicationMode } from "./events/index.ts";
 import type { TracingProcessor } from "./tracing/index.ts";
 import type { Responder } from "./permission/types.ts";
@@ -16,6 +16,7 @@ import type { PermissionManagerOptions } from "./permission/manager.ts";
 import type { Capability, SessionContext, RunContext } from "./capabilities/capability.ts";
 import { InjectionManager } from "./capabilities/injection.ts";
 import { readLog } from "./capabilities/capability-state.ts";
+import { CapabilityData } from "./capabilities/capability-data.ts";
 import { SteerBus } from "./loop/steer.ts";
 import type { BackgroundSpawner } from "./tool/background.ts";
 import type { Logger } from "./logging/index.ts";
@@ -111,6 +112,8 @@ export function testSessionContext(wiring: TestSessionWiring = {}): SessionConte
     steer: wiring.steer ?? new SteerBus(),
     logRecords: () => readLog(store),
     ...(store !== undefined ? { store } : {}),
+    // The same partitioned view a real session hands a capability, owned by "test".
+    ...capabilityDataView(store),
     ...(wiring.logger !== undefined ? { logger: wiring.logger } : {}),
     // No Session behind this context, so the controls are inert rather than absent: a capability
     // under test should find the field filled, as it would in a real session.
@@ -122,6 +125,17 @@ export function testSessionContext(wiring: TestSessionWiring = {}): SessionConte
       setThinking: () => undefined,
     },
   };
+}
+
+function capabilityDataView(store: SessionStore | undefined): Pick<SessionContext, "state" | "records" | "record"> {
+  const data = new CapabilityData({
+    ...(store !== undefined ? { store } : {}),
+    readLog: () => readLog(store),
+    append: (body) => {
+      void store?.appendRecord({ time: Date.now(), address: DEFAULT_ADDRESS, ...body } as AgentRecord);
+    },
+  });
+  return { state: data.stateFor("test"), records: data.recordsFor("test"), record: data.recorderFor("test") };
 }
 
 /** @deprecated The provision context is now the whole {@link SessionContext}. */
