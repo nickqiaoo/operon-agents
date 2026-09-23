@@ -15,8 +15,6 @@ import {
   defineModel,
   DiskSessionRepository,
   sinkLogger,
-  Tokens,
-  token,
   type ChatModel,
   type TracingProcessor,
 } from "operon-agents";
@@ -56,10 +54,6 @@ export interface ServerOptions {
   readonly tracing?: TracingProcessor;
 }
 
-/** The session's hold on its sandbox, registered on the session scope so closing the session
- *  (the worker closes it after every lease) pauses the sandbox through the scope's teardown. */
-const SandboxLease = token<{ close(): Promise<void> }, "session">("linear-github.sandbox-lease", "session");
-
 export async function composeServer(options: ServerOptions) {
   mkdirSync(options.work, { recursive: true });
   const repository = new DiskSessionRepository(options.home);
@@ -71,34 +65,39 @@ export async function composeServer(options: ServerOptions) {
       if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
       return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
     },
-    harness: (scope) => {
-      scope.register(Tokens.SessionRepository, repository);
-      if (options.log) {
-        scope.register(Tokens.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
-      }
-      // Harness-scoped: one processor, every session bridges its events into it. Disposed with
-      // the scope, which flushes what is still buffered before the process goes away.
-      if (options.tracing !== undefined) {
-        scope.register(Tokens.Tracing, options.tracing, { dispose: (tracing) => (tracing as TracingProcessor).shutdown() });
-      }
-    },
+    harness: () => ({
+      sessionRepository: repository,
+      ...(options.log ? { logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })) } : {}),
+      // One processor for the process; every session bridges its events into it. `close` flushes
+      // what is still buffered before the process goes away.
+      ...(options.tracing !== undefined ? { tracing: options.tracing } : {}),
+      close: async () => {
+        await (options.tracing as TracingProcessor | undefined)?.shutdown();
+      },
+    }),
     // The builtin coding profile (files, shell, questions) plus the one tool that ships code.
     extensions: [pullRequestExtension(options.github)],
     appendSystemPrompt: SYSTEM_PROMPT,
     // One engineer per issue: no subagent fleet, no workflow tool.
     subagentProvider: null,
     workflowTool: false,
-    session: (scope, ctx) => {
-      if (sandboxes !== undefined) {
-        const sessionId = ctx.sessionId;
-        scope.register(SandboxLease, {
-          async close() {
+    session: (ctx) => {
+      const base = defaultCapabilities({ ownEnvironment: ctx.ownEnvironment });
+      if (sandboxes === undefined) return base;
+      // The sandbox lease is session-lived, so it is a capability: closing the session releases
+      // it, in reverse order with everything else the session opened.
+      const sessionId = ctx.sessionId;
+      return [
+        ...base,
+        {
+          name: "sandbox-lease",
+          contract: "detachable" as const,
+          closeSession: async () => {
             const paused = await sandboxes.releaseSession(sessionId);
             if (!paused && options.log) console.warn(`[sandbox] ${sessionId}: could not pause; the sandbox runs until its timeout`);
           },
-        });
-      }
-      return defaultCapabilities({ scope, ownEnvironment: ctx.ownEnvironment });
+        },
+      ];
     },
     workDir: options.work,
     // Everything inside the clone is approved; the safety floor (sensitive files, .git internals,

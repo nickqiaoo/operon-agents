@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents";
 /**
  * `run()` over a real server: the synchronous shape on top of an asynchronous protocol.
  *
@@ -43,10 +42,7 @@ async function main(): Promise<void> {
   const metadataStore = new MemoryManagedSessionMetadataStore();
   const environments = new StaticEnvironmentRegistry({ workspace: { workDir: work } });
   const harness = createHarness({
-    harness: (s) => {
-      s.register(Tokens.SessionRepository, repository, { owned: false });
-      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
-    },
+    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     // `manual` with no approval handler registered anywhere is what makes a tool call pause
     // durably: there is no live responder to ask, so the run persists the request and stops.

@@ -1,4 +1,3 @@
-import { Tokens } from "../index.ts";
 import { testRunner, openTestSession } from "./faux.ts";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
@@ -9,8 +8,6 @@ import {
   LocalEnvironment,
   ListenerSink,
   SteerBus,
-  provision,
-  token,
   renderSteerText,
   defineTool,
   ToolAccesses,
@@ -34,15 +31,12 @@ function userTexts(messages: readonly Message[]): string {
     .join("\n");
 }
 
-const SteerToolProbe = token<SteerBus>("steer-probe-tool", "session");
-const SteerBgProbe = token<SteerBus>("steer-probe-bg", "session");
-const SteerReceiptProbe = token<SteerBus>("steer-probe-receipts", "session");
 
 function steerToolCapability(origin: SteerOrigin): Capability {
   let bus: SteerBus | undefined;
   return {
     name: "steer-tool",
-    provides: [provision({ token: SteerToolProbe, needs: { steer: Tokens.Steer }, create: ({ steer }) => (bus = steer) })],
+    openSession: (ctx) => { bus = ctx.steer; },
     tools: [
       defineTool({
         name: "EnqueueSteer",
@@ -66,7 +60,7 @@ function oneShotAfterStepCapability(origin: SteerOrigin, text: string): Capabili
   let fired = false;
   return {
     name: "bg-sim",
-    provides: [provision({ token: SteerBgProbe, needs: { steer: Tokens.Steer }, create: ({ steer }) => (bus = steer) })],
+    openSession: (ctx) => { bus = ctx.steer; },
     hooks: {
       afterStep: async () => {
         if (!fired) {
@@ -226,7 +220,7 @@ async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<vo
   let bus: SteerBus | undefined;
   const cap: Capability = {
     name: "receipts",
-    provides: [provision({ token: SteerReceiptProbe, needs: { steer: Tokens.Steer }, create: ({ steer }) => (bus = steer) })],
+    openSession: (ctx) => { bus = ctx.steer; },
     tools: [
       defineTool({
         name: "EnqueueSteer",

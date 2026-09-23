@@ -1,5 +1,4 @@
 import { testRunner, openTestSession } from "./faux.ts";
-import { token } from "../index.ts";
 import {
   LocalEnvironment,
   ListenerSink,
@@ -112,11 +111,12 @@ async function main(): Promise<void> {
   const wiringLogger: Logger = { log: (level, message) => captured.push(`${level}:${message}`) };
   const boom: Capability = {
     name: "boom",
-    provides: [{ token: token("boom", "session"), create: async () => { throw new Error("kapow"); } }],
+    contract: "detachable",
+    openSession: async () => { throw new Error("kapow"); },
   };
   const session = await openTestSession({ environment: new LocalEnvironment(process.cwd()), events: new ListenerSink(), logger: wiringLogger, capabilities: [boom] });
   await session.close();
-  check("Session routes capability provision failure to the logger", captured.some((l) => l.startsWith("error:") && l.includes("boom")));
+  check("Session routes a capability's openSession failure to the logger", captured.some((l) => l.startsWith("error:") && l.includes("boom")));
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

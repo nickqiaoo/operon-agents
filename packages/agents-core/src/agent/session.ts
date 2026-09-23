@@ -31,12 +31,9 @@ import { ConversationContext } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
 import type { McpServerView, MCPTool } from "../mcp/index.ts";
 import { SteerBus, type SteerContent, type SteerOptions, type SteerOrigin, type SteerReceipt } from "../loop/steer.ts";
-import type { Capability, CapabilityDiagnostic, ProvisionContext, SessionControls } from "../capabilities/capability.ts";
-import { assertDependencyTiers, resolveNeeds } from "../capabilities/needs.ts";
+import type { Capability, CapabilityDiagnostic, SessionContext, SessionControls } from "../capabilities/capability.ts";
 import { type SubagentRecord, type SubagentStatus } from "./subagent.ts";
 import { SystemPromptContextCache, type SystemPromptContext } from "./instruction-context.ts";
-import { Scope } from "../scope/scope.ts";
-import type { Token } from "../scope/token.ts";
 import type { GoalStore } from "../capabilities/goal/goal-store.ts";
 import type { PlanMode } from "../capabilities/plan/plan-mode.ts";
 import type { TodoStore } from "../capabilities/todo/todo-store.ts";
@@ -46,7 +43,13 @@ import type { PluginManager } from "../plugins/manager.ts";
 import type { McpServersHandle } from "../mcp/manager.ts";
 import type { BackgroundManager } from "../capabilities/background/manager.ts";
 import type { CompactionService } from "../capabilities/compaction/service.ts";
-import { Tokens, type SessionLogReader } from "../scope/tokens.ts";
+import type { EnvironmentFactory } from "../tool/environment.ts";
+import type { EventPublicationMode } from "../events/index.ts";
+import type { TelemetryService } from "../telemetry/service.ts";
+import type { PermissionManagerOptions } from "../permission/manager.ts";
+
+/** The session's whole append log, read once at open and memoized (see `Session.open`). */
+export type SessionLogReader = () => Promise<readonly AgentRecord[]>;
 
 let CLOSE_TIMEOUT_MS = 5_000;
 /** store.flush persists data (vs. telemetry), so it gets a longer grace. The run journal
@@ -90,11 +93,9 @@ export interface SessionOpenOptions {
   readonly signal?: AbortSignal;
   /**
    * The durable store behind this session (disk / Pg / Redis / memory). Omit for a storeless,
-   * in-memory session. `open` wraps it so record-backed events publish on commit and registers
-   * THAT wrapper as `Tokens.Store` — which is what capabilities and the loop write through.
-   *
-   * Falls back to `Tokens.StoreBackend`, which is how a `Runner`'s `session` hook supplies one:
-   * the hook can only write to the scope, and the Runner that calls `open` never sees the store.
+   * in-memory session. `open` wraps it so record-backed events publish on commit and hands
+   * THAT wrapper out as `SessionContext.store` — which is what capabilities and the loop write
+   * through.
    */
   readonly store?: SessionStore;
   /**
@@ -108,6 +109,30 @@ export interface SessionOpenOptions {
   readonly preloadedLog?: readonly AgentRecord[];
   /** Reopened from a store (vs created fresh). Only telemetry cares; the stream cannot tell. */
   readonly resumed?: boolean;
+
+  // ── What the host injects. Passed by value: a session is handed its dependencies, it does
+  //    not go looking for them, and what is not passed here it does not have. ──────────────
+  /**
+   * Where this session's tools execute: an instance, or a factory called once with the session's
+   * id and signal. Omitted, the session gets a `NullEnvironment` — no filesystem, and any file
+   * tool that slips through fails loudly instead of touching the host disk.
+   *
+   * The session only OPERATES it. Disposal stays with whoever created it: a sandbox usually
+   * outlives any one session, so closing a session must not pull it out from under the others.
+   */
+  readonly environment?: Environment | EnvironmentFactory;
+  readonly events?: EventSink;
+  readonly steer?: SteerBus;
+  /** Answers permission prompts live (as opposed to the interrupt/resume path). */
+  readonly responder?: Responder;
+  readonly permissionOptions?: PermissionManagerOptions;
+  readonly logger?: Logger;
+  readonly tracing?: TracingProcessor;
+  /** Product telemetry (docs/telemetry.md). Absent = nothing is counted. */
+  readonly telemetry?: TelemetryService;
+  readonly eventPublication?: EventPublicationMode;
+  /** Spawns background work when no background capability is open. */
+  readonly spawner?: BackgroundSpawner;
 }
 
 /** The current owner and root conversation shard for the next user prompt. */
@@ -184,27 +209,32 @@ export interface SessionPort {
 
 /**
  * Service access on a session has two tiers, one rule each:
- *  - PROBE — `session.get(Tokens.X)` returns `undefined` when that service is not registered
+ *  - PROBE — `session.service("x")` returns `undefined` when that capability is not open
  *    (the capability is not open). Use it to feature-test.
- *  - REQUIRE — `session.require(Tokens.X)` and the convenience wrappers (`createCronTask()`,
+ *  - REQUIRE — `session.requireService("x")` and the convenience wrappers (`createCronTask()`,
  *    `compact()`, `listSkills()`, …) assume the service and throw `ServiceUnavailableError`
  *    when it is missing.
  * The only exceptions are list views documented as degrading to empty when the capability
  * is off (`listWorkflows`, `listSubagents`, `listMcpServers`) — views over durable state
  * that stay meaningful on a session opened without the capability.
  *
- * The session OWNS its scope: `close()` closes it, disposing every service registered there
- * (capability provisions first, in reverse order, then the infrastructure).
+ * The session OWNS what its capabilities opened: `close()` runs every `closeSession` in reverse
+ * open order, each under a deadline.
  */
 export class Session implements SessionPort {
   readonly id: string;
-  /** The session-tier scope: every session-lived object, registered by the opener or by `open`. */
-  readonly scope: Scope<"session">;
+  /** What each open capability published, by capability name. See `service()`. */
+  private readonly services = new Map<string, unknown>();
+  /** The host's spawner, used when no background capability is open. */
+  private readonly injectedSpawner: BackgroundSpawner | undefined;
+  /** Open capabilities in registration order — closed in reverse. */
+  private openedForClose: readonly Capability[] = [];
   readonly environment: Environment;
   readonly store?: SessionStore;
   readonly events: EventSink;
   private readonly eventPublisher: SessionEventPublisher;
   readonly responder?: Responder;
+  private readonly permissionOptions: PermissionManagerOptions | undefined;
   readonly steer: SteerBus;
   readonly signal: AbortSignal;
   /** Upstream of `signal`. Fires only via `abort()`; a host signal aborts independently. */
@@ -237,6 +267,10 @@ export class Session implements SessionPort {
   private thinkingOverride?: ThinkingLevel;
   private provisionedCapabilities: readonly Capability[] = [];
   private isOpen = false;
+  /** False once `close()` has started. What the scope's `state` used to answer. */
+  get open(): boolean {
+    return this.isOpen;
+  }
   /** The one close in flight (or finished): every `close()` call returns THIS promise. */
   private closing: Promise<void> | undefined;
   private runChain: Promise<void> = Promise.resolve();
@@ -248,34 +282,35 @@ export class Session implements SessionPort {
   private permissionManager?: PermissionManager;
 
   private constructor(
-    scope: Scope<"session">,
     id: string,
     signal: AbortSignal,
     ownController: AbortController,
     publisher: SessionEventPublisher,
+    environment: Environment,
     opts: SessionOpenOptions,
   ) {
-    this.scope = scope;
     this.id = id;
     this.signal = signal;
     this.ownController = ownController;
-    this.environment = scope.require(Tokens.Environment);
+    this.environment = environment;
     this.eventPublisher = publisher;
-    // The publishing wrapper around `Tokens.Store`: record-backed events surface on `events` when
+    // The publishing wrapper around the host's store: record-backed events surface on `events` when
     // the append commits, so everything in the session writes through THIS store.
     this.store = this.eventPublisher.store;
     this.events = this.eventPublisher;
-    this.tracing = scope.get(Tokens.Tracing);
+    this.tracing = opts.tracing;
     this.unsubscribeTracing = this.tracing === undefined ? undefined : eventSinkTracingBridge(this.events, this.tracing);
     // Product telemetry rides the same stream. One subscription per session; the projection
     // tells sub-agents apart by address. `resumed` is the one fact the stream cannot tell.
-    const telemetry = scope.get(Tokens.Telemetry);
+    const telemetry = opts.telemetry;
     this.unsubscribeTelemetry =
       telemetry === undefined
         ? undefined
         : subscribeTelemetryProjection(this.events, telemetry.withContext({ session_id: id }), { resumed: opts.resumed === true });
-    this.responder = scope.get(Tokens.Responder);
-    this.steer = scope.require(Tokens.Steer);
+    this.responder = opts.responder;
+    this.injectedSpawner = opts.spawner;
+    this.permissionOptions = opts.permissionOptions;
+    this.steer = opts.steer ?? new SteerBus();
     // Every enqueue — user steer/follow-up, cron fire, background settle, a managed delivery —
     // is journaled as a `steer.queued` record and surfaces on the event stream. The write is
     // handed back so the producer's receipt can settle on durability; clients render a pending
@@ -294,57 +329,36 @@ export class Session implements SessionPort {
       }));
     // Env fallback (`AGENTS_LOG`) is resolved here so every entry point — direct `Session.open`,
     // the Runner's ephemeral session, or the harness — honors it from one place. The harness
-    // tier normally provides `Tokens.Logger`; a parentless session scope has nothing above it.
-    this.logger = scope.get(Tokens.Logger) ?? envLogger() ?? noopLogger;
+    // normally passes its logger in; a session opened directly has nothing else to fall back on.
+    this.logger = opts.logger ?? envLogger() ?? noopLogger;
     this.allCapabilities = opts.capabilities ?? [];
     this.preloadedLog = opts.preloadedLog;
   }
 
   /**
-   * Open a session on a session-tier scope. The opener registers what it decides (`Tokens.Environment`,
-   * `Tokens.Store`, `Tokens.Events`, `Tokens.Responder`, `Tokens.PermissionOptions`, `Tokens.HostSignal`, `Tokens.SessionId`, …);
-   * `open` provides the defaults for whatever is missing, builds the session's own objects
-   * (signal, event publisher, log reader, controls), runs every capability's provisions in
-   * order, then builds the permission manager. From here on the session owns the scope.
+   * Open a session. Everything it depends on arrives in `opts`; `open` fills in the defaults for
+   * whatever is missing, builds the session's own objects (signal, event publisher, log reader,
+   * controls), opens every capability in order, then builds the permission manager.
    */
-  static async open(scope: Scope<"session">, opts: SessionOpenOptions = {}): Promise<Session> {
-    if (scope.kind !== "session") throw new Error(`Session.open needs a session scope, got a ${scope.kind} scope`);
+  static async open(opts: SessionOpenOptions = {}): Promise<Session> {
     const id = opts.sessionId ?? newSessionId();
     // The session owns a cancel handle of its own, downstream of whatever the host passed in:
     // `session.abort()` stops the session without taking the host's signal away from it, and a
     // host abort still propagates. `AbortSignal.any` owns the listener lifetime for us.
     const ownController = new AbortController();
     const signal = opts.signal === undefined ? ownController.signal : AbortSignal.any([opts.signal, ownController.signal]);
-    scope.register(Tokens.SessionSignal, signal);
-    scope.provide(Tokens.Events, () => new ListenerSink());
-    scope.provide(Tokens.Steer, () => new SteerBus());
-    // Environment: the opener's registration wins; else a workspace- or harness-level factory
-    // (resolved here because it needs the session id + signal, and `provide` is sync); else a
-    // NullEnvironment — a stateless session with no filesystem, where any file tool that slips
-    // through fails loudly instead of touching the host disk. The session only OPERATES the
-    // environment — disposal stays with whoever created it (`owned: false`).
-    if (!scope.hasLocal(Tokens.Environment)) {
-      const factory = scope.get(Tokens.SessionEnvironmentFactory) ?? scope.get(Tokens.WorkspaceEnvironmentFactory) ?? scope.get(Tokens.EnvironmentFactory);
-      if (factory !== undefined) {
-        const environment = typeof factory === "function" ? await factory({ sessionId: id, signal }) : factory;
-        scope.register(Tokens.Environment, environment, { owned: false });
-      }
-    }
-    scope.provide(Tokens.Environment, () => new NullEnvironment());
+    // Resolved here rather than in the constructor because a factory is async and needs the id.
+    const environment =
+      opts.environment === undefined
+        ? new NullEnvironment()
+        : typeof opts.environment === "function"
+          ? await opts.environment({ sessionId: id, signal })
+          : opts.environment;
     // The publisher is the session's OWN object — one producer, one consumer, both inside this
-    // class — so it is built here and held as a field rather than round-tripped through the
-    // registry. Nothing outside a session can meaningfully hold another session's publisher.
-    const publisher = new SessionEventPublisher(
-      id,
-      scope.require(Tokens.Events),
-      opts.store ?? scope.get(Tokens.StoreBackend),
-      scope.get(Tokens.SessionEventPublication) ?? scope.get(Tokens.EventPublication) ?? "immediate",
-    );
-    const session = new Session(scope, id, signal, ownController, publisher, opts);
-    // `Tokens.Store` is the publishing wrapper — what capabilities, the loop and the host write through.
-    if (session.store !== undefined) scope.register(Tokens.Store, session.store, { owned: false });
-    scope.register(Tokens.SessionControls, session.controls());
-    await session.provisionCapabilities();
+    // class — so it is built here and held as a field.
+    const publisher = new SessionEventPublisher(id, opts.events ?? new ListenerSink(), opts.store, opts.eventPublication ?? "immediate");
+    const session = new Session(id, signal, ownController, publisher, environment, opts);
+    await session.openCapabilities();
     return session;
   }
 
@@ -355,42 +369,9 @@ export class Session implements SessionPort {
    * `scope.close()`, not by a matching call here. What it has is `provides`, so this is the verb
    * for it. The per-RUN pair is `start`/`stop`, which the assembler drives.
    */
-  /**
-   * Undo one capability's session registrations, newest first, after its assembly failed.
-   *
-   * Only what THIS capability registered on THIS pass, by token, so a host's own service or a
-   * concurrent replacement is never collateral. `unregister` drains and disposes, so an object
-   * that was half-wired still gets its `close()`; a disposer that throws is logged and the rest
-   * of the withdrawal continues, because the error that matters is the original one.
-   */
-  private async withdraw(tokens: readonly Token<unknown, "session">[], capability: string): Promise<void> {
-    for (const tok of [...tokens].reverse()) {
-      try {
-        await this.scope.unregister(tok, {
-          disposeTimeoutMs: 5_000,
-          onDisposeError: (name, error) => {
-            this.pendingDiagnostics.push({
-              capability,
-              phase: "register",
-              level: "warn",
-              message: `rolling back after a failed provision: disposing "${name}" failed: ${messageOf(error)}`,
-            });
-          },
-        });
-      } catch (error) {
-        this.pendingDiagnostics.push({
-          capability,
-          phase: "register",
-          level: "warn",
-          message: `rolling back after a failed provision: withdrawing "${tok.name}" failed: ${messageOf(error)}`,
-        });
-      }
-    }
-  }
-
-  private async provisionCapabilities(): Promise<void> {
+  private async openCapabilities(): Promise<void> {
     // Shared restore: read the log at most once and let every log-fold capability
-    // (goal/plan/todo) reconstruct from that one read via `Tokens.SessionLog`, then reuse it to
+    // (goal/plan/todo) reconstruct from that one read via `SessionContext.logRecords`, then reuse it to
     // pre-build the main conversation context — instead of each capability, plus the first
     // run's `replayContext`, re-reading the log separately. A caller-preloaded log IS that
     // one read, done outside.
@@ -400,8 +381,17 @@ export class Session implements SessionPort {
       if (log === undefined) log = await readLog(this.store);
       return log;
     };
-    this.scope.register(Tokens.SessionLog, logRecords);
-    const ctx: ProvisionContext = { sessionId: this.id, signal: this.signal };
+    const ctx: SessionContext = {
+      sessionId: this.id,
+      environment: this.environment,
+      events: this.events,
+      signal: this.signal,
+      steer: this.steer,
+      controls: this.controls(),
+      logRecords,
+      ...(this.store !== undefined ? { store: this.store } : {}),
+      ...(this.logger !== undefined ? { logger: this.logger } : {}),
+    };
     const opened: Capability[] = [];
     const seen = new Set<string>();
     for (const cap of this.allCapabilities) {
@@ -415,64 +405,37 @@ export class Session implements SessionPort {
         continue;
       }
       seen.add(cap.name);
-      // What THIS capability registered in the session scope, in order. A capability is all or
-      // nothing: if a later provision fails, these come back out before the next capability is
-      // assembled, so nothing can build on the remains of something that is not open.
-      const registered: Token<unknown, "session">[] = [];
       try {
-        for (const provision of cap.provides ?? []) {
-          // Declarations are checked before anything is built or looked up — including when the
-          // shared service already exists and the factory will be skipped. A workspace service
-          // that names a session one is wrong even on the run where it does not get built.
-          assertDependencyTiers(cap.name, provision.token, provision.needs);
-          const options = provision.dispose !== undefined ? { dispose: provision.dispose as (instance: unknown) => void | Promise<void> } : {};
-          // The token's tier picks the scope, which is how a capability owns both halves of
-          // itself: the shared one, built once per workspace by whichever session declares it
-          // first, and the per-session one.
-          if (provision.token.scope === "session") {
-            const tok = provision.token as Token<unknown, "session">;
-            // `create`, not `await create(); register()`: between those two the object belongs
-            // to nobody, and a session closing mid-open would drop it on the floor.
-            await this.scope.create(tok, () => provision.create(resolveNeeds(this.scope, provision.needs, cap.name), ctx), options);
-            registered.push(tok);
-            continue;
-          }
-          const host = this.scope.scopeOf(provision.token.scope);
-          if (host === undefined) {
-            throw new Error(
-              `provision for "${provision.token.name}" is ${provision.token.scope}-scoped, but this session has no ${provision.token.scope} scope above it`,
-            );
-          }
-          // Dependencies resolve from the scope that OWNS the service, and are resolved inside
-          // the factory — so an existing shared service is reused without this session's
-          // dependencies being consulted at all, and a new one can never capture them.
-          await host.ensure(
-            provision.token as Token<unknown, never>,
-            (build) => provision.create(resolveNeeds(host, provision.needs, cap.name), { signal: build.signal }),
-            options,
-          );
-        }
+        // A capability that throws here is absent for the session — its per-run assembly too,
+        // since it is not pushed onto `opened`. An `invariant` one is not allowed to be absent,
+        // so its failure fails the open instead.
+        await cap.openSession?.(ctx);
       } catch (error) {
-        // Fault isolation: the capability is absent for the session (its per-run assembly too,
-        // since it isn't pushed onto `opened`). Its session services are withdrawn here; a
-        // workspace service it had already published stays — other sessions may hold it.
-        await this.withdraw(registered, cap.name);
+        // An `invariant` capability may not be absent, so its failure fails the open — but the
+        // capabilities already opened are this session's, and nobody else will close them. Undo
+        // them here, newest first, before the error leaves.
+        if (cap.contract === "invariant") {
+          await this.closeOpened(opened);
+          throw error;
+        }
         this.pendingDiagnostics.push({
           capability: cap.name,
           phase: "start",
           level: "error",
-          message: `provision failed; capability absent for the session: ${messageOf(error)}`,
+          message: `openSession failed; capability absent for the session: ${messageOf(error)}`,
         });
-        this.logger.log("error", `capability "${cap.name}" provision failed`, { capability: cap.name, phase: "start", error: messageOf(error) });
+        this.logger.log("error", `capability "${cap.name}" openSession failed`, { capability: cap.name, phase: "start", error: messageOf(error) });
         continue;
       }
+      if (cap.service !== undefined) this.services.set(cap.name, cap.service);
       opened.push(cap);
     }
     this.provisionedCapabilities = opened;
+    this.openedForClose = opened;
     await this.buildPermissionManager(opened, logRecords);
     // A session opened without the workflow capability still needs ONE manager per session (the
     // resume journals of every workflow run in the session must land in the same store).
-    this.scope.provide(Tokens.Workflow, () => new WorkflowManager(this.store));
+    if (!this.services.has("workflow")) this.services.set("workflow", new WorkflowManager(this.store));
     // If a capability triggered the log read, reuse those records to seed the main live
     // context so the first run appends to it instead of replaying the log a second time.
     if (log !== undefined && this.store !== undefined && this.liveContext(DEFAULT_ADDRESS) === undefined) {
@@ -484,6 +447,22 @@ export class Session implements SessionPort {
       this.setLiveContext(DEFAULT_ADDRESS, context);
     }
     this.isOpen = true;
+  }
+
+  /** Close capabilities in reverse open order, each fault-isolated: used to undo a failed open. */
+  private async closeOpened(opened: readonly Capability[]): Promise<void> {
+    for (const cap of [...opened].reverse()) {
+      if (cap.closeSession === undefined) continue;
+      try {
+        await withTimeout(Promise.resolve(cap.closeSession()), CLOSE_TIMEOUT_MS);
+      } catch (error) {
+        this.logger.log("warn", `capability "${cap.name}" closeSession failed while undoing a failed open`, {
+          capability: cap.name,
+          phase: "stop",
+          error: messageOf(error),
+        });
+      }
+    }
   }
 
   /**
@@ -523,7 +502,7 @@ export class Session implements SessionPort {
       }
     }
 
-    const options = this.scope.get(Tokens.PermissionOptions);
+    const options = this.permissionOptions;
     const permission = new PermissionManager({
       ...options,
       mode: options?.mode,
@@ -565,13 +544,15 @@ export class Session implements SessionPort {
     return this.provisionedCapabilities;
   }
 
-  /** PROBE tier: the service, or undefined when nothing registered it (see the class doc). */
-  get<S>(tok: Token<S>): S | undefined {
-    return this.scope.get(tok);
+  /** PROBE tier: what the capability named `name` published, or undefined when it is not open. */
+  service<S = unknown>(name: string): S | undefined {
+    return this.services.get(name) as S | undefined;
   }
-  /** REQUIRE tier: the service, or a `ServiceUnavailableError` naming what is missing. */
-  require<S>(tok: Token<S>): S {
-    return this.scope.require(tok);
+  /** REQUIRE tier: the same, or a throw naming the capability that would have provided it. */
+  requireService<S = unknown>(name: string): S {
+    const found = this.services.get(name);
+    if (found === undefined) throw new Error(`no capability named "${name}" is open in this session`);
+    return found as S;
   }
   // ── capability services ───────────────────────────────────────────────────────────────
   // One accessor per capability, instead of a facade method per operation.
@@ -585,13 +566,13 @@ export class Session implements SessionPort {
   //    session with no background capability has no past runs. The caller has something
   //    sensible to do with "none", and the emptiness stays visible at the call site.
   //
-  // To FEATURE-TEST a REQUIRE accessor, use `session.get(Tokens.X)`. Not `session.goal?.…`:
+  // To FEATURE-TEST a REQUIRE accessor, use `session.service("goal")`. Not `session.goal?.…`:
   // optional chaining guards a null result, not a throwing getter, so it reads as safe and is
   // not.
   //
   // These accessors are the one place core names capabilities (§3.4 holds for their BEHAVIOUR:
   // the kernel and the assembler know only interfaces). It is a deliberate trade: `session.goal`
-  // over `session.require(Tokens.Goal)` at 58 call sites, paid for by this class listing eleven
+  // over `session.requireService("goal")` at 58 call sites, paid for by this class listing eleven
   // capability names. A host's own capability is reached through `session.require(tok)` and
   // needs nothing here.
   //
@@ -601,45 +582,45 @@ export class Session implements SessionPort {
 
   /** The workflow manager: the capability's, or the in-memory fallback `open` provides. */
   get workflow(): WorkflowManager {
-    return this.scope.require(Tokens.Workflow);
+    return this.requireService<WorkflowManager>("workflow");
   }
   get goal(): GoalStore {
-    return this.scope.require(Tokens.Goal);
+    return this.requireService<GoalStore>("goal");
   }
   get plan(): PlanMode {
-    return this.scope.require(Tokens.Plan);
+    return this.requireService<PlanMode>("plan");
   }
   get todo(): TodoStore {
-    return this.scope.require(Tokens.Todo);
+    return this.requireService<TodoStore>("todo");
   }
   get task(): TaskStore {
-    return this.scope.require(Tokens.Task);
+    return this.requireService<TaskStore>("task");
   }
   get skills(): SkillsService {
-    return this.scope.require(Tokens.Skills);
+    return this.requireService<SkillsService>("skills");
   }
   get plugins(): PluginManager {
-    return this.scope.require(Tokens.Plugins);
+    return this.requireService<PluginManager>("plugins");
   }
   /** The MCP control plane. Absent when no MCP capability is open — hence `get`, not `require`:
    *  a session without MCP has no servers to report, and that is an answer, not a failure. */
   get mcp(): McpServersHandle | undefined {
-    return this.scope.get(Tokens.Mcp);
+    return this.service<McpServersHandle>("mcp");
   }
   newWorkflowJournal(runId: string, parentToolCallId?: string): WorkflowJournal {
     return this.workflow.newJournal(runId, parentToolCallId);
   }
   get compaction(): CompactionService {
-    return this.scope.require(Tokens.Compaction);
+    return this.requireService<CompactionService>("compaction");
   }
   /** The PROBE view of the same service, for the loop: absent when compaction is not open. */
   get compactionView(): CompactionService | undefined {
-    return this.scope.get(Tokens.Compaction);
+    return this.service<CompactionService>("compaction");
   }
   /** The spawner the Agent/Workflow tools use: the background capability's manager, else the
-   *  host-injected `Tokens.BackgroundSpawner`. */
+   *  host-injected `spawner` (`SessionOpenOptions.spawner`). */
   get spawner(): BackgroundSpawner | undefined {
-    return this.scope.get(Tokens.Background) ?? this.scope.get(Tokens.BackgroundSpawner);
+    return this.service<BackgroundManager>("background") ?? this.injectedSpawner;
   }
 
   /**
@@ -649,10 +630,10 @@ export class Session implements SessionPort {
    * without the background capability has no past runs, which is an ANSWER — so a caller writes
    * `session.background?.listSubagents() ?? []` and the emptiness is visible at the call site
    * instead of hidden inside a facade method. Callers that genuinely require it (stopping a
-   * task, detaching a tool call) should say so with `session.require(Tokens.Background)`.
+   * task, detaching a tool call) should say so with `session.requireService("background")`.
    */
   get background(): BackgroundManager | undefined {
-    return this.scope.get(Tokens.Background);
+    return this.service<BackgroundManager>("background");
   }
 
   /** The most-recent context-window breakdown (system/tools/messages/injections/free), stamped
@@ -751,7 +732,7 @@ export class Session implements SessionPort {
 
   /** Resolve environment + AGENTS.md for the active runtime frame, cached for this Session. */
   resolveSystemPromptContext(environment: Environment): Promise<SystemPromptContext> {
-    return this.systemPromptContexts.resolve(environment, this.get(Tokens.Compaction)?.revision ?? 0);
+    return this.systemPromptContexts.resolve(environment, this.compactionView?.revision ?? 0);
   }
 
   /**
@@ -874,15 +855,20 @@ export class Session implements SessionPort {
       });
       this.logger.log("warn", "store flush failed/timed out", { capability: "store", phase: "stop", error: messageOf(error) });
     }
-    // Provisions (MCP connections, the background manager's subscription, …) go down in
-    // reverse registration order, each dispose under CLOSE_TIMEOUT_MS. The environment is NOT
-    // closed here unless this session registered it as owned: its lifetime belongs to whoever
-    // created it (see `EnvironmentFactory`) — a sandbox usually outlives any one session, so
-    // closing it on session.close would pull the workspace out from under other sessions.
-    await this.scope.close({ disposeTimeoutMs: CLOSE_TIMEOUT_MS, onDisposeError: (name, error) => {
-      this.pendingDiagnostics.push({ capability: name, phase: "stop", level: "warn", message: `dispose failed/timed out: ${messageOf(error)}` });
-      this.logger.log("warn", `service "${name}" dispose failed/timed out`, { capability: name, phase: "stop", error: messageOf(error) });
-    } });
+    // Capabilities go down in reverse open order, each under CLOSE_TIMEOUT_MS: a straggler is
+    // abandoned (and logged) so close() can never hang on one of them, and a failure is isolated
+    // so the ones after it still get torn down. The environment is NOT closed here: its lifetime
+    // belongs to whoever created it, and a sandbox usually outlives any one session.
+    for (const cap of [...this.openedForClose].reverse()) {
+      if (cap.closeSession === undefined) continue;
+      try {
+        await withTimeout(Promise.resolve(cap.closeSession()), CLOSE_TIMEOUT_MS);
+      } catch (error) {
+        this.pendingDiagnostics.push({ capability: cap.name, phase: "stop", level: "warn", message: `closeSession failed/timed out: ${messageOf(error)}` });
+        this.logger.log("warn", `capability "${cap.name}" closeSession failed/timed out`, { capability: cap.name, phase: "stop", error: messageOf(error) });
+      }
+    }
+    this.services.clear();
   }
 
   /** Public URL for a port inside the environment, or undefined when the backend can't expose one. */

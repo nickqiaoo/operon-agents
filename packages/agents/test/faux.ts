@@ -66,4 +66,4 @@ export function registerFauxProvider(
   };
 }
 
-export { testRunner, openTestSession, testHarnessScope, wireTestSession, provisionCapability, testProvisionContext, testRunContext } from "operon-agents-core/internal";
+export { testRunner, openTestSession, sessionOptionsFrom, provisionCapability, testSessionContext, testProvisionContext, testRunContext } from "operon-agents-core/internal";

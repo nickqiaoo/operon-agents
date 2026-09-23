@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents";
 /**
  * Accepted means "will be claimed", not "is on disk".
  *
@@ -40,10 +39,7 @@ function fixture(name: string, responses: number, options: { readonly ttlMs?: nu
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const sessionWork = new MemorySessionWork({ repository, ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}) });
   const harness = createHarness({
-    harness: (s) => {
-      s.register(Tokens.SessionRepository, repository, { owned: false });
-      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
-    },
+    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

@@ -1,14 +1,13 @@
-import { provision, optional, Tokens, type Capability } from "operon-agents-core";
+import { readSessionLog, type Capability } from "operon-agents-core";
 import type { ExtensionDefinition, ExtensionHost } from "./types.ts";
 import { ExtensionRuntime } from "./runtime.ts";
-import { HarnessTokens } from "../tokens.ts";
 
 export { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionLoader, createExtensionLoader } from "./loader.ts";
 export { ServiceRegistry, ServiceUnavailableError, deadServiceHandle } from "./services.ts";
-export { HarnessExtensionManager, stageDefinition, assertOneSharedHalf } from "./manager.ts";
+export { HarnessExtensionManager, stageDefinition } from "./manager.ts";
 export type { ExtensionHostBridge, StagingOptions, HeldSession, StagedDefinition } from "./manager.ts";
-export type { ServiceOptions, ServiceTier, ServiceUnavailableReason } from "./services.ts";
+export type { ServiceOptions, ServiceUnavailableReason } from "./services.ts";
 export type { ExtensionManifest, ExtensionFileState, ExtensionFileStatus, ExtensionAttachTarget } from "./loader.ts";
 export type {
   ExtensionActions,
@@ -19,7 +18,6 @@ export type {
   ExtensionSteerOptions,
   ExtensionDefinition,
   ExtensionHostContext,
-  ExtensionWorkspaceContext,
   ExtensionEventContext,
   ExtensionEventMap,
   ExtensionEventName,
@@ -77,26 +75,26 @@ export function extensionsCapability(
   const runtime = new ExtensionRuntime(definitions, options.host, options.params);
   return {
     name: "extensions",
-    provides: [
-      provision({
-        token: HarnessTokens.Extensions,
-        // An extension can touch the whole session surface, so this list IS the blast radius —
-        // written down once, here, instead of discovered by reading the runtime for lookups.
-        needs: {
-          environment: Tokens.Environment,
-          events: Tokens.Events,
-          steer: Tokens.Steer,
-          controls: Tokens.SessionControls,
-          readLog: Tokens.SessionLog,
-          store: optional(Tokens.Store),
+    // The extensions this carries are each detachable by construction; so is carrying them.
+    contract: "detachable",
+    service: runtime,
+    // An extension can touch the whole session surface, so this list IS the blast radius —
+    // written down once, here, instead of discovered by reading the runtime for lookups.
+    openSession: async (ctx) => {
+      if (ctx.controls === undefined) throw new Error("the extensions capability needs the session's controls");
+      await runtime.open(
+        {
+          environment: ctx.environment,
+          events: ctx.events,
+          steer: ctx.steer,
+          controls: ctx.controls,
+          readLog: () => readSessionLog(ctx),
+          store: ctx.store,
         },
-        create: async (services, ctx) => {
-          await runtime.open(services, ctx);
-          return runtime;
-        },
-        dispose: () => runtime.close(),
-      }),
-    ],
+        ctx,
+      );
+    },
+    closeSession: () => runtime.close(),
     toolProviders: [{ id: "extensions", listTools: () => runtime.listTools() }],
     toolFilters: [runtime.filterTools],
     gates: { compaction: runtime.compactionGate },

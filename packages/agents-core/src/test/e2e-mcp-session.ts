@@ -2,7 +2,7 @@ import { testRunner, openTestSession } from "./faux.ts";
 // The MCP capability is reachable through `session.mcp`, the PROBE accessor: with no MCP
 // capability open the handle is absent, so listing degrades to empty at the CALL SITE and a
 // caller that genuinely requires it says so with `require`.
-import { ListenerSink, LocalEnvironment, Session, Tokens } from "../index.ts";
+import { ListenerSink, LocalEnvironment, Session } from "../index.ts";
 import { mcpServersCapability, MockMCPTransport } from "../mcp/index.ts";
 import type { McpTransportFactory } from "../mcp/index.ts";
 
@@ -34,12 +34,12 @@ async function main(): Promise<void> {
       const servers = session.mcp?.list() ?? [];
       check("session.listMcpServers returns the connected server", servers.length === 1 && servers[0]!.name === "good" && servers[0]!.status === "connected");
 
-      await session.require(Tokens.Mcp).reconnect("good");
+      await session.requireService("mcp").reconnect("good");
       check("session.reconnectMcpServer succeeds + stays connected", (session.mcp?.list() ?? [])[0]!.status === "connected");
 
       let threw = false;
       try {
-        await session.require(Tokens.Mcp).reconnect("nope");
+        await session.requireService("mcp").reconnect("nope");
       } catch {
         threw = true;
       }
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
       check("session.listMcpServers is empty when no MCP capability is open", (session.mcp?.list() ?? []).length === 0);
       let threw = false;
       try {
-        await session.require(Tokens.Mcp).reconnect("good");
+        await session.requireService("mcp").reconnect("good");
       } catch {
         threw = true;
       }

@@ -30,7 +30,6 @@ export * from "./logging/index.ts";
 export * from "./net/index.ts";
 export * from "./tracing/index.ts";
 export * from "./telemetry/index.ts";
-export * from "./scope/index.ts";
 export * from "./agent/index.ts";
 export * from "./capabilities/index.ts";
 export * from "./config/index.ts";

@@ -652,41 +652,9 @@ export interface ExtensionHostContext<
 }
 
 /**
- * What an extension's `workspace` half is handed — one call per workspace key (the working
- * directory locally; a tenant / environment id on a server), the first time a session opens
- * under it, or when the definition is loaded while the workspace is already open. The same
- * reach as the `harness` half plus the workspace's identity. `dataDir` is a folder of its own
- * PER WORKSPACE (`<extension data>/workspaces/<key>`), outside the code folder, so state keyed
- * by workspace survives a reload and an update the way the harness half's does.
- */
-export interface ExtensionWorkspaceContext<
-  TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
-> {
-  /** The workspace key: the working directory locally, a tenant / environment id on a server. */
-  readonly key: string;
-  readonly workDir: string;
-  /**
-   * Open a brand-new session IN THIS WORKSPACE — `workspaceKey` and `workDir` default to it, so
-   * a spawn factory's teammates are born beside the session that spawned them. Not available
-   * while the half itself is running (the workspace is still being composed; open sessions
-   * later, from `session`, a tool, or an event).
-   */
-  createSession(
-    options?: { readonly title?: string; readonly extensions?: readonly ExtensionDefinition[]; readonly params?: Record<string, unknown> } & Record<string, unknown>,
-  ): Promise<{ readonly id: string }>;
-  /** Handles to the services named in `uses`, resolved FROM this workspace: a workspace-tier
-   *  service lands on this workspace's instance, a harness-tier one on the harness's. */
-  readonly services: TServices;
-  /** This workspace's own folder for this extension's files; absent when the harness has no
-   *  data root. Created before the half runs. */
-  readonly dataDir?: string;
-  warn(message: string): void;
-}
-
-/**
  * What `session` receives besides the API: the handles the framework resolved for this extension
  * in this session. Nothing here is looked up by name from inside the extension — every service
- * it may touch was declared on the definition (`harness` / `workspace` for its own, `uses` for
+ * it may touch was declared on the definition (`harness` for its own, `uses` for
  * others') and
  * arrives resolved.
  */
@@ -719,13 +687,6 @@ export interface ExtensionSessionContext<
  * - **`harness` — the process-shared half.** Runs ONCE per harness, not per session. Its return
  *   value is registered as a service under this extension's `id` in the harness scope; every
  *   session's `session` then receives a stable handle to it as `ctx.shared`.
- * - **`workspace` — the per-workspace half.** Runs once per workspace key (the working directory
- *   locally, a tenant on a server), when the first session opens under it. Its return value is
- *   registered under the `id` in THAT workspace's scope — one instance per workspace, disposed
- *   when the last session under it closes — and the sessions beneath it get the handle as
- *   `ctx.shared`. A definition carries at most ONE shared half, `harness` or `workspace`, so its
- *   service and `ctx.shared` live at exactly one tier; the session half need not know which.
- *   There is no separate type and no `tier` option — the tier is the name of the half.
  * - **`uses` — the services of others it consumes.** Names only; checked when the definition is
  *   registered (a consumer must come after its provider) and handed to `session` resolved as
  *   `ctx.services[name]`. There is no lookup by name from inside an extension.
@@ -747,8 +708,6 @@ export interface ExtensionDefinition<
   readonly timeoutMs?: number;
   /** The process-shared half: once per harness. See above. */
   harness?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
-  /** The per-workspace half: once per workspace key. Mutually exclusive with `harness`. See above. */
-  workspace?(host: ExtensionWorkspaceContext<TServices>): TShared | Promise<TShared>;
   /** Services this extension consumes, by name — other extensions' shared-half results (their
    *  `id`s) or host-registered `services`. Resolved into `ctx.services` for `session`. */
   readonly uses?: readonly (keyof TServices & string)[];

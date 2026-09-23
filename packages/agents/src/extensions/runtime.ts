@@ -11,7 +11,7 @@ import type {
   Injector,
   LlmRequest,
   Message,
-  ProvisionContext,
+  SessionContext,
   SessionControls,
   SessionStore,
   SteerChannel,
@@ -25,7 +25,7 @@ import type {
   ToolResultContent,
   Usage,
 } from "operon-agents-core";
-import { tagToolSource, Tokens } from "operon-agents-core";
+import { tagToolSource } from "operon-agents-core";
 import type {
   ExtensionAPI,
   ExtensionActions,
@@ -128,7 +128,7 @@ export class ExtensionRuntime {
   private flushChain: Promise<void> = Promise.resolve();
   private readonly memoryState = new Map<string, unknown>();
   /** The session binding: the services the capability DECLARED, plus the session's id/signal/scope. */
-  private session: (ProvisionContext & ExtensionServices) | undefined;
+  private session: (SessionContext & ExtensionServices) | undefined;
   private run: RunContext | undefined;
   /** The conversation shard the in-flight decision point belongs to; backs `actions.record`. */
   private activeContext: ConversationContext | undefined;
@@ -167,8 +167,8 @@ export class ExtensionRuntime {
   // Lifecycle
   // ==========================================================================
 
-  async open(services: ExtensionServices, ctx: ProvisionContext, reason: SessionStartReason = "open"): Promise<void> {
-    this.session = { ...services, ...ctx };
+  async open(services: ExtensionServices, ctx: SessionContext, reason: SessionStartReason = "open"): Promise<void> {
+    this.session = { ...ctx, ...services };
     for (const definition of this.definitions) {
       await this.setupExtension(definition);
     }
@@ -341,7 +341,7 @@ export class ExtensionRuntime {
     // under the id where the session's scope chain finds it. Not registered ⇒ it was handed to a
     // session directly instead of being registered — a programming error, so it throws rather
     // than being skipped.
-    const sharedHalf = definition.harness !== undefined || definition.workspace !== undefined;
+    const sharedHalf = definition.harness !== undefined;
     if (sharedHalf && this.host?.services?.has(definition.id) !== true) {
       throw new Error(
         `extension "${definition.id}" has a shared half but no service "${definition.id}" is reachable from this session — its harness/workspace half never ran. Register it in createHarness({ extensions }) or load it from extensionDir; a definition with a shared half cannot be handed to a session directly`,
@@ -1220,7 +1220,7 @@ export class ExtensionRuntime {
     }
   }
 
-  private requireSession(): ProvisionContext & ExtensionServices {
+  private requireSession(): SessionContext & ExtensionServices {
     if (!this.session) throw new Error("extension runtime is not attached to a session");
     return this.session;
   }

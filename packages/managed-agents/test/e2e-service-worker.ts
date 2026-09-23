@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents";
 /**
  * The two halves together: a service that only writes, a worker that only runs.
  *
@@ -45,10 +44,7 @@ async function main(): Promise<void> {
 
   const service = new SessionService({ repository, work: sessionWork, environments, metadataStore });
   const harness = createHarness({
-    harness: (s) => {
-      s.register(Tokens.SessionRepository, repository, { owned: false });
-      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
-    },
+    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });
@@ -155,10 +151,7 @@ async function cursorAdvancesOnceTheInputIsInTheConversation(): Promise<void> {
   }]);
 
   const harness = createHarness({
-    harness: (s) => {
-      s.register(Tokens.SessionRepository, repository, { owned: false });
-      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
-    },
+    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

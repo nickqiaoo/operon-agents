@@ -43,7 +43,7 @@ async function main(): Promise<void> {
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, repo })],
     });
-    return { harness, net: harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() }) };
+    return { harness, net: harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE) };
   };
 
   // ── The ledger clears only once the message is really in the recipient's conversation ──

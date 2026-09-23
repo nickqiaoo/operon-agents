@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents";
 /**
  * Soft delete at the managed layer — where the audit copy and the client's view diverge.
  *
@@ -46,7 +45,7 @@ async function main(): Promise<void> {
 
   try {
     const repository = new DiskSessionRepository(join(root, "home"));
-    const harness = createHarness({ harness: (s) => { s.register(Tokens.SessionRepository, repository, { owned: false }); }, model, permission: { mode: "yolo" } });
+    const harness = createHarness({ harness: () => ({ sessionRepository: repository }), model, permission: { mode: "yolo" } });
     const host = new SessionService({
       repository,
       work: new MemorySessionWork({ repository }),

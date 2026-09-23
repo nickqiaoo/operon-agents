@@ -1,5 +1,5 @@
 import type { Session } from "../agent/session.ts";
-import { Tokens } from "../scope/tokens.ts";
+import type { BackgroundManager } from "../capabilities/background/manager.ts";
 
 export interface CommandContext {
   readonly session: Session;
@@ -73,10 +73,8 @@ export class CommandRegistry {
 function dynamicCommands(session: Session): readonly HeadlessCommand[] {
   const out: HeadlessCommand[] = [];
   for (const capability of session.capabilities) {
-    for (const provision of capability.provides ?? []) {
-      const service = session.get(provision.token) as { sessionCommands?: () => readonly HeadlessCommand[] } | undefined;
-      if (typeof service?.sessionCommands === "function") out.push(...service.sessionCommands());
-    }
+    const service = session.service(capability.name) as { sessionCommands?: () => readonly HeadlessCommand[] } | undefined;
+    if (typeof service?.sessionCommands === "function") out.push(...service.sessionCommands());
   }
   return out;
 }
@@ -193,21 +191,21 @@ export function registerCapabilityCommands(registry: CommandRegistry): void {
       const { head: sub, tail } = splitHead(rawArgs);
       if (sub.length === 0 || sub === "list" || sub === "active") {
         const activeOnly = sub === "active" || tail.trim() === "active";
-        const tasks = session.require(Tokens.Background).list(activeOnly, undefined);
+        const tasks = session.requireService<BackgroundManager>("background").list(activeOnly, undefined);
         return { ok: true, message: `${tasks.length} background task(s).`, data: tasks };
       }
 
       if (sub === "output") {
         const { head: id } = splitHead(tail);
         if (id.length === 0) return { ok: false, message: "Usage: /tasks output <id>" };
-        const snapshot = await session.require(Tokens.Background).readOutput(id, 16 * 1024);
+        const snapshot = await session.requireService<BackgroundManager>("background").readOutput(id, 16 * 1024);
         return { ok: true, message: `Output for task ${id}.`, data: snapshot };
       }
 
       if (sub === "stop") {
         const { head: id, tail: reason } = splitHead(tail);
         if (id.length === 0) return { ok: false, message: "Usage: /tasks stop <id> [reason]" };
-        const info = await session.require(Tokens.Background).stop(id, reason.length > 0 ? reason : undefined);
+        const info = await session.requireService<BackgroundManager>("background").stop(id, reason.length > 0 ? reason : undefined);
         return info === undefined
           ? { ok: false, message: `No background task "${id}".` }
           : { ok: true, message: `Stopped task ${id}.`, data: info };

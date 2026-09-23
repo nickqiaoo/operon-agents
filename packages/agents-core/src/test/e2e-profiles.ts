@@ -1,5 +1,4 @@
 import { testRunner, openTestSession } from "./faux.ts";
-import { Tokens } from "../index.ts";
 // Agent profiles: YAML defs with `extends` inheritance + a nunjucks system-prompt renderer that
 // pulls live context (cwd/os/AGENTS.md). Builtin profiles (agent + coder/explore/plan) ship
 // inline; a profile builds into a runnable Agent whose system prompt renders at run time.
@@ -110,7 +109,7 @@ async function main(): Promise<void> {
       writeFileSync(join(dir, "AGENTS.md"), "initial project instruction");
       const environment = new CountingLocalEnvironment(dir);
       const compaction = new CompactionService();
-      const session = await openTestSession({ environment, capabilities: [{ name: "compaction", provides: [{ token: Tokens.Compaction, create: () => compaction }] }] });
+      const session = await openTestSession({ environment, capabilities: [{ name: "compaction", contract: "invariant" as const, service: compaction }] });
       const unknown: string[] = [];
       const agent = await buildAgentFromProfile(DEFAULT_AGENT_PROFILES["coder"]!, {
         tools: { Read: readTool, Write: writeTool }, // only these resolve; the rest are skipped

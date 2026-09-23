@@ -25,30 +25,31 @@ import {
   McpOAuthService,
   RotatingFileSink,
   SkillRegistry,
-  Tokens,
   createMcpServers,
   loadSkillRoots,
   loadAgentProfiles,
   resolveGlobalLogPath,
   sinkLogger,
 } from "operon-agents-core";
+import type { McpServersHandle } from "operon-agents-core";
 import {
   createHarness,
   defaultCapabilities,
   type Harness,
   type HarnessOptions,
+  type HarnessParts,
 } from "./harness.ts";
 
 export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptions<TContext> {
   /**
    * App home root — sessions (`<homeDir>/sessions`), MCP creds, logs, and disk-discovered agent
    * profiles all live under it. Defaults to `~/.agents`. (`homeDir` is a local-deployment concept;
-   * the harness itself only knows `Tokens.SessionRepository`.)
+   * the harness itself only knows `HarnessParts.sessionRepository`.)
    */
   readonly homeDir?: string;
-  /** Workspace MCP servers to expose. */
+  /** MCP servers to expose, shared by every session of the harness. */
   readonly mcpServers?: Record<string, McpServerConfig>;
-  /** Installed-plugin manager, if any. Loaded once here, then registered as `Tokens.PluginManager`. */
+  /** Installed-plugin manager, if any. Loaded once here, then handed out as `HarnessParts.pluginManager`. */
   readonly pluginManager?: PluginManager;
   /** Shell hooks from config (`config.hooks`), projected as HookDefs. */
   readonly hooks?: readonly HookDef[];
@@ -73,7 +74,9 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
 export async function localHarnessOptions<TContext>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<HarnessOptions<TContext>> {
-  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelRuntime, loadConfiguredProviders, harness, workspace, session, extensions, ...engine } = options;
+  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelRuntime, loadConfiguredProviders, harness, session, extensions, ...engine } = options;
+  // Filled by the `harness` half below, read by the `session` half — one process, one set.
+  let sharedParts: HarnessParts = {};
   const homeDir = home ?? join(homedir(), ".agents");
   // Agent profiles come from disk here; the server preset supplies them externally instead.
   const extraSubagentProfiles =
@@ -95,57 +98,57 @@ export async function localHarnessOptions<TContext>(
   return {
     ...engine,
     ...(extraSubagentProfiles !== undefined ? { extraSubagentProfiles } : {}),
-    harness: async (scope) => {
+    harness: async () => {
       // Disk sessions under <homeDir>/sessions; diagnostics roll on disk under <homeDir>/logs.
-      scope.register(Tokens.SessionRepository, new DiskSessionRepository(homeDir));
-      scope.register(Tokens.Logger, logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) })), { owned: false });
-      if (pluginManager !== undefined) scope.register(Tokens.PluginManager, pluginManager, { owned: false });
-      // What `ExtensionHost.registerProvider` mutates, and where a session's model is looked up.
-      if (runtime !== undefined) scope.register(Tokens.ModelRuntime, runtime, { owned: false });
-      await harness?.(scope);
-    },
-    // One per working directory, shared by its sessions: the MCP connections (workspace servers +
-    // enabled plugin servers), the skill scan, and the OAuth credential store (on local disk,
-    // 0600, under `<homeDir>/credentials/mcp`).
-    workspace: async (scope, ctx) => {
+      // The MCP connections, the skill scan and the OAuth store are process-wide: one set for
+      // every session this harness opens, built once, here.
       const oauthService = new McpOAuthService({ homeDir });
-      scope.register(Tokens.McpOAuth, oauthService, { owned: false });
       const configs = { ...(mcpServers ?? {}), ...(pluginManager?.mcpServerConfigs() ?? {}) };
+      let servers: McpServersHandle | undefined;
       if (Object.keys(configs).length > 0) {
-        const servers = createMcpServers(configs, { oauthService });
-        // A workspace has no session and no event sink of its own: failures surface through
-        // `onStatusChange`, which each session subscribes to when it views this set.
+        servers = createMcpServers(configs, { oauthService });
+        // The set has no session and no event sink of its own: failures surface through
+        // `onStatusChange`, which each session subscribes to when it views it.
         await servers.connect({ sessionId: "" });
-        scope.register(Tokens.McpServers, servers, { dispose: () => servers.shutdown() });
       }
-      // The host's hook runs BEFORE the skill scan so it can say what environment this workspace
-      // executes on (`Tokens.WorkspaceEnvironmentFactory`) — or register its own `Tokens.SkillRegistry`.
-      await workspace?.(scope, ctx);
-      // Skills follow the workspace's EXECUTION environment, not the host's disk: the catalog the
-      // model sees must be the one whose scripts its Bash can reach. A remote workspace
-      // registers its environment above and the scan runs through it; absent that, the harness's
-      // default (`Tokens.EnvironmentFactory`, read through the parent chain) is what sessions here will
-      // execute on — the same precedence `Session.open` resolves. An environment FACTORY (one
-      // environment per session) has no single filesystem to scan — no shared registry then; each
-      // session scans through its own `Tokens.Environment` (`defaultCapabilities` without `Tokens.SkillRegistry`).
-      if (!scope.hasLocal(Tokens.SkillRegistry)) {
-        const workspaceEnvironment = scope.get(Tokens.WorkspaceEnvironmentFactory) ?? scope.get(Tokens.EnvironmentFactory) ?? new LocalEnvironment(ctx.workDir);
-        if (typeof workspaceEnvironment !== "function") {
-          const registry = new SkillRegistry();
-          await loadSkillRoots(workspaceEnvironment, registry, {
-            ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
-          });
-          scope.register(Tokens.SkillRegistry, registry, { owned: false });
-        }
+      const fromHost = await harness?.();
+      // Skills follow the EXECUTION environment, not the host's disk: the catalog the model sees
+      // must be the one whose scripts its Bash can reach. A host that named an environment above
+      // is scanned through it; an environment FACTORY (one per session) has no single filesystem
+      // to scan, so there is no shared registry then and each session scans through its own.
+      const environment = fromHost?.environment ?? new LocalEnvironment(options.workDir ?? process.cwd());
+      let skillRegistry = fromHost?.skillRegistry;
+      if (skillRegistry === undefined && typeof environment !== "function") {
+        skillRegistry = new SkillRegistry();
+        await loadSkillRoots(environment, skillRegistry, {
+          ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
+        });
       }
+      sharedParts = {
+        sessionRepository: new DiskSessionRepository(homeDir),
+        logger: logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) })),
+        oauthService,
+        environment,
+        ...(servers !== undefined ? { mcpServers: servers } : {}),
+        ...(skillRegistry !== undefined ? { skillRegistry } : {}),
+        ...(pluginManager !== undefined ? { pluginManager } : {}),
+        // What `ExtensionHost.registerProvider` mutates, and where a session's model is looked up.
+        ...(runtime !== undefined ? { modelRuntime: runtime } : {}),
+        ...fromHost,
+        close: async () => {
+          await fromHost?.close?.();
+          await servers?.shutdown();
+        },
+      };
+      return sharedParts;
     },
     session:
       session ??
-      ((scope, ctx) =>
+      ((ctx) =>
         defaultCapabilities({
-          scope,
+          shared: sharedParts,
           ownEnvironment: ctx.ownEnvironment,
-          // `createSession({ mcpServers })` — layered over the workspace's shared connections.
+          // `createSession({ mcpServers })` — layered over the process-shared connections.
           ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
           ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
           ...(pluginManager !== undefined ? { pluginManager } : {}),

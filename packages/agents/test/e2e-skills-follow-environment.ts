@@ -1,15 +1,15 @@
 /**
  * Skills follow the EXECUTION environment, not the host's disk. The catalog the model sees is the
- * one whose scripts its Bash can reach: a workspace scans through its `Tokens.WorkspaceEnvironmentFactory`
- * (a remote workspace registers it in the `workspace` hook), and a session that brings its own
- * environment scans through that environment instead of reading the workspace's shared registry.
+ * one whose scripts its Bash can reach: the harness scans through the environment its preset
+ * named (`HarnessParts.environment`), and a session that brings its own environment scans through
+ * THAT instead of reading the process-wide registry.
  * "Remote" here is simply a LocalEnvironment rooted in a different directory.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "./faux.ts";
-import { createLocalHarness, LocalEnvironment, Tokens, type HarnessSession } from "../src/index.ts";
+import { createLocalHarness, LocalEnvironment, type HarnessSession } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -24,7 +24,7 @@ function skillDir(root: string, name: string): void {
 }
 
 function names(session: HarnessSession): string[] {
-  return (session.core.get(Tokens.Skills)?.listSkills() ?? []).map((skill) => skill.name).filter((name) => name.endsWith("-skill")).sort();
+  return (session.core.service("skills")?.listSkills() ?? []).map((skill) => skill.name).filter((name) => name.endsWith("-skill")).sort();
 }
 
 async function main(): Promise<void> {
@@ -44,83 +44,42 @@ async function main(): Promise<void> {
     {
       const harness = await createLocalHarness(base);
       const plain = await harness.createSession();
-      check("baseline: a session on the workspace's environment sees the workspace's skills", names(plain).join(",") === "local-skill");
+      check("baseline: a session on the harness's environment sees the harness's skills", names(plain).join(",") === "local-skill");
 
       const own = await harness.createSession({ environment: new LocalEnvironment(remote) });
       check("own environment (instance): the catalog comes from THAT environment, not the host's disk", names(own).join(",") === "remote-skill");
 
       const viaFactory = await harness.createSession({ environment: () => new LocalEnvironment(remote) });
       check("own environment (factory): same — scanned through the session's environment", names(viaFactory).join(",") === "remote-skill");
-      check("own environment: the shared registry the workspace scanned is untouched", names(plain).join(",") === "local-skill");
+      check("own environment: the shared registry the harness scanned is untouched", names(plain).join(",") === "local-skill");
+
+      const second = await harness.createSession();
+      check("two plain sessions share the one scan the harness did", names(second).join(",") === names(plain).join(","));
       await harness.close();
     }
 
-    // ── A "remote workspace": the host's `workspace` hook says what environment it executes on ──
+    // ── A "remote" harness: the preset says what environment everything executes on ──
     {
-      const harness = await createLocalHarness({
-        ...base,
-        workspace: (scope) => {
-          scope.register(Tokens.WorkspaceEnvironmentFactory, new LocalEnvironment(remote), { owned: false });
-        },
-      });
+      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: new LocalEnvironment(remote) }) });
       const session = await harness.createSession();
-      check("remote workspace (environment instance): the workspace scan ran through the registered environment", names(session).join(",") === "remote-skill");
-      check("remote workspace: it IS the shared registry (one scan for the workspace)", session.core.scope.parent?.hasLocal(Tokens.SkillRegistry) === true);
+      check("harness environment (instance): the scan ran through it, not the host's disk", names(session).join(",") === "remote-skill");
       await harness.close();
     }
     {
-      const harness = await createLocalHarness({
-        ...base,
-        workspace: (scope) => {
-          scope.register(Tokens.WorkspaceEnvironmentFactory, () => new LocalEnvironment(remote), { owned: false });
-        },
-      });
+      // An environment FACTORY has no single filesystem to scan once, so each session scans
+      // through the environment the factory gave it.
+      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: () => new LocalEnvironment(remote) }) });
       const session = await harness.createSession();
-      check("remote workspace (environment factory): no single filesystem to share — no shared registry", session.core.scope.parent?.hasLocal(Tokens.SkillRegistry) === false);
-      check("remote workspace (environment factory): each session scans through the environment the factory gave it", names(session).join(",") === "remote-skill");
-      await harness.close();
-    }
-
-    // ── The HARNESS default environment (`Tokens.EnvironmentFactory`): the workspace scan must follow it too ──
-    {
-      const harness = await createLocalHarness({
-        ...base,
-        harness: (scope) => {
-          scope.register(Tokens.EnvironmentFactory, new LocalEnvironment(remote), { owned: false });
-        },
-      });
-      const session = await harness.createSession();
-      check("harness default (environment instance): the workspace scan ran through the harness's environment, not the host's disk", names(session).join(",") === "remote-skill");
-      check("harness default (environment instance): it IS the shared registry", session.core.scope.parent?.hasLocal(Tokens.SkillRegistry) === true);
+      check("harness environment (factory): each session scans through the environment it was given", names(session).join(",") === "remote-skill");
       await harness.close();
     }
     {
-      const harness = await createLocalHarness({
-        ...base,
-        harness: (scope) => {
-          scope.register(Tokens.EnvironmentFactory, () => new LocalEnvironment(remote), { owned: false });
-        },
-      });
-      const session = await harness.createSession();
-      check("harness default (environment factory): no shared registry", session.core.scope.parent?.hasLocal(Tokens.SkillRegistry) === false);
-      check("harness default (environment factory): each session scans through the environment the factory gave it", names(session).join(",") === "remote-skill");
-      await harness.close();
-    }
-    {
-      // Precedence: a workspace's own environment beats the harness default, same as in Session.open.
+      // A session's own environment still wins over the harness's.
       const third = join(root, "third");
       skillDir(third, "third-skill");
-      const harness = await createLocalHarness({
-        ...base,
-        harness: (scope) => {
-          scope.register(Tokens.EnvironmentFactory, new LocalEnvironment(remote), { owned: false });
-        },
-        workspace: (scope) => {
-          scope.register(Tokens.WorkspaceEnvironmentFactory, new LocalEnvironment(third), { owned: false });
-        },
-      });
-      const session = await harness.createSession();
-      check("precedence: the workspace's environment wins over the harness default", names(session).join(",") === "third-skill");
+      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: new LocalEnvironment(remote) }) });
+      const session = await harness.createSession({ environment: new LocalEnvironment(third) });
+      check("precedence: the session's own environment wins over the harness's", names(session).join(",") === "third-skill");
       await harness.close();
     }
 

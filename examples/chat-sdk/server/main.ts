@@ -21,7 +21,6 @@ import {
   FirecrawlProvider,
   LocalEnvironment,
   sinkLogger,
-  Tokens,
   TavilySearchProvider,
   webSearchTool,
   type Tool,
@@ -62,9 +61,11 @@ const harness = createHarness({
     if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
     return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
   },
-  harness: (scope) => {
-    scope.register(Tokens.SessionRepository, repository);
-    scope.register(Tokens.Logger, sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })));
+  harness: () => {
+    return {
+      sessionRepository: repository,
+      logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
+    };
   },
   // The agent IS the configuration: a custom Agent replaces the builtin coding profile (and
   // its filesystem-shaped prompt) wholesale, so the analyst never hears about files or shells.

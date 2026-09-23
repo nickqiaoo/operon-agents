@@ -29,28 +29,9 @@ export interface HeldSession {
   attachedExtensions(): readonly { readonly id: string; readonly uses: readonly string[] }[];
 }
 
-/**
- * The workspace-tier side of the bridge: `workspace` halves live in the harness's workspace
- * scopes, which only the harness can reach. `staged` maps workspace key → the instance the new
- * half produced for it (staging runs BEFORE the barrier, so a throwing half changes nothing).
- */
-export interface WorkspaceHalfBridge {
-  /** Run `definition.workspace` against every live workspace; nothing is registered. */
-  stage(definition: ExtensionDefinition): Promise<Map<string, unknown>>;
-  /** In the quiet moment: give every live workspace its staged instance (replace where one is
-   *  registered, register where none is; compose fresh for a workspace born after staging).
-   *  `staged === undefined` ⇒ the definition has no `workspace` half: unregister everywhere. */
-  swap(definition: ExtensionDefinition, staged: Map<string, unknown> | undefined): Promise<void>;
-  /** Unregister `id` from every live workspace (unload). */
-  unregister(id: string): Promise<void>;
-  /** Dispose staged instances that were never published (a failed act). */
-  discard(id: string, staged: Map<string, unknown>): Promise<void>;
-}
-
 /** The narrow harness face the manager operates through (no import cycle with harness.ts). */
 export interface ExtensionHostBridge {
   readonly services: ServiceRegistry;
-  readonly workspaces: WorkspaceHalfBridge;
   createSession(options?: Record<string, unknown>): Promise<{ readonly id: string }>;
   sessions(): readonly HeldSession[];
   /** Rendezvous every session holding one of `extensionIds` at its run boundary, run `fn` in
@@ -60,23 +41,8 @@ export interface ExtensionHostBridge {
 }
 
 interface LoadedRecord {
-  /** Whether this extension's `harness` published a service under its id. */
+  /** Whether this extension's `harness` half published a service under its id. */
   readonly hasService: boolean;
-  /** Whether this extension's `workspace` half publishes one instance per workspace. */
-  readonly hasWorkspace: boolean;
-}
-
-/**
- * A definition carries at most ONE shared half. Its service (and `ctx.shared`) lives at exactly
- * one tier — the tier of the half that produced it — so consumers and the session half never
- * have to ask which. Checked wherever a definition is registered (by value or from a file).
- */
-export function assertOneSharedHalf(definition: ExtensionDefinition): void {
-  if (definition.harness !== undefined && definition.workspace !== undefined) {
-    throw new Error(
-      `extension "${definition.id}" declares both a harness and a workspace half — a definition carries ONE shared half, so its service lives at exactly one tier`,
-    );
-  }
 }
 
 /** What staging one `harness`-bearing definition produced, before anything is published. */
@@ -171,12 +137,6 @@ export class HarnessExtensionManager {
     // Shape and `uses` live on the definition, so they are readable only after the import; a
     // bad definition or a missing provider revokes the approval the import just recorded, so a
     // failed load leaves nothing behind. Same rule for both kinds: load providers first.
-    try {
-      assertOneSharedHalf(definition);
-    } catch (error) {
-      await this.loader.unload(id);
-      throw error;
-    }
     for (const name of definition.uses ?? []) {
       if (!this.bridge.services.has(name)) {
         await this.loader.unload(id);
@@ -216,10 +176,6 @@ export class HarnessExtensionManager {
     }
     this.sessionDefs.delete(id);
     if (record.hasService) await this.bridge.services.unregister(id);
-    if (record.hasWorkspace) {
-      await this.bridge.workspaces.unregister(id);
-      this.bridge.services.undeclareWorkspace(id);
-    }
     this.loaded.delete(id);
     await this.loader.unload(id);
   }
@@ -230,31 +186,22 @@ export class HarnessExtensionManager {
 
   private async register(id: string, definition: ExtensionDefinition, options: { readonly timeoutMs?: number }): Promise<void> {
     const staged = await this.stage(definition);
-    // The workspace half is staged the same way, once per live workspace: run BEFORE anything
-    // is published, so a throwing half leaves every workspace on what it had.
-    const hasWorkspace = definition.workspace !== undefined;
-    const stagedWorkspaces = hasWorkspace ? await this.bridge.workspaces.stage(definition) : undefined;
     const previous = this.loaded.get(id);
-    const record: LoadedRecord = { hasService: staged.service !== undefined, hasWorkspace };
+    const record: LoadedRecord = { hasService: staged.service !== undefined };
     if (previous === undefined) {
       // First load: register the service, then hand the session half to future sessions.
       // Already-open sessions are not touched (a reload only re-attaches to sessions that hold
-      // the half) — attach it explicitly where an open session should get it. Workspaces
-      // already open DO get their instance now: a workspace half is composed on first use, and
-      // for them first use is this load.
+      // the half) — attach it explicitly where an open session should get it.
       if (staged.service !== undefined) {
         this.bridge.services.register(staged.service.name, staged.service.instance, staged.service.options);
       }
-      if (hasWorkspace) this.bridge.services.declareWorkspace(id);
       this.sessionDefs.set(id, staged.sessionDef);
-      if (hasWorkspace) await this.bridge.workspaces.swap(definition, stagedWorkspaces);
       this.loaded.set(id, record);
       return;
     }
     // Reload: one coordinated act — barrier on the session half, swap half + service(s) in the
     // quiet moment. Version skew between the halves is structurally impossible.
-    try {
-      await this.bridge.withBarrier([id], options.timeoutMs ?? DEFAULT_BARRIER_TIMEOUT_MS, async (held) => {
+    await this.bridge.withBarrier([id], options.timeoutMs ?? DEFAULT_BARRIER_TIMEOUT_MS, async (held) => {
         for (const session of held()) {
           if (session.attachedExtensionIds().includes(id)) await session.detachExtension(id);
         }
@@ -265,22 +212,10 @@ export class HarnessExtensionManager {
           await this.bridge.services.unregister(id);
         }
         this.sessionDefs.set(id, staged.sessionDef);
-        if (hasWorkspace) {
-          this.bridge.services.declareWorkspace(id);
-          await this.bridge.workspaces.swap(definition, stagedWorkspaces);
-        } else if (previous.hasWorkspace) {
-          // The new version dropped its workspace half: every workspace's instance goes with it.
-          await this.bridge.workspaces.swap(definition, undefined);
-          this.bridge.services.undeclareWorkspace(id);
-        }
-        for (const session of held()) {
-          await session.attachExtension(staged.sessionDef);
-        }
-      });
-    } catch (error) {
-      if (stagedWorkspaces !== undefined) await this.bridge.workspaces.discard(id, stagedWorkspaces);
-      throw error;
-    }
+      for (const session of held()) {
+        await session.attachExtension(staged.sessionDef);
+      }
+    });
     this.loaded.set(id, record);
   }
 

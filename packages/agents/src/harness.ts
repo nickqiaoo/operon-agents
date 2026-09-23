@@ -98,19 +98,24 @@ import {
   profileSubagentProvider,
   type SubagentProvider,
   DEFAULT_ADDRESS,
-  Scope,
-  type CloseOptions,
-  Tokens,
   envLogger,
   noopLogger,
 } from "operon-agents-core";
-import { HarnessTokens } from "./tokens.ts";
-import type { SkillsService, CompactionService, BackgroundManager, McpServersHandle, GoalStore, PlanMode } from "operon-agents-core";
-import { createHash } from "node:crypto";
-import { ServiceUnavailableError, isProbeProperty } from "operon-agents-core";
+import type {
+  TodoStore,
+  SkillsService,
+  CompactionService,
+  BackgroundManager,
+  McpServersHandle,
+  GoalStore,
+  PlanMode,
+  Logger,
+  ModelRuntime,
+  TracingProcessor,
+} from "operon-agents-core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { assertOneSharedHalf, extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ExtensionWorkspaceContext, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
+import { extensionsCapability, ExtensionRuntime, HarnessExtensionManager, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
 import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult, type TodoItem } from "operon-agents-core";
 
 export type ApprovalHandler = (
@@ -126,22 +131,14 @@ export type HarnessSessionState = "idle" | "running" | "interrupted" | "closed";
 
 /** How long `HarnessSession.close()` waits for aborted runs to settle before continuing teardown. */
 let CLOSE_RUN_WAIT_MS = 5_000;
-/** Per-service dispose deadline when the harness tears a scope down itself — a workspace whose
- *  last session left, a session scope a failed open rolls back, the harness scope on close.
- *  Mirrors the core session's own close deadline: one hung MCP shutdown must not hang close(). */
-let SCOPE_DISPOSE_TIMEOUT_MS = 5_000;
-
 /** Test-only (exported via `operon-agents/internal`): shrink the close deadlines. */
-export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number; scopeDispose?: number }): void {
+export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number }): void {
   if (ms.runSettle !== undefined) CLOSE_RUN_WAIT_MS = ms.runSettle;
-  if (ms.scopeDispose !== undefined) SCOPE_DISPOSE_TIMEOUT_MS = ms.scopeDispose;
 }
 /** Rendezvous budget for `replaceExtension` when the caller names none. */
 const DEFAULT_REPLACE_TIMEOUT_MS = 30_000;
 /** Session-store key holding the per-session extension params map (see `createSession({ params })`). */
 const EXTENSION_PARAMS_STATE_KEY = "extensions:params";
-/** Session state slot for an explicit `workspaceKey` — durable workspace identity (see `OpenSessionOptionsBase.workspaceKey`). */
-const WORKSPACE_KEY_STATE_KEY = "workspace:key";
 
 /** A slash command as listed by `HarnessSession.listCommands`. */
 export interface CommandInfo {
@@ -158,27 +155,26 @@ export interface HarnessSessionStatus {
 
 export interface DefaultCapabilitiesOptions {
   /**
-   * The session scope being composed. When its workspace registered shared services —
-   * `Tokens.McpServers` (one set of connections per working directory), `Tokens.SkillRegistry` (one scan
-   * per working directory), `Tokens.McpOAuth` — the bundle uses those instead of building per-session
-   * ones. Without it (or without those registrations) everything is built per session.
+   * The harness's process-shared parts. When it carries a set of MCP connections, a skill scan or
+   * an OAuth service, the bundle uses THOSE instead of building per-session ones. Without it
+   * everything here is built per session.
    */
-  readonly scope?: Scope<"session">;
+  readonly shared?: HarnessParts;
   /**
-   * The session brought its own environment (`createSession({ environment })`). The workspace's shared
-   * `Tokens.SkillRegistry` was scanned through the WORKSPACE's environment and does not describe this
-   * one, so the skill scan runs per session through `Tokens.Environment` instead — the catalog follows
-   * the filesystem the session's tools actually operate. Default false.
+   * The session brought its own environment (`createSession({ environment })`). The shared
+   * `skillRegistry` was scanned through the HARNESS's environment and does not describe this one,
+   * so the skill scan runs per session through the session's environment instead — the catalog
+   * follows the filesystem the session's tools actually operate. Default false.
    */
   readonly ownEnvironment?: boolean;
   /** Context window budget used to size compaction. Defaults to 200_000. */
   readonly maxContextTokens?: number;
-  /** Workspace MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
+  /** Harness-level MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**
    * MCP servers private to the session being built — `SessionCapabilityContext.mcpServers`, i.e.
    * what the caller passed to `createSession({ mcpServers })`. They are layered OVER the
-   * workspace's shared servers (`Tokens.McpServers`) and over `mcpServers` above: same name, the
+   * harness's shared servers (`HarnessParts.mcpServers`) and over `mcpServers` above: same name, the
    * session's wins for this session only. Built, connected and shut down with the session.
    */
   readonly sessionMcpServers?: Record<string, McpServerConfig>;
@@ -229,14 +225,14 @@ export interface DefaultCapabilitiesOptions {
  * isolated per session, mirroring a fresh-Session-per-create model.
  */
 export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
-  const manager = options.pluginManager ?? options.scope?.get(Tokens.PluginManager);
-  // A session on its own environment ignores the workspace's registry: it was scanned elsewhere.
-  const sharedSkills = options.ownEnvironment === true ? undefined : options.scope?.get(Tokens.SkillRegistry);
-  const sharedMcp = options.scope?.has(Tokens.McpServers) === true;
-  const oauthService = options.oauthService ?? options.scope?.get(Tokens.McpOAuth);
+  const manager = options.pluginManager ?? options.shared?.pluginManager;
+  // A session on its own environment ignores the process-wide registry: it was scanned elsewhere.
+  const sharedSkills = options.ownEnvironment === true ? undefined : options.shared?.skillRegistry;
+  const sharedServers = options.ownEnvironment === true ? undefined : options.shared?.mcpServers;
+  const oauthService = options.oauthService ?? options.shared?.oauthService;
   // Shared registry so the plugin session-start injector can render a skill the skills capability
-  // loaded (its roots include the plugin skill dirs below). A workspace-level registry was
-  // scanned once for every session of the directory; a session-level one is scanned here.
+  // loaded (its roots include the plugin skill dirs below). A process-wide registry is scanned
+  // once for every session; a session-level one is scanned here.
   const registry = sharedSkills ?? (manager !== undefined ? new SkillRegistry() : undefined);
   // `includeDefaultRoots` because the plugin dirs ADD to the project/user `.agents/skills` roots —
   // without it, enabling a single skill-bearing plugin would hide every local skill.
@@ -261,14 +257,14 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     ...(oauthService !== undefined ? { oauthService } : {}),
     ...(options.allowedMcpTransports !== undefined ? { allowedTransports: options.allowedMcpTransports } : {}),
   };
-  // With workspace connections, the capability is a VIEW over them and `configs` is this session's
-  // overlay. Without, everything this session sees is its own — session servers last, so the same
-  // name still resolves to the session's. One capability either way; it reads the scope itself.
-  const mcpConfigs = sharedMcp
+  // With process-shared connections, the capability is a VIEW over them and `configs` is this
+  // session's overlay. Without, everything this session sees is its own — session servers last,
+  // so the same name still resolves to the session's.
+  const mcpConfigs = sharedServers !== undefined
     ? sessionMcp
     : { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}), ...sessionMcp };
-  if (sharedMcp || Object.keys(mcpConfigs).length > 0) {
-    capabilities.push(mcpServersCapability(mcpConfigs, mcpOptions));
+  if (sharedServers !== undefined || Object.keys(mcpConfigs).length > 0) {
+    capabilities.push(mcpServersCapability(mcpConfigs, { ...mcpOptions, ...(sharedServers !== undefined ? { sharedServers } : {}) }));
   }
   // Plugins: load the manager + render the plugin's session-start skill from the shared registry
   // (skills opens before this, so by injection time the registry holds the plugin skills).
@@ -309,39 +305,57 @@ function defaultSubagentProvider<TContext>(
   });
 }
 
+/**
+ * The process-lived objects a harness is built on — what `HarnessOptions.harness` returns.
+ * Each one is optional; what is absent simply has no provider, and the harness falls back to
+ * its own default (an in-memory repository, a silent logger, a `LocalEnvironment` per session).
+ */
+export interface HarnessParts {
+  readonly logger?: Logger;
+  readonly sessionRepository?: SessionRepository;
+  readonly modelRuntime?: ModelRuntime;
+  /** The default environment for sessions that bring none: an instance shared by all of them, or
+   *  a factory called once per session. */
+  readonly environment?: Environment | EnvironmentFactory;
+  readonly tracing?: TracingProcessor;
+  readonly telemetry?: TelemetryService;
+  readonly pluginManager?: PluginManager;
+  readonly eventPublication?: EventPublicationMode;
+  /** One set of MCP connections for every session in this process. */
+  readonly mcpServers?: McpServersHandle;
+  /** One skill scan for every session in this process. */
+  readonly skillRegistry?: SkillRegistry;
+  readonly oauthService?: McpOAuthService;
+  /**
+   * Tears down whatever this bag opened — the MCP connections, a pool, a log handle. Called by
+   * `harness.close()` after every session is closed. Without it, anything the preset connected
+   * outlives the harness that asked for it.
+   */
+  close?(): void | Promise<void>;
+}
+
 export interface HarnessOptions<TContext = unknown> {
   /** Model for the default agent. Either a constructed `ChatModel` or an id resolved via `resolveModel`. */
   readonly model: string | ChatModel;
   /** Resolve string model ids (needed only if `model`/agent models are strings). */
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
   /**
-   * Process-tier composition: register the objects that live for the whole harness on its scope
-   * — `Tokens.SessionRepository` (disk locally, Pg/Redis on a server; in-memory when absent),
-   * `Tokens.Logger` (the `AGENTS_LOG` env logger, else silent, when absent), `Tokens.ModelRuntime` (lets
-   * extensions register providers at runtime; without it those actions throw), `Tokens.EnvironmentFactory`
-   * (a shared `Environment` or a per-session factory; sessions default to a `LocalEnvironment` at their
-   * own `workDir`), `Tokens.PluginManager`, `Tokens.Tracing`. Runs before the by-value extensions'
-   * `harness` halves, so they can consume what it registers.
+   * The process-lived parts this harness runs on, built once. Everything a session needs that is
+   * NOT per-session lives here: the repository (disk locally, Pg/Redis on a server; in-memory
+   * when absent), the logger, the model runtime, the default environment, one set of MCP
+   * connections, one skill scan. Runs before the by-value extensions' `harness` halves, so they
+   * can consume what it returns.
+   *
+   * There is no tier between this and a session. A shared object is shared by the WHOLE process
+   * or it is built per session — nothing is shared by "the sessions in one directory".
    */
-  readonly harness?: (scope: Scope<"harness">) => void | Promise<void>;
+  readonly harness?: () => HarnessParts | Promise<HarnessParts>;
   /**
-   * Workspace-tier composition — one scope per workspace key (the working directory locally; a
-   * tenant / environment id on a server, via `createSession({ workspaceKey })`), shared by every
-   * session under it and closed when the last of them closes. Register what a working directory
-   * owns: `Tokens.McpServers` (one set of MCP connections for all its sessions), `Tokens.SkillRegistry`
-   * (one skill scan), `Tokens.McpOAuth`, `Tokens.WorkspaceEnvironmentFactory`. `defaultCapabilities({ scope })`
-   * picks those up. A session that brings its own `environment` instance gets a private workspace.
+   * Session-tier composition: called once per session being opened. Return its capabilities.
+   * Defaults to `defaultCapabilities()`. Always called fresh per session, so per-session state
+   * (goal/plan/todo/background/skills/mcp) is isolated by construction.
    */
-  readonly workspace?: (scope: Scope<"workspace">, ctx: WorkspaceContext) => void | Promise<void>;
-  /**
-   * Session-tier composition: called once per session being opened, with that session's scope
-   * (the opener has already registered `Tokens.SessionId`, `Tokens.Store`, `Tokens.Events`, `Tokens.Responder`,
-   * `Tokens.PermissionOptions`, and `Tokens.Environment` when the caller supplied one). Register anything else
-   * the session should own and return its capabilities. Defaults to `defaultCapabilities()`.
-   * Always called fresh per session, so per-session state (goal/plan/todo/background/skills/mcp)
-   * is isolated by construction.
-   */
-  readonly session?: (scope: Scope<"session">, ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
+  readonly session?: (ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
   /** Default working directory for new sessions. Defaults to `process.cwd()`. */
   readonly workDir?: string;
   /**
@@ -458,9 +472,9 @@ export interface HarnessOptions<TContext = unknown> {
  * Exists so conversation-scoped resources don't force conversation-scoped harnesses.
  * MCP is the motivating case: a host that gives each conversation its own server
  * (a REPL kernel keyed by conversation id, say) used to need a whole separate
- * harness per conversation, duplicating the workspace's agent profile, tool palette,
- * plugins and skills along with it. Session-scoped servers keep the harness at
- * workspace scope, where it belongs — `mcpServers` here is the session-level
+ * harness per conversation, duplicating the agent profile, tool palette, plugins and
+ * skills along with it. Session-level servers keep one harness serving every
+ * conversation — `mcpServers` here is the session-level
  * counterpart of the harness-level `DefaultCapabilitiesOptions.mcpServers`.
  */
 export interface SessionCapabilityContext {
@@ -468,16 +482,9 @@ export interface SessionCapabilityContext {
   readonly workDir: string;
   /** Session-scoped MCP servers, as given to createSession / resumeSession / forkSession. */
   readonly mcpServers?: Record<string, McpServerConfig>;
-  /** The session brought its own environment (`{ environment }` on this open): workspace-shared objects
-   *  derived from the workspace's environment (the skill scan) do not apply to it. */
+  /** The session brought its own environment (`{ environment }` on this open): harness-shared objects
+   *  derived from the harness's environment (the skill scan) do not apply to it. */
   readonly ownEnvironment: boolean;
-}
-
-/** What the `workspace` hook is told about the workspace scope it is composing. */
-export interface WorkspaceContext {
-  /** The workspace key: the working directory locally, a tenant / environment id on a server. */
-  readonly key: string;
-  readonly workDir: string;
 }
 
 /**
@@ -502,8 +509,8 @@ interface OpenSessionOptionsBase<TContext = unknown> {
    * MCP servers scoped to this session, surfaced to the capability factory via
    * {@link SessionCapabilityContext}. Merge policy is the factory's call — the
    * harness only carries them across. `defaultCapabilities` (and so the local preset)
-   * layers them OVER the workspace's shared servers, a reused name shadowing the
-   * workspace one for this session; a custom factory can decide otherwise.
+   * layers them OVER the harness's shared servers, a reused name shadowing the
+   * shared one for this session; a custom factory can decide otherwise.
    */
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**
@@ -532,18 +539,6 @@ interface OpenSessionOptionsBase<TContext = unknown> {
    * first), so it is ignored when `agent` is given.
    */
   readonly maxStepsPerTurn?: number;
-  /**
-   * Which workspace scope this session lives under (see `HarnessOptions.workspace`). Defaults
-   * to the working directory; a server passes its tenant / environment id. An explicit key is
-   * part of the session's DURABLE identity: persisted at create, read back on every later open,
-   * so a resume or fork lands in the same workspace without the caller repeating it (a tenant
-   * must never fall back to a directory key on reopen). Passing one on `resumeSession` /
-   * `forkSession` overrides the stored key — which is how a workspace changes generation (its
-   * runtime restarted or reconnected): new opens get `<workspace>@<generation>`, sessions still
-   * on the old key keep the old scope until the last of them closes — workspace entries are
-   * never `replace`d in place.
-   */
-  readonly workspaceKey?: string;
 }
 
 export interface CreateSessionOptions<TContext = unknown> extends OpenSessionOptionsBase<TContext> {
@@ -1168,7 +1163,7 @@ export class HarnessSession<TContext = unknown> {
   }
   /** The current todo list (the `TodoList` tool's latest state); empty without the todo capability. */
   getTodos(): readonly TodoItem[] {
-    return this.core.get(Tokens.Todo)?.get() ?? [];
+    return this.core.service<TodoStore>("todo")?.get() ?? [];
   }
   /** Every slash command this session answers to — the static registry plus the ones its
    *  capabilities and extensions contribute — for a UI's palette and autocompletion. */
@@ -1227,7 +1222,7 @@ export class HarnessSession<TContext = unknown> {
     }
   }
   private extensionRuntime(): ExtensionRuntime {
-    const runtime = this.core.get(HarnessTokens.Extensions);
+    const runtime = this.core.service<ExtensionRuntime>("extensions");
     if (!runtime) throw new Error("this session has no extensions capability");
     return runtime;
   }
@@ -1291,10 +1286,8 @@ export class Harness<TContext = unknown> {
   /** The one close in flight (or finished): every `close()` call returns THIS promise. */
   private closing: Promise<void> | undefined;
 
-  /** The harness-tier scope: every process-lived object, and the parent of every workspace scope. */
-  readonly scope: Scope<"harness">;
-  /** Workspace scopes by key, reference-counted by the sessions open under them. */
-  private readonly workspaces = new Map<string, WorkspaceEntry>();
+  /** The process-lived objects this harness runs on (`HarnessOptions.harness`), plus defaults. */
+  private parts: HarnessParts = {};
   /** Process-level extension services by name (a facade over `scope`). The host replaces
    *  providers here (`services.replace`); sessions only ever see handles (`ctx.shared`, `ctx.services`). */
   readonly services: ServiceRegistry;
@@ -1322,13 +1315,7 @@ export class Harness<TContext = unknown> {
 
   constructor(options: HarnessOptions<TContext>) {
     this.options = options;
-    this.scope = new Scope("harness");
-    this.services = new ServiceRegistry(this.scope);
-    // Defaults for the harness tier; the `harness` hook's registrations win over them.
-    this.scope.provide(Tokens.Logger, () => envLogger() ?? noopLogger);
-    this.scope.provide(Tokens.SessionRepository, () => new MemorySessionRepository());
-    if (options.eventPublication !== undefined) this.scope.register(Tokens.EventPublication, options.eventPublication);
-    if (options.telemetry !== undefined) this.scope.register(Tokens.Telemetry, options.telemetry, { owned: false });
+    this.services = new ServiceRegistry();
     const agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
     this.toolPalette = Object.fromEntries(agentTools.map((tool) => [tool.schema.name, tool]));
     // The Agent/Workflow tools only appear when the run has subagents to spawn. Default the fleet
@@ -1338,7 +1325,7 @@ export class Harness<TContext = unknown> {
       options.subagentProvider === null
         ? undefined
         : options.subagentProvider ?? defaultSubagentProvider<TContext>(agentTools, options.resolveModel, options.extraSubagentProfiles);
-    this.runner = new Runner<TContext>(this.scope, {
+    this.runner = new Runner<TContext>({
       resolveModel: options.resolveModel,
       subagentProvider,
       ...(options.workflowTool !== undefined ? { workflowTool: options.workflowTool } : {}),
@@ -1354,12 +1341,6 @@ export class Harness<TContext = unknown> {
           dataDir: this.dataRoot ?? join(options.extensionDir, ".data"),
           bridge: {
             services: this.services,
-            workspaces: {
-              stage: (definition) => this.stageWorkspaceHalf(definition),
-              swap: (definition, staged) => this.swapWorkspaceHalf(definition, staged),
-              unregister: (id) => this.unregisterWorkspaceHalf(id),
-              discard: (id, staged) => this.discardStagedWorkspaces(id, staged),
-            },
             createSession: (sessionOptions) => this.createSession(sessionOptions as CreateSessionOptions<TContext>),
             sessions: () => [...this.activeSessions.values()],
             withBarrier: (extensionIds, timeoutMs, fn) => this.withBarrier(extensionIds, timeoutMs, fn),
@@ -1383,10 +1364,21 @@ export class Harness<TContext = unknown> {
     // The host's process-tier registrations come first (extension `harness` halves may consume
     // them); a synchronous hook keeps the whole chain synchronous, so a synchronous extension's
     // service exists the moment `createHarness` returns.
-    const composed = options.harness?.(this.scope);
+    const composed = options.harness?.();
+    const absorb = (parts: HarnessParts | undefined): void => {
+      this.parts = {
+        ...(parts ?? {}),
+        // Explicit options win over what the preset built, and both win over the defaults below.
+        ...(options.telemetry !== undefined ? { telemetry: options.telemetry } : {}),
+        ...(options.eventPublication !== undefined ? { eventPublication: options.eventPublication } : {}),
+      };
+    };
     this.sharedReady = composed instanceof Promise
-      ? composed.then(() => this.registerDefinitions(options.extensions))
-      : this.registerDefinitions(options.extensions);
+      ? composed.then((parts) => {
+          absorb(parts);
+          return this.registerDefinitions(options.extensions);
+        })
+      : (absorb(composed), this.registerDefinitions(options.extensions));
     // Surfaced to whoever opens a session; never an unhandled rejection on its own.
     this.sharedReady.catch(() => undefined);
   }
@@ -1394,8 +1386,18 @@ export class Harness<TContext = unknown> {
   /** The session repository, once the `harness` hook has had its say. */
   private async repository(): Promise<SessionRepository> {
     await this.sharedReady;
-    return this.scope.require(Tokens.SessionRepository);
+    this.memoryRepository ??= new MemorySessionRepository();
+    return this.parts.sessionRepository ?? this.memoryRepository;
   }
+  /** The fallback repository, built once so two opens share one in-memory store. */
+  private memoryRepository: MemorySessionRepository | undefined;
+
+  /** The harness logger: the preset's, else the `AGENTS_LOG` env logger, else silent. */
+  private get logger(): Logger {
+    this.defaultLogger ??= envLogger() ?? noopLogger;
+    return this.parts.logger ?? this.defaultLogger;
+  }
+  private defaultLogger: Logger | undefined;
 
   /**
    * Run one by-value definition's `harness` half against a staging host: the service is COLLECTED,
@@ -1449,15 +1451,11 @@ export class Harness<TContext = unknown> {
   private registerDefinitions(extensions: readonly ExtensionDefinition[] | undefined): Promise<void> {
     if (extensions === undefined) return Promise.resolve();
     const run = (definition: ExtensionDefinition): void | Promise<void> => {
-      assertOneSharedHalf(definition);
       for (const name of definition.uses ?? []) {
         if (!this.services.has(name)) {
           throw new Error(`extension "${definition.id}" uses service "${name}", which is not registered — list its provider earlier in createHarness({ extensions }) (or register it in services)`);
         }
       }
-      // A workspace half runs lazily, when a workspace is first composed; declaring the name
-      // now is what lets a later definition `uses` it.
-      if (definition.workspace !== undefined) this.services.declareWorkspace(definition.id);
       if (definition.harness === undefined) return;
       const staged = this.stageValue(definition);
       const publish = (result: StagedDefinition): void => {
@@ -1552,8 +1550,8 @@ export class Harness<TContext = unknown> {
       return Promise.resolve(existing);
     }
     return this.trackOpen(id, async (): Promise<HarnessSession<TContext>> => {
-      // `existing` here is one that is closing: wait for that close (its registration and
-      // workspace hold go with it) rather than open a twin beside it.
+      // `existing` here is one that is closing: wait for that close (its registration goes
+      // with it) rather than open a twin beside it.
       if (existing !== undefined) await existing.close();
       const handle = await (await this.repository()).open(id);
       if (handle === undefined) throw new SessionRepositoryNotFoundError(id);
@@ -1665,8 +1663,26 @@ export class Harness<TContext = unknown> {
     await Promise.allSettled([...this.opening.values()]);
     for (const session of [...this.activeSessions.values()]) await session.close();
     await this.sharedReady.catch(() => undefined);
+    // The `harness` halves' services, newest first: each is drained, then disposed (default, the
+    // instance's own close()). A failure here is logged, never allowed to skip the rest.
+    for (const name of [...this.createdServices].reverse()) {
+      try {
+        await this.services.unregister(name);
+      } catch (error) {
+        this.logger.log("warn", `service "${name}" unregister failed during harness close`, {
+          service: name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     this.createdServices.length = 0;
-    await this.scope.close(this.scopeCloseOptions());
+    // Last: the process-shared objects the preset opened (MCP connections, handles). Every
+    // session is closed by now, so nothing is still reading them.
+    try {
+      await this.parts.close?.();
+    } catch (error) {
+      this.logger.log("warn", "harness parts close failed", { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   /** Every path that opens a session starts here: a closing harness opens nothing new. */
@@ -1723,12 +1739,8 @@ export class Harness<TContext = unknown> {
     // world completely untouched (no session detached, no service swapped) — the same discipline
     // construction and the file manager use. Whatever a failed act staged is disposed below.
     const staged = new Map<string, StagedDefinition>();
-    const stagedWorkspaces = new Map<string, Map<string, unknown>>();
-    const hadWorkspace = new Set(definitions.filter((definition) => this.valueDefs.get(definition.id)?.workspace !== undefined).map((definition) => definition.id));
     for (const definition of definitions) {
-      assertOneSharedHalf(definition);
       if (definition.harness !== undefined) staged.set(definition.id, await this.stageValue(definition));
-      if (definition.workspace !== undefined) stagedWorkspaces.set(definition.id, await this.stageWorkspaceHalf(definition));
     }
     const published = new Set<string>();
     const ids = definitions.map((definition) => definition.id);
@@ -1751,13 +1763,6 @@ export class Harness<TContext = unknown> {
         }
         for (const definition of definitions) {
           await this.publishValueService(definition, staged.get(definition.id), options.drainTimeoutMs);
-          if (definition.workspace !== undefined) {
-            this.services.declareWorkspace(definition.id);
-            await this.swapWorkspaceHalf(definition, stagedWorkspaces.get(definition.id));
-          } else if (hadWorkspace.has(definition.id)) {
-            await this.swapWorkspaceHalf(definition, undefined);
-            this.services.undeclareWorkspace(definition.id);
-          }
           published.add(definition.id);
         }
         // New halves in: their `session.start` runs against the new shape. The pending queue
@@ -1772,9 +1777,6 @@ export class Harness<TContext = unknown> {
       // a `harness` that opened a pool must not leak it because the barrier never converged.
       for (const [id, entry] of staged) {
         if (!published.has(id) && entry.service !== undefined) await this.disposeStaged(id, entry.service.instance);
-      }
-      for (const [id, instances] of stagedWorkspaces) {
-        if (!published.has(id)) await this.discardStagedWorkspaces(id, instances);
       }
       throw error;
     }
@@ -1857,11 +1859,10 @@ export class Harness<TContext = unknown> {
 
   /** Resolve the capability set for one session — the `session` hook, called fresh every time. */
   private async resolveCapabilities(
-    scope: Scope<"session">,
     ctx: SessionCapabilityContext,
     params: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly Capability[]> {
-    const base = this.options.session !== undefined ? await this.options.session(scope, ctx) : defaultCapabilities();
+    const base = this.options.session !== undefined ? await this.options.session(ctx) : defaultCapabilities({ shared: this.parts });
     // Every definition registered on this harness: by value (`extensions`, harness halves
     // included — their per-session `session` is mounted here like any other), then from files.
     const extensions = [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
@@ -1869,7 +1870,7 @@ export class Harness<TContext = unknown> {
     // so it evaluates the final rewritten args before normal authorization.
     // Installed even when empty: the runtime must exist for `attachExtension` to have
     // somewhere to land on sessions born without extensions.
-    return [extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId, scope), params }), ...base];
+    return [extensionsCapability(extensions, { host: this.extensionHost(ctx.sessionId), params }), ...base];
   }
 
   /**
@@ -1880,9 +1881,9 @@ export class Harness<TContext = unknown> {
    * `isIdle`/`waitForIdle` resolve the HarnessSession lazily — at capability-build time the
    * session object does not exist yet (this runs while it is being constructed).
    */
-  private extensionHost(sessionId: string, scope: Scope<"session">): ExtensionHost {
+  private extensionHost(sessionId: string): ExtensionHost {
     const self = this;
-    const runtime = this.scope.get(Tokens.ModelRuntime);
+    const runtime = this.parts.modelRuntime;
     return {
       sessionId,
       newSession: (options) => self.createSession({ ...(options?.title !== undefined ? { title: options.title } : {}) }),
@@ -1897,11 +1898,9 @@ export class Harness<TContext = unknown> {
         if (!runtime) throw new Error("unregisterProvider() requires the harness to be built with a `modelRuntime`");
         runtime.models.deleteProvider(id);
       },
-      // Resolved FROM the session's scope: a workspace-tier service lands on this session's
-      // workspace's instance, a harness-tier one on the harness's — the extension never asks which.
       services: {
-        has: (name) => self.services.hasFrom(scope, name),
-        handle: <T = unknown>(name: string): T => self.services.handleFrom<T>(scope, name),
+        has: (name) => self.services.has(name),
+        handle: <T = unknown>(name: string): T => self.services.handle<T>(name),
       },
       isIdle: () => self.activeSessions.get(sessionId)?.status.state !== "running",
       waitForIdle: async () => {
@@ -1927,43 +1926,18 @@ export class Harness<TContext = unknown> {
     let params = opts.params;
     if (params !== undefined) await store.putState(EXTENSION_PARAMS_STATE_KEY, params);
     else params = ((await store.getState(EXTENSION_PARAMS_STATE_KEY)) as Record<string, unknown> | null) ?? undefined;
-    // The workspace key: an EXPLICIT one is durable identity — persisted with the session (like
-    // params) and read back on resume / fork, so a tenant session never falls back to a
-    // directory key on reopen; passing one on a later open overrides the stored key (a
-    // generation change). Absent both, the key is derived from this open: a session that
-    // brings its own environment INSTANCE gets a private workspace, everything else the directory's.
-    let workspaceKey = opts.workspaceKey;
-    if (workspaceKey !== undefined) await store.putState(WORKSPACE_KEY_STATE_KEY, workspaceKey);
-    else workspaceKey = ((await store.getState(WORKSPACE_KEY_STATE_KEY)) as string | null) ?? undefined;
-    workspaceKey ??= opts.environment !== undefined && typeof opts.environment !== "function" ? `private::${id}` : dirWorkspaceKey(workDir);
-    // The workspace scope (one per key, shared) and under it the session scope: what the harness
-    // decides for this session goes in here; Session.open provides the defaults for the rest,
-    // and from then on the session owns the scope.
+    await this.sharedReady;
     // From here the open is a transaction: the session is registered as active only once every
-    // step has succeeded, and any failure tears down exactly what was built — projection, the
-    // session scope (via the core when it got that far), the workspace hold — before rethrowing.
-    // Half-open leftovers are what kept a workspace alive after its last real session closed.
-    const workspace = await this.acquireWorkspace(workspaceKey, workDir);
-    let scope: Scope<"session"> | undefined;
+    // step has succeeded, and any failure tears down exactly what was built — the projection, the
+    // core when it got that far — before rethrowing.
     let projection: SessionProjection | undefined;
     let core: Session | undefined;
     try {
-      scope = workspace.child("session");
       const events = new ListenerSink();
-      scope.register(Tokens.Events, events);
       const responder = new MutableResponder();
-      scope.register(Tokens.Responder, responder);
-      // Environment: this call's override → the harness-level factory (resolved by Session.open) →
-      // a LocalEnvironment at the session's own workDir. The session only OPERATES a caller-supplied
-      // environment; the default one is its own.
-      if (opts.environment !== undefined) {
-        if (typeof opts.environment === "function") scope.register(Tokens.SessionEnvironmentFactory, opts.environment);
-        else scope.register(Tokens.Environment, opts.environment, { owned: false });
-      } else if (!workspace.has(Tokens.WorkspaceEnvironmentFactory) && !this.scope.has(Tokens.EnvironmentFactory)) {
-        scope.provide(Tokens.Environment, () => new LocalEnvironment(workDir));
-      }
-      scope.register(Tokens.PermissionOptions, opts.permission ?? this.options.permission ?? { mode: "yolo" });
-      if (opts.eventPublication !== undefined) scope.register(Tokens.SessionEventPublication, opts.eventPublication);
+      // Environment: this call's override → the harness's default → a LocalEnvironment at the
+      // session's own workDir. The session only OPERATES a caller-supplied environment.
+      const environment = opts.environment ?? this.parts.environment ?? new LocalEnvironment(workDir);
       // ONE open-time log read, shared: the projection seeds from it, and Session.open
       // receives it as `preloadedLog` so its capability restore + context pre-build fold the
       // same records — same IO, and the same `Message` objects (no second parsed copy).
@@ -1979,7 +1953,6 @@ export class Harness<TContext = unknown> {
         if (recoveryRecords.length > 0) preloadedLog = [...preloadedLog, ...recoveryRecords];
       }
       const capabilities = await this.resolveCapabilities(
-        scope,
         {
           sessionId: id,
           workDir,
@@ -1988,9 +1961,24 @@ export class Harness<TContext = unknown> {
         },
         params,
       );
-      // The id, the host signal and the store are arguments, not registry entries: nothing
-      // inherits them and nothing else shares them. The repository owns the store's lifetime.
-      core = await Session.open(scope, { capabilities, preloadedLog, resumed, sessionId: id, store });
+      // Everything the session runs on, by value. The repository owns the store's lifetime.
+      core = await Session.open({
+        capabilities,
+        preloadedLog,
+        resumed,
+        sessionId: id,
+        store,
+        events,
+        responder,
+        environment,
+        permissionOptions: opts.permission ?? this.options.permission ?? { mode: "yolo" },
+        ...(this.parts.logger !== undefined ? { logger: this.parts.logger } : {}),
+        ...(this.parts.tracing !== undefined ? { tracing: this.parts.tracing } : {}),
+        ...(this.parts.telemetry !== undefined ? { telemetry: this.parts.telemetry } : {}),
+        ...(opts.eventPublication ?? this.parts.eventPublication) !== undefined
+          ? { eventPublication: (opts.eventPublication ?? this.parts.eventPublication)! }
+          : {},
+      });
       const agent =
         opts.agent ??
         this.options.agent ??
@@ -2010,12 +1998,10 @@ export class Harness<TContext = unknown> {
           ? { maxTurns: opts.maxTurns ?? this.options.maxTurns }
           : {},
         interrupted,
-        onClosed: async (sid) => {
+        onClosed: (sid) => {
           // Only THIS instance's registration goes — a later open under the same id (a resume
-          // that waited for this close) must keep its own. The workspace hold is this
-          // instance's regardless and is always returned.
+          // that waited for this close) must keep its own.
           if (this.activeSessions.get(sid) === session) this.activeSessions.delete(sid);
-          await this.releaseWorkspace(workspaceKey);
         },
       });
       this.activeSessions.set(id, session);
@@ -2025,23 +2011,21 @@ export class Harness<TContext = unknown> {
       if (this.activeBarrier !== undefined) this.activeBarrier.holds.set(id, session.holdAtBoundary());
       return session;
     } catch (error) {
-      await this.rollbackOpen(id, workspaceKey, { projection, core, scope }, error);
+      await this.rollbackOpen(id, { projection, core }, error);
       throw error;
     }
   }
 
   /**
    * Undo a failed `openFromStore`, newest artifact first. Every step runs even if an earlier one
-   * throws (a cleanup failure is logged, never allowed to mask the open's own error), and the
-   * workspace hold this open took is always returned.
+   * throws (a cleanup failure is logged, never allowed to mask the open's own error).
    */
   private async rollbackOpen(
     id: string,
-    workspaceKey: string,
-    built: { readonly projection?: SessionProjection; readonly core?: Session; readonly scope?: Scope<"session"> },
+    built: { readonly projection?: SessionProjection; readonly core?: Session },
     cause: unknown,
   ): Promise<void> {
-    const logger = this.scope.get(Tokens.Logger);
+    const logger = this.parts.logger;
     const attempt = async (step: string, run: () => void | Promise<void>): Promise<void> => {
       try {
         await run();
@@ -2055,257 +2039,17 @@ export class Harness<TContext = unknown> {
       }
     };
     await attempt("detach projection", () => built.projection?.detach());
-    // The core owns the scope once it opened; before that the scope is ours to close.
     if (built.core !== undefined) await attempt("close core", () => built.core!.close());
-    else if (built.scope !== undefined) await attempt("close scope", () => built.scope!.close(this.scopeCloseOptions(id)));
-    await attempt("release workspace", () => this.releaseWorkspace(workspaceKey));
   }
 
-  /**
-   * The workspace scope for `key`, composed on first use — the host's `workspace` hook, then
-   * every registered extension's `workspace` half — and ref-counted by the sessions under it.
-   */
-  private async acquireWorkspace(key: string, workDir: string): Promise<Scope<"workspace">> {
-    let entry = this.workspaces.get(key);
-    if (entry === undefined) {
-      const scope = this.scope.child("workspace");
-      const created: WorkspaceEntry = { key, workDir, scope, refs: 0, chain: Promise.resolve(), ready: Promise.resolve() };
-      created.ready = (async (): Promise<void> => {
-        await this.sharedReady;
-        await this.options.workspace?.(scope, { key, workDir });
-        await this.inWorkspace(created, () => this.composeWorkspaceHalves(created, this.allDefinitions()));
-      })();
-      this.workspaces.set(key, created);
-      entry = created;
-    }
-    entry.refs += 1;
-    try {
-      await entry.ready;
-    } catch (error) {
-      await this.releaseWorkspace(key);
-      throw error;
-    }
-    return entry.scope;
-  }
-
-  /** Drop one session's hold; the last one out closes the workspace scope. */
-  private async releaseWorkspace(key: string): Promise<void> {
-    const entry = this.workspaces.get(key);
-    if (entry === undefined) return;
-    entry.refs -= 1;
-    if (entry.refs > 0) return;
-    this.workspaces.delete(key);
-    await entry.scope.close(this.scopeCloseOptions(undefined, key));
-  }
-
-  /** Close options for a scope the harness tears down itself: per-service deadline, failures logged. */
-  private scopeCloseOptions(sessionId?: string, workspaceKey?: string): CloseOptions {
-    return {
-      disposeTimeoutMs: SCOPE_DISPOSE_TIMEOUT_MS,
-      onDisposeError: (name, error) => {
-        this.scope.get(Tokens.Logger)?.log("warn", `service "${name}" dispose failed/timed out`, {
-          service: name,
-          ...(sessionId !== undefined ? { sessionId } : {}),
-          ...(workspaceKey !== undefined ? { workspaceKey } : {}),
-          error: error instanceof Error ? error.message : String(error),
-        });
-      },
-    };
-  }
-
-  /**
-   * A handle to a workspace-tier extension service in ONE workspace — how a host reaches a
-   * `workspace` half's instance (`harness.services.handle` only answers for the harness tier).
-   * Like every handle it resolves at CALL time: safe to take before the workspace exists, and a
-   * call while no session has that workspace open throws `ServiceUnavailableError("missing")`.
-   * Methods only, as everywhere.
-   */
-  workspaceService<T = unknown>(name: string, where: { readonly workspaceKey: string } | { readonly workDir: string }): T {
-    const key = "workspaceKey" in where ? where.workspaceKey : dirWorkspaceKey(where.workDir);
-    const self = this;
-    const current = (): Record<string, unknown> | undefined => {
-      const entry = self.workspaces.get(key);
-      if (entry === undefined || entry.scope.closed) return undefined;
-      return self.services.handleFrom<Record<string, unknown>>(entry.scope, name);
-    };
-    return new Proxy(Object.create(null) as object, {
-      get(_target, prop) {
-        if (isProbeProperty(prop)) return undefined;
-        return (...args: unknown[]) => {
-          const inner = current();
-          if (inner === undefined) throw new ServiceUnavailableError(name, "missing");
-          const fn = inner[prop as string];
-          if (typeof fn !== "function") {
-            throw new TypeError(`service "${name}": "${String(prop)}" is not a method — replaceable services expose methods only`);
-          }
-          return (fn as (...a: unknown[]) => unknown)(...args);
-        };
-      },
-      has(_target, prop) {
-        const inner = current();
-        return inner !== undefined && Reflect.has(inner as object, prop);
-      },
-    }) as T;
-  }
-
-  /** The workspaces currently open (some session holds each one), oldest first. */
-  openWorkspaces(): readonly WorkspaceContext[] {
-    return [...this.workspaces.values()].filter((entry) => !entry.scope.closed).map((entry) => ({ key: entry.key, workDir: entry.workDir }));
-  }
-
-  /** Every definition this harness mounts, by value then from files — the set a workspace composes. */
+  /** Every definition this harness mounts, by value then from files. */
   private allDefinitions(): ExtensionDefinition[] {
     return [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
-  }
-
-  /** Serialize work on one workspace's extension registrations: composition at open, a load
-   *  landing in an open workspace, and a reload's swap never interleave on the same scope. */
-  private inWorkspace<R>(entry: WorkspaceEntry, fn: () => Promise<R>): Promise<R> {
-    const next = entry.chain.then(fn, fn);
-    entry.chain = next.then(() => undefined, () => undefined);
-    return next;
-  }
-
-  /** Workspaces whose composition settled (a failed one is being torn down by its opener). */
-  private async liveWorkspaces(): Promise<WorkspaceEntry[]> {
-    const live: WorkspaceEntry[] = [];
-    for (const entry of [...this.workspaces.values()]) {
-      const ok = await entry.ready.then(() => true, () => false);
-      if (ok && !entry.scope.closed) live.push(entry);
-    }
-    return live;
-  }
-
-  /** Run every `workspace` half this workspace lacks and register the results. Idempotent. */
-  private async composeWorkspaceHalves(entry: WorkspaceEntry, definitions: readonly ExtensionDefinition[]): Promise<void> {
-    for (const definition of definitions) {
-      if (definition.workspace === undefined || this.services.hasLocalIn(entry.scope, definition.id)) continue;
-      const instance = await this.runWorkspaceHalf(definition, entry);
-      this.services.registerIn(entry.scope, definition.id, instance, { replaceable: !this.valueDefs.has(definition.id) });
-    }
-  }
-
-  /**
-   * Run one definition's `workspace` half against one workspace and return the instance —
-   * nothing registered (staging). The context mirrors the harness half's, bound to the
-   * workspace: `uses` handles resolve from ITS scope, `createSession` lands sessions in it, and
-   * `dataDir` is its own folder under the extension's data root.
-   */
-  private async runWorkspaceHalf(definition: ExtensionDefinition, entry: WorkspaceEntry): Promise<unknown> {
-    const half = definition.workspace;
-    if (half === undefined) throw new Error(`extension "${definition.id}" has no workspace half`);
-    const dataDir = this.dataRoot !== undefined ? join(this.dataRoot, definition.id, "workspaces", workspaceSlug(entry.key)) : undefined;
-    if (dataDir !== undefined) mkdirSync(dataDir, { recursive: true });
-    let composing = true;
-    const host: ExtensionWorkspaceContext = {
-      key: entry.key,
-      workDir: entry.workDir,
-      services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, this.services.handleFrom(entry.scope, name)]))),
-      ...(dataDir !== undefined ? { dataDir } : {}),
-      createSession: (sessionOptions) => {
-        if (composing) {
-          return Promise.reject(
-            new Error(`extension "${definition.id}": createSession is not available inside workspace() — the workspace is still being composed; open sessions later, from session(), a tool, or an event`),
-          );
-        }
-        return this.createSession({ workDir: entry.workDir, workspaceKey: entry.key, ...(sessionOptions ?? {}) } as CreateSessionOptions<TContext>);
-      },
-      warn: (message) => console.warn(`[extension ${definition.id}] ${message}`),
-    };
-    try {
-      return await half(host);
-    } finally {
-      composing = false;
-    }
-  }
-
-  /** Stage a `workspace` half in every live workspace: key → instance, nothing registered. A
-   *  throwing half disposes what was staged before it and rethrows. */
-  private async stageWorkspaceHalf(definition: ExtensionDefinition): Promise<Map<string, unknown>> {
-    const staged = new Map<string, unknown>();
-    try {
-      for (const entry of await this.liveWorkspaces()) staged.set(entry.key, await this.runWorkspaceHalf(definition, entry));
-    } catch (error) {
-      await this.discardStagedWorkspaces(definition.id, staged);
-      throw error;
-    }
-    return staged;
-  }
-
-  /**
-   * Publish a workspace half into every live workspace (the quiet moment of a reload / replace,
-   * or a first load landing in workspaces already open): its staged instance replaces the one
-   * registered (`force`: the owner is being replaced along with it) or registers where there is
-   * none; a workspace born after staging composes fresh. `staged === undefined` means the new
-   * version has no workspace half: every instance is unregistered. Staged instances for
-   * workspaces closed meanwhile are disposed.
-   */
-  private async swapWorkspaceHalf(definition: ExtensionDefinition, staged: Map<string, unknown> | undefined): Promise<void> {
-    const id = definition.id;
-    const seen = new Set<string>();
-    for (const entry of await this.liveWorkspaces()) {
-      seen.add(entry.key);
-      await this.inWorkspace(entry, async () => {
-        if (entry.scope.closed) return;
-        const has = this.services.hasLocalIn(entry.scope, id);
-        if (staged === undefined) {
-          if (has) await this.services.unregisterIn(entry.scope, id);
-          return;
-        }
-        const instance = staged.has(entry.key) ? staged.get(entry.key) : await this.runWorkspaceHalf(definition, entry);
-        if (has) await this.services.replaceIn(entry.scope, id, instance, { force: true });
-        else this.services.registerIn(entry.scope, id, instance, { replaceable: !this.valueDefs.has(id) });
-      });
-    }
-    if (staged !== undefined) {
-      const orphans = new Map([...staged].filter(([key]) => !seen.has(key)));
-      if (orphans.size > 0) await this.discardStagedWorkspaces(id, orphans);
-    }
-  }
-
-  /** Remove a workspace half's instance from every live workspace (unload). */
-  private async unregisterWorkspaceHalf(id: string): Promise<void> {
-    for (const entry of await this.liveWorkspaces()) {
-      await this.inWorkspace(entry, async () => {
-        if (!entry.scope.closed && this.services.hasLocalIn(entry.scope, id)) await this.services.unregisterIn(entry.scope, id);
-      });
-    }
-  }
-
-  /** Dispose staged-but-unpublished workspace instances (default rule: their `close()`). */
-  private async discardStagedWorkspaces(id: string, staged: Map<string, unknown>): Promise<void> {
-    for (const instance of staged.values()) await this.disposeStaged(id, instance);
   }
 
   private contextFor(options: { readonly context?: TContext }): TContext | undefined {
     return hasOwnContext(options) ? options.context : this.options.context;
   }
-}
-
-/** One workspace scope and what the harness tracks about it. */
-interface WorkspaceEntry {
-  readonly key: string;
-  readonly workDir: string;
-  readonly scope: Scope<"workspace">;
-  /** Composition: the host's `workspace` hook, then the extensions' `workspace` halves. */
-  ready: Promise<void>;
-  /** Sessions open under it; the last one out closes the scope. */
-  refs: number;
-  /** Serializes extension registrations on this scope (see `inWorkspace`). */
-  chain: Promise<void>;
-}
-
-/** The default workspace key for a working directory (`createSession` without `workspaceKey`). */
-function dirWorkspaceKey(workDir: string): string {
-  return `dir::${workDir}`;
-}
-
-/** A filesystem-safe folder name for a workspace key: readable prefix + a short hash, so two keys
- *  that sanitize alike never share a folder. */
-function workspaceSlug(key: string): string {
-  const readable = key.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-  const hash = createHash("sha256").update(key).digest("hex").slice(0, 10);
-  return readable.length > 0 ? `${readable}-${hash}` : hash;
 }
 
 /**

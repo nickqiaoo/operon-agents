@@ -73,7 +73,7 @@ The lifecycle is the host's (this server's), as `operon-sandbox` intends:
 - **open** -- the session's sandbox id is in `workspace/<session>/sandbox.json`; the server
   reconnects to it (a paused sandbox resumes on `connect`) or, if it is gone, starts a new one
   and clones again (work since the last push is lost; the log says so).
-- **close** -- the worker closes a session after every turn; the session scope's teardown pauses
+- **close** -- the worker closes a session after every turn; the session's `sandbox-lease` capability pauses
   the sandbox, so a session waiting days for a reply costs storage, not compute. Fresh sandboxes
   are created with `lifecycle.onTimeout: "pause"` as the backstop. A plan without pause support
   leaves the sandbox running until its timeout.

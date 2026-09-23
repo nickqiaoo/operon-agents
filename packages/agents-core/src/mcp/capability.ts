@@ -1,5 +1,4 @@
-import { BoundaryInjector, provision, optional, type Capability, type ProvisionContext, type InjectionContext, type InjectionResult, type EventSink } from "../index.ts";
-import { Tokens } from "../scope/tokens.ts";
+import { BoundaryInjector, type Capability, type SessionContext, type InjectionContext, type InjectionResult } from "../index.ts";
 import type { MCPServer } from "./server.ts";
 import { hasResources } from "./server.ts";
 import { mcpToolProvider } from "./provider.ts";
@@ -45,8 +44,8 @@ class McpResourcesInjector extends BoundaryInjector {
  * The split from {@link mcpServersCapability} is recipe vs finished good, and it decides what is
  * possible, not just what is convenient: a controller reconnects by rebuilding its server from the
  * config it holds, so a configured server gets status, reconnect, keep-alive and OAuth. An
- * instance handed in from outside cannot be rebuilt, so it gets none of that — it provides
- * `Tokens.McpRaw` rather than `Tokens.Mcp`, and `session.mcp?.list() ?? []` / `reconnectMcpServer()`
+ * instance handed in from outside cannot be rebuilt, so it gets none of that — it publishes
+ * the raw server list as its `service`, and `session.mcp?.list() ?? []` / `reconnectMcpServer()`
  * do not cover it. Its tools reach the model exactly the same way.
  */
 export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabilityOptions = {}): Capability {
@@ -54,15 +53,19 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
 
   const capability: Capability = {
     name: "mcp",
+    contract: "detachable",
     toolProviders: servers.map((server) => mcpToolProvider(server)),
     ...(options.injectResources ? { injectors: [new McpResourcesInjector(() => resources)] } : {}),
-    provides: [provision({ token: Tokens.McpRaw, needs: { events: optional(Tokens.Events) }, create: connectAll, dispose: closeAll })],
+    service: servers,
+    openSession: (ctx) => connectAll(ctx),
+    closeSession: closeAll,
   };
 
   // Connect every server in parallel, fault-isolated — session open would otherwise cost
   // the SUM of each server's startup (matching `mcpServersCapability`, which already does).
-  async function connectAll({ events }: { readonly events: EventSink | undefined }, ctx: ProvisionContext): Promise<readonly MCPServer[]> {
+  async function connectAll(ctx: SessionContext): Promise<void> {
     {
+      const events = ctx.events;
       const perServer = await Promise.all(
         servers.map(async (server): Promise<readonly CollectedResource[]> => {
           try {
@@ -104,7 +107,6 @@ export function mcpCapability(servers: readonly MCPServer[], options: MCPCapabil
       // Flattened in `servers` order, so the injected listing doesn't reshuffle per run.
       resources = perServer.flat();
     }
-    return servers;
   }
 
   async function closeAll(): Promise<void> {

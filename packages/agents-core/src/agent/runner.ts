@@ -10,8 +10,6 @@ import type { BackgroundSpawner } from "../tool/background.ts";
 import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Capability, RunContext } from "../capabilities/capability.ts";
-import { Scope } from "../scope/scope.ts";
-import { Tokens } from "../scope/tokens.ts";
 import { assembleCapabilities, type AssembledCapabilities } from "../capabilities/assembler.ts";
 import { computeContextBreakdown } from "./context-report.ts";
 import {
@@ -33,7 +31,7 @@ import {
   type InterruptionState,
   type PendingRunInterrupt,
 } from "../loop/interruption.ts";
-import { abortReason, Session, type ConversationHead, type SessionPort } from "./session.ts";
+import { abortReason, Session, type ConversationHead, type SessionOpenOptions, type SessionPort } from "./session.ts";
 import { Agent, type AgentRunContext } from "./agent.ts";
 import type { SubagentInfo, SubagentProvider } from "./profiles.ts";
 import {
@@ -62,18 +60,18 @@ import {
 
 /**
  * Engine configuration — VALUES, not lifetimes. Everything with a lifetime (environment, store,
- * events, responder, permission options, capabilities' services) lives in a `Scope`: the
- * harness-tier scope the Runner is constructed on, and the session-tier scope the `session`
+ * events, responder, permission options, capabilities' services) is passed to `Session.open`:
  * hook fills for each session the Runner opens itself.
  */
 export interface RunnerConfig<TContext = unknown> {
   readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
   /**
-   * Called once per session the Runner opens on its own (no `RunOptions.session`): register
-   * this session's objects (`Tokens.Store`, `Tokens.Environment`, `Tokens.PermissionOptions`, …) on `scope` and
-   * return its capabilities. A caller-supplied session is never passed through here.
+   * Called once per session the Runner opens on its own (no `RunOptions.session`): return
+   * everything that session is built from — its capabilities and the objects it depends on
+   * (store, environment, permission options, …). A caller-supplied session never comes through
+   * here. `sessionId` and `signal` are the Runner's to set and are overwritten if returned.
    */
-  readonly session?: (scope: Scope<"session">, ctx: { readonly sessionId: string | undefined }) => readonly Capability[] | Promise<readonly Capability[]>;
+  readonly session?: (ctx: { readonly sessionId: string | undefined }) => SessionOpenOptions | Promise<SessionOpenOptions>;
   readonly maxTurns?: number;
   readonly maxStepsPerTurn?: number;
   readonly maxRetriesPerStep?: number;
@@ -265,14 +263,10 @@ export interface SubagentSpawner<TContext> {
 }
 
 export class Runner<TContext = unknown> {
-  /** The harness-tier scope every Runner-opened session hangs under. */
-  readonly scope: Scope<"harness" | "workspace">;
   private readonly config: RunnerConfig<TContext>;
   private readonly engine: Engine<TContext>;
 
-  constructor(scope: Scope<"harness" | "workspace">, config: RunnerConfig<TContext> = {}) {
-    if ((scope as Scope).kind === "session") throw new Error("Runner needs a harness or workspace scope, not a session scope");
-    this.scope = scope;
+  constructor(config: RunnerConfig<TContext> = {}) {
     this.config = config;
     this.engine = new Engine(config);
   }
@@ -448,27 +442,19 @@ export class Runner<TContext = unknown> {
       }
       return { session: opts.session, owned: false };
     }
-    const scope = this.scope.child("session");
     // Losing the lease cancels the run: a holder that can no longer renew has, by definition,
     // been superseded, and must stop before its writes race the node that took over. Only the
     // session this runner owns is wired up — a caller-supplied session keeps its own signal.
     const signal = mergeSignals(opts?.signal, lease?.signal);
-    // A one-shot pull stream IS the session's event bus (Invariant 4); it wins over the hook's.
-    if (eventsOverride !== undefined) scope.register(Tokens.Events, eventsOverride, { owned: false });
-    try {
-      const capabilities = (await this.config.session?.(scope, { sessionId: opts?.sessionId })) ?? [];
-      const session = await Session.open(scope, {
-        capabilities,
-        ...(opts?.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-      });
-      return { session, owned: true };
-    } catch (error) {
-      // The scope is ours: a hook or open that fails must not leave it (and whatever it already
-      // registered — a provision, an MCP connection) hanging off the runner's scope.
-      await scope.close().catch(() => undefined);
-      throw error;
-    }
+    const fromHook = (await this.config.session?.({ sessionId: opts?.sessionId })) ?? {};
+    const session = await Session.open({
+      ...fromHook,
+      // A one-shot pull stream IS the session's event bus (Invariant 4); it wins over the hook's.
+      ...(eventsOverride !== undefined ? { events: eventsOverride } : {}),
+      ...(opts?.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    return { session, owned: true };
   }
 
   /** Resolve the durable conversation owner by following committed handoffs from `main`. */

@@ -162,9 +162,9 @@ interface Capability {
 ```
 
 A capability's session-lived state is a **provision**: `Session.open` runs each `create` in order
-and registers the result in the session scope under the provision's token (`Tokens.Goal`, `Tokens.Mcp`, …);
-`scope.close()` disposes them in reverse. `create` receives `{ scope, sessionId, signal }` and reads
-everything else from the scope (`Tokens.Environment`, `Tokens.Store`, `Tokens.Events`, `Tokens.Steer`, `Tokens.SessionLog`, and
+and publishes it as the capability's `service`, reachable as `session.service("goal")` and through
+the named accessors; `Session.close` runs `closeSession` in reverse. `openSession` receives the
+whole `SessionContext` (environment, store, events, steer, controls, the memoized log reader, and
 whatever earlier capabilities provided). There is no separate `openSession`/`closeSession`: the
 provision IS the session-tier lifecycle, and one teardown path serves capabilities, the session's
 own objects, and the harness alike (§5.7).
@@ -213,15 +213,15 @@ server does not install the local-only ones. The kernel and the assembler know o
 nothing in `loop/` or `capabilities/assembler.ts` mentions one of those names.
 
 `Session`'s accessors are the one place core does name them, and that is a deliberate trade:
-`session.goal` over `session.require(Tokens.Goal)` at ~58 call sites, paid for by this class
-listing eleven names. A host's own capability needs nothing here — `session.require(tok)` reaches
+`session.goal` over `session.requireService("goal")` at ~58 call sites, paid for by this class
+listing eleven names. A host's own capability needs nothing here — `session.service(name)` reaches
 it. Which tier an accessor gets is decided by one question: **when the capability is not open, is
 that a failure or an answer?**
 
 - **REQUIRE** (`T`, throws `ServiceUnavailableError` naming the capability that provides it) —
   `goal`, `plan`, `todo`, `task`, `skills`, `plugins`, `compaction`, `workflow`. Asking a session
   with no goal capability for its goal is a misconfiguration; returning `undefined` would turn it
-  into a silent no-op. Feature-test with `session.get(Tokens.X)`, never `session.goal?.…` —
+  into a silent no-op. Feature-test with `session.service("x")`, never `session.goal?.…` —
   optional chaining guards a null result, not a throwing getter.
 - **PROBE** (`T | undefined`) — `mcp`, `background`, `spawner`, `compactionView`. A session with no
   MCP has no servers to report; one with no background capability has no past runs. "None" is
@@ -237,11 +237,11 @@ which is why an outer ring is required:
 | Only the harness has this | Where it shows up |
 |---|---|
 | **Another session** | `ExtensionHost.newSession / fork / openSession / listSessions`; the peers spawn factory |
-| **A process-level shared instance** | the harness-tier `Scope` (§5.7); extension services sit in it by id through `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
-| **A per-directory shared instance** | the workspace-tier `Scope`: one per working directory (or tenant / environment key), composed by the `workspace` hook — MCP connections, the skill scan, credential stores — shared by its sessions and closed with the last of them |
+| **A process-level shared instance** | `HarnessParts`, what the `harness` hook returns (§5.7); extension services sit beside it by id in `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
+| **A per-directory shared instance** | does not exist. Share it with the whole process, or build it per session (§5.7) |
 | **Extension runtime** | `ExtensionRuntime` (`extensions/runtime.ts`) projects capability hooks **one by one** into extension events, giving each hook a timeout and fault isolation |
 | **File loading** | `extensions/loader.ts`: file → import → value → attach; manual approval accounted by mtime |
-| **Model provider registry** | `Tokens.ModelRuntime`, registered on the harness scope by the `harness` hook |
+| **Model provider registry** | `HarnessParts.modelRuntime`, returned by the `harness` hook |
 | **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalEnvironment, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |
 
 The comment on `createHarness()` pins down its nature: **"pure composition of core primitives — no new
@@ -249,10 +249,10 @@ engine behavior"**. The harness is not a second engine; it is a composition root
 
 > **Composition is three hooks, config is data.** `createHarness` takes engine configuration as
 > plain values (model, turn caps, work dir, permission mode) and everything with a lifetime through
-> three hooks — `harness(scope)` for process-lived objects, `workspace(scope, ctx)` for per-directory
-> ones, `session(scope, ctx)` for each session's capabilities. `createLocalHarness` is a preset that
+> two hooks — `harness()` returns the process-lived parts, `session(ctx)` returns each session's
+> capabilities. `createLocalHarness` is a preset that
 > turns local conventions into those hooks; a server writes its own preset the same way
-> (`examples/managed-agents`), registering per-tenant stores on the workspace scope — which is what
+> (`examples/managed-agents`), returning its own parts from `harness()` — which is what
 > the old "one `McpOAuthService` for every session" objection was missing.
 
 ---
@@ -265,7 +265,6 @@ engine behavior"**. The harness is not a second engine; it is a composition root
 interface ExtensionDefinition<TShared, TParams, TServices> {
   id: string;                                         // durable identity (slug); state/records are scoped by it
   harness?(host): TShared;                             // process half: once per harness, the return value is the service (registered under id)
-  workspace?(host): TShared;                           // workspace half: once per workspace key, registered under id in THAT workspace's scope
   uses?: (keyof TServices)[];                         // whose services this consumes: validated at registration, resolved into session
   session(api, { shared, params, services }): cleanup;  // session half: once per session
 }
@@ -355,65 +354,61 @@ Two layers:
 > incremental lines), whereas an engine model cannot be taken apart in reverse — the asymmetry favors
 > the flat model.
 
-### 5.7 Scopes: who builds it, how many exist, how long it lives
+### 5.7 Lifetimes: who builds it, how many exist, how long it lives
 
-Every object with a lifetime sits in a `Scope` (`agents-core/src/scope/`), addressed by a typed token
-that declares its tier (`Tokens.Logger` is harness-scoped, `Tokens.McpServers` workspace-scoped, `Tokens.Goal`
-session-scoped). Three tiers, each a scope with a parent:
+There are exactly TWO lifetimes, and nothing between them:
 
 ```
-Harness   (one per process)      Tokens.Logger, Tokens.SessionRepository, Tokens.ModelRuntime, Tokens.EnvironmentFactory, extension create results
- └ Workspace (one per key)        Tokens.McpServers, Tokens.SkillRegistry, Tokens.McpOAuth, Tokens.WorkspaceEnvironmentFactory, extension workspace results
-    └ Session (one per session)   Tokens.Environment, Tokens.Store, Tokens.Events, Tokens.Steer, Tokens.Permission, Tokens.Goal / Tokens.Plan / … (provisions)
+Process   (one per harness)    HarnessParts: the repository, logger, model runtime, default
+                               environment, one set of MCP connections, one skill scan, plus the
+                               `harness` half of every extension (by id, in `ServiceRegistry`)
+ └ Session (one per session)   everything a capability opens: goal, plan, todo, background, mcp, …
 ```
 
-Four rules carry the whole design: a lookup walks UP the chain (a session reads harness services
-without anything threaded through by hand); a child that registers the same token OVERRIDES its
-parent's (`createSession({ environment })` beats the harness-level `Tokens.EnvironmentFactory`); `provide` is a
-default that a prior `register` silently beats (the old `a ?? b ?? new X()` chains became
-registrations at the right tier); and `close()` runs children first, then a scope's own entries in
-reverse registration order — one teardown path for capabilities, session infrastructure, workspace
-resources and extension services. Registering a token in the wrong tier throws, which is the one
-mechanism that keeps session state from leaking across sessions.
+There is no registry to look anything up in. A session is HANDED what it runs on
+(`Session.open(opts)`), a capability is handed the session (`openSession(ctx)`), and a dependency
+that was not handed over is a dependency that does not exist. What used to be a chain of scopes
+resolving a token by walking up tiers is now a plain argument, which is why the preset
+(`local.ts`, `examples/managed-agents/server.ts`) is the one place that decides what a deployment
+is built from.
 
-The rule for what may sit in a workspace scope: **it must hold for every session under that
-key.** Shared connections, credential stores, tenant configuration, an extension's per-workspace
-instance — yes. Anything derived from an ENVIRONMENT only if it is the workspace's environment: the local
-preset scans skills through `Tokens.WorkspaceEnvironmentFactory` (a remote workspace registers it in the
-`workspace` hook), publishes no shared registry when that is a per-session factory, and a session
-that brings its own environment (`createSession({ environment })`) scans through it instead of reading the
-workspace's — the catalog the model sees is always the one whose scripts its tools can reach.
-Where a workspace's MCP servers RUN is a separate axis: stdio servers are spawned by the host
-process (near the user's credentials and devices), remote ones are URLs; neither follows the
-environment, and a session on a remote environment with local connectors is the ordinary shape, not a
-special combination.
+**Why no tier in between.** There used to be a workspace tier — one scope per working directory,
+shared by its sessions. It cost a second set of lifetime rules, a second provision kind, a
+reference-counted hold on every open and close, and a whole `workspace` half on every extension;
+and what it bought (one MCP connection set and one skill scan per directory instead of per
+process) did not pay for that. A shared object is now shared by the WHOLE process or built per
+session. A host that genuinely needs per-tenant isolation runs a harness per tenant — which is
+what a server does anyway, since its sessions do not share a filesystem.
 
-Run and frame are deliberately NOT scopes: `RunState` is a snapshot the runner resolves from the
-session scope once per run, and the loop (`loop/`) never touches a scope — construction and
-lifetime are the scope's job, the hot path reads plain fields. The other half of that decision —
-where state OWNED by a frame goes, given that it gets no scope — is
-[State and Lifetime](./state-and-lifetime.md): a scope decides when an object is destroyed, an
+**What replaced `scope.close()`.** Teardown is explicit and ordered by construction:
+`Session.close` runs each capability's `closeSession` in reverse open order, each under a
+deadline, each failure isolated and logged; an `invariant` capability that fails to open takes the
+ones already opened down before the error leaves; `harness.close` closes every session, then
+unregisters the extension services newest-first, then calls `HarnessParts.close()` — the one seam
+by which a preset tears down what it opened (its MCP connections, its handles).
+
+The rule for what may sit in the process tier: **it must hold for every session in the process.**
+Anything derived from an ENVIRONMENT only if it is the harness's environment: the local preset
+scans skills through `HarnessParts.environment`, publishes no shared registry when that is a
+per-session factory, and a session that brings its own environment (`createSession({ environment })`)
+scans through it instead — the catalog the model sees is always the one whose scripts its tools
+can reach. Where MCP servers RUN is a separate axis: stdio servers are spawned by the host process
+(near the user's credentials and devices), remote ones are URLs; neither follows the environment,
+and a session on a remote environment with local connectors is the ordinary shape.
+
+Run and frame own no lifetime either: `RunState` is a snapshot the runner builds once per run, and
+the loop (`loop/`) never resolves anything — construction happens at open, the hot path reads
+plain fields. Where state OWNED by a frame goes is
+[State and Lifetime](./state-and-lifetime.md): a lifetime decides when an object is destroyed, an
 identity (`address`, `turnId`) decides whose data it is, and the test for which mechanism applies
 is whether the thing has a `close()`.
 
 Extension services are the one string-keyed corner (§5.5): an extension is loaded by its id and
-names what it consumes in `uses`, so `harness.services` maps those ids onto harness-tier tokens.
-
-**Workspace entries are never replaced; a new generation is a new key.** A session's provisions
-pin the workspace objects they were opened against (`create` takes instances, on purpose: a
-session stays on the generation it started on), so `replace` on a workspace scope would leave
-old sessions holding retired objects. When what a workspace is backed by changes — a sandbox
-restarted, a remote runtime reconnected — the host opens new sessions under a new
-`workspaceKey` (say `<workspaceId>@<generation>`): the `workspace` hook composes the new
-generation, old sessions keep the old scope alive through its reference count, and the last one
-out tears it down in reverse. An explicit key is part of a session's durable identity (persisted
-at create, read back on resume and inherited by a fork), so reopening never silently lands a
-tenant's session in a directory-keyed workspace; passing a key on `resumeSession` is the
-generation change. `replace` stays with the harness tier, whose consumers all go
-through handles — and, for that same reason, with extension services at EITHER tier: an
-extension's `workspace` result is consumed only through handles (`ctx.shared`, `ctx.services`,
-`harness.workspaceService`), so a reload replaces it in place in every open workspace, exactly
-as it replaces a `harness` result. What is never replaced is a token-registered engine object.
+names what it consumes in `uses`, so `harness.services` maps those ids onto process-lived
+handles. `replace` exists only there, and only because every consumer goes through a handle
+(`ctx.shared`, `ctx.services`): a reload swaps the instance behind the handle in place. An engine
+object a session was opened with is never replaced — a changed backend (a restarted sandbox, a
+reconnected runtime) is new sessions on new parts, not a swap under old ones.
 
 ### 5.6 "The seam in core, the behavior in an extension" — the most useful third pattern
 
@@ -473,19 +468,19 @@ process — and the split is worth stating, because it is invisible in the capab
 |---|---|---|
 | Built-in tools, `background`, `user-hooks`, the skill scan | **Follow the environment** | All of them reach the world through `Environment` (`environment.run`, `environment.readBytes`), so pointing the environment at a sandbox moves them with it, with no capability aware that anything changed |
 | **MCP connections** | **Stay with the host** | `mcp/server.ts` does not mention `Environment` at all. An http server is a network call from the harness process; an stdio server is a **child process of it**. Neither follows the session's environment |
-| `todo`, `plan`, `goal`, `task`, `compaction` | Either — it makes no difference | Pure state over `Tokens.Store`; nothing touches the world |
+| `todo`, `plan`, `goal`, `task`, `compaction` | Either — it makes no difference | Pure state over the session store; nothing touches the world |
 
 That MCP stays host-side is the **right default, not an oversight**. Most MCP servers are API
 clients (Linear, Notion, GitHub), and for those, host-side is where they belong: credentials never
 enter the sandbox, `McpOAuthService` and its swappable credential store keep working, and
-`Tokens.McpServers` reuses one set of connections across every session of a working directory. Servers
+`HarnessParts.mcpServers` reuses one set of connections across every session of the process. Servers
 that genuinely need the workspace's files — filesystem, shell — are the case MCP is the wrong tool
 for; the built-in tools already run there.
 
 **Therefore stdio is a local-host transport.** It is fine, and normal, on a laptop or a
 single-tenant self-deployment. On a server host it is four separate problems: the child process
 does not follow the environment into the sandbox, so it reads the *host's* disk instead of the
-workspace; `Tokens.McpServers`'s "one set of connections per working directory" stops holding across
+workspace; `HarnessParts.mcpServers`'s "one set of connections per process" stops holding across
 replicas and rolling restarts; a crashing `npx`-launched server takes down a process carrying every
 tenant's sessions; and stdio secrets travel in `config.env`, which has no tenant boundary. A server
 host therefore states its transports once, where it assembles capabilities:

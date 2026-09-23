@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents";
 /**
  * The live path, and specifically the two things the store alone cannot do.
  *
@@ -148,10 +147,7 @@ async function realTurnProducesDeltas(): Promise<void> {
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const broadcaster = new MemoryEventBroadcaster();
   const harness = createHarness({
-    harness: (s) => {
-      s.register(Tokens.SessionRepository, repository, { owned: false });
-      s.register(Tokens.EnvironmentFactory, new LocalEnvironment(work), { owned: false });
-    },
+    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

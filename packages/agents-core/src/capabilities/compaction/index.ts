@@ -1,6 +1,4 @@
-import { provision, type Capability, type RunContext, type CompactionGate } from "../capability.ts";
-import { optional } from "../needs.ts";
-import { Tokens } from "../../scope/tokens.ts";
+import type { Capability, RunContext, CompactionGate } from "../capability.ts";
 import { APIContextOverflowError } from "../../llm/errors.ts";
 import type { InjectionManager } from "../injection.ts";
 import type { EventSink } from "../../events/index.ts";
@@ -111,20 +109,14 @@ export function compactionCapability(options: CompactionOptions): Capability {
 
   return {
     name: "compaction",
-    provides: [
-      provision({
-        token: Tokens.Compaction,
-        // The sink and the logger were being picked up in `start`, once per run, from whatever
-        // the scope held at that moment. They are session-lived, so they belong here: resolved
-        // once, declared where a reader can see them.
-        needs: { sink: Tokens.Events, log: optional(Tokens.Logger) },
-        create: ({ sink, log }) => {
-          events = sink;
-          logger = log ?? noopLogger;
-          return service;
-        },
-      }),
-    ],
+    contract: "invariant",
+    service,
+    // The sink and the logger were being picked up in `start`, once per run, from whatever the
+    // session held at that moment. They are session-lived, so they are taken once, here.
+    openSession: (ctx) => {
+      events = ctx.events;
+      logger = ctx.logger ?? noopLogger;
+    },
     hooks: {
       beforeStep: async (ctx) => {
         maxOutputTokens = ctx.model.maxOutputTokens;

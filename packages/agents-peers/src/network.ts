@@ -25,7 +25,7 @@
  * This does not belong in core; see the README for the reasoning and for how
  * this shape was reached.
  */
-import type { ExtensionAPI, ExtensionActions, ExtensionDefinition, ExtensionWorkspaceContext } from "operon-agents";
+import type { ExtensionAPI, ExtensionActions, ExtensionDefinition, ExtensionHostContext } from "operon-agents";
 import type { AgentEvent, SteerOrigin } from "operon-agents-core";
 import {
   CardSyncedDirectory,
@@ -157,6 +157,9 @@ function ownedLabelsOf(creatorId: string, ref: AgentRef): readonly string[] {
  * id or a label (a team name admits neither `/` nor `:`).
  */
 export function memberAgentId(team: string, name: string): string {
+  // `team` is the full label — `team:<creator agentId>:<name>` — and a root creator's agentId is
+  // its session id, so this is unique across the whole process without any further namespacing.
+  // That is what lets ONE roster serve every session the harness opens.
   return `${team}/${name}`;
 }
 
@@ -715,10 +718,9 @@ export type PeerNetworkHandle = Pick<
   | "reconcile"
 >;
 
-/** The extension id, and so the service name its `workspace` half's network is registered under
- *  — in each workspace's scope, one network per working directory (per tenant on a server). A
- *  session's `session` reaches its workspace's network as `ctx.shared`; the host reaches one with
- *  `harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir })`. */
+/** The extension id, and so the service name its `harness` half's network is registered under —
+ *  ONE network for the whole process. A session's `session` reaches it as `ctx.shared`; the host
+ *  reaches it with `harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE)`. */
 export const PEERS_SERVICE = "peers";
 
 /** Mount the creator side (the `Team` tool) onto a session — what `peers().session` does for an
@@ -798,7 +800,7 @@ export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "rep
    * deliberate choice: one roster across working directories). Absent → in-memory per
    * workspace (wiped by a reload).
    */
-  readonly repo?: PeerRepo | ((host: ExtensionWorkspaceContext) => PeerRepo);
+  readonly repo?: PeerRepo | ((host: ExtensionHostContext) => PeerRepo);
   /**
    * Teammate types the model may create with `Team spawn`, each as the session options a
    * teammate of that type is born with (a constant, or computed from the spawn request). The
@@ -832,7 +834,7 @@ export function peers(options: PeerOptions): ExtensionDefinition<PeerNetworkHand
   const { teammates, team = {}, repo, ...networkOptions } = options;
   return {
     id: PEERS_SERVICE,
-    workspace(host: ExtensionWorkspaceContext) {
+    harness(host: ExtensionHostContext) {
       const resolvedRepo = typeof repo === "function" ? repo(host) : repo;
       const spawnable =
         teammates === undefined

@@ -5,9 +5,6 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { existsSync } from "node:fs";
 import {
-  ServiceUnavailableError,
-  Tokens,
-  token,
   defineModel,
   defineAgent,
   Runner,
@@ -48,25 +45,19 @@ interface ProbeStats {
   maxConcurrentRuns: number;
 }
 
-const PROBE = token<object>("probe", "session");
-
 function probeCapability(opts: { failOpen?: boolean } = {}): { capability: Capability; stats: ProbeStats } {
   const stats: ProbeStats = { openSession: 0, closeSession: 0, start: 0, stop: 0, activeRuns: 0, maxConcurrentRuns: 0 };
   const capability: Capability = {
     name: "probe",
-    provides: [
-      {
-        token: PROBE,
-        create: async () => {
-          stats.openSession += 1;
-          if (opts.failOpen) throw new Error("probe provision boom");
-          return {};
-        },
-        dispose: async () => {
-          stats.closeSession += 1;
-        },
-      },
-    ],
+    contract: "detachable",
+    service: {},
+    openSession: async () => {
+      stats.openSession += 1;
+      if (opts.failOpen) throw new Error("probe openSession boom");
+    },
+    closeSession: async () => {
+      stats.closeSession += 1;
+    },
     start: async () => {
       stats.start += 1;
       stats.activeRuns += 1;
@@ -249,10 +240,10 @@ async function testSessionHandles(environment: LocalEnvironment): Promise<void> 
     capabilities: [goalCapability(goal), backgroundCapability(bg)],
   });
 
-  check("handles: session.get(Tokens.Goal) returns the GoalStore", session.get(Tokens.Goal) === goal);
+  check("handles: session.service('goal') returns the GoalStore", session.service("goal") === goal);
   check("handles: session.background unifies the BackgroundManager", session.background === bg);
-  check("handles: session.require(Tokens.Goal) also resolves", session.require(Tokens.Goal) === goal);
-  check("handles: unknown service is undefined", session.get(token("nope", "session")) === undefined);
+  check("handles: session.requireService('goal') also resolves", session.requireService("goal") === goal);
+  check("handles: an unopened capability probes as undefined", session.service("nope") === undefined);
 
   await session.close();
 }
@@ -426,27 +417,21 @@ async function testSessionIdConflict(environment: LocalEnvironment): Promise<voi
   } catch (e) {
     missing = e;
   }
-  check("capability-missing: probe getter returns undefined", session.get(Tokens.Plan) === undefined);
+  check("capability-missing: probe getter returns undefined", session.service("plan") === undefined);
   check(
-    "capability-missing: require method throws ServiceUnavailableError with the service name",
-    missing instanceof ServiceUnavailableError && missing.serviceName === "plan",
+    "capability-missing: the require accessor throws, naming the capability",
+    missing instanceof Error && missing.message.includes("plan"),
   );
   faux.unregister();
   await session.close();
 }
 
-/** A runner-owned session whose hook or open fails must not leave its scope (and what the hook
- *  already registered) hanging off the runner's scope. */
+/** A failing open must not leave half a session behind: the hook's error reaches the caller, and
+ *  an `invariant` capability that throws takes the ones already opened down with it. */
 async function testOwnedScopeClosedOnOpenFailure(): Promise<void> {
   const { faux, model } = fauxModel("never");
-  const Probe = token<{ close(): void }>("session-e2e-open-fail-probe", "session");
-  let disposed = 0;
-  let hookScope: { readonly state: string } | undefined;
-  const harnessScope = new (await import("../index.ts")).Scope("harness");
-  const runner = new Runner(harnessScope, {
-    session: (scope) => {
-      hookScope = scope;
-      scope.register(Probe, { close: () => void (disposed += 1) });
+  const runner = new Runner({
+    session: () => {
       throw new Error("session hook boom");
     },
   });
@@ -454,10 +439,27 @@ async function testOwnedScopeClosedOnOpenFailure(): Promise<void> {
   let error: unknown;
   await runner.run(agent, "hi").catch((e) => { error = e; });
   check("owned open failure: the run rejects with the hook's error", error instanceof Error && error.message === "session hook boom");
-  check("owned open failure: the runner closed the scope it created", hookScope?.state === "closed");
-  check("owned open failure: what the hook registered was disposed", disposed === 1);
+
+  // An invariant capability failing mid-open: everything opened before it is closed again.
+  let closed = 0;
+  const earlier: Capability = {
+    name: "earlier",
+    contract: "detachable",
+    service: {},
+    closeSession: () => void (closed += 1),
+  };
+  const breaks: Capability = {
+    name: "breaks",
+    contract: "invariant",
+    openSession: () => {
+      throw new Error("invariant boom");
+    },
+  };
+  let openError: unknown;
+  await openTestSession({ capabilities: [earlier, breaks] }).catch((e) => { openError = e; });
+  check("invariant failure: the open rejects rather than running without it", openError instanceof Error && openError.message === "invariant boom");
+  check("invariant failure: the capabilities already opened were closed again", closed === 1);
   faux.unregister();
-  await harnessScope.close();
 }
 
 async function main(): Promise<void> {

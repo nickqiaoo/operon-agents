@@ -73,11 +73,10 @@ export function registerFauxProvider(
 
 
 export {
-  testHarnessScope,
-  wireTestSession,
+  sessionOptionsFrom,
   testRunner,
   openTestSession,
-  testSessionScope,
+  testSessionContext,
   testProvisionContext,
   testRunContext,
   provisionCapability,

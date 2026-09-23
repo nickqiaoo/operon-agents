@@ -1,5 +1,4 @@
 import { testRunner, openTestSession } from "./faux.ts";
-import { token } from "../index.ts";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -100,16 +99,12 @@ async function main(): Promise<void> {
         backgroundCapability(),
         {
           name: "dyn-commands",
-          provides: [
-            {
-              token: token("dyn-commands", "session"),
-              create: () => ({
-                sessionCommands: () => [
-                  { name: "dyncmd", description: "dynamic test command", run: async (_ctx: unknown, args: string) => ({ ok: true, message: `dyn:${args}` }) },
-                ],
-              }),
-            },
-          ],
+          contract: "detachable",
+          service: {
+            sessionCommands: () => [
+              { name: "dyncmd", description: "dynamic test command", run: async (_ctx: unknown, args: string) => ({ ok: true, message: `dyn:${args}` }) },
+            ],
+          },
         },
       ],
     });

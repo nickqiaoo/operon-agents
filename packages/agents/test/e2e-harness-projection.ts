@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents-core";
 // HarnessSession × SessionProjection: attach-at-open, live fold, mid-turn seam, reopen seeding.
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 import { createHarness } from "../src/index.ts";
@@ -94,9 +93,7 @@ async function main(): Promise<void> {
   {
     const repository = new MemorySessionRepository();
     const crashHarness = createHarness({
-      harness: (s) => {
-        s.register(Tokens.SessionRepository, repository, { owned: false });
-      },
+      harness: () => ({ sessionRepository: repository }),
       model: faux.getChatModel()!,
       permission: { mode: "yolo" },
     });
@@ -188,7 +185,7 @@ async function main(): Promise<void> {
       },
     };
     faux.setResponses([fauxAssistantMessage("counted", { stopReason: "stop" })]);
-    const harness2 = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
+    const harness2 = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
     const counted = await harness2.createSession();
     const { store } = stores.get(counted.id)!;
     check("open: full-log readRecords happens exactly once", store.reads === 1);

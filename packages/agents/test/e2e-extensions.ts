@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents-core";
 import { testRunner, openTestSession } from "operon-agents-core/internal";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
@@ -466,7 +465,7 @@ async function hostReach(): Promise<void> {
 
   const harness = createHarness({
     model,
-    harness: (s) => s.register(Tokens.ModelRuntime, faux.runtime, { owned: false }),
+    harness: () => ({ modelRuntime: faux.runtime }),
     workDir: process.cwd(),
     permission: { mode: "yolo" },
     extensions: [extension],

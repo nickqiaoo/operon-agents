@@ -1,6 +1,6 @@
 import type { ShouldContinueAfterStopHook } from "../../loop/types.ts";
-import { provision, type Capability } from "../capability.ts";
-import { Tokens } from "../../scope/tokens.ts";
+import type { Capability } from "../capability.ts";
+import { readSessionLog } from "../capability-state.ts";
 import { GoalStore } from "./goal-store.ts";
 import { getGoalTool, setGoalBudgetTool, updateGoalTool } from "./tools.ts";
 import { GoalInjector } from "./injector.ts";
@@ -24,6 +24,7 @@ const GOAL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(["UpdateGoal", "SetGo
 export function goalCapability(store: GoalStore = new GoalStore()): Capability {
   return {
     name: "goal",
+    contract: "invariant",
     tools: [updateGoalTool(store), getGoalTool(store), setGoalBudgetTool(store)],
     // The goal is the CONVERSATION's, so a subagent may read it — knowing what the session is
     // for helps it do its part — but not rewrite it or change its budget. Those are the root
@@ -31,18 +32,14 @@ export function goalCapability(store: GoalStore = new GoalStore()): Capability {
     toolFilters: [(tools, ctx) => (ctx.isRootAgent ? tools : tools.filter((tool) => !GOAL_WRITE_TOOL_NAMES.has(tool.schema.name)))],
     injectors: [new GoalInjector(store)],
     hooks: { shouldContinueAfterStop: goalDriver(store) },
-    provides: [
-      provision({
-        token: Tokens.Goal,
-        needs: { readLog: Tokens.SessionLog, events: Tokens.Events },
-        // Rebuild the goal (incl. turn/token counters) by replaying the session log, so resume
-        // and fork restore it instead of starting from an empty in-memory store.
-        create: async ({ readLog, events }, ctx) => {
-          store.reconstruct(await readLog());
-          store.attachAnnouncer(async (snapshot) => { await events.emit({ type: "goal.updated", snapshot, address: "main", sessionId: ctx.sessionId }); });
-          return store;
-        },
-      }),
-    ],
+    service: store,
+    // Rebuild the goal (incl. turn/token counters) by replaying the session log, so resume
+    // and fork restore it instead of starting from an empty in-memory store.
+    openSession: async (ctx) => {
+      store.reconstruct(await readSessionLog(ctx));
+      store.attachAnnouncer(async (snapshot) => {
+        await ctx.events.emit({ type: "goal.updated", snapshot, address: "main", sessionId: ctx.sessionId });
+      });
+    },
   };
 }

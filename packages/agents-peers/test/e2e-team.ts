@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       spy,
     ],
   });
-  const net = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() });
+  const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
   const rosterEntry = async (id: string) => (await net.list()).find((ref) => ref.agentId === id || ref.name === id);
 
   const helperRole = defineAgent({ name: "helper", model, instructions: "Do quick work." });

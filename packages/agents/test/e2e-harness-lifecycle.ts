@@ -5,9 +5,10 @@
  */
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { defineAgent, Tokens, token, type Logger } from "operon-agents-core";
+import { defineAgent, type Logger } from "operon-agents-core";
 import { createHarness, defaultCapabilities, tool } from "../src/index.ts";
 import { setHarnessCloseTimeoutsForTest } from "../src/internal.ts";
+import { setSessionCloseTimeoutsForTest } from "operon-agents-core/internal";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -130,11 +131,11 @@ async function closeWaitsForRuns(): Promise<void> {
   await sleep(40);
   check("close: the tool's finally has not run yet — the run is still winding down", !log.includes("hold:finally"));
   check("close: close() is still pending while the run winds down", await pendingAfter(closing, 40));
-  check("close: the core session is still open meanwhile (no dispose under the run's feet)", session.core.scope.state === "open");
+  check("close: the core session is still open meanwhile (no dispose under the run's feet)", session.core.open === true);
   hold.release();
   await closing;
   check("close: after close() resolves, the tool's finally HAS run", log.includes("hold:finally"));
-  check("close: ...and the core scope is closed", session.core.scope.state === "closed");
+  check("close: ...and the core session is closed", session.core.open === false);
   check("close: the in-flight run settled as aborted", (await first).status === "aborted");
   let secondError: unknown;
   await second.catch((error) => { secondError = error; });
@@ -167,7 +168,7 @@ async function closeGivesUpOnStuckRun(): Promise<void> {
     const elapsed = Date.now() - startedAt;
     check("close deadline: close() returns after the run-settle deadline even though the run is stuck", elapsed >= 70 && elapsed < 2_000);
     check("close deadline: the stuck tool has NOT finished — the deadline abandons the wait, it does not stop the run", !log.includes("hold:finally"));
-    check("close deadline: the core scope was closed anyway", session.core.scope.state === "closed");
+    check("close deadline: the core session was closed anyway", session.core.open === false);
   } finally {
     setHarnessCloseTimeoutsForTest({ runSettle: 5_000 });
   }
@@ -223,36 +224,29 @@ async function idleCloseIsQuiet(): Promise<void> {
   faux.unregister();
 }
 
-const WsProbe = token<{ close(): void }>("lifecycle-test-ws-probe", "workspace");
-
 async function openFailureRollsBack(): Promise<void> {
   const faux = registerFauxProvider();
-  let wsDisposed = 0;
   let failNext = true;
-  let failedScope: { readonly state: string } | undefined;
+  let closed = 0;
   const harness = createHarness({
     model: faux.getChatModel()!,
     permission: { mode: "yolo" },
-    workspace: (scope) => { scope.register(WsProbe, { close: () => void (wsDisposed += 1) }); },
-    session: (scope) => {
+    session: () => {
       if (failNext) {
         failNext = false;
-        failedScope = scope;
         throw new Error("session hook boom");
       }
-      return defaultCapabilities({ scope });
+      return [...defaultCapabilities(), { name: "probe", contract: "detachable" as const, service: {}, closeSession: () => void (closed += 1) }];
     },
   });
   let error: unknown;
   await harness.createSession({ id: "rollback-1" }).catch((e) => { error = e; });
   check("rollback: the open rejects with the hook's own error", error instanceof Error && error.message === "session hook boom");
   check("rollback: no active session was registered", harness.getSession("rollback-1") === undefined);
-  check("rollback: the half-built session scope is closed", failedScope?.state === "closed");
-  check("rollback: the workspace hold was returned — as its only holder, the failed open closed the workspace", wsDisposed === 1);
   const ok = await harness.createSession();
-  check("rollback: a later open composes a fresh workspace and succeeds", ok.status.state === "idle");
+  check("rollback: a later open succeeds", ok.status.state === "idle");
   await ok.close();
-  check("rollback: closing that session closes its workspace too (no leaked hold anywhere)", wsDisposed === 2);
+  check("rollback: closing that session closed its capabilities", closed === 1);
   await harness.close();
   faux.unregister();
 }
@@ -433,32 +427,36 @@ async function concurrentStreamsStayApart(): Promise<void> {
   faux.unregister();
 }
 
-const WsHang = token<{ close(): Promise<void> }>("lifecycle-test-ws-hang", "workspace");
-
 async function scopeDisposeHasADeadline(): Promise<void> {
   const faux = registerFauxProvider();
   const warnings: string[] = [];
   const logger: Logger = { log: (level, message) => { if (level === "warn") warnings.push(message); } };
+  // A capability whose closeSession never settles — a hung MCP shutdown, say.
+  const hang = {
+    name: "lifecycle-test-hang",
+    contract: "detachable" as const,
+    service: {},
+    closeSession: () => new Promise<void>(() => undefined),
+  };
   const harness = createHarness({
     model: faux.getChatModel()!,
     permission: { mode: "yolo" },
-    harness: (scope) => { scope.register(Tokens.Logger, logger, { owned: false }); },
-    // A workspace service whose close never settles — a hung MCP shutdown, say.
-    workspace: (scope) => { scope.register(WsHang, { close: () => new Promise<void>(() => undefined) }); },
+    harness: () => ({ logger }),
+    session: () => [...defaultCapabilities(), hang],
   });
   const session = await harness.createSession();
-  setHarnessCloseTimeoutsForTest({ scopeDispose: 80 });
+  setSessionCloseTimeoutsForTest({ close: 80 });
   try {
     const startedAt = Date.now();
-    await session.close(); // last session out → workspace scope closes → the hung dispose
+    await session.close();
     const elapsed = Date.now() - startedAt;
-    check("dispose deadline: closing the last session returns despite a hung workspace dispose", elapsed >= 70 && elapsed < 2_000);
-    check("dispose deadline: the hung dispose is logged as a warning", warnings.some((w) => w.includes("lifecycle-test-ws-hang") && /timed out/.test(w)));
+    check("dispose deadline: closing the session returns despite a hung capability close", elapsed >= 70 && elapsed < 2_000);
+    check("dispose deadline: the hung close is logged as a warning", warnings.some((w) => w.includes("lifecycle-test-hang") && /timed out/.test(w)));
     const t2 = Date.now();
     await harness.close();
     check("dispose deadline: harness.close() returns promptly too", Date.now() - t2 < 2_000);
   } finally {
-    setHarnessCloseTimeoutsForTest({ scopeDispose: 5_000 });
+    setSessionCloseTimeoutsForTest({ close: 5_000 });
   }
   faux.unregister();
 }

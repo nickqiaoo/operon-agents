@@ -62,7 +62,7 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
   check(`${label}: the model was told without waiting`, JSON.stringify(formed.messages).includes("working on it"));
 
   // Host-side consumption goes through the very same handle the sessions use.
-  const peersHandle = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir: process.cwd() });
+  const peersHandle = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
   const roster = await peersHandle.list();
   check(`${label}: the lead joined the roster by creating the team`, roster.some((r) => r.agentId === lead.id));
   const dba = roster.find((r) => r.name === "dba");

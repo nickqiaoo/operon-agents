@@ -47,76 +47,6 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scope, state gets a key — is written down in
   [docs/state-and-lifetime.md](./docs/state-and-lifetime.md).
 
-- **A service may only depend on what outlives it** (`operon-agents-core`). A token says how long
-  the object it names lives; that never said anything about the objects it DEPENDS on. A
-  workspace service built by the first session used to resolve its `needs` from THAT session's
-  scope, capture its private objects, and keep handing them to every later session after the
-  first one closed — silently, with no diagnostic.
-
-  Three things now hold that line. `workspaceProvision()` is a separate constructor whose `needs`
-  only accept workspace- and harness-tier tokens (and `optional()` carries the tier through, so it
-  cannot be used to smuggle one past); `assertDependencyTiers` re-checks the declaration at
-  assembly, before anything is built, for callers who went around the compiler; and `needs`
-  resolve from the scope that OWNS the service rather than from the session that triggered the
-  build, so a workspace factory cannot see a session service even if the first two are bypassed.
-
-  A workspace provision also gets its own context: no `sessionId`, and a `signal` belonging to
-  the workspace — cancelling the session that happened to trigger the build must not abort an
-  object every other session is about to share. An already-built shared service is now reused
-  without resolving the new session's dependencies at all.
-
-  **Breaking**: a workspace-tier `provides` entry is written with `workspaceProvision()` rather
-  than `provision()`, and `ProvisionContext` no longer carries `scope` (`mcpServersCapability`
-  declares `Tokens.McpServers` as a dependency instead of looking it up; `McpConnectContext` is
-  now `{ sessionId, events? }`). `token<T>(name, tier)` keeps the literal tier in the type — it
-  used to widen to `ScopeKind` whenever only `T` was written out, which switched off exactly the
-  rules above.
-
-- **A half-built capability leaves nothing behind** (`operon-agents-core`). Assembly is now
-  all-or-nothing per capability: if a later provision throws, the session services that
-  capability already registered are withdrawn (drained, disposed, newest first) before the next
-  capability is assembled — so nothing can build on the remains of a capability that is not open.
-  A workspace service it had already published stays, because other sessions may hold it.
-
-- **The scope owns objects while they are still being built** (`operon-agents-core`). Between
-  `await factory()` and `register()` an object belonged to nobody: a `close()` in that window
-  dropped it without disposal. `Scope` now keeps a ledger of in-flight builds — `close()` cancels
-  them, waits for them (`buildTimeoutMs`, default 10s), and disposes whatever comes back too late
-  to be registered; a build that loses a race to `register` disposes its own object and returns
-  the winner; `unregister` on a token still being built stops that build from publishing. Session
-  provisions go through the same path via the new `Scope.create()` (the asynchronous twin of
-  `register`, which refuses a duplicate instead of reusing it), and `Scope.signal` exposes the
-  scope's lifetime so a factory can be told to stop.
-
-- **Capabilities declare their dependencies instead of looking them up** (`operon-agents-core`).
-  A `Provision` now carries a `needs` map — `provision({ token, needs: { environment:
-  Tokens.Environment, store: optional(Tokens.Store) }, create: ({ environment, store }) => … })` —
-  and `Session.open` resolves it BEFORE calling `create`. Three things change, and none of them
-  is syntax:
-  - The compiler knows. `create` is handed exactly what `needs` declared, typed. It cannot reach
-    a service it never asked for, and `optional()` makes absence a `T | undefined` it has to
-    handle rather than a crash it will meet later.
-  - The assembler knows. A dependency nobody registered fails the capability at open, with a
-    diagnostic naming the capability, the field and where that service normally comes from —
-    instead of the session opening fine and dying inside whichever call first reached the gap.
-  - A reader knows. `needs` is data sitting next to the token, so "who depends on what" can be
-    read or checked without running anything.
-
-  `ProvisionContext` shrank to what is genuinely not a service — `sessionId` and `signal`.
-  `RunContext` follows the same rule: a run is where dependencies are used, not where they are
-  found.
-
-  **Breaking**: `create(ctx)` becomes `create(deps, ctx)`, `ProvisionContext` no longer carries
-  services, and `readSessionLog(ctx)` is gone (declare `Tokens.SessionLog` and call it).
-
-- **A capability owns both halves of itself** (`operon-agents-core`). A `provides` entry is no
-  longer forced to be session-tier: the token's tier decides the lifetime, so a capability can
-  declare the SHARED half (a skill scan, an MCP connection — workspace-tier, built once per
-  working directory by whichever session declares it first, and disposed with the workspace) next
-  to the per-session half that depends on it. `Scope.ensure()` is the primitive behind it, and
-  `Scope.scopeOf(kind)` finds the tier. A workspace-tier provision in a session with no workspace
-  above it is diagnosed by name rather than silently demoted to the wrong lifetime.
-
 - **Capability services replace the session facade** (`operon-agents-core`, `operon-agents`).
   `Session` had 34 methods that each looked a capability service up and forwarded one call to it
   — `session.createGoal`, `session.listSkills`, `session.stopBackgroundTask`, … — and
@@ -133,40 +63,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remembered to, so a caller reaching the store by any route gets the same events.
 
   Note that optional chaining does NOT guard a REQUIRE accessor: `session.goal?.x` still throws
-  when the capability is absent. Feature-test with `session.get(Tokens.Goal)`.
+  when the capability is absent. Feature-test with `session.service("goal")`.
 
   **Breaking**: every facade method listed above is gone; `session/invoke` over the app-server
   protocol now names operations as `"<service>.<op>"` (`"skills.listSkills"`).
 
-- **The token table stopped doubling as a parameter list** (`operon-agents-core`). `Tokens.SessionId`,
-  `Tokens.HostSignal`, `Tokens.Permission` and `Tokens.EventPublisher` are gone. The first two are
-  `Session.open(scope, { sessionId, signal })` arguments — nothing inherits them from a parent
-  scope, nothing else shares them, and they have no lifetime for a scope to manage. The last two
-  were registered and read inside `Session` itself, tens of lines apart, which is a private field
-  written the long way round. `Tokens.Store` is now handed over as `{ store }` too; the one
-  parameter-shaped token that stays is `Tokens.StoreBackend`, and its doc says why — a `Runner`'s
-  `session` hook can only write to the scope, so that is how it passes a store to the `open` it
-  never sees.
-
-  A token belongs in the registry when it has a lifetime to manage, a tier to fall back through,
-  or several consumers that do not know each other. Otherwise it is an argument.
-
-- **`openCapabilities` → `provisionCapabilities`** (`operon-agents-core`). `open` implies a
-  matching `close`, and a capability has none — its services are torn down by `scope.close()`.
-  Its vocabulary is `provides`/`Provision`, so the verb now matches. The test helper
-  `openCapability` is `provisionCapability`; `open`/`close` stay with `Session` and `Scope`.
-
-- **A missing service names who provides it** (`operon-agents-core`). Tokens carry a `providedBy`
-  hint, and `ServiceUnavailableError` quotes it: `service "plan" is not registered; it comes from
-  the "plan" capability — pass it in \`capabilities\`` instead of a bare token name that tells you
-  what broke but not what to do. Every shipped token has one — capability services through the new
-  `capabilityToken()`, the rest pointing at the harness scope, the workspace scope, the session
-  opener or `Session.open`. `providerHintOf(name)` exposes the hint for the handle path, which only
-  ever holds a name.
-
 - **MCP transport admission** (`operon-agents-core`, `operon-agents`). A host now states which MCP
-  transports it is willing to run: `createMcpServers`, `mcpServersCapability` and
-  `mcpSessionCapability` take `allowedTransports`, and `defaultCapabilities` takes
+  transports it is willing to run: `createMcpServers` and `mcpServersCapability` take
+  `allowedTransports`, and `defaultCapabilities` takes
   `allowedMcpTransports`. Anything else is refused with `McpTransportNotPermittedError` while the
   server set is being BUILT, rather than when the connection is attempted — `attempt()` turns a
   failure into a `failed` status and a warning, which is right for "the server is down" and wrong
@@ -177,38 +81,51 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   servers disabled with `enabled: false` are exempt. See `docs/architecture.md` §6.3 for which
   capabilities follow the environment and which stay with the host.
 
-### Added
-
-- **`mcpServersCapability({ shareWorkspace: false })`** (`operon-agents-core`). Pins a session to
-  the MCP servers it was given, ignoring the workspace's shared set (`Tokens.McpServers`) — the
-  set keeps connecting and keeps serving every other session, this one simply never views it. The
-  default stays true. Given no servers of its own, the capability diagnoses the misassembly by
-  name instead of falling back to the very set it was told to ignore.
-
 ### Changed
 
-- **`mcpSessionCapability` is folded into `mcpServersCapability`** (`operon-agents-core`). The two
-  had converged: the session one already handled "no workspace connections to view" by owning its
-  servers outright, which is exactly what the other did, so which function you called only decided
-  whether the capability was ALLOWED to look at `Tokens.McpServers`. It now always looks, and the
-  topology follows from what the scope holds — a view over the workspace's shared set, its own
-  controllers when there is no shared set, or the former overlaid by the latter. `configs` still
-  means "the servers this session owns" in every case. Substitute `mcpServersCapability` for
-  `mcpSessionCapability`; the arguments are unchanged.
+- **Scopes and tokens are gone; a session is handed what it runs on** (all packages).
+  `Scope`, `token()`, `Tokens`, `HarnessTokens` and the workspace tier are removed. Every object
+  used to sit in a scope under a typed token and be found by walking up harness → workspace →
+  session; in practice capabilities reached across that registry at 14 places, none of them for
+  another capability's service, and the workspace tier cost a second set of lifetime rules, a
+  second provision kind and a reference-counted hold on every open — to share MCP connections and
+  a skill scan per directory instead of per process. There are now exactly two lifetimes:
 
-- **The token namespaces are spelled out: `T` → `Tokens`, `HT` → `HarnessTokens`**
-  (`operon-agents-core`, `operon-agents`). The DI token table was a single letter, which told a
-  reader nothing at the ~400 call sites that carry it — and collided visually with the generic
-  parameter `T` that `Token<T, K>` and every `as T` assertion use. Both namespaces now say what
-  they hold. Mechanical, no compatibility aliases: `T.Logger` → `Tokens.Logger`,
-  `HT.Extensions` → `HarnessTokens.Extensions`, and the same for every other member. The token
-  NAMES (`"logger"`, `"session-repository"`, …) are untouched, so tokens declared by extensions
-  still compare equal across copies of the framework.
+  - **Process** — what `createHarness({ harness })` returns as `HarnessParts` (repository,
+    logger, model runtime, default environment, one MCP connection set, one skill scan, tracing),
+    plus each extension's `harness` half in `ServiceRegistry`. `HarnessParts.close()` is the one
+    seam by which a preset tears down what it opened.
+  - **Session** — what each capability opens. A capability is handed the session at
+    `openSession(ctx: SessionContext)` (environment, store, events, steer, controls, logger, the
+    memoized log) and publishes one `service`; `closeSession` runs in reverse open order, each
+    under a deadline, failures isolated. A capability now declares a `contract`: `invariant`
+    (permission, compaction — may not be absent, only these may contribute `policies`, a failed
+    open fails the session and undoes what was already opened) or `detachable` (everything else).
+
+  **Breaking**:
+  - `Session.open(scope, opts)` → `Session.open(opts)`.
+  - `createHarness({ harness: (scope) => …, workspace, session: (scope, ctx) => … })` →
+    `{ harness: () => HarnessParts, session: (ctx) => Capability[] }`. There is no `workspace`
+    hook, no extension `workspace` half, and no `workspaceKey`; a host that needs per-tenant
+    isolation runs a harness per tenant.
+  - A capability's `provides` entries become `openSession` / `closeSession` / `service`, and
+    every capability states `contract`. Services are read as `session.service(name)` /
+    `session.requireService(name)` or through the named accessors.
+  - Test helpers: `testHarnessScope`, `testSessionScope` and `wireTestSession` are replaced by
+    `sessionOptionsFrom` and `testSessionContext` (`operon-agents-core/internal`).
+
+- **`mcpSessionCapability` is folded into `mcpServersCapability`** (`operon-agents-core`). The two
+  had converged: the session one already handled "no shared connections to view" by owning its
+  servers outright, which is exactly what the other did. The topology now follows from what the
+  host passes — a view over `options.sharedServers`, its own controllers when there is no shared
+  set, or the former overlaid by the latter. `configs` still means "the servers this session owns"
+  in every case. Substitute `mcpServersCapability` for `mcpSessionCapability`; the arguments are
+  unchanged.
 
 - **`createLocalSession` is gone; use `createLocalHarness`** (`operon-agents`). It opened a harness
   per call and then dropped the reference, so nothing could ever close it: `session.close()` only
-  unregisters the session from its harness, while the cron timer, the workspace MCP connections and
-  the rotating log handle all hang off the harness scope and come down in `harness.close()`. A
+  unregisters the session from its harness, while the cron timer, the shared MCP connections and
+  the rotating log handle all belong to the harness and come down in `harness.close()`. A
   single-session script now reads `const harness = await createLocalHarness({ … })`, then
   `await harness.createSession()`, and closes the harness at the end — `harness.close()` closes its
   sessions first, so it is the only call a script needs.

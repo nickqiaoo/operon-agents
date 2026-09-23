@@ -1,5 +1,4 @@
 import type { Capability } from "../index.ts";
-import { Tokens } from "../scope/tokens.ts";
 import { PluginManager } from "./manager.ts";
 import { PluginSessionStartInjector, type SessionStartSkillResolver } from "./injector.ts";
 
@@ -53,15 +52,11 @@ export type {
 export function pluginsCapability(manager: PluginManager, resolveSkill: SessionStartSkillResolver): Capability {
   return {
     name: "plugins",
-    provides: [
-      {
-        token: Tokens.Plugins,
-        create: async () => {
-          await manager.load();
-          return manager;
-        },
-      },
-    ],
+    contract: "detachable",
+    service: manager,
+    openSession: async () => {
+      await manager.load();
+    },
     injectors: [new PluginSessionStartInjector(manager, resolveSkill)],
   };
 }

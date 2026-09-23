@@ -14,6 +14,16 @@ export async function readLog(store: SessionStore | undefined): Promise<AgentRec
   return records;
 }
 
+/** The session's records for a capability's `openSession`: prefers the memoized `logRecords`
+ *  the session shares across capabilities (one read for goal/plan/todo + the context replay),
+ *  falling back to a direct `readLog` when it is absent (e.g. a test-constructed context). */
+export function readSessionLog(ctx: {
+  readonly store?: SessionStore;
+  readonly logRecords?: () => Promise<readonly AgentRecord[]>;
+}): Promise<readonly AgentRecord[]> {
+  return ctx.logRecords !== undefined ? ctx.logRecords() : readLog(ctx.store);
+}
+
 /** Tool-result messages for `toolName` in the log, in append order. */
 function toolResultsInLog(records: readonly AgentRecord[], toolName: string): ToolResultMessage[] {
   const out: ToolResultMessage[] = [];

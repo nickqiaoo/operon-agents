@@ -55,13 +55,12 @@ export { setSessionCloseTimeoutsForTest } from "./agent/session.ts";
 export { assembleCapabilities, AssembledCapabilities } from "./capabilities/assembler.ts";
 export type { AssembleCapabilitiesOptions } from "./capabilities/assembler.ts";
 
-// ── testing: scope-wiring helpers (a flat options bag → harness/session scopes) ──────────────
+// ── testing: wiring helpers (a flat options bag → session options / context) ─────────────────
 export {
-  testHarnessScope,
-  wireTestSession,
+  sessionOptionsFrom,
   testRunner,
   openTestSession,
-  testSessionScope,
+  testSessionContext,
   testProvisionContext,
   testRunContext,
   provisionCapability,

@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents-core";
 // Durable human-in-the-loop through the Harness facade.
 //
 // When no approval handler is registered, the session's MutableResponder reports
@@ -48,7 +47,7 @@ async function main(): Promise<void> {
   try {
     // ── Process 1: prompt pauses durably (manual mode, no approval handler) ──
     const initialContext: AppContext = { process: "initial", seenByAgent: [] };
-    const harness1 = createHarness<AppContext>({ model, harness: (s) => s.register(Tokens.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "manual" } });
+    const harness1 = createHarness<AppContext>({ model, harness: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "manual" } });
     const session1 = await harness1.createSession({ agent: writer, context: initialContext });
     const sessionId = session1.id;
 
@@ -66,7 +65,7 @@ async function main(): Promise<void> {
 
     // ── Process 2: a fresh harness reopens the session and resumes with answers ──
     const resumedContext: AppContext = { process: "resumed", seenByAgent: [] };
-    const harness2 = createHarness<AppContext>({ model, harness: (s) => s.register(Tokens.SessionRepository, new DiskSessionRepository(home), { owned: false }), workDir: work, permission: { mode: "manual" } });
+    const harness2 = createHarness<AppContext>({ model, harness: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "manual" } });
     const session2 = await harness2.resumeSession(sessionId, { agent: writer, context: resumedContext });
     check("hitl-harness: reopened durable pause reports interrupted before resume", session2.status.state === "interrupted");
     check("hitl-harness: reopened pause exposes its pending approval", (await session2.pendingInterruptions())[0]?.toolCallId === toolCallId);

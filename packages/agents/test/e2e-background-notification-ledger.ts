@@ -1,4 +1,3 @@
-import { Tokens } from "operon-agents-core";
 /**
  * The settle-notification ledger: a background result that was queued but never reached the
  * conversation is redelivered on reopen.
@@ -64,13 +63,13 @@ async function confirmedSettleIsNotRedelivered(): Promise<void> {
     fauxAssistantMessage("nothing new", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
 
   const settle = Promise.withResolvers<{ agentStatus: string }>();
-  const taskId = session.core.require(Tokens.Background).registerTask(
+  const taskId = session.core.requireService("background").registerTask(
     new AgentBackgroundTask(settle.promise, "confirmed helper", { agentId: "helper-ok", address: "main/helper-ok" }),
   );
 
@@ -103,7 +102,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
     fauxAssistantMessage("acted on the recovered result", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -147,7 +146,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
   check("unconfirmed: it names the read that reaches the shard", text.includes("BackgroundOutput(task_id="));
   check(
     "unconfirmed: the named read returns the recovered result",
-    (await reopened.core.require(Tokens.Background).readOutput("agent_lost_notice")).content === "recovered helper result",
+    (await reopened.core.requireService("background").readOutput("agent_lost_notice")).content === "recovered helper result",
   );
   check("unconfirmed: the redelivery woke the idle session on its own", await waitFor(() => events.some((e) => e.type === "turn.ended")));
 
@@ -180,7 +179,7 @@ async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {
     fauxAssistantMessage("read the log", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -226,7 +225,7 @@ async function unstampedRecordsAreLeftAlone(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("started", { stopReason: "stop" })]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: (s) => s.register(Tokens.SessionRepository, repo, { owned: false }) });
+  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;

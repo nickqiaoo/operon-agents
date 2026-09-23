@@ -1,8 +1,5 @@
-import { provision } from "../capability.ts";
-import { optional } from "../needs.ts";
 import type { SessionStore } from "../../store/index.ts";
 import type { Capability } from "../capability.ts";
-import { Tokens } from "../../scope/tokens.ts";
 import { BackgroundManager } from "./manager.ts";
 import type { BackgroundTaskPersistence } from "./persist.ts";
 import { StoreBackgroundTaskPersistence } from "./persist.ts";
@@ -53,42 +50,40 @@ export type {
 export function backgroundCapability(manager: BackgroundManager = new BackgroundManager()): Capability {
   return {
     name: "background",
+    contract: "detachable",
     // Enumeration stays a host API (`session.listBackgroundTasks()`). The model already owns
     // every task id it successfully spawned, while cold recovery injects ids whose ack was lost;
     // exposing an unbounded list invites unrelated historical tasks into the reasoning path.
     tools: [backgroundOutputTool(manager), backgroundStopTool(manager)],
-    provides: [
-      provision({
-        token: Tokens.Background,
-        needs: { steer: Tokens.Steer, events: Tokens.Events, store: optional(Tokens.Store) },
-        create: async ({ steer, events, store }, ctx) => {
+    service: manager,
+    openSession: async (ctx) => {
+      {
+        const { steer, events, store } = ctx;
           // Each task's status is now durably recorded in a dedicated per-task store (disk
           // sessions get the `<sessionDir>/tasks/<id>/` layout; other backends use KV state),
           // so a task orphaned by a dead process can be reconciled to `lost` on reopen. Loading
           // + reconcile happen in the store-cutover step; here we attach the persistence so live
           // spawns start recording. Without a durable store the manager stays purely in memory.
-          manager.attach({
-            steer,
-            events,
-            sessionId: ctx.sessionId,
-            persistence: makeTaskPersistence(store),
-            // Shard-backed output (a sub-agent's conversation) is read back from here rather than
-            // copied into the task, so the manager needs the log itself, not just the task store.
-            ...(store !== undefined ? { store } : {}),
-          });
-          // Load prior-process task records so reconcile (triggered on first run via
-          // session.reconcileSubagents) can reclassify any that were left non-terminal.
-          await manager.loadFromDisk();
-          return manager;
-        },
-        // Only releases the event subscription taken in `create`. Running tasks are
-        // deliberately NOT stopped here: closing a session releases resources, it does not cancel
-        // work, and `attach` is last-writer-wins anyway.
-        dispose: () => {
-          manager.detachRuntime();
-        },
-      }),
-    ],
+        manager.attach({
+          steer,
+          events,
+          sessionId: ctx.sessionId,
+          persistence: makeTaskPersistence(store),
+          // Shard-backed output (a sub-agent's conversation) is read back from here rather than
+          // copied into the task, so the manager needs the log itself, not just the task store.
+          ...(store !== undefined ? { store } : {}),
+        });
+        // Load prior-process task records so reconcile (triggered on first run via
+        // session.reconcileSubagents) can reclassify any that were left non-terminal.
+        await manager.loadFromDisk();
+      }
+    },
+    // Only releases the event subscription taken at open. Running tasks are deliberately NOT
+    // stopped here: closing a session releases resources, it does not cancel work, and `attach`
+    // is last-writer-wins anyway.
+    closeSession: () => {
+      manager.detachRuntime();
+    },
   };
 }
 
