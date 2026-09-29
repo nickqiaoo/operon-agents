@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { cronExtension } from "./cron/index.ts";
 import { createModelRuntimeFromConfig } from "./providers.ts";
 import type { ModelRuntime } from "operon-agents-core";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type HookDef,
   type Logger,
@@ -77,6 +77,9 @@ export async function localHarnessOptions<TContext>(
   const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelRuntime, loadConfiguredProviders, harness, session, extensions, ...engine } = options;
   // Filled by the `harness` half below, read by the `session` half — one process, one set.
   let sharedParts: HarnessParts = {};
+  // Set when the shared skill scan ran through a LocalEnvironment at the default workDir (the host
+  // named no environment): that catalog only describes sessions rooted there.
+  let sharedSkillsWorkDir: string | undefined;
   const homeDir = home ?? join(homedir(), ".agents");
   // Agent profiles come from disk here; the server preset supplies them externally instead.
   const extraSubagentProfiles =
@@ -116,19 +119,26 @@ export async function localHarnessOptions<TContext>(
       // must be the one whose scripts its Bash can reach. A host that named an environment above
       // is scanned through it; an environment FACTORY (one per session) has no single filesystem
       // to scan, so there is no shared registry then and each session scans through its own.
-      const environment = fromHost?.environment ?? new LocalEnvironment(options.workDir ?? process.cwd());
+      //
+      // A host that named none gets NO harness-wide environment: each session runs in a
+      // LocalEnvironment at its own workDir (the harness's fallback). The shared scan then goes
+      // through the default workDir and is reused only by sessions rooted there.
+      const hostEnvironment = fromHost?.environment;
+      const defaultWorkDir = resolve(options.workDir ?? process.cwd());
+      const scanEnvironment = hostEnvironment ?? new LocalEnvironment(defaultWorkDir);
       let skillRegistry = fromHost?.skillRegistry;
-      if (skillRegistry === undefined && typeof environment !== "function") {
+      if (skillRegistry === undefined && typeof scanEnvironment !== "function") {
         skillRegistry = new SkillRegistry();
-        await loadSkillRoots(environment, skillRegistry, {
+        await loadSkillRoots(scanEnvironment, skillRegistry, {
           ...(pluginManager !== undefined ? { roots: pluginManager.skillRoots(), includeDefaultRoots: true } : {}),
         });
+        if (hostEnvironment === undefined) sharedSkillsWorkDir = defaultWorkDir;
       }
       sharedParts = {
         sessionRepository: new DiskSessionRepository(homeDir),
         logger: logger ?? sinkLogger(new RotatingFileSink({ path: resolveGlobalLogPath({ homeDir }) })),
         oauthService,
-        environment,
+        ...(hostEnvironment !== undefined ? { environment: hostEnvironment } : {}),
         ...(servers !== undefined ? { mcpServers: servers } : {}),
         ...(skillRegistry !== undefined ? { skillRegistry } : {}),
         ...(pluginManager !== undefined ? { pluginManager } : {}),
@@ -146,7 +156,7 @@ export async function localHarnessOptions<TContext>(
       session ??
       ((ctx) =>
         defaultCapabilities({
-          shared: sharedParts,
+          shared: sessionSharedParts(sharedParts, sharedSkillsWorkDir, ctx.workDir),
           ownEnvironment: ctx.ownEnvironment,
           // `createSession({ mcpServers })` — layered over the process-shared connections.
           ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
@@ -169,4 +179,11 @@ export async function createLocalHarness<TContext = unknown>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<Harness<TContext>> {
   return createHarness<TContext>(await localHarnessOptions(options));
+}
+
+/** The shared parts a session may reuse: all of them, less a skill catalog scanned for another workDir. */
+function sessionSharedParts(parts: HarnessParts, skillsWorkDir: string | undefined, workDir: string): HarnessParts {
+  if (skillsWorkDir === undefined || resolve(workDir) === skillsWorkDir) return parts;
+  const { skillRegistry: _skillRegistry, ...rest } = parts;
+  return rest;
 }

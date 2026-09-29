@@ -55,6 +55,13 @@ async function main(): Promise<void> {
 
       const second = await harness.createSession();
       check("two plain sessions share the one scan the harness did", names(second).join(",") === names(plain).join(","));
+
+      // A session in another workDir, no environment given: it runs THERE (not at the harness's
+      // default workDir) and its catalog is scanned there, not borrowed from the shared scan.
+      const elsewhere = await harness.createSession({ workDir: remote });
+      check("other workDir: the session's environment is rooted at its own workDir", elsewhere.environment.getcwd() === remote);
+      check("other workDir: the catalog comes from its own workDir", names(elsewhere).join(",") === "remote-skill");
+      check("default workDir: a plain session still runs at the harness's workDir", plain.environment.getcwd() === local);
       await harness.close();
     }
 
