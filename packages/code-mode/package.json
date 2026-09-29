@@ -1,6 +1,6 @@
 {
   "name": "operon-code-mode",
-  "version": "0.1.0-alpha.14",
+  "version": "0.1.0-alpha.15",
   "description": "Code Mode for operon-agents: the model writes a TypeScript program that calls its tools, run in a confined QuickJS (WebAssembly) runtime.",
   "type": "module",
   "engines": {

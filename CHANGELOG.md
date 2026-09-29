@@ -7,6 +7,19 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.15] — 2026-09-29
+
+### Removed
+
+- **Breaking:** OpenRouter's server-side `openrouter:tool_search` is no longer used, and
+  `ChatModel.serverToolSearch` and `ToolSchema.deferLoading` are gone. What a search reveals
+  lasts one HTTP request: OpenRouter returns only the query, ignores a replayed search item,
+  `allowed_tools` and `additional_tools`, so after any tool round the next request no longer
+  declares the tool. Measured on GLM, a failed `list_issues` was retried 0/6 times deferred
+  against 6/6 loaded; DeepSeek guessed the arguments instead. A non-Claude model on OpenRouter
+  now sends every tool up front. Claude through OpenRouter's Messages API keeps SearchTool
+  deferral, whose loaded set lives in the transcript (`operon-agents-core`).
+
 ## [0.1.0-alpha.14] — 2026-09-29
 
 ### Fixed
