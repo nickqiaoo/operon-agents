@@ -7,6 +7,14 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.14] — 2026-09-29
+
+### Fixed
+
+- OpenRouter's server-side tool search now returns up to 20 tools per search instead of
+  OpenRouter's default 5. A model read the truncated page as the whole catalog and concluded
+  tools it could not see did not exist (`operon-agents-core`).
+
 ## [0.1.0-alpha.13] — 2026-09-29
 
 ### Added
