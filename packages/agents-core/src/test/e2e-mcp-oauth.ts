@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     "provider: clientMetadata is a public DCR client",
     provider.clientMetadata.token_endpoint_auth_method === "none" &&
       provider.clientMetadata.grant_types?.includes("refresh_token") === true &&
-      provider.clientMetadata.client_name?.includes("agent-framework") === true,
+      provider.clientMetadata.client_name?.includes("Operon") === true,
   );
   provider.saveTokens({ access_token: "tok", token_type: "Bearer" });
   check("provider: saveTokens→tokens round-trip", provider.tokens()?.access_token === "tok");
@@ -51,6 +51,31 @@ async function main(): Promise<void> {
   const cb = await startCallbackServer();
   check("callback: loopback redirect uri on a random port", /^http:\/\/127\.0\.0\.1:\d+\/callback$/.test(cb.redirectUri));
   await cb.close();
+
+  const okCb = await startCallbackServer();
+  const okWait = okCb.waitForCode({ timeoutMs: 5_000 });
+  const okRes = await fetch(`${okCb.redirectUri}?code=abc&state=s1`);
+  const okBody = await okRes.text();
+  const okResult = await okWait;
+  check(
+    "callback: success page is Operon-branded and yields the code",
+    okRes.status === 200 && okBody.includes("return to Operon") && !okBody.includes("agent-framework") &&
+      okResult.code === "abc" && okResult.state === "s1",
+  );
+
+  const errCb = await startCallbackServer();
+  const errWait = errCb.waitForCode({ timeoutMs: 5_000 }).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const errRes = await fetch(`${errCb.redirectUri}?error=access_denied&error_description=${encodeURIComponent("<b>denied</b>")}`);
+  const errBody = await errRes.text();
+  const errResult = await errWait;
+  check(
+    "callback: failure page shows the escaped reason and rejects",
+    errRes.status === 400 && errBody.includes("access_denied: &lt;b&gt;denied&lt;/b&gt;") && !errBody.includes("<b>denied") &&
+      errResult instanceof Error && errResult.message.includes("access_denied"),
+  );
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

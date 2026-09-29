@@ -14,7 +14,7 @@ import type {
   UnexpectedCloseReason,
 } from "./types.ts";
 
-const CLIENT_INFO = { name: "agent-framework-mcp", version: "0.0.0" };
+const CLIENT_INFO = { name: "operon", version: "0.0.0" };
 
 const STDERR_BUFFER_CAPACITY = 4 * 1024;
 

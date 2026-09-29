@@ -38,7 +38,7 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
     this.serverUrl = canonicalMcpOAuthResource(options.serverUrl);
     this.storeKey = mcpOAuthStoreKey(options.serverName, this.serverUrl);
     this.store = options.store;
-    this.clientLabel = options.clientLabel ?? `agent-framework (${options.serverName})`;
+    this.clientLabel = options.clientLabel ?? `Operon (${options.serverName})`;
   }
 
   setRedirectUrl(url: URL): void {
