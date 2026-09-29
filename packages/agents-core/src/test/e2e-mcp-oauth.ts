@@ -1,4 +1,6 @@
 import { mkdtempSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +11,8 @@ import {
   mcpOAuthStoreKey,
   defaultMcpCredentialsDir,
 } from "../mcp/oauth/index.ts";
+import { McpServerConfigSchema } from "../config/index.ts";
+import { mcpOAuthSettings } from "../mcp/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -76,6 +80,133 @@ async function main(): Promise<void> {
     errRes.status === 400 && errBody.includes("access_denied: &lt;b&gt;denied&lt;/b&gt;") && !errBody.includes("<b>denied") &&
       errResult instanceof Error && errResult.message.includes("access_denied"),
   );
+
+  // ── Pre-registered clients (Codex `.mcp.json` `oauth` block) ──────────────
+  const codexCfg = McpServerConfigSchema.parse({
+    type: "http",
+    url: "https://api.githubcopilot.com/mcp/",
+    oauth: { client_id: "cid", client_secret: "sec", callback_port: 12799, callback_url: "http://127.0.0.1:12799/callback/x" },
+    scopes: ["repo", "read:org"],
+    bearer_token_env_var: "GH_PAT",
+  });
+  check(
+    "schema: Codex snake_case oauth/scopes/bearer keys survive parsing",
+    codexCfg.oauth?.clientId === "cid" && codexCfg.oauth.clientSecret === "sec" && codexCfg.oauth.callbackPort === 12799 &&
+      codexCfg.oauth.callbackUrl === "http://127.0.0.1:12799/callback/x" && codexCfg.scopes?.join(" ") === "repo read:org" &&
+      codexCfg.bearerTokenEnvVar === "GH_PAT" && codexCfg.transport === "http",
+  );
+  check(
+    "schema: camelCase wins over its snake_case twin",
+    McpServerConfigSchema.parse({ url: "https://x", bearerTokenEnvVar: "A", bearer_token_env_var: "B" }).bearerTokenEnvVar === "A",
+  );
+  check("schema: a server without oauth parses unchanged", McpServerConfigSchema.parse({ command: "x" }).oauth === undefined);
+
+  const staticProvider = new McpOAuthClientProvider({
+    serverName: "gh",
+    serverUrl: "https://mcp.example.com/mcp",
+    store,
+    ...mcpOAuthSettings(codexCfg),
+  });
+  const staticInfo = staticProvider.clientInformation();
+  check(
+    "provider: static client is returned as client information (no DCR) and never persisted",
+    staticInfo?.client_id === "cid" && staticInfo.client_secret === "sec" &&
+      (staticProvider.saveClientInformation({ client_id: "dcr" }), staticProvider.clientInformation()?.client_id === "cid") &&
+      store.read(`${staticProvider.storeKey}-client.json`) === undefined,
+  );
+  check("provider: static callback URL is the redirect URI", staticProvider.redirectUrl === "http://127.0.0.1:12799/callback/x");
+  check("provider: configured scopes land in client metadata", staticProvider.clientMetadata.scope === "repo read:org");
+  staticProvider.configure({});
+  check("provider: configure({}) drops the static client", staticProvider.clientInformation() === undefined);
+
+  const freePort = await new Promise<number>((resolve) => {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const port = (probe.address() as AddressInfo).port;
+      probe.close(() => resolve(port));
+    });
+  });
+  const fixedCb = await startCallbackServer({ redirectUri: `http://127.0.0.1:${freePort}/callback/abc` });
+  const fixedWait = fixedCb.waitForCode({ timeoutMs: 5_000 });
+  const wrongPath = await fetch(`http://127.0.0.1:${freePort}/callback?code=nope`);
+  await fetch(`http://127.0.0.1:${freePort}/callback/abc?code=fixed`);
+  check(
+    "callback: listens on the registered port + path only",
+    fixedCb.redirectUri === `http://127.0.0.1:${freePort}/callback/abc` && wrongPath.status === 404 && (await fixedWait).code === "fixed",
+  );
+  await fixedCb.close();
+  let badUrlRejected = false;
+  try {
+    await startCallbackServer({ redirectUri: "https://example.com/callback" });
+  } catch {
+    badUrlRejected = true;
+  }
+  check("callback: a non-loopback redirect URI is refused", badUrlRejected);
+
+  // Full flow against a fake authorization server: static client → no registration, the authorize
+  // URL carries the fixed redirect + configured scope, and the token exchange sends the secret.
+  const seen = { register: 0, tokenBody: "" };
+  const readBody = (req: IncomingMessage) =>
+    new Promise<string>((resolve) => {
+      let body = "";
+      req.on("data", (c: Buffer) => (body += c.toString()));
+      req.on("end", () => resolve(body));
+    });
+  const as = createServer((req, res) => {
+    void (async () => {
+      const base = `http://127.0.0.1:${(as.address() as AddressInfo).port}`;
+      const json = (v: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(v));
+      const path = new URL(req.url ?? "/", base).pathname;
+      if (path.startsWith("/.well-known/oauth-protected-resource")) {
+        return json({ resource: `${base}/mcp`, authorization_servers: [base], scopes_supported: ["prm-scope"] });
+      }
+      if (path.startsWith("/.well-known/oauth-authorization-server")) {
+        return json({
+          issuer: base,
+          authorization_endpoint: `${base}/authorize`,
+          token_endpoint: `${base}/token`,
+          registration_endpoint: `${base}/register`,
+          response_types_supported: ["code"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+        });
+      }
+      if (path === "/register") {
+        seen.register += 1;
+        await readBody(req);
+        return json({ client_id: "dcr-client", redirect_uris: ["http://127.0.0.1/callback"] });
+      }
+      if (path === "/token") {
+        seen.tokenBody = await readBody(req);
+        return json({ access_token: "at", token_type: "Bearer", refresh_token: "rt" });
+      }
+      res.writeHead(404).end();
+    })();
+  });
+  await new Promise<void>((resolve) => as.listen(0, "127.0.0.1", resolve));
+  const asBase = `http://127.0.0.1:${(as.address() as AddressInfo).port}`;
+  const flowSvc = new McpOAuthService({ homeDir: mkdtempSync(join(tmpdir(), "af-oauth-flow-")) });
+  const redirect = `http://127.0.0.1:${freePort}/callback/flow`;
+  const flow = await flowSvc.beginAuthorization("gh", `${asBase}/mcp`, {
+    client: { clientId: "static-id", clientSecret: "static-secret", callbackUrl: redirect },
+    scopes: ["repo"],
+  });
+  const authUrl = flow.authorizationUrl;
+  const done = flow.complete({ timeoutMs: 5_000 });
+  await fetch(`${redirect}?code=the-code&state=${authUrl.searchParams.get("state") ?? ""}`);
+  await done;
+  const tokenParams = new URLSearchParams(seen.tokenBody);
+  check(
+    "flow: static client skips registration and uses the fixed redirect + configured scope",
+    seen.register === 0 && authUrl.searchParams.get("client_id") === "static-id" &&
+      authUrl.searchParams.get("redirect_uri") === redirect && authUrl.searchParams.get("scope") === "repo",
+  );
+  check(
+    "flow: token exchange authenticates with the static secret and stores tokens",
+    tokenParams.get("client_id") === "static-id" && tokenParams.get("client_secret") === "static-secret" &&
+      tokenParams.get("redirect_uri") === redirect && flowSvc.hasTokens("gh", `${asBase}/mcp`),
+  );
+  await new Promise<void>((resolve) => as.close(() => resolve()));
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

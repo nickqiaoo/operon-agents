@@ -26,7 +26,7 @@ export { mcpToolProvider, wrapMcpTool } from "./provider.ts";
 export { mcpCapability } from "./capability.ts";
 export type { MCPCapabilityOptions } from "./capability.ts";
 
-export { serverFromConfig, mcpServersCapability, createMcpServers, DEFAULT_RECONNECT_POLICY, McpTransportNotPermittedError } from "./manager.ts";
+export { serverFromConfig, mcpOAuthSettings, mcpServersCapability, createMcpServers, DEFAULT_RECONNECT_POLICY, McpTransportNotPermittedError } from "./manager.ts";
 export type {
   McpServerStatus,
   McpTransportKind,
@@ -75,7 +75,9 @@ export type {
   BeginAuthorizationOptions,
   BeginAuthorizationResult,
   McpOAuthProviderOptions,
+  McpOAuthClientSettings,
   McpCredentialStore,
+  CallbackServerOptions,
   CallbackServer,
   CallbackResult,
 } from "./oauth/index.ts";

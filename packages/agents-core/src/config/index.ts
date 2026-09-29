@@ -12,6 +12,7 @@ export type {
   HookDefConfig,
   LoopControl,
   McpServerConfig,
+  McpOAuthClientConfig,
   ModelAlias,
   ModelCredentialsConfig,
   PermissionConfig,

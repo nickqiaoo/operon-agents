@@ -1,8 +1,8 @@
 export { startCallbackServer } from "./callback-server.ts";
-export type { CallbackServer, CallbackResult } from "./callback-server.ts";
+export type { CallbackServer, CallbackResult, CallbackServerOptions } from "./callback-server.ts";
 
 export { McpOAuthClientProvider } from "./provider.ts";
-export type { McpOAuthProviderOptions } from "./provider.ts";
+export type { McpOAuthProviderOptions, McpOAuthClientSettings } from "./provider.ts";
 
 export {
   McpOAuthService,

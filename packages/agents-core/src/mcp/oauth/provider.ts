@@ -8,6 +8,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
+import type { McpOAuthClientConfig } from "../../config/schema.ts";
 import { type McpCredentialStore, canonicalMcpOAuthResource, mcpOAuthStoreKey } from "./store.ts";
 
 const TOKENS_SUFFIX = "-tokens.json";
@@ -22,6 +23,16 @@ export interface McpOAuthProviderOptions {
   readonly serverUrl: string | URL;
   readonly store: McpCredentialStore;
   readonly clientLabel?: string;
+  /** A pre-registered client (skips dynamic client registration). */
+  readonly client?: McpOAuthClientConfig;
+  /** Scopes to request; also the DCR metadata scope. */
+  readonly scopes?: readonly string[];
+}
+
+/** Server-config-derived OAuth settings a provider can be (re)configured with. */
+export interface McpOAuthClientSettings {
+  readonly client?: McpOAuthClientConfig;
+  readonly scopes?: readonly string[];
 }
 
 export class McpOAuthClientProvider implements OAuthClientProvider {
@@ -33,12 +44,31 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
   private _codeVerifier: string | undefined;
   private _state: string | undefined;
   private _lastAuthorizationUrl: URL | undefined;
+  private _client: McpOAuthClientConfig | undefined;
+  private _scopes: readonly string[] | undefined;
 
   constructor(options: McpOAuthProviderOptions) {
     this.serverUrl = canonicalMcpOAuthResource(options.serverUrl);
     this.storeKey = mcpOAuthStoreKey(options.serverName, this.serverUrl);
     this.store = options.store;
     this.clientLabel = options.clientLabel ?? `Operon (${options.serverName})`;
+    this.configure(options);
+  }
+
+  /** Apply the server's configured client/scopes. Called on every lookup, so config edits land. */
+  configure(settings: McpOAuthClientSettings): void {
+    this._client = settings.client;
+    this._scopes = settings.scopes !== undefined && settings.scopes.length > 0 ? settings.scopes : undefined;
+  }
+
+  /** The pre-registered client, when the server config names one. */
+  get staticClient(): McpOAuthClientConfig | undefined {
+    return this._client;
+  }
+
+  /** Configured scopes as an OAuth `scope` string, when any. */
+  get scope(): string | undefined {
+    return this._scopes?.join(" ");
   }
 
   setRedirectUrl(url: URL): void {
@@ -73,6 +103,7 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       client_name: this.clientLabel,
+      ...(this.scope !== undefined ? { scope: this.scope } : {}),
     };
   }
 
@@ -82,10 +113,18 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
   }
 
   clientInformation(): OAuthClientInformationMixed | undefined {
+    if (this._client !== undefined) {
+      return {
+        client_id: this._client.clientId,
+        ...(this._client.clientSecret !== undefined ? { client_secret: this._client.clientSecret } : {}),
+      };
+    }
     return this.store.read<OAuthClientInformationFull>(`${this.storeKey}${CLIENT_SUFFIX}`);
   }
 
   saveClientInformation(info: OAuthClientInformationMixed): void {
+    // A pre-registered client is never persisted — the server config stays the source of truth.
+    if (this._client !== undefined) return;
     this.store.write(`${this.storeKey}${CLIENT_SUFFIX}`, info);
   }
 
@@ -145,6 +184,8 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
     if (this._redirectUrl !== undefined) {
       return this._redirectUrl.toString();
     }
+    if (this._client?.callbackUrl !== undefined) return this._client.callbackUrl;
+    if (this._client?.callbackPort !== undefined) return `http://127.0.0.1:${this._client.callbackPort}/callback`;
     const registered = registeredRedirectUri(this.clientInformation());
     return registered ?? PASSIVE_REDIRECT_URI;
   }

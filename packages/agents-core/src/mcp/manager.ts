@@ -5,7 +5,7 @@ import { qualifyMcpToolName } from "./tool-naming.ts";
 import { createMcpAuthTool } from "./auth-tool.ts";
 import type { MCPTool, MCPTransport } from "./types.ts";
 import type { MCPToolFilterStatic } from "./filter.ts";
-import type { McpOAuthService } from "./oauth/index.ts";
+import type { McpOAuthClientSettings, McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Capability, SessionContext, RunContext, Tool, ToolProvider } from "../index.ts";
 import type { EventSink } from "../events/index.ts";
@@ -169,7 +169,15 @@ function resolveOAuthProvider(name: string, config: McpServerConfig, oauthServic
   if (config.headers !== undefined) return undefined;
   if (config.url === undefined) return undefined;
   if (!oauthService.hasTokens(name, config.url)) return undefined;
-  return oauthService.getProvider(name, config.url);
+  return oauthService.getProvider(name, config.url, mcpOAuthSettings(config));
+}
+
+/** The OAuth client/scopes a server config pins (Codex `.mcp.json` `oauth` / `scopes`). */
+export function mcpOAuthSettings(config: McpServerConfig): McpOAuthClientSettings {
+  return {
+    ...(config.oauth !== undefined ? { client: config.oauth } : {}),
+    ...(config.scopes !== undefined ? { scopes: config.scopes } : {}),
+  };
 }
 
 function isUnauthorizedLikeError(error: unknown): boolean {
@@ -370,6 +378,7 @@ class McpServerController {
         serverName: this.name,
         serverUrl: this.config.url,
         oauthService: this.oauthService,
+        oauthSettings: mcpOAuthSettings(this.config),
         reconnect: () => this.reconnect(),
       });
     }

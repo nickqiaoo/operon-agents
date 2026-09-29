@@ -71,7 +71,18 @@ function errorHtml(detail: string): string {
   });
 }
 
-export async function startCallbackServer(): Promise<CallbackServer> {
+export interface CallbackServerOptions {
+  /** Listen on this loopback port instead of a random one (a pre-registered redirect URI). */
+  readonly port?: number;
+  /**
+   * The exact redirect URI to advertise. Its port (when present) and path drive the listener;
+   * wins over `port`. Must be an http loopback URL.
+   */
+  readonly redirectUri?: string;
+}
+
+export async function startCallbackServer(options: CallbackServerOptions = {}): Promise<CallbackServer> {
+  const fixed = resolveFixedRedirect(options);
   let resolveCode: ((value: CallbackResult) => void) | undefined;
   let rejectCode: ((reason: Error) => void) | undefined;
   let settled = false;
@@ -98,7 +109,7 @@ export async function startCallbackServer(): Promise<CallbackServer> {
       res.writeHead(404).end();
       return;
     }
-    if (url.pathname !== "/callback") {
+    if (url.pathname !== fixed.path) {
       res.writeHead(404).end();
       return;
     }
@@ -132,13 +143,13 @@ export async function startCallbackServer(): Promise<CallbackServer> {
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(fixed.port ?? 0, fixed.host, () => {
       server.off("error", reject);
       resolve();
     });
   });
   const port = (server.address() as AddressInfo).port;
-  const redirectUri = `http://127.0.0.1:${port}/callback`;
+  const redirectUri = fixed.redirectUri ?? `http://127.0.0.1:${port}${fixed.path}`;
 
   let closed = false;
   const close = async () => {
@@ -190,3 +201,33 @@ export async function startCallbackServer(): Promise<CallbackServer> {
 
   return { redirectUri, waitForCode, close };
 }
+
+interface FixedRedirect {
+  readonly host: string;
+  readonly port?: number;
+  readonly path: string;
+  readonly redirectUri?: string;
+}
+
+function resolveFixedRedirect(options: CallbackServerOptions): FixedRedirect {
+  if (options.redirectUri === undefined) {
+    return { host: "127.0.0.1", ...(options.port !== undefined ? { port: options.port } : {}), path: "/callback" };
+  }
+  let url: URL;
+  try {
+    url = new URL(options.redirectUri);
+  } catch {
+    throw new Error(`invalid OAuth callback URL "${options.redirectUri}"`);
+  }
+  if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname)) {
+    throw new Error(`OAuth callback URL must be an http loopback URL (got "${options.redirectUri}")`);
+  }
+  const port = url.port !== "" ? Number(url.port) : options.port;
+  if (port === undefined) {
+    throw new Error(`OAuth callback URL "${options.redirectUri}" has no port`);
+  }
+  const host = url.hostname === "[::1]" ? "::1" : "127.0.0.1";
+  return { host, port, path: url.pathname, redirectUri: options.redirectUri };
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);

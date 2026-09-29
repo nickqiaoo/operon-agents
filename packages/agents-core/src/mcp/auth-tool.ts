@@ -1,6 +1,6 @@
 import { ToolAccesses, type Tool, type ToolPlan, type ToolResult } from "../index.ts";
 import { qualifyMcpToolName } from "./tool-naming.ts";
-import { AlreadyAuthorizedError, type McpOAuthService } from "./oauth/index.ts";
+import { AlreadyAuthorizedError, type McpOAuthClientSettings, type McpOAuthService } from "./oauth/index.ts";
 
 const DEFAULT_AUTH_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -10,6 +10,8 @@ export interface CreateMcpAuthToolOptions {
   readonly serverName: string;
   readonly serverUrl: string;
   readonly oauthService: McpOAuthService;
+  /** The server's pre-registered client / scopes, from its config. */
+  readonly oauthSettings?: McpOAuthClientSettings;
   readonly reconnect: (signal?: AbortSignal) => Promise<void>;
   readonly timeoutMs?: number;
 }
@@ -27,7 +29,7 @@ This server requires an OAuth login that has not yet been completed. Calling thi
 Takes no arguments. Treat the URL as sensitive — do not modify it or strip query parameters.`;
 
 export function createMcpAuthTool(options: CreateMcpAuthToolOptions): Tool {
-  const { serverName, serverUrl, oauthService, reconnect, timeoutMs } = options;
+  const { serverName, serverUrl, oauthService, oauthSettings, reconnect, timeoutMs } = options;
   const name = qualifyMcpToolName(serverName, "authenticate");
 
   return {
@@ -48,7 +50,7 @@ export function createMcpAuthTool(options: CreateMcpAuthToolOptions): Tool {
 
         let flow: Awaited<ReturnType<McpOAuthService["beginAuthorization"]>>;
         try {
-          flow = await oauthService.beginAuthorization(serverName, serverUrl);
+          flow = await oauthService.beginAuthorization(serverName, serverUrl, oauthSettings ?? {});
         } catch (error) {
           if (error instanceof AlreadyAuthorizedError) {
             onUpdate?.({ kind: "status", text: `Already authorized; reconnecting ${serverName}…` });

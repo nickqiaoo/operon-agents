@@ -1,7 +1,7 @@
 import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 
 import { startCallbackServer, type CallbackServer } from "./callback-server.ts";
-import { McpOAuthClientProvider } from "./provider.ts";
+import { McpOAuthClientProvider, type McpOAuthClientSettings } from "./provider.ts";
 import { JsonFileStore, type McpCredentialStore, mcpCredentialsDir, mcpOAuthStoreKey } from "./store.ts";
 
 export interface McpOAuthServiceOptions {
@@ -12,7 +12,7 @@ export interface McpOAuthServiceOptions {
   readonly clientLabel?: string;
 }
 
-export interface BeginAuthorizationOptions {
+export interface BeginAuthorizationOptions extends McpOAuthClientSettings {
   readonly clientLabel?: string;
 }
 
@@ -34,7 +34,13 @@ export class McpOAuthService {
     this.clientLabel = options.clientLabel;
   }
 
-  getProvider(serverName: string, serverUrl: string | URL): McpOAuthClientProvider {
+  /**
+   * The cached provider for one server identity. Pass the server's OAuth `settings` (its
+   * pre-registered client / scopes) whenever you have its config — they're re-applied on every
+   * call so the provider always matches the current config. Omit them only for store-level
+   * queries (`hasTokens`, invalidation) that never talk to the authorization server.
+   */
+  getProvider(serverName: string, serverUrl: string | URL, settings?: McpOAuthClientSettings): McpOAuthClientProvider {
     const storeKey = mcpOAuthStoreKey(serverName, serverUrl);
     let provider = this.providers.get(storeKey);
     if (provider === undefined) {
@@ -43,8 +49,11 @@ export class McpOAuthService {
         serverUrl,
         store: this.store,
         ...(this.clientLabel !== undefined ? { clientLabel: this.clientLabel } : {}),
+        ...settings,
       });
       this.providers.set(provider.storeKey, provider);
+    } else if (settings !== undefined) {
+      provider.configure(settings);
     }
     return provider;
   }
@@ -58,14 +67,24 @@ export class McpOAuthService {
     serverUrl: string | URL,
     options: BeginAuthorizationOptions = {},
   ): Promise<BeginAuthorizationResult> {
+    // Callers that don't pass settings keep whatever the provider was last configured with (e.g.
+    // by the MCP manager connecting this server from its config).
+    const settings: McpOAuthClientSettings | undefined =
+      options.client === undefined && options.scopes === undefined
+        ? undefined
+        : {
+            ...(options.client !== undefined ? { client: options.client } : {}),
+            ...(options.scopes !== undefined ? { scopes: options.scopes } : {}),
+          };
     const provider =
       options.clientLabel === undefined
-        ? this.getProvider(serverName, serverUrl)
+        ? this.getProvider(serverName, serverUrl, settings)
         : new McpOAuthClientProvider({
             serverName,
             serverUrl,
             store: this.store,
             clientLabel: options.clientLabel,
+            ...settings,
           });
     if (options.clientLabel !== undefined) {
       this.providers.set(provider.storeKey, provider);
@@ -75,7 +94,12 @@ export class McpOAuthService {
 
     let callbackServer: CallbackServer;
     try {
-      callbackServer = await startCallbackServer();
+      // A pre-registered client only accepts the redirect URI it was registered with.
+      const client = provider.staticClient;
+      callbackServer = await startCallbackServer({
+        ...(client?.callbackPort !== undefined ? { port: client.callbackPort } : {}),
+        ...(client?.callbackUrl !== undefined ? { redirectUri: client.callbackUrl } : {}),
+      });
     } catch (error) {
       throw wrapAuthError("failed to start OAuth callback listener", error);
     }
@@ -84,7 +108,8 @@ export class McpOAuthService {
 
     let authorizationUrl: URL | undefined;
     try {
-      const result = await auth(provider as OAuthClientProvider, { serverUrl });
+      const scope = provider.scope;
+      const result = await auth(provider as OAuthClientProvider, { serverUrl, ...(scope !== undefined ? { scope } : {}) });
       if (result !== "REDIRECT") {
         // Tokens already valid (e.g. unexpired refresh). Nothing to do.
         await callbackServer.close();
