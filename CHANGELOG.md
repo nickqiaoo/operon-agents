@@ -7,6 +7,19 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.11] — 2026-09-29
+
+### Added
+
+- MCP servers can declare a pre-registered OAuth client and scopes (`oauth` / `scopes` in
+  `.mcp.json`), so providers without dynamic client registration, such as GitHub and Slack, can
+  sign in (`operon-agents-core`).
+
+### Fixed
+
+- Codex-style snake_case keys in `.mcp.json` (e.g. `bearer_token_env_var`) are no longer dropped
+  (`operon-agents-core`).
+
 ## [0.1.0-alpha.10] — 2026-09-29
 
 ### Fixed
