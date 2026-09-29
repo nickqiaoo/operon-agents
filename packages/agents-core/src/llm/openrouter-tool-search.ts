@@ -14,6 +14,14 @@ import type { Api } from "../protocol/index.ts";
  */
 export const OPENROUTER_TOOL_SEARCH = "openrouter:tool_search";
 
+/**
+ * Tools one search may reveal. OpenRouter's default is 5 (cap 50), and a model reads a
+ * truncated page as the whole catalog: asked for Linear with 157 deferred tools, it got the
+ * five attachment tools back and concluded `list_issues` did not exist. 20 covers a typical
+ * MCP server's matches; a revealed tool costs input tokens only once it is found.
+ */
+export const OPENROUTER_TOOL_SEARCH_MAX_RESULTS = 20;
+
 export function supportsOpenRouterToolSearch(model: Model<Api>): boolean {
   return model.api === "openai-responses" && isOpenRouter(model.baseUrl);
 }
@@ -47,7 +55,7 @@ export function withOpenRouterToolSearch(
         });
         // OpenRouter rejects a deferred tool without the search tool, and the search tool
         // with nothing to search is only noise.
-        if (marked) next = { ...payload, tools: [{ type: OPENROUTER_TOOL_SEARCH }, ...tools] };
+        if (marked) next = { ...payload, tools: [{ type: OPENROUTER_TOOL_SEARCH, parameters: { max_results: OPENROUTER_TOOL_SEARCH_MAX_RESULTS } }, ...tools] };
       }
       return (await inspect?.(next, model)) ?? next;
     },

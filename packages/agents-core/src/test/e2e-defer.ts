@@ -37,7 +37,7 @@ import {
 import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
 import { prepareToolCatalog, withToolLoads } from "../tool/search/catalog.ts";
-import { OPENROUTER_TOOL_SEARCH, supportsOpenRouterToolSearch, withOpenRouterToolSearch } from "../llm/openrouter-tool-search.ts";
+import { OPENROUTER_TOOL_SEARCH, OPENROUTER_TOOL_SEARCH_MAX_RESULTS, supportsOpenRouterToolSearch, withOpenRouterToolSearch } from "../llm/openrouter-tool-search.ts";
 import { acceptsMidConvoToolChanges } from "../llm/define-model.ts";
 import { runSearchQuery, SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
 import { buildSearchTool } from "../tool/search/search-tool.ts";
@@ -470,10 +470,11 @@ async function testOpenRouterServerSearch(): Promise<void> {
   for await (const _event of (streamResponses as unknown as WireStream)(openrouter, context, options as SimpleStreamOptions)) {
     // drain
   }
-  const tools = (payload?.tools ?? []) as Array<{ type?: string; name?: string; defer_loading?: boolean }>;
+  const tools = (payload?.tools ?? []) as Array<{ type?: string; name?: string; defer_loading?: boolean; parameters?: { max_results?: number } }>;
   check(
-    "openrouter: search tool leads, only the capability tool is defer_loading",
+    "openrouter: search tool leads with a raised max_results, only the capability tool is defer_loading",
     tools[0]?.type === OPENROUTER_TOOL_SEARCH &&
+      tools[0]?.parameters?.max_results === OPENROUTER_TOOL_SEARCH_MAX_RESULTS &&
       tools.find((t) => t.name === slackTool.schema.name)?.defer_loading === true &&
       tools.find((t) => t.name === "Read")?.defer_loading === undefined,
   );
