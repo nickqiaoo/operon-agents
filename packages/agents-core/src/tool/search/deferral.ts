@@ -4,8 +4,9 @@
  * When an agent has many tools (MCP / capability sprawl), most are marked
  * *deferred*: kept in Operon's execution catalog but out of the model's active
  * context. The model calls SearchTool to discover the few it needs; matches
- * are recorded as `ToolResultMessage.addedToolNames`, and pi 0.81 handles the
- * provider-specific transcript representation.
+ * are recorded in the SearchTool result's details, and the request projection
+ * declares them to pi as `toolsAdded` system messages; pi handles the
+ * provider-specific wire representation.
  *
  * This module holds only the pieces that don't depend on any provider: the
  * keyword search, the query DSL,

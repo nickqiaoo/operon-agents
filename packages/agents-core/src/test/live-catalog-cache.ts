@@ -1,120 +1,115 @@
 /**
  * LIVE probe (spends real tokens; not part of `pnpm test`):
  *
- *   ANTHROPIC_API_KEY=... node --experimental-strip-types src/test/live-catalog-cache.ts
+ *   OPENROUTER_API_KEY=... node --experimental-strip-types src/test/live-catalog-cache.ts
  *
- * Confirms against the real Anthropic API what e2e-catalog.ts asserts on serialized bytes:
+ * Runs the real Runner against real endpoints with 30 fake MCP tools and checks, per step,
+ * what e2e-catalog.ts / e2e-defer.ts assert on serialized bytes:
  *
- *   1. A request with SearchTool + the deferred-mode placeholder writes a cache entry.
- *   2. The next request — same prefix, plus a tail announcement, a SearchTool load point and the
- *      loaded tool declared `defer_loading` — READS that cache (prefix survived the catalog change).
- *   3. (optional, LIVE_PROBE_CALL_BEFORE_LOAD=1) Whether the API accepts a `defer_loading`-only
- *      declaration for a tool whose `tool_use` precedes any `tool_reference` — the case pi
- *      promotes to a prefix tool today. If accepted, an explicit deferred-name option in pi would
- *      remove that one-time prefix change after compaction / call-before-load.
+ *   native  — a Claude model with mid-conversation tool changes (`LIVE_NATIVE_MODEL`, default
+ *             anthropic/claude-opus-5.5 through OpenRouter's Messages API). The first request
+ *             carries SearchTool only; loading a tool via SearchTool (a `tool_addition`) must
+ *             keep reading the cached prefix.
+ *   server  — a non-Claude model on OpenRouter's Responses API (`LIVE_SERVER_MODEL`, default
+ *             deepseek/deepseek-v4-flash): no SearchTool, MCP tools sent `defer_loading`
+ *             beside `openrouter:tool_search`; the prompt must stay far below the full-send
+ *             size and later steps must hit the cache.
  *
- * Model: LIVE_MODEL (default claude-sonnet-4-5). Prompt caching needs >= 1024 tokens on Sonnet,
- * so the system prompt is padded.
+ * `LIVE_ONLY=native|server` runs one of them.
  */
-import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxToolCall } from "./faux.ts";
-import { withAnthropicDeferredMode } from "../llm/deferred-tools.ts";
+import { z } from "zod";
+import { defineAgent, ProviderManager, type AssistantMessage, type ChatModel } from "../index.ts";
+import { ToolAccesses } from "../tool/access.ts";
+import { tool } from "../tool/define.ts";
+import type { Tool } from "../tool/types.ts";
 import { SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
+import { testRunner } from "./faux.ts";
 
-const apiKey = process.env.ANTHROPIC_API_KEY;
+const apiKey = process.env.OPENROUTER_API_KEY;
 if (!apiKey) {
-  console.log("skip: ANTHROPIC_API_KEY not set");
+  console.log("skip: OPENROUTER_API_KEY not set");
   process.exit(0);
 }
-const modelId = process.env.LIVE_MODEL ?? "claude-sonnet-4-5";
 
-const model: Model<Api> = {
-  id: modelId,
-  name: modelId,
-  api: "anthropic-messages",
-  provider: "anthropic",
-  baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 200_000,
-  maxTokens: 64,
-  compat: { supportsToolReferences: true },
-} as Model<Api>;
+const checks: Array<[string, boolean]> = [];
+function check(label: string, ok: boolean): void {
+  checks.push([label, ok]);
+  console.log(ok ? `✅ ${label}` : `❌ ${label}`);
+}
 
-const SLACK = "mcp__slack__send_message";
-const padding = Array.from({ length: 220 }, (_, i) => `Guideline ${i + 1}: keep answers short, precise, and free of speculation about unrelated topics.`).join("\n");
-const systemPrompt = `You are a terse assistant. Reply with the single word OK unless a tool is clearly needed.\n\n${padding}`;
-const searchSchema = { name: SEARCH_TOOL_NAME, description: "Search deferred tools by keyword or select:<name>.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } };
-const slackSchema = { name: SLACK, description: "Send a message to a Slack channel.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } };
+const padding = Array.from({ length: 300 }, (_, i) => `Guideline ${i + 1}: keep answers short, precise, and free of speculation.`).join("\n");
+const instructions = `You are a terse assistant. Use tools when the task needs them.\n\n${padding}`;
 
-async function send(label: string, context: Context, patch?: (payload: Record<string, unknown>) => Record<string, unknown>): Promise<AssistantMessage | undefined> {
-  const options = withAnthropicDeferredMode({
-    apiKey,
-    maxRetries: 0,
-    onPayload: (payload) => (patch ? patch(payload as Record<string, unknown>) : payload),
-  }) as SimpleStreamOptions;
-  let done: AssistantMessage | undefined;
-  for await (const event of streamAnthropic(model, context, options)) {
-    if (event.type === "done") done = event.message;
-    if (event.type === "error") {
-      console.log(`${label}: ERROR ${event.error.errorMessage ?? "(no message)"}`);
-      return undefined;
-    }
-  }
-  if (done) {
-    const u = done.usage;
-    console.log(`${label}: input=${u.input} cacheWrite=${u.cacheWrite} cacheRead=${u.cacheRead} stop=${done.stopReason}`);
-  }
-  return done;
+const weather = tool({
+  name: "mcp__weather__get_forecast",
+  description: "Get the current weather forecast for a city.",
+  parameters: z.object({ city: z.string().describe("City name") }),
+  accesses: ToolAccesses.none(),
+  execute: ({ city }) => `${city}: sunny, 22C`,
+});
+const filler: Tool[] = Array.from({ length: 30 }, (_, i) => tool({
+  name: `mcp__corp__operation_${i}`,
+  description: `Internal corporate operation ${i}. `.repeat(25),
+  parameters: z.object({ id: z.string().describe("Record identifier") }),
+  accesses: ToolAccesses.none(),
+  execute: () => "ok",
+}));
+
+async function resolve(alias: string, provider: { type: "anthropic" | "openai_responses" }, model: string): Promise<ChatModel> {
+  const manager = new ProviderManager({
+    config: {
+      providers: { or: { ...provider, baseUrl: provider.type === "anthropic" ? "https://openrouter.ai/api" : "https://openrouter.ai/api/v1", apiKey } },
+      models: { [alias]: { provider: "or", model, maxContextSize: 200_000, maxOutputSize: 2_000 } },
+    },
+  });
+  return (await manager.resolveModel(alias)).model;
+}
+
+function usages(messages: readonly { role: string }[]): AssistantMessage["usage"][] {
+  return messages.filter((m): m is AssistantMessage => m.role === "assistant").map((m) => m.usage);
+}
+
+async function runOnce(model: ChatModel, label: string): Promise<{ usage: AssistantMessage["usage"][]; toolNames: string[] }> {
+  const agent = defineAgent({ name: label, model, instructions });
+  const result = await testRunner({ capabilities: [{ name: "mcp", tools: [weather, ...filler] }], permission: { mode: "yolo" } })
+    .run(agent, "What's the weather in Paris? Use the weather tool.");
+  const usage = usages(result.messages);
+  usage.forEach((u, i) => console.log(`  ${label} step ${i + 1}: input=${u.input} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite}`));
+  const toolNames = result.messages.flatMap((m) => m.role === "toolResult" ? [m.toolName] : []);
+  console.log(`  ${label} tool calls: ${toolNames.join(", ") || "(none)"}`);
+  return { usage, toolNames };
+}
+
+async function native(): Promise<void> {
+  const model = await resolve("native", { type: "anthropic" }, process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5");
+  check("native: model gets SearchTool deferral", model.supportsDeferredTools);
+  const { usage, toolNames } = await runOnce(model, "native");
+  check("native: searched, then called the loaded tool", toolNames.includes(SEARCH_TOOL_NAME) && toolNames.includes(weather.schema.name));
+  const prefix = usage[0]!.cacheRead + usage[0]!.cacheWrite;
+  check(
+    "native: every step after the load reads the first step's cached prefix",
+    usage.length >= 2 && usage.slice(1).every((u) => u.cacheRead >= prefix * 0.9),
+  );
+}
+
+async function server(): Promise<void> {
+  const model = await resolve("server", { type: "openai_responses" }, process.env.LIVE_SERVER_MODEL ?? "deepseek/deepseek-v4-flash");
+  check("server: model searches server-side", model.serverToolSearch && !model.supportsDeferredTools);
+  const { usage, toolNames } = await runOnce(model, "server");
+  check("server: called the revealed tool directly", toolNames.includes(weather.schema.name) && !toolNames.includes(SEARCH_TOOL_NAME));
+  const last = usage.at(-1)!;
+  // 31 tools × ~150 tokens stay out of the prompt; only the system text and history remain.
+  check("server: the final step's prompt excludes the deferred definitions", last.input + last.cacheRead < 9_000);
+  check("server: the final step hits the cache", last.cacheRead > 0);
 }
 
 async function main(): Promise<void> {
-  const user = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() });
-
-  // 1. First request: SearchTool + placeholder, nothing loaded.
-  const first = await send("1/prefix write", { systemPrompt, tools: [searchSchema], messages: [user("Say OK.")] });
-  if (!first) process.exit(1);
-
-  // 2. Catalog changed at the tail; one tool loaded via a SearchTool load point.
-  const second = await send("2/prefix read", {
-    systemPrompt,
-    tools: [searchSchema, slackSchema],
-    messages: [
-      user("Say OK."),
-      first,
-      user("<system-reminder>\nThe following deferred tools are now available via SearchTool. Their schemas are NOT loaded — calling them directly will fail. Use SearchTool with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nmcp__slack__send_message\n</system-reminder>\nLoad the slack tool."),
-      fauxAssistantMessage(fauxToolCall(SEARCH_TOOL_NAME, { query: `select:${SLACK}` }, { id: "toolu_live_search" }), { stopReason: "toolUse" }),
-      { role: "toolResult", toolCallId: "toolu_live_search", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: `Loaded: ${SLACK}` }], addedToolNames: [SLACK], isError: false, timestamp: Date.now() },
-      user("Now just say OK."),
-    ],
-  });
-  if (!second) process.exit(1);
-  const reused = second.usage.cacheRead > 0 && second.usage.cacheRead >= first.usage.cacheWrite * 0.9;
-  console.log(reused ? "✅ prefix cache survived the catalog change + tool load" : "❌ prefix cache NOT reused (see numbers above)");
-
-  // 3. Optional: defer_loading-only declaration with a tool_use before any tool_reference.
-  if (process.env.LIVE_PROBE_CALL_BEFORE_LOAD === "1") {
-    const third = await send("3/call-before-load as defer_loading", {
-      systemPrompt,
-      tools: [searchSchema, slackSchema],
-      messages: [
-        user("Say OK."),
-        first,
-        user("Send hi on slack."),
-        fauxAssistantMessage(fauxToolCall(SLACK, { text: "hi" }, { id: "toolu_live_guess" }), { stopReason: "toolUse" }),
-        { role: "toolResult", toolCallId: "toolu_live_guess", toolName: SLACK, content: [{ type: "text", text: "This tool's schema was not loaded. Load it via SearchTool first." }], isError: true, timestamp: Date.now() },
-        user("Just say OK."),
-      ],
-    }, (payload) => {
-      const tools = (payload.tools as Array<Record<string, unknown>>).map((t) => (t.name === SLACK ? { ...t, defer_loading: true } : t));
-      return { ...payload, tools };
-    });
-    console.log(third
-      ? "✅ API accepted a defer_loading-only declaration with an earlier tool_use (a pi deferred-name option would avoid the prefix promotion)"
-      : "❌ API rejected it — pi's promotion to a prefix tool is required in this case");
-  }
+  const only = process.env.LIVE_ONLY;
+  if (only !== "server") await native();
+  if (only !== "native") await server();
+  const passed = checks.filter(([, ok]) => ok).length;
+  console.log(`\n${passed}/${checks.length} live checks passed`);
+  if (passed !== checks.length) process.exit(1);
 }
 
 main().catch((error) => {

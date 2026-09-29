@@ -6,7 +6,7 @@
  * One `peers()` registered on the harness; members are made at birth by a session param
  * (`params: { peers: { member } }`): identity and the Hub arrive with birth, no spawn involved.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "../../agents/test/faux.ts";
 import { createHarness } from "operon-agents";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle } from "../src/index.ts";
 
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
   bob.onEvent((event) => { if (event.type === "message.appended") bobSaw.push(JSON.stringify(event)); });
   faux.setResponses([
     (context) => {
-      aliceTools = (context.tools ?? []).map((tool) => tool.name);
+      aliceTools = offeredToolNames(context);
       return fauxAssistantMessage(fauxToolCall("Hub", { op: "list" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage(fauxToolCall("Hub", { op: "send", to: "bob", message: "PING_FROM_ALICE" }), { stopReason: "toolUse" }),

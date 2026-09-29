@@ -12,8 +12,8 @@ import {
   type ModelRuntime,
 } from "./runtime.ts";
 import { classifyError } from "./errors.ts";
-import { withAnthropicDeferredMode } from "./deferred-tools.ts";
 import type { CallOptions, LlmRequest, RetryHint } from "./model.ts";
+import { supportsOpenRouterToolSearch, withOpenRouterToolSearch } from "./openrouter-tool-search.ts";
 
 /** A finished attempt: either resolved (terminal already pushed to the out stream) or a
  *  clean pre-content failure the caller may retry. */
@@ -110,7 +110,11 @@ export class ChatModel {
    *  holds back for the summary against this — a model that cannot emit 20k never needs 20k
    *  reserved. */
   readonly maxOutputTokens: number;
+  /** Loading a deferred tool mid-conversation keeps the request prefix: SearchTool mode. */
   readonly supportsDeferredTools: boolean;
+  /** The provider searches deferred tools itself (OpenRouter's `openrouter:tool_search`).
+   *  Used only where `supportsDeferredTools` is false. */
+  readonly serverToolSearch: boolean;
   private readonly piModel: Model<Api>;
   private readonly runtime: ModelRuntime;
   /** Build-time settings (`apiKey` + `connection`) flattened once into pi's option shape.
@@ -119,7 +123,7 @@ export class ChatModel {
 
   constructor(spec: ModelSpec) {
     this.runtime = spec.runtime ?? createModelRuntime();
-    this.piModel = resolvePiModel(spec, this.runtime);
+    this.piModel = withAnthropicToolChanges(resolvePiModel(spec, this.runtime));
     this.requestDefaults = {
       ...(spec.apiKey !== undefined ? { apiKey: spec.apiKey } : {}),
       ...spec.connection,
@@ -130,6 +134,7 @@ export class ChatModel {
     this.contextWindow = this.piModel.contextWindow;
     this.maxOutputTokens = this.piModel.maxTokens;
     this.supportsDeferredTools = supportsNativeDeferredTools(this.piModel);
+    this.serverToolSearch = supportsOpenRouterToolSearch(this.piModel);
   }
 
   stream(req: LlmRequest, call?: CallOptions): AssistantMessageEventStream {
@@ -170,9 +175,10 @@ export class ChatModel {
 
   private options(req: LlmRequest, call?: CallOptions): ModelsSimpleStreamOptions {
     const options = toOptions(req, call, this.requestDefaults);
-    return req.deferredTools && this.api === "anthropic-messages" && this.supportsDeferredTools
-      ? withAnthropicDeferredMode(options)
-      : options;
+    const deferred = this.serverToolSearch
+      ? new Set((req.tools ?? []).filter((tool) => tool.deferLoading === true).map((tool) => tool.name))
+      : undefined;
+    return deferred !== undefined && deferred.size > 0 ? withOpenRouterToolSearch(options, deferred) : options;
   }
 
   private async streamWithAuthRetry(
@@ -316,34 +322,71 @@ export function tryGetPiModel(
 }
 
 /**
- * Mirror pi's public model-compat gates so Operon only hides capability tools
- * when the selected wire can materialize `addedToolNames`. pi remains the
- * authority for serialization; this gate only decides whether SearchTool mode
- * is safe to enter.
+ * Mirror pi's gates for anchoring a `toolsAdded` system message in place, so Operon only
+ * hides capability tools when loading one will not rewrite the request prefix. Everywhere
+ * else pi collapses later system messages into the leading one — the whole current tool list
+ * at the top — which is exactly the per-load prefix rewrite deferral must not cause.
  */
 function supportsNativeDeferredTools(model: Model<Api>): boolean {
   const compat = model.compat as
     | {
-        readonly supportsToolReferences?: boolean;
-        readonly deferredToolsMode?: "kimi";
+        readonly supportsMidConvoSystemMessages?: boolean;
+        readonly supportsMidConvoToolChanges?: boolean;
+        readonly supportsMidConvoToolAdditions?: boolean;
+        readonly supportsAdditionalTools?: boolean;
         readonly supportsToolSearch?: boolean;
       }
     | undefined;
-
-  if (model.api === "openai-completions") return compat?.deferredToolsMode === "kimi";
-  if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
-    return compat?.supportsToolSearch === true;
+  if (compat?.supportsMidConvoSystemMessages !== true) return false;
+  switch (model.api) {
+    case "anthropic-messages":
+      return compat.supportsMidConvoToolChanges === true;
+    case "openai-responses":
+    case "azure-openai-responses":
+    case "openai-codex-responses":
+      return compat.supportsAdditionalTools === true || compat.supportsToolSearch === true;
+    case "openai-completions":
+      return compat.supportsMidConvoToolAdditions === true;
+    default:
+      return false;
   }
-  if (model.api !== "anthropic-messages") return false;
-  if (compat?.supportsToolReferences !== undefined) return compat.supportsToolReferences;
+}
 
-  // pi's Anthropic default: first-party Claude >= 4.5, excluding Haiku.
-  if (model.provider !== "anthropic" || model.id.includes("haiku")) return false;
-  const version = model.id.match(/^claude-(?:opus|sonnet|fable)-(\d+)(?:-(\d+))?(?:-|$)/);
-  if (!version) return false;
-  const major = Number(version[1]);
-  const minor = version[2] && version[2].length < 8 ? Number(version[2]) : 0;
-  return major > 4 || (major === 4 && minor >= 5);
+/**
+ * Anthropic accepts mid-conversation `tool_addition` blocks from Opus 4.8 on, Sonnet 5
+ * excepted (the API's own rejection text; Sonnet 5.5 verified through OpenRouter). pi's
+ * catalog flags only the models it verified and none reached through other gateways, so
+ * fill in the Anthropic-wire models it leaves unset. An explicit flag always wins.
+ */
+function withAnthropicToolChanges(model: Model<Api>): Model<Api> {
+  if (model.api !== "anthropic-messages") return model;
+  const compat = model.compat as
+    | { readonly supportsMidConvoSystemMessages?: boolean; readonly supportsMidConvoToolChanges?: boolean }
+    | undefined;
+  if (compat?.supportsMidConvoToolChanges !== undefined || !acceptsMidConvoToolChanges(model.id)) return model;
+  return {
+    ...model,
+    compat: {
+      ...compat,
+      supportsMidConvoSystemMessages: compat?.supportsMidConvoSystemMessages ?? true,
+      supportsMidConvoToolChanges: true,
+    },
+  } as Model<Api>;
+}
+
+/** `claude-opus-4-8`, `anthropic/claude-sonnet-5.5`, `claude-fable-5-20260101`, ... */
+export function acceptsMidConvoToolChanges(modelId: string): boolean {
+  const match = modelId
+    .replace(/^.*\//, "")
+    .replace(/\./g, "-")
+    .match(/^claude-(opus|sonnet|fable)-(\d+)(?:-(\d{1,2}))?(?:-|$)/);
+  if (match === null) return false;
+  const family = match[1]!;
+  const major = Number(match[2]);
+  const minor = match[3] === undefined ? 0 : Number(match[3]);
+  if (family === "fable") return true;
+  if (family === "sonnet" && major === 5 && minor === 0) return false;
+  return major > 4 || (major === 4 && minor >= 8);
 }
 
 function toContext(req: LlmRequest): Context {

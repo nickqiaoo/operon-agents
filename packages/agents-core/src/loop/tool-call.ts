@@ -1,4 +1,4 @@
-import type { AssistantMessage, ToolCall, ToolResultMessage } from "../protocol/index.ts";
+import type { AssistantMessage, JsonObject, JsonValue, ToolCall, ToolResultMessage } from "../protocol/index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import type { NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
 import type { ApprovalResponse } from "../permission/types.ts";
@@ -374,7 +374,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
         type: "toolCall",
         id: `${parent.id}:code:${String(sequence)}`,
         name,
-        arguments: (args ?? {}) as Record<string, unknown>,
+        arguments: (args ?? {}) as JsonObject,
       };
       if (step.signal.aborted) return errorResult(`nested call to ${name} not dispatched: the run was aborted`);
       // An answer the caller obtained for this very call (it paused, the user answered, the
@@ -503,8 +503,8 @@ function toResultMessage(call: ToolCall, result: ToolResult): ToolResultMessage 
     toolCallId: call.id,
     toolName: call.name,
     content: result.content,
-    details: result.details,
-    ...(result.addedToolNames !== undefined ? { addedToolNames: [...result.addedToolNames] } : {}),
+    // Tool details are persisted as JSON; pi now types that contract.
+    details: result.details as JsonValue | undefined,
     isError: result.isError ?? false,
     timestamp: Date.now(),
   };

@@ -54,6 +54,9 @@ function formatMessage(message: Message): string[] {
     }
     case 'toolResult':
       return [`#### ${message.toolName} result${message.isError ? ' (error)' : ''}`, '', fence(toolResultText(message.content)), ''];
+    case 'system':
+      // Request-only: tool declarations the loop projects for pi, never journaled.
+      return [];
   }
 }
 

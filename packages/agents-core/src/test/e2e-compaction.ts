@@ -40,7 +40,7 @@ function testMicroPreservesDeferredMetadata(): void {
       toolCallId: "search-1",
       toolName: "SearchTool",
       content: [{ type: "text", text: "X".repeat(1_000) }],
-      addedToolNames: [selectedTool],
+      details: { deferredToolSchemas: [{ sourceName: selectedTool, schema: { name: selectedTool, description: "Send.", parameters: { type: "object" } } }] },
       isError: false,
       timestamp: 1,
     },
@@ -55,10 +55,10 @@ function testMicroPreservesDeferredMetadata(): void {
   const cleared = micro.detectAndApply(messages, 0, 1);
   const result = messages[0];
   check(
-    "micro: clearing SearchTool text preserves addedToolNames",
+    "micro: clearing SearchTool text preserves the loaded definitions",
     cleared === 1 &&
       result?.role === "toolResult" &&
-      result.addedToolNames?.[0] === selectedTool &&
+      JSON.stringify(result.details).includes(selectedTool) &&
       result.content.map(partText).join("") === "[Old tool result content cleared]",
   );
 }

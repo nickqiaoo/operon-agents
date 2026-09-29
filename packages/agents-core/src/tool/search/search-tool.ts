@@ -3,9 +3,9 @@
  *
  * Built per turn over a snapshot of the deferred catalog (in `buildRunTools`),
  * so it can search names/descriptions without needing the live tool registry
- * at call time. Its result exposes matches through pi 0.81's
- * `ToolResultMessage.addedToolNames`; pi materializes the provider-specific
- * re-entry envelope.
+ * at call time. Its result records the matched definitions in
+ * `details.deferredToolSchemas`; the request projection (`withToolLoads`)
+ * declares them to pi as a `toolsAdded` system message right after the load.
  */
 import { z } from "zod";
 import { tool } from "../define.ts";
@@ -60,7 +60,6 @@ export function buildSearchTool(
             text: matches.length > 0 ? `Loaded tools: ${matches.join(", ")}` : "No matching deferred tools found.",
           },
         ],
-        addedToolNames: matches,
         details: {
           deferredToolSchemas: matches.map((name) => ({
             sourceName: sourceNames.get(name) ?? name,

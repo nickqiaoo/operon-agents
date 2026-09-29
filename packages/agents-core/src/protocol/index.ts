@@ -1,5 +1,6 @@
 export type {
   Message,
+  SystemMessage,
   UserMessage,
   AssistantMessage,
   ToolResultMessage,
@@ -20,6 +21,8 @@ export type {
   Tool as PiTool,
   AssistantMessageEvent,
   AssistantMessageEventStream,
+  JsonObject,
+  JsonValue,
 } from "@earendil-works/pi-ai";
 
 // pi 0.81 uses `Provider` for the provider runtime object. Operon's public

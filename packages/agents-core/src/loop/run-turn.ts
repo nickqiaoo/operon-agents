@@ -49,6 +49,7 @@ export interface RunTurnInput {
   /** Capability tools hidden until transcript load/use evidence activates them. */
   readonly deferredToolNames?: ReadonlySet<string>;
   readonly deferEnabled?: boolean;
+  readonly serverToolSearch?: boolean;
   /** Snapshot after beforeStep, so a connection completed during a turn is seen next step. */
   readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
@@ -105,7 +106,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   try {
     // HITL resume — re-run the interrupted batch with pre-loaded answers first.
     if (input.resumeFrom) {
-      const resumeSnapshot = input.refreshTools ? await input.refreshTools() : { tools: toolList, deferredToolNames, deferEnabled: input.deferEnabled };
+      const resumeSnapshot = input.refreshTools ? await input.refreshTools() : { tools: toolList, deferredToolNames, deferEnabled: input.deferEnabled, serverToolSearch: input.serverToolSearch };
       const resumePrepared = prepareToolCatalog(input.context, resumeSnapshot, { announce: false });
       const resumeTools = resumePrepared.tools;
       input.onToolsPrepared?.(resumeTools);
@@ -171,6 +172,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           tools: toolList,
           deferredToolNames,
           deferEnabled: input.deferEnabled,
+          serverToolSearch: input.serverToolSearch,
           refreshTools: input.refreshTools,
           onToolsPrepared: input.onToolsPrepared,
           hooks: input.hooks,

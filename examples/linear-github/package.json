@@ -34,6 +34,6 @@
     "zod": "^4"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.84.1"
+    "@earendil-works/pi-ai": "0.87.1"
   }
 }

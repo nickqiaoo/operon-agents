@@ -1,4 +1,5 @@
 import { testRunner, openTestSession } from "./faux.ts";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import {
   BackgroundManager,
   MemoryStore,
@@ -97,7 +98,7 @@ async function main(): Promise<void> {
   faux.setResponses([
     (context) => {
       providerMessages = context.messages;
-      providerSystem = context.systemPrompt ?? "";
+      providerSystem = getCurrentSystemPrompt(context.messages);
       return fauxAssistantMessage("continued", { stopReason: "stop" });
     },
   ]);

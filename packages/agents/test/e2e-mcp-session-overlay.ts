@@ -11,7 +11,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider, type Context } from "./faux.ts";
+import { fauxAssistantMessage, registerFauxProvider, type Context, offeredToolNames } from "./faux.ts";
 import { createHarness, createLocalHarness, createMcpServers, defaultCapabilities, mcpServersCapability, type HarnessParts, type McpServersHandle } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -41,7 +41,7 @@ async function main(): Promise<void> {
     let offered: string[] = [];
     faux.setResponses([
       (context: Context) => {
-        offered = (context.tools ?? []).map((t) => t.name);
+        offered = offeredToolNames(context);
         return fauxAssistantMessage("ok", { stopReason: "stop" });
       },
     ]);
@@ -95,7 +95,7 @@ async function main(): Promise<void> {
 
     faux.setResponses([
       (context: Context) => {
-        offered = (context.tools ?? []).map((t) => t.name);
+        offered = offeredToolNames(context);
         return fauxAssistantMessage("ok", { stopReason: "stop" });
       },
     ]);
@@ -155,7 +155,7 @@ async function main(): Promise<void> {
 
     faux.setResponses([
       (context: Context) => {
-        offered = (context.tools ?? []).map((t) => t.name);
+        offered = offeredToolNames(context);
         return fauxAssistantMessage("ok", { stopReason: "stop" });
       },
     ]);

@@ -1,4 +1,4 @@
-import type { Message } from "../../protocol/index.ts";
+import type { Message, PiTool, SystemMessage } from "../../protocol/index.ts";
 import type { LoadedToolSchema, PromptOrigin } from "../../store/origin.ts";
 import { SEARCH_TOOL_NAME } from "./deferral.ts";
 
@@ -25,22 +25,57 @@ export function isLoadedSchema(value: unknown): value is LoadedToolSchema {
 export function loadedToolSchemas(history: HistoryView): Map<string, LoadedToolSchema> {
   const loaded = new Map<string, LoadedToolSchema>();
   for (const message of history.messages) {
-    let entries: readonly LoadedToolSchema[] = [];
-    if (message.role === "user") {
-      const origin = history.originOf(message);
-      if (origin?.kind === "compaction_summary" && origin.loadedTools !== undefined) {
-        entries = origin.loadedTools.filter(isLoadedSchema);
-      }
-    } else if (message.role === "toolResult" && message.toolName === SEARCH_TOOL_NAME && !message.isError) {
-      const details = message.details as { deferredToolSchemas?: unknown } | undefined;
-      if (Array.isArray(details?.deferredToolSchemas)) {
-        const selected = new Set(message.addedToolNames ?? []);
-        entries = details.deferredToolSchemas.filter(isLoadedSchema).filter((entry) => selected.has(entry.schema.name));
-      }
-    }
-    for (const entry of entries) if (!loaded.has(entry.schema.name)) loaded.set(entry.schema.name, entry);
+    for (const entry of loadPointEntries(history, message)) if (!loaded.has(entry.schema.name)) loaded.set(entry.schema.name, entry);
   }
   return loaded;
+}
+
+/** The definitions `message` records as loaded, if it is a load point. */
+function loadPointEntries(history: HistoryView, message: Message): readonly LoadedToolSchema[] {
+  if (message.role === "user") {
+    const origin = history.originOf(message);
+    return origin?.kind === "compaction_summary" && origin.loadedTools !== undefined ? origin.loadedTools.filter(isLoadedSchema) : [];
+  }
+  if (message.role === "toolResult" && message.toolName === SEARCH_TOOL_NAME && !message.isError) {
+    const details = message.details as { deferredToolSchemas?: unknown } | undefined;
+    return Array.isArray(details?.deferredToolSchemas) ? details.deferredToolSchemas.filter(isLoadedSchema) : [];
+  }
+  return [];
+}
+
+/**
+ * The history as pi should see it: every load point followed by a system message whose
+ * `toolsAdded` declares the definitions it loaded, so pi anchors them there (Anthropic
+ * `tool_addition`, Responses `additional_tools` / client tool search, Kimi `tools` system
+ * messages) instead of rewriting the top-level tool list. `declared` names the request's
+ * top-level tools; a name is declared once, at its first surviving load point, which keeps
+ * the projection of an unchanged prefix byte-identical as history grows. The declaration
+ * lands after the load point's whole tool-result batch, since results must stay contiguous.
+ */
+export function withToolLoads(history: HistoryView, declared: ReadonlySet<string>): Message[] {
+  const seen = new Set(declared);
+  const out: Message[] = [];
+  let pending: SystemMessage | undefined;
+  const flush = (): void => {
+    if (pending !== undefined) out.push(pending);
+    pending = undefined;
+  };
+  for (const message of history.messages) {
+    if (message.role !== "toolResult") flush();
+    out.push(message);
+    const fresh = loadPointEntries(history, message).filter((entry) => !seen.has(entry.schema.name));
+    if (fresh.length === 0) continue;
+    for (const entry of fresh) seen.add(entry.schema.name);
+    pending ??= { role: "system", content: "", toolsAdded: [], timestamp: message.timestamp };
+    pending.toolsAdded!.push(...fresh.map((entry) => toPiTool(entry.schema)));
+  }
+  flush();
+  return out;
+}
+
+function toPiTool(schema: LoadedToolSchema["schema"]): PiTool {
+  // Protocol-level parameters are a JSON Schema object; pi serializes it as the tool schema.
+  return { name: schema.name, description: schema.description, parameters: schema.parameters as unknown as PiTool["parameters"] };
 }
 
 /**

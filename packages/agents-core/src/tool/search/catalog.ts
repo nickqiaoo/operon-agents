@@ -7,19 +7,26 @@ import { SEARCH_TOOL_NAME } from "./deferral.ts";
 import { loadedToolSchemas } from "./loaded.ts";
 import { buildSearchTool } from "./search-tool.ts";
 
-export { loadedToolSchemas } from "./loaded.ts";
+export { loadedToolSchemas, withToolLoads } from "./loaded.ts";
 
 export interface ToolCatalogSnapshot {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
   readonly deferEnabled?: boolean;
+  /** The provider searches `deferredToolNames` itself: every tool executes and is sent,
+   *  the deferred ones marked `deferLoading`. Exclusive with `deferEnabled`. */
+  readonly serverToolSearch?: boolean;
 }
 
 export interface PreparedToolCatalog {
   /** Only presently available, loaded tools can execute. */
   readonly tools: readonly Tool[];
-  /** Includes retired definitions needed to replay surviving load points. */
+  /** Every definition the request declares, including retired ones needed to replay
+   *  surviving load points. What the context-window accounting counts. */
   readonly schemas: readonly ToolSchema[];
+  /** The request's top-level tool list. With deferral on, only the immediate tools and
+   *  SearchTool: loaded definitions are declared at their load points (`withToolLoads`). */
+  readonly requestTools: readonly ToolSchema[];
   readonly loaded: ReadonlyMap<string, LoadedToolSchema>;
   /** The deferred catalog this request offers through SearchTool, by wire name. */
   readonly catalog: ReadonlyMap<string, ToolSchema>;
@@ -94,8 +101,16 @@ export function prepareToolCatalog(
   options: { readonly announce?: boolean } = {},
 ): PreparedToolCatalog {
   const enabled = snapshot.deferEnabled ?? snapshot.deferredToolNames.size > 0;
+  if (snapshot.serverToolSearch === true) {
+    const all = snapshot.tools.map((tool) => tool.schema);
+    const requestTools = all.map((schema) => snapshot.deferredToolNames.has(schema.name) ? { ...schema, deferLoading: true } : schema);
+    // The provider keeps the deferred definitions out of the prompt: they cost no context.
+    const schemas = all.filter((schema) => !snapshot.deferredToolNames.has(schema.name));
+    return { tools: snapshot.tools, schemas, requestTools, loaded: new Map(), catalog: new Map(), deferEnabled: false, warnings: [] };
+  }
   if (!enabled) {
-    return { tools: snapshot.tools, schemas: snapshot.tools.map((tool) => tool.schema), loaded: new Map(), catalog: new Map(), deferEnabled: false, warnings: [] };
+    const schemas = snapshot.tools.map((tool) => tool.schema);
+    return { tools: snapshot.tools, schemas, requestTools: schemas, loaded: new Map(), catalog: new Map(), deferEnabled: false, warnings: [] };
   }
 
   const warnings: string[] = [];
@@ -179,6 +194,7 @@ export function prepareToolCatalog(
   return {
     tools: active,
     schemas: [...schemas.values()],
+    requestTools: [...immediate.map((tool) => tool.schema), search.schema],
     loaded,
     catalog: new Map(catalog.map((tool) => [tool.schema.name, tool.schema])),
     deferEnabled: true,

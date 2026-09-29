@@ -15,7 +15,7 @@ import { APIContextOverflowError, isContextOverflowMessage } from "../llm/errors
 import type { LoopEventDispatcher } from "./events.ts";
 import type { HandoffSignal, LoopHooks, OutputGuardrailMonitorFactory, PendingInterrupt, StepStopReason } from "./types.ts";
 import type { ToolCallSuspension } from "./interruption.ts";
-import { describeUnknownTool, prepareToolCatalog, type ToolCatalogSnapshot } from "../tool/search/catalog.ts";
+import { describeUnknownTool, prepareToolCatalog, withToolLoads, type ToolCatalogSnapshot } from "../tool/search/catalog.ts";
 
 export interface RecordUsageResult {
   readonly stopTurn?: boolean;
@@ -45,6 +45,7 @@ export interface ExecuteStepDeps {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
   readonly deferEnabled?: boolean;
+  readonly serverToolSearch?: boolean;
   readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   readonly hooks?: LoopHooks;
@@ -102,15 +103,16 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
   for (const warning of prepared.warnings) deps.logger?.log("warn", warning);
   const activeTools = prepared.tools;
   deps.onToolsPrepared?.(activeTools);
-  const toolSchemas = prepared.schemas;
+  const toolSchemas = prepared.requestTools;
   const toolMap = new Map<string, Tool>(
     activeTools.map((tool) => [tool.schema.name, tool]),
   );
   let request: LlmRequest = {
     system,
-    messages,
+    messages: prepared.deferEnabled
+      ? withToolLoads(deps.context, new Set(toolSchemas.map((schema) => schema.name)))
+      : messages,
     tools: toolSchemas.length > 0 ? toolSchemas : undefined,
-    ...(prepared.deferEnabled ? { deferredTools: true } : {}),
     ...(deps.params ? { params: deps.params } : {}),
     // Per conversation line, not per session: each address carries its own prefix, so keying
     // them apart is what actually helps the cache. Seeded here rather than merged, so an

@@ -37,9 +37,9 @@ export interface ModelSettings {
 export interface LlmRequest {
   readonly system?: string;
   readonly messages: readonly Message[];
+  /** Top-level tools. Tools that become available later in the conversation are declared
+   *  by `system` messages in `messages` (pi's `toolsAdded`). */
   readonly tools?: readonly ToolSchema[];
-  /** Keep native deferred loading active even before the first successful search. */
-  readonly deferredTools?: boolean;
   readonly params?: ModelSettings;
   readonly providerOptions?: Readonly<Record<string, unknown>>;
 }

@@ -30,6 +30,8 @@ export interface RunToolset {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
   readonly deferEnabled: boolean;
+  /** The provider runs tool search itself (`ChatModel.serverToolSearch`); no SearchTool. */
+  readonly serverToolSearch: boolean;
 }
 
 export async function buildRunTools<TContext>(
@@ -64,7 +66,8 @@ export async function buildRunTools<TContext>(
     return false;
   });
   const deferEnabled = active.deferTools !== false && model.supportsDeferredTools;
-  const deferredToolNames = new Set(deferEnabled ? capTools.map((tool) => tool.schema.name) : []);
+  const serverToolSearch = active.deferTools !== false && !deferEnabled && model.serverToolSearch;
+  const deferredToolNames = new Set(deferEnabled || serverToolSearch ? capTools.map((tool) => tool.schema.name) : []);
   const tools: Tool[] = [...active.tools, ...capTools];
   if (deferEnabled) tools.push(buildSearchTool(capTools.map((t) => t.schema)));
   for (const h of active.handoffs) tools.push(h.asTool());
@@ -72,7 +75,7 @@ export async function buildRunTools<TContext>(
   // (e.g. profile-loaded agents). The unified "Agent" tool spawns/resumes by type.
   const providerAgents = state.subagentProvider !== undefined ? [...(await state.subagentProvider.list())] : [];
   if (active.subagents.length === 0 && providerAgents.length === 0) {
-    return finish(state, tools, deferredToolNames, deferEnabled);
+    return finish(state, tools, deferredToolNames, deferEnabled, serverToolSearch);
   }
   // One spawner (the engine seam) shared by every subagent-spawning tool: the static
   // `agent_<name>` tools, the unified `Agent` tool, and `Workflow`.
@@ -86,7 +89,7 @@ export async function buildRunTools<TContext>(
   if (state.workflowTool !== false && !tools.some((tool) => tool.schema.name === "Workflow")) {
     tools.push(buildWorkflowTool(spawner, state));
   }
-  return finish(state, tools, deferredToolNames, deferEnabled);
+  return finish(state, tools, deferredToolNames, deferEnabled, serverToolSearch);
 }
 
 /**
@@ -99,18 +102,20 @@ function finish<TContext>(
   tools: readonly Tool[],
   deferredToolNames: ReadonlySet<string>,
   deferEnabled: boolean,
+  serverToolSearch: boolean,
 ): RunToolset {
   const filtered = state.capabilities.applyToolFilters(tools, {
     address: state.address,
     isRootAgent: state.address === DEFAULT_ADDRESS,
   });
   const enabled = deferEnabled && filtered.some((tool) => tool.schema.name === "SearchTool");
-  if (filtered === tools) return { tools, deferredToolNames, deferEnabled: enabled };
+  if (filtered === tools) return { tools, deferredToolNames, deferEnabled: enabled, serverToolSearch };
   const surviving = new Set(filtered.map((tool) => tool.schema.name));
   return {
     tools: filtered,
-    deferredToolNames: new Set(enabled ? [...deferredToolNames].filter((name) => surviving.has(name)) : []),
+    deferredToolNames: new Set(enabled || serverToolSearch ? [...deferredToolNames].filter((name) => surviving.has(name)) : []),
     deferEnabled: enabled,
+    serverToolSearch,
   };
 }
 

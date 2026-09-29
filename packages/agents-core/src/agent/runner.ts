@@ -961,6 +961,7 @@ class Engine<TContext> {
           tools: toolset.tools,
           deferredToolNames: toolset.deferredToolNames,
           deferEnabled: toolset.deferEnabled,
+          serverToolSearch: toolset.serverToolSearch,
           onToolsPrepared: (tools) => { permissionTools = tools; },
           refreshTools: () => buildRunTools(
             current,

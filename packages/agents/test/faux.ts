@@ -5,6 +5,7 @@ import {
   fauxText,
   fauxThinking,
   fauxToolCall,
+  getCurrentTools,
   type Api,
   type Context,
   type FauxProviderHandle,
@@ -28,6 +29,12 @@ export {
   fauxToolCall,
 };
 export type { Api, Context, FauxResponseStep, Model, ToolCall };
+
+/** Names of every tool a faux request offers: pi hands providers a transcript whose system
+ *  messages carry the tools (the leading one plus any later `toolsAdded`). */
+export function offeredToolNames(context: Pick<Context, "messages">): string[] {
+  return getCurrentTools(context.messages).map((tool) => tool.name);
+}
 
 export interface FauxChatProvider extends FauxProviderHandle {
   readonly runtime: ModelRuntime;

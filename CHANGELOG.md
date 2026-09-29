@@ -7,6 +7,29 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- OpenRouter models on the Responses API (a provider with `type: "openai_responses"` and an
+  `openrouter.ai` `baseUrl`) defer MCP tools through OpenRouter's server-side
+  `openrouter:tool_search`, on any model: the tools are sent `defer_loading` and stay out of the
+  prompt until the model searches for them, with no `SearchTool` round trip on our side. Adding a
+  deferred tool mid-conversation keeps the cached prefix (`operon-agents-core`).
+
+### Changed
+
+- **Breaking:** upgraded pi to 0.87.1. A tool loaded through `SearchTool` is now declared to the
+  model by a system message right after the load (pi's `toolsAdded`: Anthropic `tool_addition`,
+  Responses `additional_tools` / tool search, Kimi `tools` messages) instead of by
+  `ToolResult.addedToolNames`, which is removed. A call made before the tool was loaded no longer
+  changes the request prefix. `LlmRequest.deferredTools` is removed; pi keeps deferred mode on
+  itself (`operon-agents-core`).
+- Deferred tools now need a model with native mid-conversation tool changes: Claude Opus 4.8 and
+  newer (Sonnet 5 excepted, Sonnet 5.5 included, also through gateways such as OpenRouter),
+  OpenAI GPT-5.4 and newer on the Responses API, and Kimi K3. Other models, including Sonnet 4.x
+  and Haiku 4.5, send every tool up front (`operon-agents-core`).
+
 ## [0.1.0-alpha.12] — 2026-09-29
 
 ### Fixed

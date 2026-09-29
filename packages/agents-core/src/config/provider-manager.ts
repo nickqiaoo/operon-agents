@@ -292,17 +292,7 @@ function configureKnownModel(
     ...(config.customHeaders !== undefined
       ? { headers: { ...(model.headers ?? {}), ...config.customHeaders } }
       : {}),
-    ...(config.type === "kimi"
-      ? { compat: { ...model.compat, deferredToolsMode: "kimi" as const } }
-      : config.type === "anthropic"
-        ? {
-            compat: {
-              ...model.compat,
-              supportsToolReferences: defaultAnthropicToolReferences(model.id),
-            },
-          }
-      : {}),
-  };
+  } as Model<Api>;
 }
 
 function buildCustomPiModel(
@@ -316,12 +306,6 @@ function buildCustomPiModel(
       ? ["text", "image"]
       : ["text"];
   const api = apiForProviderType(providerConfig.type);
-  const compat =
-    providerConfig.type === "kimi"
-      ? { deferredToolsMode: "kimi" as const }
-      : providerConfig.type === "anthropic"
-        ? { supportsToolReferences: defaultAnthropicToolReferences(alias.model) }
-        : undefined;
   return {
     id: alias.model,
     name: alias.displayName ?? alias.model,
@@ -339,7 +323,6 @@ function buildCustomPiModel(
     ...(providerConfig.customHeaders !== undefined
       ? { headers: providerConfig.customHeaders }
       : {}),
-    ...(compat !== undefined ? { compat } : {}),
   };
 }
 
@@ -500,20 +483,6 @@ function apiForProviderType(type: ProviderType): KnownApi {
     case "vertexai":
       return "google-vertex";
   }
-}
-
-function defaultAnthropicToolReferences(modelId: string): boolean {
-  if (modelId.includes("haiku")) return false;
-  const version = modelId.match(
-    /^claude-(?:opus|sonnet|fable)-(\d+)(?:-(\d+))?(?:-|$)/,
-  );
-  if (version === null) return false;
-  const major = Number(version[1]);
-  const minor =
-    version[2] !== undefined && version[2].length < 8
-      ? Number(version[2])
-      : 0;
-  return major > 4 || (major === 4 && minor >= 5);
 }
 
 export { UNKNOWN_CAPABILITY };

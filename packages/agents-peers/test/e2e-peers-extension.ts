@@ -11,7 +11,7 @@ import { mkdtemp, mkdir, readdir, rm, utimes, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "../../agents/test/faux.ts";
 import { createHarness, type Harness } from "operon-agents";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerNetworkHandle } from "../src/index.ts";
 
@@ -49,7 +49,7 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
   const lead = await harness.createSession();
   faux.setResponses([
     (context) => {
-      leadTools = (context.tools ?? []).map((tool) => tool.name);
+      leadTools = offeredToolNames(context);
       return fauxAssistantMessage(fauxToolCall("Team", { op: "create", name: "alpha" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage(fauxToolCall("Team", { op: "spawn", type: "member", name: "dba", prompt: "plan the schema" }), { stopReason: "toolUse" }),
@@ -78,7 +78,7 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
     fauxAssistantMessage(fauxToolCall("Team", { op: "send", to: "dba", message: `PING_${label.toUpperCase()}` }), { stopReason: "toolUse" }),
     fauxAssistantMessage("pinged", { stopReason: "stop" }),
     (context) => {
-      const dbaTools = (context.tools ?? []).map((tool) => tool.name);
+      const dbaTools = offeredToolNames(context);
       check(`${label}: the teammate holds Hub but NOT Team`, dbaTools.includes("Hub") && !dbaTools.includes("Team"));
       return fauxAssistantMessage("dba ack", { stopReason: "stop" });
     },

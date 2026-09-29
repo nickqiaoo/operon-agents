@@ -4,8 +4,9 @@
  * reconstructible across disconnects, compaction and durable replay.
  *
  * Session-level turns run against the faux provider; every request the model saw is then
- * serialized with pi's real Anthropic wire (aborted from `onPayload`) so the prefix
- * comparison is on the bytes the API would cache, not on an internal projection.
+ * serialized with pi's real Anthropic wire (aborted from `onPayload`) on a model with native
+ * mid-conversation tool changes, so the prefix comparison is on the bytes the API would
+ * cache, not on an internal projection.
  */
 import { z } from "zod";
 import {
@@ -17,7 +18,8 @@ import {
   type Context,
 } from "./faux.ts";
 import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { getCurrentTools, getInitialSystemMessage, normalizeContext } from "@earendil-works/pi-ai";
+import type { Api, Model, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 import {
   compactionCapability,
   ConversationContext,
@@ -33,8 +35,10 @@ import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
 import type { Tool } from "../tool/types.ts";
 import { SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
-import { describeUnknownTool, loadedToolSchemas, prepareToolCatalog } from "../tool/search/catalog.ts";
-import { DEFERRED_TOOL_PLACEHOLDER, withAnthropicDeferredMode } from "../llm/deferred-tools.ts";
+import { describeUnknownTool, loadedToolSchemas, prepareToolCatalog, withToolLoads, type PreparedToolCatalog } from "../tool/search/catalog.ts";
+
+/** pi's own inert deferred declaration (anthropic-messages), present from the first request. */
+const PI_DEFERRED_PLACEHOLDER = "__pi_deferred_placeholder__";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -65,7 +69,7 @@ const github = mcpTool(GITHUB_ISSUE, "Create a GitHub issue.", "issue");
 
 interface Snapshot {
   readonly label: string;
-  readonly context: Context;
+  readonly context: TranscriptContext;
 }
 
 function text(message: Message): string {
@@ -77,14 +81,20 @@ function lastReminder(messages: readonly Message[]): string | undefined {
   return found ? text(found) : undefined;
 }
 
+/** Every tool the request makes available: the top-level list plus later `toolsAdded`. */
 function toolNames(context: Context): string[] {
-  return (context.tools ?? []).map((t) => t.name);
+  return getCurrentTools(context.messages).map((t) => t.name);
+}
+
+/** Only the request's top-level (leading system message) tools. */
+function topLevelNames(context: Context): string[] {
+  return (getInitialSystemMessage(context.messages)?.toolsAdded ?? []).map((t) => t.name);
 }
 
 function wireModel(): Model<Api> {
   return {
-    id: "claude-sonnet-4-5",
-    name: "claude-sonnet-4-5",
+    id: "claude-opus-5-5",
+    name: "claude-opus-5-5",
     api: "anthropic-messages",
     provider: "anthropic",
     baseUrl: "http://127.0.0.1:1",
@@ -93,7 +103,7 @@ function wireModel(): Model<Api> {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
     maxTokens: 4_096,
-    compat: { supportsToolReferences: true },
+    compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
   } as Model<Api>;
 }
 
@@ -103,11 +113,11 @@ interface WirePayload {
   readonly messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
 }
 
-/** Serialize a request exactly as our ChatModel would (placeholder included). */
-async function capturePayload(context: Context): Promise<WirePayload> {
+/** Serialize a request exactly as pi's Anthropic wire would. */
+async function capturePayload(context: TranscriptContext): Promise<WirePayload> {
   const controller = new AbortController();
   let payload: unknown;
-  const options: SimpleStreamOptions = withAnthropicDeferredMode({
+  const options: SimpleStreamOptions = {
     apiKey: "test",
     signal: controller.signal,
     maxRetries: 0,
@@ -116,7 +126,7 @@ async function capturePayload(context: Context): Promise<WirePayload> {
       controller.abort();
       return next;
     },
-  }) as SimpleStreamOptions;
+  };
   const stream = streamAnthropic(wireModel(), context, options);
   for await (const _event of stream) {
     // drain the abort
@@ -136,11 +146,11 @@ async function testSessionFlow(): Promise<void> {
   const faux = registerFauxProvider({
     api: "anthropic-messages",
     provider: "anthropic",
-    models: [{ id: "claude-sonnet-4-5" }],
+    models: [{ id: "claude-opus-5-5" }],
   });
   const snapshots: Snapshot[] = [];
   const snap = (label: string) => (context: Context): void => {
-    snapshots.push({ label, context: structuredClone({ systemPrompt: context.systemPrompt, tools: context.tools, messages: context.messages }) });
+    snapshots.push({ label, context: structuredClone({ messages: context.messages }) });
   };
 
   let current: Tool[] = [];
@@ -161,7 +171,7 @@ async function testSessionFlow(): Promise<void> {
     faux.setResponses([
       (context) => {
         snap("t1")(context);
-        check("t1: SearchTool present before any MCP connects", toolNames(context).includes(SEARCH_TOOL_NAME));
+        check("t1: SearchTool present before any MCP connects", topLevelNames(context).includes(SEARCH_TOOL_NAME));
         check("t1: no announcement without catalog changes", lastReminder(context.messages) === undefined);
         return fauxAssistantMessage("ok", { stopReason: "stop" });
       },
@@ -182,6 +192,7 @@ async function testSessionFlow(): Promise<void> {
       (context) => {
         snap("t2s2")(context);
         check("t2: loaded tool joins the request, unloaded sibling does not", toolNames(context).includes(SLACK_SEND) && !toolNames(context).includes(SLACK_LIST));
+        check("t2: loaded tool is declared at its load point, not in the top-level list", !topLevelNames(context).includes(SLACK_SEND) && context.messages.at(-1)?.role === "system");
         return fauxAssistantMessage(fauxToolCall(SLACK_SEND, { text: "hello" }), { stopReason: "toolUse" });
       },
       (context) => {
@@ -261,7 +272,7 @@ async function testSessionFlow(): Promise<void> {
     session.compaction.request();
     faux.setResponses([
       (context) => {
-        check("t7: compaction summary request carries no tools", context.tools === undefined);
+        check("t7: compaction summary request carries no tools", toolNames(context).length === 0);
         return fauxAssistantMessage("## Summary\nSlack and GitHub tools were used.", { stopReason: "stop" });
       },
       (context) => {
@@ -308,20 +319,20 @@ async function testSessionFlow(): Promise<void> {
     faux.unregister();
   }
 
-  // Wire: every request across all turns shares one cached prefix.
+  // Wire: every request across all turns shares one cached prefix — including the
+  // call-before-load at t7 (t7s2 guessed the name, t7s3 loaded it), which on the old
+  // tool_reference wire promoted the tool into the prefix once.
   const payloads = new Map<string, WirePayload>();
   for (const s of snapshots) payloads.set(s.label, await capturePayload(s.context));
   const base = prefixOf(payloads.get("t1")!);
-  // Known cost, not a regression: once a tool was called before its load point (t7s2 guessed
-  // the name, t7s3 loaded it), pi declares it as an ordinary prefix tool from then on. The
-  // prefix changes once and stays stable afterwards.
-  const knownCost = new Set(["t7s3", "t7s4"]);
-  const drift = snapshots.filter((s) => !knownCost.has(s.label) && prefixOf(payloads.get(s.label)!) !== base).map((s) => s.label);
-  check(`wire: cached prefix identical across ${snapshots.length - knownCost.size} requests (drift: ${drift.join(",") || "none"})`, drift.length === 0);
-  check("wire: refused call to an unloaded tool does not touch the prefix", prefixOf(payloads.get("t7s2")!) === base);
-  check("wire: (known cost) call-before-load promotes the tool once, then the prefix is stable again", prefixOf(payloads.get("t7s3")!) !== base && prefixOf(payloads.get("t7s3")!) === prefixOf(payloads.get("t7s4")!));
-  check("wire: placeholder keeps deferred mode on from the first request", payloads.get("t1")!.tools.some((t) => t.name === DEFERRED_TOOL_PLACEHOLDER && t.defer_loading === true));
-  check("wire: loaded tool is defer_loading, expanded by tool_reference", payloads.get("t2s2")!.tools.some((t) => t.name === SLACK_SEND && t.defer_loading === true) && JSON.stringify(payloads.get("t2s2")!.messages).includes(`"tool_name":"${SLACK_SEND}"`));
+  const drift = snapshots.filter((s) => prefixOf(payloads.get(s.label)!) !== base).map((s) => s.label);
+  check(`wire: cached prefix identical across all ${snapshots.length} requests (drift: ${drift.join(",") || "none"})`, drift.length === 0);
+  check("wire: placeholder keeps deferred mode on from the first request", payloads.get("t1")!.tools.some((t) => t.name === PI_DEFERRED_PLACEHOLDER && t.defer_loading === true));
+  const additionOf = (payload: WirePayload, name: string): boolean => payload.messages.some((m) => m.role === "system" && m.content.some((b) => b.type === "tool_addition" && JSON.stringify(b).includes(`"name":"${name}"`)));
+  check("wire: loaded tool is defer_loading, surfaced by a tool_addition", payloads.get("t2s2")!.tools.some((t) => t.name === SLACK_SEND && t.defer_loading === true) && additionOf(payloads.get("t2s2")!, SLACK_SEND));
+  check("wire: call-before-load then load surfaces the tool by tool_addition", additionOf(payloads.get("t7s3")!, GITHUB_ISSUE) && payloads.get("t7s3")!.tools.some((t) => t.name === GITHUB_ISSUE && t.defer_loading === true));
+  const history = (payload: WirePayload): string => JSON.stringify(payload.messages.slice(0, -1));
+  check("wire: the load point's projection is byte-stable as the turn continues", JSON.stringify(payloads.get("t2s3")!.messages).startsWith(history(payloads.get("t2s2")!).slice(0, -1)));
   check("wire: retired definition stays defer_loading after disconnect", payloads.get("t4s1")!.tools.some((t) => t.name === SLACK_SEND && t.defer_loading === true));
   const t2 = payloads.get("t2s1")!;
   const roles = t2.messages.map((m) => m.role);
@@ -339,6 +350,12 @@ function snapshotFor(tools: readonly Tool[]) {
   return { tools, deferredToolNames: new Set(tools.map((t) => t.schema.name)), deferEnabled: true };
 }
 
+/** The request `executeStep` would send for `ctx`, as pi's transcript. */
+function requestFor(ctx: ConversationContext, prepared: PreparedToolCatalog): TranscriptContext {
+  const tools = prepared.requestTools.map((schema) => ({ name: schema.name, description: schema.description, parameters: schema.parameters as never }));
+  return normalizeContext({ systemPrompt: "x", tools, messages: withToolLoads(ctx, new Set(tools.map((t) => t.name))) });
+}
+
 async function testCompactionSemantics(): Promise<void> {
   // (a) Load point compacted away, no surviving call: the tool leaves the request; the model
   // is re-told to search; a direct call gets load guidance.
@@ -346,20 +363,20 @@ async function testCompactionSemantics(): Promise<void> {
     const ctx = new ConversationContext();
     ctx.appendMessage(summaryMessage("used slack"), { kind: "compaction_summary" });
     const prepared = prepareToolCatalog(ctx, snapshotFor([slackSend]));
-    check("compact/a: unloaded tool is not sent", !prepared.schemas.some((s) => s.name === SLACK_SEND) && !prepared.tools.some((t) => t.schema.name === SLACK_SEND));
+    check("compact/a: unloaded tool is not sent", !prepared.schemas.some((s) => s.name === SLACK_SEND) && !prepared.tools.some((t) => t.schema.name === SLACK_SEND) && !toolNames(requestFor(ctx, prepared)).includes(SLACK_SEND));
     check("compact/a: full catalog re-announced after the summary", (lastReminder(ctx.messages) ?? "").includes(SLACK_SEND));
     check("compact/a: direct call gets load guidance", (describeUnknownTool(prepared, SLACK_SEND) ?? "").includes(`select:${SLACK_SEND}`));
     check("compact/a: unrelated names get no guidance", describeUnknownTool(prepared, "Nope") === undefined);
   }
 
   // (b) Load point compacted away but the call survived: `applyCompaction` carries the
-  // definition on the summary's origin and the tool stays executable. Known cost: pi sees a
-  // call without a load point and declares the tool as an ordinary (prefix) tool.
+  // definition on the summary's origin, the tool stays executable, and the summary becomes
+  // its load point on the wire.
   {
     const ctx = new ConversationContext();
     ctx.appendMessage({ role: "user", content: [{ type: "text", text: "send hi" }], timestamp: 1 });
     ctx.appendMessage(assistantCall(SEARCH_TOOL_NAME, { query: `select:${SLACK_SEND}` }, "s1"));
-    ctx.appendMessage({ role: "toolResult", toolCallId: "s1", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: "Loaded tools" }], addedToolNames: [SLACK_SEND, SLACK_LIST], details: { deferredToolSchemas: [{ sourceName: SLACK_SEND, schema: slackSend.schema }, { sourceName: SLACK_LIST, schema: slackList.schema }] }, isError: false, timestamp: 2 });
+    ctx.appendMessage({ role: "toolResult", toolCallId: "s1", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: "Loaded tools" }], details: { deferredToolSchemas: [{ sourceName: SLACK_SEND, schema: slackSend.schema }, { sourceName: SLACK_LIST, schema: slackList.schema }] }, isError: false, timestamp: 2 });
     ctx.appendMessage(assistantCall(SLACK_SEND, { text: "hi" }, "call-1"));
     ctx.appendMessage({ role: "toolResult", toolCallId: "call-1", toolName: SLACK_SEND, content: [{ type: "text", text: "sent:hi" }], isError: false, timestamp: 3 });
     ctx.appendMessage({ role: "user", content: [{ type: "text", text: "again" }], timestamp: 4 });
@@ -370,9 +387,11 @@ async function testCompactionSemantics(): Promise<void> {
     check("compact/b: surviving call keeps the tool executable", prepared.tools.some((t) => t.schema.name === SLACK_SEND));
     check("compact/b: definition restored from the summary origin", prepared.loaded.get(SLACK_SEND)?.schema.description === slackSend.schema.description);
     check("compact/b: no assistant message carries a per-call snapshot", ctx.messages.every((m) => m.role !== "assistant" || ctx.originOf(m) === undefined));
-    const payload = await capturePayload({ systemPrompt: "x", tools: prepared.schemas, messages: ctx.messages });
+    const request = requestFor(ctx, prepared);
+    check("compact/b: the summary is the load point", request.messages[1]?.role === "user" && request.messages[2]?.role === "system" && getCurrentTools(request.messages).some((t) => t.name === SLACK_SEND));
+    const payload = await capturePayload(request);
     const wire = payload.tools.find((t) => t.name === SLACK_SEND);
-    check("compact/b: (known cost) pi declares a call-only tool in the prefix", wire !== undefined && wire.defer_loading !== true);
+    check("compact/b: the carried definition stays deferred, out of the prefix", wire?.defer_loading === true);
 
     // Same shape, but the server is gone: the definition is wire-only and cannot execute.
     const gone = prepareToolCatalog(ctx, snapshotFor([github]), { announce: false });
@@ -387,7 +406,6 @@ async function testCompactionSemantics(): Promise<void> {
       toolCallId: "s1",
       toolName: SEARCH_TOOL_NAME,
       content: [{ type: "text", text: "X".repeat(2_000) }],
-      addedToolNames: [SLACK_SEND],
       details: { deferredToolSchemas: [{ sourceName: SLACK_SEND, schema: slackSend.schema }] },
       isError: false,
       timestamp: 1,
@@ -396,24 +414,26 @@ async function testCompactionSemantics(): Promise<void> {
     const micro = new MicroCompaction({ cacheMissedThresholdMs: 0, minContextUsageRatio: 0, keepRecentMessages: 0, minContentTokens: 1 });
     const cleared = micro.detectAndApply(messages, 0, 1);
     const ctx = new ConversationContext({ history: messages });
-    check("compact/c: micro compaction keeps details and addedToolNames", cleared === 1 && loadedToolSchemas(ctx).get(SLACK_SEND)?.schema.description === slackSend.schema.description);
+    check("compact/c: micro compaction keeps the loaded definitions in details", cleared === 1 && loadedToolSchemas(ctx).get(SLACK_SEND)?.schema.description === slackSend.schema.description);
   }
 }
 
 // ── wire: announcement placement ───────────────────────────────────────────────────────────
 
 async function testAnnouncementWire(): Promise<void> {
-  const messages: Message[] = [
-    { role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
-    assistantCall(SEARCH_TOOL_NAME, { query: "slack" }, "s1"),
-    { role: "toolResult", toolCallId: "s1", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: "found" }], addedToolNames: [SLACK_SEND], isError: false, timestamp: 3 },
-    { role: "user", content: [{ type: "text", text: "<system-reminder>\ncatalog changed\n</system-reminder>" }], timestamp: 4 },
-  ];
-  const payload = await capturePayload({ systemPrompt: "x", tools: [{ name: SEARCH_TOOL_NAME, description: "s", parameters: { type: "object" } }, slackSend.schema], messages });
+  const ctx = new ConversationContext();
+  ctx.appendMessage({ role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 });
+  ctx.appendMessage(assistantCall(SEARCH_TOOL_NAME, { query: "slack" }, "s1"));
+  ctx.appendMessage({ role: "toolResult", toolCallId: "s1", toolName: SEARCH_TOOL_NAME, content: [{ type: "text", text: "found" }], details: { deferredToolSchemas: [{ sourceName: SLACK_SEND, schema: slackSend.schema }] }, isError: false, timestamp: 3 });
+  ctx.appendMessage({ role: "user", content: [{ type: "text", text: "<system-reminder>\ncatalog changed\n</system-reminder>" }], timestamp: 4 });
+  const prepared = prepareToolCatalog(ctx, snapshotFor([slackSend]), { announce: false });
+  const request = requestFor(ctx, prepared);
+  check("wire: projection declares the load right after the tool-result batch", request.messages.map((m) => m.role).join(",") === "system,user,assistant,toolResult,system,user");
+  const payload = await capturePayload(request);
   const roles = payload.messages.map((m) => m.role);
-  check("wire: reminder after a tool result serializes as a second user turn", roles.join(",") === "user,assistant,user,user");
-  check("wire: tool_reference stays in the tool_result turn", payload.messages[2]!.content.some((b) => b.type === "tool_result") && JSON.stringify(payload.messages[2]).includes("tool_reference"));
-  check("wire: cache breakpoint moves to the announcement", payload.messages[3]!.content.at(-1)?.cache_control !== undefined);
+  // pi holds a later system message until just before the next assistant turn (or the end).
+  check("wire: tool_addition follows the reminder turn", roles.join(",") === "user,assistant,user,user,system");
+  check("wire: tool_result turn carries no tool_reference", payload.messages[2]!.content.some((b) => b.type === "tool_result") && !JSON.stringify(payload.messages[2]).includes("tool_reference"));
 }
 
 

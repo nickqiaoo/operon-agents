@@ -6,7 +6,7 @@
  * The host wrote no factory: `peers({ teammates })` says what a "schema" teammate IS (its session
  * options) and the extension's own `harness` half spawns it, tagged a member through `params`.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "../../agents/test/faux.ts";
 import { createHarness, type ExtensionDefinition } from "operon-agents";
 import { defineAgent } from "operon-agents-core";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle } from "../src/index.ts";
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   let leadTools: string[] = [];
   faux.setResponses([
     (context) => {
-      leadTools = (context.tools ?? []).map((tool) => tool.name);
+      leadTools = offeredToolNames(context);
       return fauxAssistantMessage(fauxToolCall("Team", { op: "create", name: "db-migration" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage(
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   let memberTools: string[] = [];
   faux.setResponses([
     (context) => {
-      memberTools = (context.tools ?? []).map((tool) => tool.name);
+      memberTools = offeredToolNames(context);
       return fauxAssistantMessage(fauxToolCall("Hub", { op: "send", to: "lead", message: "PLAN_READY" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage("reported", { stopReason: "stop" }),

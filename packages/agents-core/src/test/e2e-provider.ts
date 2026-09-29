@@ -98,12 +98,17 @@ async function testCustomPath(): Promise<void> {
           provider: "proxy",
           model: "claude-sonnet-4-5",
         },
+        opus: {
+          provider: "proxy",
+          model: "claude-opus-5-5",
+        },
       },
     },
   });
   check(
-    "custom: Anthropic alias keeps pi tool-reference compatibility",
-    (await anthropicProxy.resolveModel("sonnet")).model.supportsDeferredTools,
+    "custom: Anthropic alias gets native tool changes by model id",
+    (await anthropicProxy.resolveModel("opus")).model.supportsDeferredTools &&
+      !(await anthropicProxy.resolveModel("sonnet")).model.supportsDeferredTools,
   );
 
   const kimiProxy = new ProviderManager({
@@ -120,12 +125,17 @@ async function testCustomPath(): Promise<void> {
           provider: "moon",
           model: "private-kimi",
         },
+        k3: {
+          provider: "moon",
+          model: "kimi-k3",
+        },
       },
     },
   });
   check(
-    "custom: Kimi endpoint gets pi deferred-tools mode",
-    (await kimiProxy.resolveModel("kimi")).model.supportsDeferredTools,
+    "custom: Kimi endpoint keeps the catalog's verified tool-addition flags",
+    (await kimiProxy.resolveModel("k3")).model.supportsDeferredTools &&
+      !(await kimiProxy.resolveModel("kimi")).model.supportsDeferredTools,
   );
 
   // Unknown model with no baseUrl to build from → clear error, not a silent bad model.

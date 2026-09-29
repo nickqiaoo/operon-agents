@@ -48,11 +48,6 @@ export interface ToolResumeContext {
 export interface ToolResult<Details = unknown> {
   readonly content: ToolResultContent;
   readonly details?: Details;
-  /**
-   * Tool definitions made available by this result. pi 0.81 uses these names
-   * as the transcript load point for native deferred-tool serialization.
-   */
-  readonly addedToolNames?: readonly string[];
   readonly isError?: boolean;
   readonly stopTurn?: boolean;
 }

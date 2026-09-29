@@ -370,6 +370,8 @@ function serializeMessage(message: Message): Record<string, unknown> {
         isError: message.isError,
         content: message.content.map(serializePart),
       };
+    case "system":
+      return { role: "system", content: typeof message.content === "string" ? message.content : message.content.map(serializePart) };
   }
 }
 

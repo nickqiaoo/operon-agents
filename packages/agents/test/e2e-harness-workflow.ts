@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "./faux.ts";
 import { defineModel, DiskSessionRepository, type Message } from "operon-agents-core";
 import { createHarness } from "../src/index.ts";
 
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   // Captures the tool names offered to the model on each call (reset per case).
   let offered: string[][] = [];
   const captureThen = (msg: ReturnType<typeof fauxAssistantMessage>) => (ctx: ToolsCtx) => {
-    offered.push([...(ctx.tools ?? [])].map((t) => t.name));
+    offered.push(offeredToolNames(ctx));
     return msg;
   };
 
