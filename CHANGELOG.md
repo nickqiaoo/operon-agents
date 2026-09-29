@@ -7,6 +7,14 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.12] — 2026-09-29
+
+### Fixed
+
+- A Codex plugin whose manifest doesn't name `mcpServers` or `skills` now loads the plugin's root
+  `.mcp.json` and `skills/` directory, as Codex does. Many curated plugins (Vercel, Slack, Figma,
+  Canva…) rely on this, and their MCP servers were never loaded (`operon-agents-core`).
+
 ## [0.1.0-alpha.11] — 2026-09-29
 
 ### Added
