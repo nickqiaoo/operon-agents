@@ -45,7 +45,6 @@ export interface ExecuteStepDeps {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
   readonly deferEnabled?: boolean;
-  readonly serverToolSearch?: boolean;
   readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   readonly hooks?: LoopHooks;

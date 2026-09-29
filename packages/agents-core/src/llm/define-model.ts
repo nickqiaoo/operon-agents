@@ -13,7 +13,6 @@ import {
 } from "./runtime.ts";
 import { classifyError } from "./errors.ts";
 import type { CallOptions, LlmRequest, RetryHint } from "./model.ts";
-import { supportsOpenRouterToolSearch, withOpenRouterToolSearch } from "./openrouter-tool-search.ts";
 
 /** A finished attempt: either resolved (terminal already pushed to the out stream) or a
  *  clean pre-content failure the caller may retry. */
@@ -112,9 +111,6 @@ export class ChatModel {
   readonly maxOutputTokens: number;
   /** Loading a deferred tool mid-conversation keeps the request prefix: SearchTool mode. */
   readonly supportsDeferredTools: boolean;
-  /** The provider searches deferred tools itself (OpenRouter's `openrouter:tool_search`).
-   *  Used only where `supportsDeferredTools` is false. */
-  readonly serverToolSearch: boolean;
   private readonly piModel: Model<Api>;
   private readonly runtime: ModelRuntime;
   /** Build-time settings (`apiKey` + `connection`) flattened once into pi's option shape.
@@ -134,7 +130,6 @@ export class ChatModel {
     this.contextWindow = this.piModel.contextWindow;
     this.maxOutputTokens = this.piModel.maxTokens;
     this.supportsDeferredTools = supportsNativeDeferredTools(this.piModel);
-    this.serverToolSearch = supportsOpenRouterToolSearch(this.piModel);
   }
 
   stream(req: LlmRequest, call?: CallOptions): AssistantMessageEventStream {
@@ -174,11 +169,7 @@ export class ChatModel {
   }
 
   private options(req: LlmRequest, call?: CallOptions): ModelsSimpleStreamOptions {
-    const options = toOptions(req, call, this.requestDefaults);
-    const deferred = this.serverToolSearch
-      ? new Set((req.tools ?? []).filter((tool) => tool.deferLoading === true).map((tool) => tool.name))
-      : undefined;
-    return deferred !== undefined && deferred.size > 0 ? withOpenRouterToolSearch(options, deferred) : options;
+    return toOptions(req, call, this.requestDefaults);
   }
 
   private async streamWithAuthRetry(

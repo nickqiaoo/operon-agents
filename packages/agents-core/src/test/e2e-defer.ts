@@ -2,7 +2,7 @@ import { testRunner, openTestSession } from "./faux.ts";
 /**
  * Deferred tool loading — SearchTool, the `toolsAdded` load-point projection, pi 0.87's
  * native wires (Anthropic tool_addition, Kimi tools system messages, Responses tool
- * search / additional_tools) and OpenRouter's server-side tool search.
+ * search / additional_tools), and OpenRouter models that get none of it.
  *
  * No real provider requests are made: native API streams are aborted from
  * `onPayload` after their complete request body has been captured.
@@ -36,8 +36,7 @@ import {
 } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
-import { prepareToolCatalog, withToolLoads } from "../tool/search/catalog.ts";
-import { OPENROUTER_TOOL_SEARCH, OPENROUTER_TOOL_SEARCH_MAX_RESULTS, supportsOpenRouterToolSearch, withOpenRouterToolSearch } from "../llm/openrouter-tool-search.ts";
+import { withToolLoads } from "../tool/search/catalog.ts";
 import { acceptsMidConvoToolChanges } from "../llm/define-model.ts";
 import { runSearchQuery, SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
 import { buildSearchTool } from "../tool/search/search-tool.ts";
@@ -224,7 +223,7 @@ async function testFrameworkFlow(): Promise<void> {
 
   try {
     const model = faux.getChatModel()!;
-    check("framework: Opus 5.5 gets native deferral from the id rule", model.supportsDeferredTools && !model.serverToolSearch);
+    check("framework: Opus 5.5 gets native deferral from the id rule", model.supportsDeferredTools);
     const agent = defineAgent({
       name: "deferred",
       model,
@@ -420,72 +419,17 @@ async function testResponsesWire(): Promise<void> {
   );
 }
 
-async function testOpenRouterServerSearch(): Promise<void> {
-  const openrouter = model("openai-responses", "openrouter-responses", "deepseek/deepseek-v4-flash", {}, "https://openrouter.ai/api/v1") as Model<Api>;
-  check("openrouter: Responses API on openrouter.ai searches server-side", supportsOpenRouterToolSearch(openrouter));
-  check(
-    "openrouter: not on Chat Completions nor on other hosts",
-    !supportsOpenRouterToolSearch({ ...openrouter, api: "openai-completions" }) &&
-      !supportsOpenRouterToolSearch({ ...openrouter, baseUrl: "https://example.com/openrouter.ai" }),
-  );
-
-  // Catalog: every tool executes and is sent; capability ones marked deferLoading.
-  const read = tool({ name: "Read", description: "Read a file.", parameters: z.object({}), accesses: ToolAccesses.none(), execute: () => "" });
-  const prepared = prepareToolCatalog(new ConversationContext(), {
-    tools: [read, slackTool],
-    deferredToolNames: new Set([slackTool.schema.name]),
-    deferEnabled: false,
-    serverToolSearch: true,
-  });
-  check(
-    "openrouter: capability tools sent deferLoading, no SearchTool, all executable",
-    prepared.requestTools.find((s) => s.name === slackTool.schema.name)?.deferLoading === true &&
-      prepared.requestTools.find((s) => s.name === "Read")?.deferLoading === undefined &&
-      !prepared.requestTools.some((s) => s.name === SEARCH_TOOL_NAME) &&
-      prepared.tools.includes(slackTool),
-  );
-
-  // Wire: pi's Responses payload rewritten at the onPayload seam.
-  const context: TranscriptContext = {
-    messages: [
-      { role: "system", content: "test", toolsAdded: [PI_TOOLS[1]!, SLACK_PI], timestamp: 0 },
-      { role: "user", content: "send a Slack message", timestamp: 1 },
-    ],
-  };
-  const controller = new AbortController();
-  let payload: Record<string, unknown> | undefined;
-  const options = withOpenRouterToolSearch(
-    {
-      apiKey: "test",
-      signal: controller.signal,
-      maxRetries: 0,
-      onPayload: (next) => {
-        payload = next as Record<string, unknown>;
-        controller.abort();
-        return next;
-      },
-    },
-    new Set([slackTool.schema.name]),
-  );
-  for await (const _event of (streamResponses as unknown as WireStream)(openrouter, context, options as SimpleStreamOptions)) {
-    // drain
-  }
-  const tools = (payload?.tools ?? []) as Array<{ type?: string; name?: string; defer_loading?: boolean; parameters?: { max_results?: number } }>;
-  check(
-    "openrouter: search tool leads with a raised max_results, only the capability tool is defer_loading",
-    tools[0]?.type === OPENROUTER_TOOL_SEARCH &&
-      tools[0]?.parameters?.max_results === OPENROUTER_TOOL_SEARCH_MAX_RESULTS &&
-      tools.find((t) => t.name === slackTool.schema.name)?.defer_loading === true &&
-      tools.find((t) => t.name === "Read")?.defer_loading === undefined,
-  );
-}
-
-async function testOpenRouterFramework(): Promise<void> {
+/**
+ * OpenRouter's `openrouter:tool_search` is deliberately unused: what a search reveals lasts
+ * one HTTP request, so after any tool round a strict upstream can no longer call the tool
+ * it found. A non-Claude model on OpenRouter's Responses API sends every tool up front.
+ */
+async function testOpenRouterSendsEverything(): Promise<void> {
   const faux = registerFauxProvider({ api: "openai-responses", provider: "openrouter-responses", models: [{ id: "deepseek/deepseek-v4-flash" }] });
   faux.setResponses([
     (context) => {
       const names = (getInitialSystemMessage(context.messages)?.toolsAdded ?? []).map((t) => t.name);
-      check("openrouter/framework: capability tool sent up front, no SearchTool", names.includes(slackTool.schema.name) && !names.includes(SEARCH_TOOL_NAME));
+      check("openrouter: capability tool sent up front, no SearchTool", names.includes(slackTool.schema.name) && !names.includes(SEARCH_TOOL_NAME));
       return fauxAssistantMessage(fauxToolCall(slackTool.schema.name, { text: "direct" }), { stopReason: "toolUse" });
     },
     fauxAssistantMessage("done", { stopReason: "stop" }),
@@ -493,11 +437,11 @@ async function testOpenRouterFramework(): Promise<void> {
   try {
     const descriptor = faux.getModel()!;
     const model = defineModel({ runtime: faux.runtime, descriptor: { ...descriptor, baseUrl: "https://openrouter.ai/api/v1" } as Model<Api> });
-    check("openrouter/framework: model searches server-side, not via SearchTool", model.serverToolSearch && !model.supportsDeferredTools);
+    check("openrouter: a non-Claude Responses model on openrouter.ai does not defer", !model.supportsDeferredTools);
     const agent = defineAgent({ name: "or", model, instructions: "x" });
     const result = await testRunner({ capabilities: [{ name: "deferred-test", tools: [slackTool] }], permission: { mode: "yolo" } }).run(agent, "send");
     check(
-      "openrouter/framework: a revealed capability tool executes without a load point",
+      "openrouter: the capability tool executes without a load point",
       result.messages.some((m) => m.role === "toolResult" && m.toolName === slackTool.schema.name && !m.isError),
     );
   } finally {
@@ -514,15 +458,14 @@ async function main(): Promise<void> {
   await testAnthropicWire();
   await testKimiWire();
   await testResponsesWire();
-  await testOpenRouterServerSearch();
-  await testOpenRouterFramework();
+  await testOpenRouterSendsEverything();
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
     console.log(
-      "✅ DEFER E2E PASS — SearchTool + toolsAdded load points + pi native Anthropic/Kimi/Responses wire + OpenRouter server search",
+      "✅ DEFER E2E PASS — SearchTool + toolsAdded load points + pi native Anthropic/Kimi/Responses wire + OpenRouter sends everything",
     );
   } else {
     console.log("❌ DEFER E2E FAIL");

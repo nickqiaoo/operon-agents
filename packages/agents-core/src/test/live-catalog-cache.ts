@@ -3,19 +3,11 @@
  *
  *   OPENROUTER_API_KEY=... node --experimental-strip-types src/test/live-catalog-cache.ts
  *
- * Runs the real Runner against real endpoints with 30 fake MCP tools and checks, per step,
- * what e2e-catalog.ts / e2e-defer.ts assert on serialized bytes:
- *
- *   native  — a Claude model with mid-conversation tool changes (`LIVE_NATIVE_MODEL`, default
- *             anthropic/claude-opus-5.5 through OpenRouter's Messages API). The first request
- *             carries SearchTool only; loading a tool via SearchTool (a `tool_addition`) must
- *             keep reading the cached prefix.
- *   server  — a non-Claude model on OpenRouter's Responses API (`LIVE_SERVER_MODEL`, default
- *             deepseek/deepseek-v4-flash): no SearchTool, MCP tools sent `defer_loading`
- *             beside `openrouter:tool_search`; the prompt must stay far below the full-send
- *             size and later steps must hit the cache.
- *
- * `LIVE_ONLY=native|server` runs one of them.
+ * Runs the real Runner against a real endpoint with 30 fake MCP tools and checks, per step,
+ * what e2e-catalog.ts / e2e-defer.ts assert on serialized bytes: a Claude model with
+ * mid-conversation tool changes (`LIVE_NATIVE_MODEL`, default anthropic/claude-opus-5.5
+ * through OpenRouter's Messages API). The first request carries SearchTool only; loading a
+ * tool via SearchTool (a `tool_addition`) must keep reading the cached prefix.
  */
 import { z } from "zod";
 import { defineAgent, ProviderManager, type AssistantMessage, type ChatModel } from "../index.ts";
@@ -55,10 +47,10 @@ const filler: Tool[] = Array.from({ length: 30 }, (_, i) => tool({
   execute: () => "ok",
 }));
 
-async function resolve(alias: string, provider: { type: "anthropic" | "openai_responses" }, model: string): Promise<ChatModel> {
+async function resolve(alias: string, model: string): Promise<ChatModel> {
   const manager = new ProviderManager({
     config: {
-      providers: { or: { ...provider, baseUrl: provider.type === "anthropic" ? "https://openrouter.ai/api" : "https://openrouter.ai/api/v1", apiKey } },
+      providers: { or: { type: "anthropic", baseUrl: "https://openrouter.ai/api", apiKey } },
       models: { [alias]: { provider: "or", model, maxContextSize: 200_000, maxOutputSize: 2_000 } },
     },
   });
@@ -81,7 +73,7 @@ async function runOnce(model: ChatModel, label: string): Promise<{ usage: Assist
 }
 
 async function native(): Promise<void> {
-  const model = await resolve("native", { type: "anthropic" }, process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5");
+  const model = await resolve("native", process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5");
   check("native: model gets SearchTool deferral", model.supportsDeferredTools);
   const { usage, toolNames } = await runOnce(model, "native");
   check("native: searched, then called the loaded tool", toolNames.includes(SEARCH_TOOL_NAME) && toolNames.includes(weather.schema.name));
@@ -92,21 +84,8 @@ async function native(): Promise<void> {
   );
 }
 
-async function server(): Promise<void> {
-  const model = await resolve("server", { type: "openai_responses" }, process.env.LIVE_SERVER_MODEL ?? "deepseek/deepseek-v4-flash");
-  check("server: model searches server-side", model.serverToolSearch && !model.supportsDeferredTools);
-  const { usage, toolNames } = await runOnce(model, "server");
-  check("server: called the revealed tool directly", toolNames.includes(weather.schema.name) && !toolNames.includes(SEARCH_TOOL_NAME));
-  const last = usage.at(-1)!;
-  // 31 tools × ~150 tokens stay out of the prompt; only the system text and history remain.
-  check("server: the final step's prompt excludes the deferred definitions", last.input + last.cacheRead < 9_000);
-  check("server: the final step hits the cache", last.cacheRead > 0);
-}
-
 async function main(): Promise<void> {
-  const only = process.env.LIVE_ONLY;
-  if (only !== "server") await native();
-  if (only !== "native") await server();
+  await native();
   const passed = checks.filter(([, ok]) => ok).length;
   console.log(`\n${passed}/${checks.length} live checks passed`);
   if (passed !== checks.length) process.exit(1);

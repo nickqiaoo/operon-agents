@@ -13,9 +13,6 @@ export interface ToolCatalogSnapshot {
   readonly tools: readonly Tool[];
   readonly deferredToolNames: ReadonlySet<string>;
   readonly deferEnabled?: boolean;
-  /** The provider searches `deferredToolNames` itself: every tool executes and is sent,
-   *  the deferred ones marked `deferLoading`. Exclusive with `deferEnabled`. */
-  readonly serverToolSearch?: boolean;
 }
 
 export interface PreparedToolCatalog {
@@ -101,13 +98,6 @@ export function prepareToolCatalog(
   options: { readonly announce?: boolean } = {},
 ): PreparedToolCatalog {
   const enabled = snapshot.deferEnabled ?? snapshot.deferredToolNames.size > 0;
-  if (snapshot.serverToolSearch === true) {
-    const all = snapshot.tools.map((tool) => tool.schema);
-    const requestTools = all.map((schema) => snapshot.deferredToolNames.has(schema.name) ? { ...schema, deferLoading: true } : schema);
-    // The provider keeps the deferred definitions out of the prompt: they cost no context.
-    const schemas = all.filter((schema) => !snapshot.deferredToolNames.has(schema.name));
-    return { tools: snapshot.tools, schemas, requestTools, loaded: new Map(), catalog: new Map(), deferEnabled: false, warnings: [] };
-  }
   if (!enabled) {
     const schemas = snapshot.tools.map((tool) => tool.schema);
     return { tools: snapshot.tools, schemas, requestTools: schemas, loaded: new Map(), catalog: new Map(), deferEnabled: false, warnings: [] };
