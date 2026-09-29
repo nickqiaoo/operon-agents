@@ -61,6 +61,9 @@ export interface ParsedManifestResult {
   readonly diagnostics: readonly PluginDiagnostic[];
 }
 
+const DEFAULT_SKILLS_DIR = "skills";
+const DEFAULT_MCP_CONFIG_FILE = ".mcp.json";
+
 export async function parseManifest(environment: Environment, pluginRoot: string): Promise<ParsedManifestResult> {
   const candidates = [PLUGIN_ROOT_MANIFEST, PLUGIN_DIR_MANIFEST, CODEX_DIR_MANIFEST];
   let manifestPath: string | undefined;
@@ -95,8 +98,15 @@ export async function parseManifest(environment: Environment, pluginRoot: string
     return { manifestPath, diagnostics };
   }
 
-  let skills = await resolveSkillsField(environment, pluginRoot, raw.skills, diagnostics);
-  if (raw.skills === undefined && (await isFile(environment, path.join(pluginRoot, "SKILL.md")))) {
+  // Codex convention: a manifest that doesn't name its skills / MCP file still gets the plugin's
+  // `skills/` dir and root `.mcp.json` (most curated plugins rely on this — e.g. Vercel, Slack).
+  const skillsField =
+    raw.skills ?? ((await isDir(environment, path.join(pluginRoot, DEFAULT_SKILLS_DIR))) ? `./${DEFAULT_SKILLS_DIR}` : undefined);
+  const mcpServersField =
+    raw.mcpServers ?? ((await isFile(environment, path.join(pluginRoot, DEFAULT_MCP_CONFIG_FILE))) ? `./${DEFAULT_MCP_CONFIG_FILE}` : undefined);
+
+  let skills = await resolveSkillsField(environment, pluginRoot, skillsField, diagnostics);
+  if (skillsField === undefined && (await isFile(environment, path.join(pluginRoot, "SKILL.md")))) {
     skills = [pluginRoot];
   }
 
@@ -116,7 +126,7 @@ export async function parseManifest(environment: Environment, pluginRoot: string
     author: raw.author,
     skills,
     sessionStart: raw.sessionStart === undefined ? undefined : { skill: raw.sessionStart.skill.trim() },
-    mcpServers: await readMcpServers(environment, pluginRoot, raw.mcpServers, diagnostics),
+    mcpServers: await readMcpServers(environment, pluginRoot, mcpServersField, diagnostics),
     ...(hooks.length > 0 ? { hooks } : {}),
     interface: raw.interface,
     skillInstructions: raw.skillInstructions,

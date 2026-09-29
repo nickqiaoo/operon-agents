@@ -76,6 +76,18 @@ async function main(): Promise<void> {
     mcp["plugin-linear:linear"]?.transport === "http" && mcp["plugin-linear:linear"]?.url === "https://mcp.linear.app/mcp",
   );
 
+  // 2b. A manifest naming neither `skills` nor `mcpServers` still gets the plugin's `skills/` dir
+  // and root `.mcp.json` — the Codex convention most curated plugins (Vercel, Slack…) rely on.
+  const bare = join(repo, "plugins", "vercel");
+  mkdirSync(join(bare, ".codex-plugin"), { recursive: true });
+  mkdirSync(join(bare, "skills", "deploy"), { recursive: true });
+  writeFileSync(join(bare, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "vercel", version: "0.0.1" }));
+  writeFileSync(join(bare, "skills", "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deploy\n---\nDeploy.\n");
+  writeFileSync(join(bare, ".mcp.json"), JSON.stringify({ mcpServers: { vercel: { type: "http", url: "https://mcp.vercel.com" } } }));
+  const bareRec = await pm.install(bare);
+  check("install: bare manifest falls back to root .mcp.json", bareRec.state === "ok" && pm.mcpServerConfigs()["plugin-vercel:vercel"]?.url === "https://mcp.vercel.com");
+  check("install: bare manifest falls back to skills/ dir", pm.skillRoots().some((r) => r.plugin?.id === "vercel"));
+
   // 3. Detail enrichment reads the manifest + logo from the CACHED repo (no network).
   const det = await loadMarketplaceEntryDetails(entry!.source);
   check("details: displayName + description from manifest", det?.displayName === "Linear" && det?.description === "Find issues.");
