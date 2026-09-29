@@ -7,7 +7,7 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-alpha.9] — 2026-09-29
 
 ### Added
 
@@ -127,6 +127,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   capabilities follow the environment and which stay with the host.
 
 ### Changed
+
+- The MCP OAuth callback page is now Operon-branded, and a failed sign-in shows the reason (`operon-agents-core`).
+- The MCP client name and the dynamic-registration `client_name` are now `Operon` (`operon-agents-core`).
 
 - **Scopes and tokens are gone; a session is handed what it runs on** (all packages).
   `Scope`, `token()`, `Tokens`, `HarnessTokens` and the workspace tier are removed. Every object

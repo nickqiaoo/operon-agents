@@ -1,6 +1,6 @@
 {
   "name": "operon-agents-core",
-  "version": "0.1.0-alpha.8",
+  "version": "0.1.0-alpha.9",
   "description": "Internal engine for operon-agents. Prefer operon-agents for application code.",
   "type": "module",
   "engines": {
