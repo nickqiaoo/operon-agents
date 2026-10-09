@@ -22,6 +22,8 @@ export * from "./providers.ts";
 
 // Deployment composition roots: local vs server injection presets (Invariant 7 — no engine "mode").
 export * from "./local.ts";
+// Per-directory MCP sharing for hosts that open many sessions in one folder (a desktop app).
+export * from "./workspace-mcp.ts";
 
 // The curated core engine, re-exported for convenience; `operon-agents/core` is the dedicated
 // primitives entrypoint.

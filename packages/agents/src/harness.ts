@@ -114,6 +114,7 @@ import type {
   TracingProcessor,
 } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
+import { workspaceMcpCapability, type WorkspaceMcpPool } from "./workspace-mcp.ts";
 import { join } from "node:path";
 import { extensionCapability, extensionRuntimeOf, extensionsCapability, HarnessExtensionManager, type ExtensionRuntime, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
 import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult, type TodoItem } from "operon-agents-core";
@@ -178,6 +179,19 @@ export interface DefaultCapabilitiesOptions {
    * session's wins for this session only. Built, connected and shut down with the session.
    */
   readonly sessionMcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Share MCP connections per DIRECTORY instead of building them per session: every server this
+   * bundle would otherwise connect for the session — `mcpServers`, the plugins', and `servers`
+   * here (the directory's own, e.g. its `mcp.json`) — is borrowed from `pool` under `workDir`, so
+   * the sessions open in one directory run one set. `sessionMcpServers` stay the session's own,
+   * layered over it. Ignored when `shared.mcpServers` is set (a process-wide set already covers
+   * every directory) and for a session on its own environment. See {@link WorkspaceMcpPool}.
+   */
+  readonly workspaceMcp?: {
+    readonly pool: WorkspaceMcpPool;
+    readonly workDir: string;
+    readonly servers?: Record<string, McpServerConfig>;
+  };
   /**
    * Installed-plugin manager. When set, the framework self-drives the plugin's contributions into
    * this capability set: its skills (merged into the skills capability), its MCP servers (merged
@@ -257,14 +271,25 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     ...(oauthService !== undefined ? { oauthService } : {}),
     ...(options.allowedMcpTransports !== undefined ? { allowedTransports: options.allowedMcpTransports } : {}),
   };
-  // With process-shared connections, the capability is a VIEW over them and `configs` is this
-  // session's overlay. Without, everything this session sees is its own — session servers last,
-  // so the same name still resolves to the session's.
-  const mcpConfigs = sharedServers !== undefined
-    ? sessionMcp
-    : { ...(options.mcpServers ?? {}), ...(manager?.mcpServerConfigs() ?? {}), ...sessionMcp };
-  if (sharedServers !== undefined || Object.keys(mcpConfigs).length > 0) {
-    capabilities.push(mcpServersCapability(mcpConfigs, { ...mcpOptions, ...(sharedServers !== undefined ? { sharedServers } : {}) }));
+  // Everything this session would connect that is not private to it: the directory's servers
+  // last, so they win over a same-named plugin server the way they did as a session overlay.
+  const shareable = {
+    ...(options.mcpServers ?? {}),
+    ...(manager?.mcpServerConfigs() ?? {}),
+    ...(options.workspaceMcp?.servers ?? {}),
+  };
+  const pooled = sharedServers === undefined && options.ownEnvironment !== true ? options.workspaceMcp : undefined;
+  if (pooled !== undefined && Object.keys(shareable).length > 0) {
+    // Borrowed per directory: the capability views the pool's set, `sessionMcp` is its overlay.
+    capabilities.push(workspaceMcpCapability({ pool: pooled.pool, workDir: pooled.workDir, servers: shareable, overlay: sessionMcp, overlayOptions: mcpOptions }));
+  } else {
+    // With process-shared connections, the capability is a VIEW over them and `configs` is this
+    // session's overlay. Without, everything this session sees is its own — session servers last,
+    // so the same name still resolves to the session's.
+    const mcpConfigs = sharedServers !== undefined ? sessionMcp : { ...shareable, ...sessionMcp };
+    if (sharedServers !== undefined || Object.keys(mcpConfigs).length > 0) {
+      capabilities.push(mcpServersCapability(mcpConfigs, { ...mcpOptions, ...(sharedServers !== undefined ? { sharedServers } : {}) }));
+    }
   }
   // Plugins: load the manager + render the plugin's session-start skill from the shared registry
   // (skills opens before this, so by injection time the registry holds the plugin skills).

@@ -7,6 +7,21 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `WorkspaceMcpPool` and `defaultCapabilities({ workspaceMcp: { pool, workDir, servers } })`:
+  sessions opened in the same directory (by real path) share one set of MCP connections instead
+  of each spawning its own. Meant for a host that opens many conversations in one folder, like
+  a desktop app. Each session's MCP capability borrows the set at `openSession` and gives it back
+  at `closeSession` or on detach. After the last session leaves, the set stays up for `idleMs`
+  (5 minutes by default) so the next session reuses it. A borrow with a different configuration
+  builds a new set for new sessions; sessions on the old one keep it until they close. Sharing
+  covers every pooled server, so a stateful one (a browser) is shared between those sessions; a
+  session's own `mcpServers` stay private. The host creates the pool and closes it, typically
+  from its `harness()` part's `close` (`operon-agents`).
+
 ## [0.1.0-alpha.15] — 2026-09-29
 
 ### Removed
