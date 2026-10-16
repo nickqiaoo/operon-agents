@@ -113,6 +113,16 @@ interface WirePayload {
   readonly messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
 }
 
+/** Whether a tool_addition block (in a system turn) declares `name`. */
+function additionOf(payload: WirePayload, name: string): boolean {
+  return payload.messages.some((m) => m.role === "system" && m.content.some((b) => b.type === "tool_addition" && JSON.stringify(b).includes(`"name":"${name}"`)));
+}
+
+/** Whether `name` sits in the request's top-level tool list (the cached prefix). */
+function topLevel(payload: WirePayload, name: string): boolean {
+  return payload.tools.some((t) => t.name === name);
+}
+
 /** Serialize a request exactly as pi's Anthropic wire would. */
 async function capturePayload(context: TranscriptContext): Promise<WirePayload> {
   const controller = new AbortController();
@@ -328,12 +338,13 @@ async function testSessionFlow(): Promise<void> {
   const drift = snapshots.filter((s) => prefixOf(payloads.get(s.label)!) !== base).map((s) => s.label);
   check(`wire: cached prefix identical across all ${snapshots.length} requests (drift: ${drift.join(",") || "none"})`, drift.length === 0);
   check("wire: placeholder keeps deferred mode on from the first request", payloads.get("t1")!.tools.some((t) => t.name === PI_DEFERRED_PLACEHOLDER && t.defer_loading === true));
-  const additionOf = (payload: WirePayload, name: string): boolean => payload.messages.some((m) => m.role === "system" && m.content.some((b) => b.type === "tool_addition" && JSON.stringify(b).includes(`"name":"${name}"`)));
-  check("wire: loaded tool is defer_loading, surfaced by a tool_addition", payloads.get("t2s2")!.tools.some((t) => t.name === SLACK_SEND && t.defer_loading === true) && additionOf(payloads.get("t2s2")!, SLACK_SEND));
-  check("wire: call-before-load then load surfaces the tool by tool_addition", additionOf(payloads.get("t7s3")!, GITHUB_ISSUE) && payloads.get("t7s3")!.tools.some((t) => t.name === GITHUB_ISSUE && t.defer_loading === true));
+  // pi ≥ 1.0.1 (inline-tools beta) defines a loaded tool by value in its tool_addition block;
+  // it never joins the top-level list, which is what keeps the prefix above stable.
+  check("wire: loaded tool is defined by its tool_addition, not in the top-level list", additionOf(payloads.get("t2s2")!, SLACK_SEND) && !topLevel(payloads.get("t2s2")!, SLACK_SEND));
+  check("wire: call-before-load then load surfaces the tool by tool_addition", additionOf(payloads.get("t7s3")!, GITHUB_ISSUE) && !topLevel(payloads.get("t7s3")!, GITHUB_ISSUE));
   const history = (payload: WirePayload): string => JSON.stringify(payload.messages.slice(0, -1));
   check("wire: the load point's projection is byte-stable as the turn continues", JSON.stringify(payloads.get("t2s3")!.messages).startsWith(history(payloads.get("t2s2")!).slice(0, -1)));
-  check("wire: retired definition stays defer_loading after disconnect", payloads.get("t4s1")!.tools.some((t) => t.name === SLACK_SEND && t.defer_loading === true));
+  check("wire: retired definition stays declared at its load point after disconnect", additionOf(payloads.get("t4s1")!, SLACK_SEND) && !topLevel(payloads.get("t4s1")!, SLACK_SEND));
   const t2 = payloads.get("t2s1")!;
   const roles = t2.messages.map((m) => m.role);
   const last = t2.messages.at(-1)!;
@@ -390,8 +401,7 @@ async function testCompactionSemantics(): Promise<void> {
     const request = requestFor(ctx, prepared);
     check("compact/b: the summary is the load point", request.messages[1]?.role === "user" && request.messages[2]?.role === "system" && getCurrentTools(request.messages).some((t) => t.name === SLACK_SEND));
     const payload = await capturePayload(request);
-    const wire = payload.tools.find((t) => t.name === SLACK_SEND);
-    check("compact/b: the carried definition stays deferred, out of the prefix", wire?.defer_loading === true);
+    check("compact/b: the carried definition stays deferred, out of the prefix", additionOf(payload, SLACK_SEND) && !topLevel(payload, SLACK_SEND));
 
     // Same shape, but the server is gone: the definition is wire-only and cannot execute.
     const gone = prepareToolCatalog(ctx, snapshotFor([github]), { announce: false });

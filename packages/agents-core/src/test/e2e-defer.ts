@@ -354,8 +354,9 @@ async function testAnthropicWire(): Promise<void> {
     }) as Model<Api>,
   );
   const tools = payload.tools as Array<Record<string, unknown>>;
-  const deferred = tools.find((candidate) => candidate.name === slackTool.schema.name);
-  check("pi/Anthropic: loaded schema is defer_loading", deferred?.defer_loading === true);
+  // pi ≥ 1.0.1 (inline-tools beta) defines the loaded schema by value in its tool_addition
+  // block below rather than as a defer_loading entry of the top-level list.
+  check("pi/Anthropic: loaded schema stays out of the top-level tool list", !tools.some((candidate) => candidate.name === slackTool.schema.name));
   const messages = payload.messages as Array<{ role: string; content: unknown }>;
   const addition = messages.find((message) => message.role === "system");
   check(
