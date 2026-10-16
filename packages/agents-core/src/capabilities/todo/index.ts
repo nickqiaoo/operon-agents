@@ -1,5 +1,4 @@
 import type { Capability } from "../capability.ts";
-import { readSessionLog } from "../capability-state.ts";
 import { TodoListInjector } from "./injector.ts";
 import { TodoStore } from "./todo-store.ts";
 import { todoListTool } from "./tools.ts";
@@ -16,10 +15,15 @@ export function todoCapability(store: TodoStore = new TodoStore()): Capability {
     tools: [todoListTool(store)],
     injectors: [new TodoListInjector(store)],
     service: store,
-    // Rebuild the list from the session log (the latest TodoList result), not a KV side
-    // channel — so resume restores it and a fork reconstructs the list at the fork point.
-    openSession: async (ctx) => {
-      store.reconstruct(await readSessionLog(ctx));
+    // FRAME state: each address stores and restores its own agent's list. A lost write only
+    // leaves the list one change behind, which the agent's next TodoList call rewrites — so
+    // nothing waits for it.
+    durableState: {
+      snapshot: (address) => store.snapshot(address),
+      restore: (address, value) => store.restore(address, value),
+    },
+    openSession: (ctx) => {
+      store.attachPersistence((address) => void ctx.persistState(address));
     },
   };
 }

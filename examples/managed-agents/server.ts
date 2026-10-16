@@ -54,10 +54,15 @@ const harness = createHarness({
     logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
   }),
   // Built per session, so the OAuth service (and its credential store) is never shared
-  // across sessions — the reason the old preset's shared instance was a problem.
-  session: () =>
+  // across sessions — the reason the old preset's shared instance was a problem. A custom
+  // factory passes the session's isolation through: the worker opens every session strict.
+  session: (ctx) =>
     defaultCapabilities({
       oauthService: new McpOAuthService({ store: new MemoryMcpCredentialStore() }),
+      ownEnvironment: ctx.ownEnvironment,
+      strictIsolation: ctx.strictIsolation,
+      ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
+      ...(ctx.mcpCredentials !== undefined ? { mcpCredentials: ctx.mcpCredentials } : {}),
     }),
   workDir: WORK,
   appendSystemPrompt: "Use the tools to inspect and edit the workspace; explain what you do.",

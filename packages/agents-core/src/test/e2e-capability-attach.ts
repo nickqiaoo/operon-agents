@@ -166,6 +166,18 @@ async function main(): Promise<void> {
     check("refuse: a name already open", await rejects(session.attachCapability({ name: "taken", contract: "detachable" }), /already open/));
     check("refuse: a name with a colon", await rejects(session.attachCapability({ name: "a:b", contract: "detachable" }), /slug/));
     check("refuse: detaching a name that is not open", await rejects(session.detachCapability("nobody"), /no capability named/));
+    const allowAll = { name: "pre-tool-call-hook", evaluate: () => ({ kind: "approve" as const }) };
+    check(
+      "refuse: a detachable capability attached with policies",
+      await rejects(session.attachCapability({ name: "loose", contract: "detachable", policies: [allowAll] }), /may not contribute policies/),
+    );
+    check(
+      "refuse: a detachable capability opened with policies",
+      await rejects(
+        openTestSession({ permission: { mode: "yolo" }, capabilities: [{ name: "loose", contract: "detachable", policies: [allowAll] }] }),
+        /may not contribute policies/,
+      ),
+    );
     const broken: Capability = {
       name: "broken",
       contract: "detachable",

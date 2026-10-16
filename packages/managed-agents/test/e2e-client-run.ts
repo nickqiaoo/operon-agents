@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     permission: { mode: "manual" },
   });
   const sessionWork = new MemorySessionWork({ repository });
-  const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork });
+  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork });
   const service = new SessionService({ repository, work: sessionWork, metadataStore, environments });
   const managed = createManagedHttpServer({ service, worker, authorize: allowAllRequests, heartbeatMs: 50 });
   await managed.listen(0, "127.0.0.1");

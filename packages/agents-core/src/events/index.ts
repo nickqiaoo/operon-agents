@@ -14,7 +14,7 @@ export { SessionEventPublisher, agentEventFromRecord, isDurableAgentEvent, workf
 export type { WorkflowRecordProjection } from "./publisher.ts";
 export type { EventPublicationMode } from "./publisher.ts";
 export { RedactingSink } from "./redacting-sink.ts";
-export { SessionProjection } from "./projection.ts";
+export { SessionProjection, readSessionTails } from "./projection.ts";
 export type { WorkflowProgressEvent, WorkflowAgentRecord } from "./events.ts";
 export type {
   AgentSnapshot,
@@ -28,4 +28,6 @@ export type {
   ProjectionSource,
   SessionSnapshot,
   SnapshotOptions,
+  FrameCheckpoint,
+  SessionProjectionOptions,
 } from "./projection.ts";

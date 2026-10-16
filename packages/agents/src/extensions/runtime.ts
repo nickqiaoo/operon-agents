@@ -26,7 +26,7 @@ import type {
   ToolResultContent,
   Usage,
 } from "operon-agents-core";
-import { tagToolSource } from "operon-agents-core";
+import { appendAudit, tagToolSource } from "operon-agents-core";
 import type {
   ExtensionAPI,
   ExtensionActions,
@@ -250,15 +250,15 @@ export class ExtensionRuntime {
   }
 
   /**
-   * Durable audit trail: replay needs "tool X only exists after record N" to reconstruct the
-   * capability timeline. Rides the `custom` record type — audit-only, ignored by reducers.
+   * Durable audit trail of when this extension joined or left the session — written to the
+   * session's audit shard, which nothing replays from.
    */
   private async logChange(kind: "attached" | "detached"): Promise<void> {
     const extensionId = this.id;
     const store = this.session?.store;
     if (!store) return;
     try {
-      await store.appendRecord({ type: "custom", name: `extensions.${kind}`, data: { extensionId } });
+      await appendAudit(store, { type: "custom", name: `extensions.${kind}`, data: { extensionId } });
     } catch (error) {
       await this.warn(extensionId, `failed to journal extension ${kind}: ${messageOf(error)}`);
     }
@@ -822,7 +822,7 @@ export class ExtensionRuntime {
     return this.revocable(extensionId, {
       steer: (content, options) => runtime.enqueue(extensionId, content, "steering", options?.metadata),
       followUp: (content, options) => runtime.enqueue(extensionId, content, "follow_up", options?.metadata),
-      // Journaled by the engine into the main conversation as `extension:<id>:<name>`, and seen
+      // Written by the engine to the session's audit shard as `extension:<id>:<name>`, and seen
       // by `records()` straight away.
       record: (name, data) => {
         const session = runtime.session;

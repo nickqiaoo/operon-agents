@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });
-  const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork });
+  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork });
 
   // ── one message, one turn ─────────────────────────────────────────────────────
   const session = await service.create({ agent: "default", environment: "default" });
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   check("a later message runs a second turn", assistants === 2);
 
   // ── the lease is what stops two workers ───────────────────────────────────────
-  const other = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork });
+  const other = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork });
   const blocked = (await sessionWork.acquire(session.id))!;
   await service.appendEvent(session.id, { input: "third question" });
   const refused = await other.drain(session.id);
@@ -156,7 +156,7 @@ async function cursorAdvancesOnceTheInputIsInTheConversation(): Promise<void> {
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });
-  const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork });
+  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork });
   const service = new SessionService({ repository, work: sessionWork, metadataStore, environments });
 
   const session = await service.create({ agent: "default", environment: "default" });

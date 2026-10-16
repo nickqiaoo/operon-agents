@@ -8,7 +8,7 @@
  *  - `provider`: header/payload/response hooks, composed across capabilities (and after any
  *    callback already on the request), isolated when the capability is detachable.
  */
-import { CommandRegistry, MemoryStore, readLog, type Capability, type SessionContext } from "../index.ts";
+import { CommandRegistry, MemoryStore, readAudit, readLog, type Capability, type SessionContext } from "../index.ts";
 import { assembleCapabilities, openTestSession, testRunContext, withProviderHooks } from "../internal.ts";
 import type { LlmRequest } from "../llm/model.ts";
 
@@ -85,8 +85,10 @@ async function main(): Promise<void> {
     check("records: another capability's records are not mixed in", (await second.get("beta")!.records()).length === 0);
     await s2.close();
 
+    const audit = await readAudit(store);
+    check("records: kept in the audit shard as custom records named extension:<name>:<record>", audit.filter((r) => r.type === "custom" && (r as { name: string }).name === "extension:alpha:hit").length === 2);
     const log = await readLog(store);
-    check("records: journaled as custom records named extension:<name>:<record>", log.filter((r) => r.type === "custom" && (r as { name: string }).name === "extension:alpha:hit").length === 2);
+    check("records: never in the conversation log", log.every((r) => r.type !== "custom" || !(r as { name: string }).name.startsWith("extension:")));
   }
 
   // ── storeless: state and records still work, from memory ──

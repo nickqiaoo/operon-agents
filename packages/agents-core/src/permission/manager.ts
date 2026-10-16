@@ -82,6 +82,10 @@ export class PermissionManager {
   get mode(): PermissionMode {
     return this.currentMode;
   }
+  /** The approve-for-session grants made so far (approval-rule subjects), in grant order. */
+  get sessionGrants(): readonly string[] {
+    return [...this.sessionPatterns];
+  }
   setMode(mode: PermissionMode): void {
     this.currentMode = mode;
   }

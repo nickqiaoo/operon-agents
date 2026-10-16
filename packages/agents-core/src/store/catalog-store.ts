@@ -1,10 +1,12 @@
-import type {
-  AgentRecord,
-  ReadRecordPageOptions,
-  ReadRecordsFilter,
-  RecordPage,
-  SessionStore,
-  StateKey,
+import type { Usage } from "../protocol/index.ts";
+import {
+  type AgentRecord,
+  type ReadRecordPageOptions,
+  type ReadRecordsFilter,
+  type RecordPage,
+  SESSION_USAGE_KEY,
+  type SessionStore,
+  type StateKey,
 } from "./store.ts";
 
 export type DurableSessionState = "idle" | "interrupted";
@@ -13,6 +15,8 @@ export interface SessionCatalogObserver {
   activity(at: number, source: "log" | "state"): void | Promise<void>;
   durableState(state: DurableSessionState, at: number): void | Promise<void>;
   metadata?(value: unknown, at: number): void | Promise<void>;
+  /** The session's running usage moved (a root-agent turn ended; see `SessionSummary.usage`). */
+  usage?(usage: Usage, at: number): void | Promise<void>;
   flush?(): Promise<void>;
 }
 
@@ -37,7 +41,8 @@ export class CatalogSessionStore implements SessionStore {
 
   async appendRecord(record: AgentRecord): Promise<string> {
     const sequence = await this.inner.appendRecord(record);
-    await this.notify(() => this.observer.activity(Date.now(), "log"));
+    const at = Date.now();
+    await this.notify(() => this.observer.activity(at, "log"));
     return sequence;
   }
 
@@ -55,6 +60,7 @@ export class CatalogSessionStore implements SessionStore {
     await this.notify(() => {
       if (key === "interrupt") return this.observer.durableState("interrupted", at);
       if (key === "meta" && this.observer.metadata !== undefined) return this.observer.metadata(value, at);
+      if (key === SESSION_USAGE_KEY && this.observer.usage !== undefined) return this.observer.usage(value as Usage, at);
       return this.observer.activity(at, "state");
     });
   }

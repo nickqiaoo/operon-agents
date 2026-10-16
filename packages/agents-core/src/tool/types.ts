@@ -56,11 +56,18 @@ export interface ToolResult<Details = unknown> {
  * The call identity + execution surface shared by the resolve phase and the run phase of
  * one tool call. New fields needed by both phases belong here, not on both subtypes.
  */
-export interface ToolContextBase {
+export interface ToolContextBase<TContext = unknown> {
   readonly turnId: string;
   readonly toolCallId: string;
   readonly signal: AbortSignal;
   readonly environment: Environment;
+  /**
+   * The host's application context for this run — `RunOptions.context` (or the Harness
+   * session's), the same value `instructions` and guardrails receive. Runtime-only: never
+   * journaled. Typed by the tool author's declaration, not checked: a tool written for one
+   * context shape must not be handed to a run that passes another.
+   */
+  readonly context?: TContext;
   /**
    * Journal address of the frame running this call — `main` for the root agent, `main/<agentId>`
    * for a subagent. It is the frame's identity: what `agent.started`/`agent.ended` events carry,
@@ -117,7 +124,7 @@ export interface NestedCallInterrupt {
 
 export type NestedCallResult = ToolResult & { readonly interrupt?: NestedCallInterrupt };
 
-export interface ToolRunContext extends ToolContextBase {
+export interface ToolRunContext<TContext = unknown> extends ToolContextBase<TContext> {
   readonly onUpdate?: (update: ToolUpdate) => void;
   readonly background?: BackgroundSpawner;
   /** Run other tools through the full pipeline (see {@link NestedToolDispatcher}). */
@@ -160,7 +167,7 @@ export interface ToolPlan {
   readonly run: (ctx: ToolRunContext) => Promise<ToolResult>;
 }
 
-export interface ToolResolveContext extends ToolContextBase {}
+export interface ToolResolveContext<TContext = unknown> extends ToolContextBase<TContext> {}
 
 export interface Tool {
   readonly schema: ToolSchema;

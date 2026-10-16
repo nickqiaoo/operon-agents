@@ -1,6 +1,5 @@
 import { dirname, join } from "pathe";
 import type { Environment } from "../../tool/environment.ts";
-import type { AgentRecord } from "../../store/index.ts";
 import { readTextFile, writeTextFile } from "../../tool/support/environment-ops.ts";
 
 export type PlanData = null | { readonly id: string; readonly content: string; readonly path: string };
@@ -8,7 +7,8 @@ export type PlanData = null | { readonly id: string; readonly content: string; r
 /** Tool names whose results carry plan-mode state in `details`. */
 export const PLAN_TOOL_NAMES = ["EnterPlanMode", "ExitPlanMode"] as const;
 
-/** Plan-mode state carried in enter/exit tool result `details`, folded back on session open. */
+/** Plan-mode state: carried in enter/exit tool result `details` for the transcript, and the
+ *  whole durable state the plan capability stores after every change. */
 export interface PlanDetails {
   readonly planActive: boolean;
   readonly planId: string | null;
@@ -26,9 +26,20 @@ export class PlanMode {
   private planId: string | null = null;
   private filePath: string | null = null;
   private environment: Environment | null = null;
+  /** Persists the whole state after each change. Absent in a bare PlanMode (tests). */
+  private persist: (() => Promise<void>) | undefined;
 
   attachEnvironment(environment: Environment): void {
     this.environment = environment;
+  }
+
+  /**
+   * Where entering or leaving plan mode becomes durable — whether the tool did it or the host
+   * did (`setEnabled`, e.g. `/plan on`). Awaited by both: plan mode restricts the agent, so a
+   * change must not be reported done while a reopen could still come back in the other mode.
+   */
+  attachPersistence(persist: () => Promise<void>): void {
+    this.persist = persist;
   }
 
   get isActive(): boolean {
@@ -46,16 +57,18 @@ export class PlanMode {
     this.active = true;
     this.planId = id;
     this.filePath = path;
+    await this.persist?.();
     if (createFile) {
       await this.ensureDir(path);
       await this.writeEmpty(path);
     }
   }
 
-  exit(): void {
+  async exit(): Promise<void> {
     this.active = false;
     this.planId = null;
     this.filePath = null;
+    await this.persist?.();
   }
 
   /** Current state for journaling into an enter/exit tool result `details`. */
@@ -63,22 +76,15 @@ export class PlanMode {
     return { planActive: this.active, planId: this.planId, planFilePath: this.filePath };
   }
 
-  /** Rebuild from the log: the latest enter/exit result is the current plan-mode state.
-   *  Restores in-memory flags only — never re-creates the plan file (no side effects). */
-  reconstruct(entries: readonly AgentRecord[]): void {
-    let latest: PlanDetails | undefined;
-    for (const entry of entries) {
-      if (entry.type !== "context.append_message") continue;
-      const msg = entry.message;
-      if (msg.role !== "toolResult" || !isPlanToolName(msg.toolName)) continue;
-      const d = msg.details as Partial<PlanDetails> | undefined;
-      if (d && typeof d.planActive === "boolean") {
-        latest = { planActive: d.planActive, planId: d.planId ?? null, planFilePath: d.planFilePath ?? null };
-      }
-    }
-    this.active = latest?.planActive ?? false;
-    this.planId = latest?.planId ?? null;
-    this.filePath = latest?.planFilePath ?? null;
+  /**
+   * Restore from the value stored for plan mode (undefined: none). Restores in-memory flags
+   * only — never re-creates the plan file (no side effects), and persists nothing.
+   */
+  restore(value: unknown): void {
+    const d = isPlanDetails(value) ? value : undefined;
+    this.active = d?.planActive ?? false;
+    this.planId = d?.planId ?? null;
+    this.filePath = d?.planFilePath ?? null;
   }
 
   /** Set by the capability's provision; absent in a bare PlanMode (tests, replay). */
@@ -95,7 +101,7 @@ export class PlanMode {
    */
   async setEnabled(enabled: boolean, options: { readonly createFile?: boolean } = {}): Promise<PlanData> {
     if (enabled && !this.isActive) await this.enter(options.createFile ?? true);
-    else if (!enabled && this.isActive) this.exit();
+    else if (!enabled && this.isActive) await this.exit();
     const snapshot = await this.data();
     await this.announce?.(snapshot);
     return snapshot;
@@ -143,8 +149,10 @@ export class PlanMode {
   }
 }
 
-function isPlanToolName(name: string): boolean {
-  return (PLAN_TOOL_NAMES as readonly string[]).includes(name);
+function isPlanDetails(value: unknown): value is PlanDetails {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v["planActive"] === "boolean";
 }
 
 function isMissingFileError(error: unknown): boolean {

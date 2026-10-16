@@ -192,9 +192,13 @@ export class SessionService {
   async create(request: CreateManagedSessionRequest): Promise<ManagedSession> {
     const input = parseRequest(CreateSessionRequestSchema, request);
     const { agent, environment } = input;
-    const resolved = await this.environments.resolve(environment);
-    const now = Date.now();
     const sessionId = input.id ?? managedSessionId();
+    const resolved = await this.environments.resolve(environment, {
+      sessionId,
+      ...(this.ownerKey !== undefined ? { ownerKey: this.ownerKey } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    });
+    const now = Date.now();
     // Metadata is the write-ahead identity record: after the repository commits, a crash must
     // never leave a durable session the managed layer cannot resolve on restart.
     const claimed = await this.metadata.create({

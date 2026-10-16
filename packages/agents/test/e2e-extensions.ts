@@ -10,6 +10,7 @@ import {
   ListenerSink,
   LocalEnvironment,
   MemoryStore,
+  readAudit,
   Runner,
   Session,
   tool,
@@ -152,7 +153,9 @@ async function coreSurface(): Promise<void> {
   check("model.request carries the live conversation", sawContextOnModelRequest);
   check("step.start / step.end cover every step", seen.stepStart === 2 && seen.stepEnd === 2);
   check("run.settled fires at the terminal stop", seen.runSettled === 1);
-  check("actions.record journals a namespaced custom record", records.some((r) => r.type === "custom" && r.name === "extension:surface-extension:step-began"));
+  const audit = await readAudit(store);
+  check("actions.record writes a namespaced custom record to the audit shard", audit.some((r) => r.type === "custom" && r.name === "extension:surface-extension:step-began"));
+  check("actions.record stays out of the conversation log", !records.some((r) => r.type === "custom" && r.name.startsWith("extension:")));
   check("actions.getContextUsage returns a breakdown", typeof contextUsageTokens === "number" && contextUsageTokens > 0);
   check("registerInjector reaches the turn boundary", textOf(result.messages, "user").includes("INJECTED_BY_EXTENSION"));
   check("events still stream to plain sink subscribers", observed.some((event) => event.type === "agent.started"));

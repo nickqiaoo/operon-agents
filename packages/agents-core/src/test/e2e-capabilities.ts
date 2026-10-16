@@ -77,21 +77,9 @@ async function testExitPlanReviewAsk(environment: LocalEnvironment): Promise<voi
   const agent = defineAgent({ name: "planner", model, instructions: "x" });
 
   const store = new MemoryStore();
-  // Plan-mode state lives in the session branch now (not on the object): seed the EnterPlanMode
-  // result a real prior turn would have journaled, so openSession reconstructs plan mode as active.
-  await store.appendRecord({
-    address: "main",
-    type: "context.append_message",
-    message: {
-      role: "toolResult",
-      toolCallId: "seed-enter",
-      toolName: "EnterPlanMode",
-      content: [{ type: "text", text: "Plan mode active." }],
-      details: planMode.details(),
-      isError: false,
-      timestamp: Date.now(),
-    },
-  });
+  // Plan-mode state lives in the store (not on the object): seed the value a real prior turn
+  // would have stored on entering, so the open restores plan mode as active.
+  await store.putState("durable:plan:main", planMode.details());
   // No responder → the review ask reifies to a durable interrupt.
   const runner = testRunner({ environment, store, capabilities: [planCapability(planMode)], permission: { mode: "manual" } });
   const result = await runner.run(agent, "exit plan mode");

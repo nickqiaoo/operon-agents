@@ -47,7 +47,7 @@ function fixture(name: string, options: { readonly permission?: "yolo" | "manual
   const sessionWork = new MemorySessionWork({ repository });
   const service = new SessionService({ repository, metadataStore, environments, work: sessionWork });
   // A short heartbeat: it is what carries a cancel from another node to the holder.
-  const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork, renewIntervalMs: 30 });
+  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork, renewIntervalMs: 30 });
   const events = async (id: string): Promise<readonly AgentEvent[]> => (await service.listEvents(id, { limit: 500 })).data;
   const assistants = async (id: string): Promise<string[]> =>
     (await events(id))
@@ -148,7 +148,7 @@ async function resumeThroughTheLog(): Promise<void> {
   check("resume: the answer is accepted as a command", receipt.accepted);
 
   // A different worker — the one that paused could be on any node, or dead.
-  const other = new SessionWorker({
+  const other = new SessionWorker({ profile: "single-tenant",
     harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments, work: f.sessionWork,
   });
   await other.drain(session.id);

@@ -6,7 +6,9 @@ import { compareSequence, pageRecords } from "./log-store.ts";
 import { migrateRecord, WIRE_PROTOCOL_VERSION, WIRE_VERSION_KEY } from "./migrate.ts";
 import {
   type AgentRecord,
+  AUDIT_ADDRESS,
   DEFAULT_ADDRESS,
+  isCheckpointRecord,
   type ReadRecordPageOptions,
   type ReadRecordsFilter,
   type RecordPage,
@@ -93,17 +95,63 @@ export class DiskSessionStore implements SessionStore {
       else await this.ensureMetadata(address, dir);
       const stamped: AgentRecord = record.time !== undefined ? record : { ...record, time: Date.now() };
       const stored = await offloadRecord(stamped, this.blobStore);
-      return this.appendStored(dir, stored);
+      if (!isCheckpointRecord(record)) return this.appendStored(dir, stored);
+      // Index the shard's newest checkpoint by BYTE OFFSET, so a replay reads the file from
+      // there rather than from the top. Written after the line: a crash in between leaves the
+      // index at an older checkpoint, which is still a valid place to start.
+      const offset = await fileSize(join(dir, LOG_FILE));
+      const sequence = await this.appendStored(dir, stored);
+      await this.putState(checkpointOffsetKey(shardName(address)), { sequence, offset } satisfies CheckpointOffset);
+      return sequence;
     });
   }
 
   async *readRecords(filter?: ReadRecordsFilter): AsyncIterable<AgentRecord> {
-    const shards = filter?.address !== undefined ? [shardName(filter.address)] : await this.listShards();
+    const shards = filter?.address !== undefined ? [shardName(filter.address)] : await this.conversationShards();
+    if (filter?.fromCheckpoint === true) {
+      const all: StoredAgentRecord[] = [];
+      for (const shard of shards) {
+        const tail = await this.readFromCheckpoint(shard);
+        if (tail !== undefined) all.push(...tail);
+        else for await (const item of this.readShardDecoded(shard)) all.push(item);
+      }
+      if (shards.length > 1) all.sort((a, b) => compareSequence(a.sequence, b.sequence));
+      for (const item of all) yield item.record;
+      return;
+    }
     for (const item of await this.readStored(shards)) yield item.record;
   }
 
+  /**
+   * The shard's records from its indexed checkpoint on — the file read from that byte offset,
+   * nothing before it. Undefined when there is no index or it does not land on that checkpoint
+   * (the caller reads the whole shard instead, which is always correct).
+   */
+  private async readFromCheckpoint(shard: string): Promise<StoredAgentRecord[] | undefined> {
+    const index = await this.getState(checkpointOffsetKey(shard));
+    if (!isCheckpointOffset(index)) return undefined;
+    const filePath = join(this.sessionDir, AGENTS_DIR, shard, LOG_FILE);
+    const raw = await readFileFrom(filePath, index.offset);
+    if (raw === undefined) return undefined;
+    const version = await this.version();
+    const out: StoredAgentRecord[] = [];
+    try {
+      for (const stored of parseLogLines(raw, filePath)) {
+        if (out.length === 0 && stored.sequence !== index.sequence) return undefined;
+        const migrated = migrateRecord(stored.record, version);
+        if (migrated === null) continue;
+        out.push({ sequence: stored.sequence, record: await rehydrateRecord(migrated, this.blobStore) });
+      }
+    } catch {
+      // The offset no longer lands on a line boundary (the file was replaced underneath us).
+      return undefined;
+    }
+    const head = out[0];
+    return head !== undefined && head.sequence === index.sequence && isCheckpointRecord(head.record) ? out : undefined;
+  }
+
   async readRecordPage(options: ReadRecordPageOptions): Promise<RecordPage> {
-    const shards = options.address !== undefined ? [shardName(options.address)] : await this.listShards();
+    const shards = options.address !== undefined ? [shardName(options.address)] : await this.conversationShards();
     return pageRecords(await this.readStored(shards), options);
   }
 
@@ -244,9 +292,25 @@ export class DiskSessionStore implements SessionStore {
     const withMeta = withLeadingMetadata(lines, shardAddress(shard));
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`;
-    await writeFile(tmp, withMeta.length > 0 ? `${withMeta.map((line) => JSON.stringify(line)).join("\n")}\n` : "", { encoding: "utf-8", mode: 0o600 });
+    const encoded = withMeta.map((line) => `${JSON.stringify(line)}\n`);
+    await writeFile(tmp, encoded.join(""), { encoding: "utf-8", mode: 0o600 });
     await rename(tmp, target);
     this.metadataChecked.add(shardAddress(shard));
+    // The rewrite moved every line, so re-point the checkpoint index at the new byte offset.
+    let offset = 0;
+    let newest: CheckpointOffset | undefined;
+    for (let i = 0; i < withMeta.length; i++) {
+      if (isCheckpointRecord(withMeta[i]!.record as { type: string })) newest = { sequence: withMeta[i]!.sequence, offset };
+      offset += Buffer.byteLength(encoded[i]!, "utf-8");
+    }
+    if (newest !== undefined) await this.putState(checkpointOffsetKey(shard), newest);
+    else await this.deleteState(checkpointOffsetKey(shard));
+  }
+
+  /** Every shard a read without an address covers: all of them but the audit shard. */
+  private async conversationShards(): Promise<string[]> {
+    const audit = shardName(AUDIT_ADDRESS);
+    return (await this.listShards()).filter((shard) => shard !== audit);
   }
 
   private async listShards(): Promise<string[]> {
@@ -351,6 +415,54 @@ function shardAddress(shard: string): string {
   return shard;
 }
 
+/** Where a shard's newest checkpoint line starts in its log file. */
+interface CheckpointOffset {
+  readonly sequence: string;
+  readonly offset: number;
+}
+
+function checkpointOffsetKey(shard: string): StateKey {
+  return `checkpoint-offset:${shard}`;
+}
+
+function isCheckpointOffset(value: unknown): value is CheckpointOffset {
+  if (typeof value !== "object" || value === null) return false;
+  const { sequence, offset } = value as Record<string, unknown>;
+  return typeof sequence === "string" && /^[1-9]\d*$/.test(sequence) && typeof offset === "number" && Number.isSafeInteger(offset) && offset >= 0;
+}
+
+async function fileSize(filePath: string): Promise<number> {
+  try {
+    return (await stat(filePath)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** The file's contents from byte `offset` to its end, or undefined when it is shorter than that. */
+async function readFileFrom(filePath: string, offset: number): Promise<string | undefined> {
+  let handle;
+  try {
+    handle = await open(filePath, "r");
+  } catch {
+    return undefined;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (offset > size) return undefined;
+    const buffer = Buffer.alloc(size - offset);
+    let read = 0;
+    while (read < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, read, buffer.length - read, offset + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return buffer.subarray(0, read).toString("utf-8");
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Yield each well-formed JSON record of a log file (a torn trailing line is tolerated). */
 async function* readRawLines(filePath: string): AsyncIterable<StoredDiskRecord> {
   let raw: string;
@@ -359,6 +471,11 @@ async function* readRawLines(filePath: string): AsyncIterable<StoredDiskRecord> 
   } catch {
     return;
   }
+  yield* parseLogLines(raw, filePath);
+}
+
+/** The records of a log file's text (all of it, or a suffix starting on a line boundary). */
+function* parseLogLines(raw: string, filePath: string): Iterable<StoredDiskRecord> {
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.replace(/\r$/, "");

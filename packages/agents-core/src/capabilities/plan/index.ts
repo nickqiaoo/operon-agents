@@ -1,5 +1,5 @@
+import { DEFAULT_ADDRESS } from "../../store/index.ts";
 import type { Capability } from "../capability.ts";
-import { readSessionLog } from "../capability-state.ts";
 import { PlanMode } from "./plan-mode.ts";
 import { enterPlanModeTool, exitPlanModeTool } from "./tools.ts";
 import {
@@ -31,10 +31,16 @@ export function planCapability(planMode: PlanMode = new PlanMode()): Capability 
     ],
     injectors: [new PlanModeInjector(planMode)],
     service: planMode,
+    // The mode is SESSION state (see above): it lives in `main`.
+    durableState: {
+      snapshot: (address) => (address === DEFAULT_ADDRESS ? planMode.details() : undefined),
+      restore: (address, value) => {
+        if (address === DEFAULT_ADDRESS) planMode.restore(value);
+      },
+    },
     openSession: async (ctx) => {
       planMode.attachEnvironment(ctx.environment);
-      // Rebuild plan-mode state from the log's latest enter/exit result (resume/fork aware).
-      planMode.reconstruct(await readSessionLog(ctx));
+      planMode.attachPersistence(() => ctx.persistState());
       planMode.attachAnnouncer(async (snapshot) => {
         await ctx.events.emit({ type: "plan.updated", snapshot, address: "main", sessionId: ctx.sessionId });
       });

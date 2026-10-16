@@ -104,6 +104,8 @@ async function repositoryContract(name: string, repo: SessionRepository, workDir
 
   await created.store.appendRecord(msg("hello", 1, "main"));
   await created.store.putState("interrupt", { step: 7 });
+  await created.store.putState("durable:todo:main/sub-1", { todos: [{ title: "child", status: "pending" }] });
+  await created.store.putState("session:permission", { mode: "yolo", grants: ["Bash(ls)"] });
   check(`${name}: catalog reflects durable interruption`, (await repo.get(created.id))?.durableState === "interrupted");
 
   const reopened = await repo.open(created.id);
@@ -126,6 +128,10 @@ async function repositoryContract(name: string, repo: SessionRepository, workDir
   const forkRecords = await collect(forked.store.readRecords());
   check(`${name}: fork carried the log`, texts(forkRecords) === "hello");
   check(`${name}: fork carried the KV`, JSON.stringify(await forked.store.getState("interrupt")) === JSON.stringify({ step: 7 }));
+  check(
+    `${name}: fork carried session and capability state`,
+    (await forked.store.getState("durable:todo:main/sub-1")) !== null && JSON.stringify(await forked.store.getState("session:permission")) === JSON.stringify({ mode: "yolo", grants: ["Bash(ls)"] }),
+  );
   check(`${name}: fork carried durable state into catalog`, (await repo.get(forked.id))?.durableState === "interrupted");
 
   await created.store.deleteState("interrupt");

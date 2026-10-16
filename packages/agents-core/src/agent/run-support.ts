@@ -71,7 +71,7 @@ export function historyChangeEmitter(events: EventSink, sessionId: string): Hist
       case "context.apply_compaction":
         void events.emit({
           type: "history.compacted",
-          cutoff: record.cutoff,
+          cutoff: record.compactedCount,
           summary: record.summary,
           summaryTimestamp: record.summaryTimestamp,
           ...(record.loadedTools !== undefined ? { loadedTools: record.loadedTools } : {}),

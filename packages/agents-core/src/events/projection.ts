@@ -2,9 +2,13 @@ import type { Message, TextContent, ThinkingContent, Usage } from "../protocol/i
 import type { PromptOrigin } from "../store/origin.ts";
 import {
   type AgentRecord,
+  type CheckpointRecord,
+  DEFAULT_ADDRESS,
   foldAppend,
   foldCompaction,
+  foldCompactionRecord,
   foldReplace,
+  isCheckpointRecord,
   type SessionStore,
 } from "../store/store.ts";
 import type { ToolInputRequest, ToolUpdate } from "../tool/types.ts";
@@ -210,6 +214,37 @@ interface AgentState {
 
 const DEFAULT_SNAPSHOT_MAX_MESSAGES = 200;
 
+/**
+ * One address's durable non-history state at a checkpoint (`checkpoint["#frame"]`): what was
+ * folded from lifecycle events that may sit BEFORE the checkpoint — a compaction runs inside a
+ * turn, so the `agent.started` and `turn.started` it happened under are behind it. History is
+ * not here (the checkpoint record carries it), and neither is anything live-only (streaming
+ * tails, in-flight parts), which no replay could recover anyway.
+ */
+export interface FrameCheckpoint {
+  readonly agent?: string;
+  readonly parentToolCallId?: string;
+  readonly live: boolean;
+  readonly turn?: {
+    readonly turnId: string;
+    readonly origin?: PromptOrigin;
+    readonly step: number;
+    readonly stepId?: string;
+    readonly toolCalls: readonly ProjectedToolCall[];
+    readonly paused?: readonly PendingRunInterrupt[];
+  };
+  readonly pendingSteers: readonly ProjectedPendingSteer[];
+  readonly usage?: Usage;
+}
+
+export interface SessionProjectionOptions {
+  /**
+   * Fold message history (default true). False keeps only the lifecycle side — what a
+   * checkpoint's `#frame` needs — without holding any message references.
+   */
+  readonly history?: boolean;
+}
+
 interface WorkflowRunState {
   runId: string;
   toolCallId?: string;
@@ -228,9 +263,11 @@ export class SessionProjection {
   private readonly listeners = new Set<ProjectionListener>();
   private detachFn?: () => void;
   private lastEventId?: string;
+  private readonly trackHistory: boolean;
 
-  constructor(sessionId: string) {
+  constructor(sessionId: string, options: SessionProjectionOptions = {}) {
     this.sessionId = sessionId;
+    this.trackHistory = options.history !== false;
   }
 
   /**
@@ -245,15 +282,64 @@ export class SessionProjection {
    */
   static async attach(source: ProjectionSource, preloadedLog?: readonly AgentRecord[]): Promise<SessionProjection> {
     const projection = new SessionProjection(source.id);
-    const records = preloadedLog ?? (source.store !== undefined ? await collectRecords(source.store) : []);
-    for (const record of records) {
-      const event = agentEventFromRecord(record, source.id);
-      if (event !== undefined) projection.apply(event, record.time);
-    }
+    const records = preloadedLog ?? (source.store !== undefined ? await readSessionTails(source.store) : []);
+    for (const record of records) projection.applyRecord(record);
     projection.detachFn = source.events.subscribe((event) => {
       projection.apply(event);
     });
     return projection;
+  }
+
+  /**
+   * Fold one durable record (replay). A checkpoint is folded as what it is — a self-contained
+   * reset of the address's history — and, when it is the first record seen for its address
+   * (the shard was read from that checkpoint on), it also seeds the address's lifecycle from
+   * its `#frame`. So a whole log and a log of shard tails fold to the same state.
+   */
+  applyRecord(record: AgentRecord): void {
+    if (!isCheckpointRecord(record)) {
+      const event = agentEventFromRecord(record, this.sessionId);
+      if (event !== undefined) this.apply(event, record.time);
+      return;
+    }
+    const address = record.address ?? DEFAULT_ADDRESS;
+    const fresh = !this.agents.has(address);
+    const state = this.stateFor(address);
+    if (fresh) seedFrame(state, record.checkpoint?.["#frame"] as FrameCheckpoint | undefined);
+    if (this.trackHistory) resetHistory(state, record);
+    if (record.time !== undefined) state.lastEventAt = record.time;
+    if (record.eventId !== undefined) this.lastEventId = record.eventId;
+  }
+
+  /** True once anything has been folded for `address`. */
+  has(address: string): boolean {
+    return this.agents.has(address);
+  }
+
+  /** `address`'s durable lifecycle state, for a checkpoint of its shard. */
+  frameCheckpoint(address: string): FrameCheckpoint {
+    const state = this.agents.get(address);
+    if (state === undefined) return { live: false, pendingSteers: [] };
+    const turn = state.turn;
+    return {
+      ...(state.agent !== undefined ? { agent: state.agent } : {}),
+      ...(state.parentToolCallId !== undefined ? { parentToolCallId: state.parentToolCallId } : {}),
+      live: state.live,
+      ...(turn !== undefined
+        ? {
+            turn: {
+              turnId: turn.turnId,
+              ...(turn.origin !== undefined ? { origin: turn.origin } : {}),
+              step: turn.step,
+              ...(turn.stepId !== undefined ? { stepId: turn.stepId } : {}),
+              toolCalls: [...turn.toolCalls.values()].map((call) => ({ ...call })),
+              ...(turn.paused !== undefined ? { paused: turn.paused } : {}),
+            },
+          }
+        : {}),
+      pendingSteers: [...state.pendingSteers],
+      ...(state.usage !== undefined ? { usage: state.usage } : {}),
+    };
   }
 
   /** Stop receiving live events (the projection keeps its last state). */
@@ -476,7 +562,7 @@ export class SessionProjection {
         break;
       }
       case "message.appended": {
-        foldAppend(state, event.message, event.origin);
+        if (this.trackHistory) foldAppend(state, event.message, event.origin);
         const turn = state.turn;
         if (turn !== undefined && event.message.role === "assistant") {
           // The step's parts are now durable inside this message.
@@ -512,10 +598,10 @@ export class SessionProjection {
       // transcript watched live and the same transcript after a reopen cannot diverge —
       // which they silently did while these mutations were journaled but never broadcast.
       case "history.replaced":
-        foldReplace(state, event.messages, event.origins);
+        if (this.trackHistory) foldReplace(state, event.messages, event.origins);
         break;
       case "history.compacted":
-        foldCompaction(state, event.cutoff, event.summary, event.summaryTimestamp, event.loadedTools);
+        if (this.trackHistory) foldCompaction(state, event.cutoff, event.summary, event.summaryTimestamp, event.loadedTools);
         break;
       case "steer.queued":
         state.pendingSteers.push({
@@ -613,10 +699,59 @@ export class SessionProjection {
   }
 }
 
-async function collectRecords(store: SessionStore): Promise<readonly AgentRecord[]> {
-  const records: AgentRecord[] = [];
-  for await (const record of store.readRecords()) records.push(record);
-  return records;
+/**
+ * Every shard of the log, each read from its newest checkpoint on (append order across shards)
+ * — what a projection or a session open needs, since each checkpoint carries the history and the
+ * `#frame` before it. A shard whose newest checkpoint was written without a `#frame` (outside a
+ * session) is read whole instead, so its lifecycle is folded from its head.
+ */
+export async function readSessionTails(store: SessionStore): Promise<AgentRecord[]> {
+  const tails: AgentRecord[] = [];
+  for await (const record of store.readRecords({ fromCheckpoint: true })) tails.push(record);
+  const seen = new Set<string>();
+  const incomplete = new Set<string>();
+  for (const record of tails) {
+    const address = record.address ?? DEFAULT_ADDRESS;
+    if (seen.has(address)) continue;
+    seen.add(address);
+    if (isCheckpointRecord(record) && record.checkpoint?.["#frame"] === undefined) incomplete.add(address);
+  }
+  if (incomplete.size === 0) return tails;
+  const out = tails.filter((record) => !incomplete.has(record.address ?? DEFAULT_ADDRESS));
+  for (const address of incomplete) {
+    for await (const record of store.readRecords({ address })) out.push(record);
+  }
+  // Re-merge in append order. Records carry no sequence here, so order by time; within one
+  // address the shard's own order is kept (stable sort).
+  return out.sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
+}
+
+function seedFrame(state: AgentState, frame: FrameCheckpoint | undefined): void {
+  if (frame === undefined) return;
+  if (frame.agent !== undefined) state.agent = frame.agent;
+  if (frame.parentToolCallId !== undefined) state.parentToolCallId = frame.parentToolCallId;
+  state.live = frame.live;
+  if (frame.turn !== undefined) {
+    state.turn = {
+      turnId: frame.turn.turnId,
+      ...(frame.turn.origin !== undefined ? { origin: frame.turn.origin } : {}),
+      step: frame.turn.step,
+      ...(frame.turn.stepId !== undefined ? { stepId: frame.turn.stepId } : {}),
+      parts: [],
+      textTail: "",
+      thinkingTail: "",
+      toolCalls: new Map(frame.turn.toolCalls.map((call) => [call.toolCallId, { ...call }])),
+      ...(frame.turn.paused !== undefined ? { paused: frame.turn.paused } : {}),
+    };
+  }
+  state.pendingSteers = [...frame.pendingSteers];
+  if (frame.usage !== undefined) state.usage = frame.usage;
+}
+
+/** A checkpoint replayed on its own: the history becomes exactly what the record holds. */
+function resetHistory(state: AgentState, record: CheckpointRecord): void {
+  if (record.type === "context.replace") foldReplace(state, record.messages, record.origins);
+  else foldCompactionRecord(state, record);
 }
 
 function snapshotAgent(state: AgentState, maxMessages?: number): AgentSnapshot {

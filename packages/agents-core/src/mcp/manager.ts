@@ -10,6 +10,7 @@ import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.
 import type { Capability, SessionContext, RunContext, Tool, ToolProvider } from "../index.ts";
 import type { EventSink } from "../events/index.ts";
 import type { McpServerConfig } from "../config/schema.ts";
+import type { McpCredential, McpCredentialProvider, McpCredentialRequest } from "./credentials.ts";
 
 export type McpServerStatus = "pending" | "connected" | "failed" | "disabled" | "needs-auth";
 
@@ -108,16 +109,19 @@ const REAL_TIMER: McpTimer = {
 
 const DEFAULT_CACHE_TOOLS = true;
 
-export type McpTransportFactory = (name: string, config: McpServerConfig) => MCPTransport;
+/** `credential` is what an {@link McpCredentialProvider} gave for this connect, if anything. */
+export type McpTransportFactory = (name: string, config: McpServerConfig, credential?: McpCredential) => MCPTransport;
 
 export interface ServerFromConfigOptions {
   readonly oauthService?: McpOAuthService;
   readonly cacheToolsList?: boolean;
   readonly transport?: MCPTransport;
+  /** A provider's answer for this connect. Takes the place of the OAuth service. */
+  readonly credential?: McpCredential;
 }
 
 export function serverFromConfig(name: string, config: McpServerConfig, opts: ServerFromConfigOptions = {}): TransportMCPServer {
-  const transport = opts.transport ?? transportFromConfig(name, config, opts.oauthService);
+  const transport = opts.transport ?? transportFromConfig(name, config, opts.oauthService, opts.credential);
   const filter = staticFilterFromConfig(config);
   return new TransportMCPServer({
     name,
@@ -138,7 +142,7 @@ function staticFilterFromConfig(config: McpServerConfig): MCPToolFilterStatic | 
   };
 }
 
-function transportFromConfig(name: string, config: McpServerConfig, oauthService?: McpOAuthService): MCPTransport {
+function transportFromConfig(name: string, config: McpServerConfig, oauthService?: McpOAuthService, credential?: McpCredential): MCPTransport {
   if (config.transport === "stdio") {
     if (config.command === undefined) throw new Error(`MCP server "${name}": stdio transport requires "command".`);
     return mcpStdioTransport({
@@ -151,11 +155,12 @@ function transportFromConfig(name: string, config: McpServerConfig, oauthService
     });
   }
   if (config.url === undefined) throw new Error(`MCP server "${name}": http transport requires "url".`);
-  const oauthProvider = resolveOAuthProvider(name, config, oauthService);
+  const oauthProvider = credential === undefined ? resolveOAuthProvider(name, config, oauthService) : undefined;
+  const headers = config.headers ?? (credential !== undefined ? { ...credential.headers } : undefined);
   return mcpStreamableHttpTransport({
     name,
     url: config.url,
-    ...(config.headers !== undefined ? { headers: config.headers } : {}),
+    ...(headers !== undefined ? { headers } : {}),
     ...(config.bearerTokenEnvVar !== undefined ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
     ...(config.toolTimeoutMs !== undefined ? { toolTimeoutMs: config.toolTimeoutMs } : {}),
     ...(oauthProvider !== undefined ? { oauthProvider } : {}),
@@ -193,6 +198,7 @@ interface ControllerOptions {
   readonly name: string;
   readonly config: McpServerConfig;
   readonly oauthService?: McpOAuthService;
+  readonly credentials?: McpCredentialProvider;
   readonly cacheToolsList: boolean;
   readonly transportFactory?: McpTransportFactory;
   readonly onStatusChange?: McpStatusListener;
@@ -205,6 +211,7 @@ class McpServerController {
   readonly name: string;
   private readonly config: McpServerConfig;
   private readonly oauthService: McpOAuthService | undefined;
+  private readonly credentials: McpCredentialProvider | undefined;
   private readonly cacheToolsList: boolean;
   private readonly transportFactory: McpTransportFactory | undefined;
   private readonly onStatusChange: McpStatusListener | undefined;
@@ -225,6 +232,7 @@ class McpServerController {
     this.name = opts.name;
     this.config = opts.config;
     this.oauthService = opts.oauthService;
+    this.credentials = opts.credentials;
     this.cacheToolsList = opts.cacheToolsList;
     this.transportFactory = opts.transportFactory;
     this.onStatusChange = opts.onStatusChange;
@@ -259,18 +267,31 @@ class McpServerController {
     await this.attempt();
   }
 
-  private async attempt(): Promise<McpServerStatus> {
+  /** The provider's request for this server, when the provider is the one to ask: an http
+   *  server whose config carries no credential of its own. */
+  private credentialRequest(): McpCredentialRequest | undefined {
+    if (this.credentials === undefined) return undefined;
+    if (this.config.transport !== "http" || this.config.url === undefined) return undefined;
+    if (this.config.headers !== undefined || this.config.bearerTokenEnvVar !== undefined) return undefined;
+    return { serverName: this.name, url: this.config.url, sessionId: this.session?.sessionId ?? "" };
+  }
+
+  private async attempt(retriedAuth = false): Promise<McpServerStatus> {
     // Attempts can overlap: a manual reconnect() can fire while an in-flight attempt is still
     // awaiting connect(). Every mutation of the shared `this.server` slot is therefore guarded
     // by identity — an attempt only ever publishes/retracts the server IT created, never a
     // sibling's. Without this, a losing attempt's cleanup would tear down the winner's live
     // connection (and a stale connect() success would leak an orphaned server/child process).
     let server: TransportMCPServer | undefined;
+    const request = this.credentialRequest();
+    let credential: McpCredential | undefined;
     try {
+      if (request !== undefined) credential = await this.credentials!.credentialsFor(request);
       server = serverFromConfig(this.name, this.config, {
         ...(this.oauthService !== undefined ? { oauthService: this.oauthService } : {}),
         cacheToolsList: this.cacheToolsList,
-        ...(this.transportFactory !== undefined ? { transport: this.transportFactory(this.name, this.config) } : {}),
+        ...(credential !== undefined ? { credential } : {}),
+        ...(this.transportFactory !== undefined ? { transport: this.transportFactory(this.name, this.config, credential) } : {}),
       });
       const mine = server;
       this.server = mine;
@@ -291,6 +312,14 @@ class McpServerController {
     } catch (error) {
       // React only if we're still the current attempt; a superseding attempt owns the state.
       const current = this.server === server || this.server === undefined;
+      // The provider's credential was refused: let it refresh, then try once more with whatever
+      // it hands out next. Once only — a credential that is still refused is a failure.
+      if (current && !retriedAuth && credential !== undefined && this.credentials?.invalidate !== undefined && isUnauthorizedLikeError(error)) {
+        await server?.close().catch(() => undefined);
+        if (this.server === server) this.server = undefined;
+        await Promise.resolve(this.credentials.invalidate(request!)).catch(() => undefined);
+        return this.attempt(true);
+      }
       if (current) {
         this.cancelKeepAlive();
         if (this.shouldMarkNeedsAuth(error)) {
@@ -475,6 +504,8 @@ class McpServerController {
 
 export interface McpServersCapabilityOptions {
   readonly oauthService?: McpOAuthService;
+  /** Credentials the host hands out per connect. See {@link McpCredentialProvider}. */
+  readonly credentials?: McpCredentialProvider;
   /**
    * Transports this host is willing to run. Omitted means both — the local default, and what
    * every existing caller gets. A server host passes `["http"]`; see
@@ -576,6 +607,7 @@ export function createMcpServers(
         name,
         config,
         ...(options.oauthService !== undefined ? { oauthService: options.oauthService } : {}),
+        ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
         cacheToolsList: options.cacheToolsList ?? DEFAULT_CACHE_TOOLS,
         ...(options.transportFactory !== undefined ? { transportFactory: options.transportFactory } : {}),
         ...(options.reconnectPolicy !== undefined ? { reconnectPolicy: options.reconnectPolicy } : {}),

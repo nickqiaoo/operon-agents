@@ -16,8 +16,10 @@ export type AgentRecord = {
   readonly eventId?: string;
   /** Wall-clock stamp (ms). Set by the store if the writer omitted it. */
   readonly time?: number;
-  /** Which conversation shard this record belongs to (defaults to `main`). */
+  /** Which shard this record belongs to (defaults to `main`). */
   readonly address?: string;
+  /** On a record in the audit shard (`AUDIT_ADDRESS`): the conversation shard it is about. */
+  readonly about?: string;
 } & AgentRecordBody;
 
 export type AgentRecordBody =
@@ -27,29 +29,37 @@ export type AgentRecordBody =
   // `origin`: structured provenance (user / injection / background_task / cron / compaction).
   // Reducers and UI routing read it instead of parsing rendered text.
   | { readonly type: "context.append_message"; readonly message: Message; readonly origin?: PromptOrigin }
-  // The whole history was explicitly replaced — the reducer resets to this
-  // list so a resumed context matches what the new agent saw live. Origins are parallel to
-  // messages and optional for backward compatibility with older logs.
+  // ── Checkpoints ──
+  // The two history RESETS. Each is self-contained: the history after it is a function of the
+  // record alone, never of what came before — so a shard can be replayed starting AT its newest
+  // checkpoint instead of at its head (see `ReadRecordsFilter.fromCheckpoint`). `checkpoint`
+  // carries the shard's lifecycle at the same instant, which the history alone cannot rebuild
+  // (see `CheckpointState`).
+  //
+  // The whole history was explicitly replaced (micro-compaction's trim commits through this).
   | {
       readonly type: "context.replace";
       readonly messages: readonly Message[];
       readonly origins?: readonly (PromptOrigin | null)[];
+      readonly checkpoint?: CheckpointState;
     }
-  // Compaction, anchored by a `cutoff` COUNT (not an entry id): the reducer drops the first
-  // `cutoff` history messages and prepends the summary. A linear log has stable positions, so
-  // a count is sufficient — no id-anchoring needed. Every model-visible context message,
-  // including injections, is journaled, so live and replay use the same count.
+  // Compaction: the history becomes `[summary, ...kept]`. `kept` is the tail the summary did not
+  // replace — journaled in full so the record does not depend on the messages before it.
+  // `compactedCount` is how many leading messages the summary replaced (the live splice).
   | {
       readonly type: "context.apply_compaction";
       readonly summary: string;
       /** Timestamp of the live summary message, so cold replay rebuilds it byte-for-byte. */
-      readonly summaryTimestamp?: number;
-      readonly cutoff: number;
+      readonly summaryTimestamp: number;
+      readonly kept: readonly Message[];
+      /** Parallel to `kept`. */
+      readonly keptOrigins?: readonly (PromptOrigin | null)[];
       readonly compactedCount: number;
       readonly tokensBefore: number;
       readonly tokensAfter: number;
       /** See `CompactionSummaryOrigin.loadedTools`; folded onto the summary's origin. */
       readonly loadedTools?: readonly LoadedToolSchema[];
+      readonly checkpoint?: CheckpointState;
     }
   // A host-injected message that should enter the model's context.
   | {
@@ -60,7 +70,10 @@ export type AgentRecordBody =
       readonly details?: unknown;
       readonly origin?: PromptOrigin;
     }
-  // ── Audit-only (NOT reduced into history) ──
+  // ── Not reduced into history ──
+  // A turn's usage: in the conversation shard because it is a durable EVENT (`usage.updated`),
+  // which `events.list` pages through by the shard's sequence. The session's running total is
+  // state (`session:usage`), not part of this record.
   | {
       readonly type: "usage.record";
       readonly model?: string;
@@ -69,6 +82,7 @@ export type AgentRecordBody =
       /** Run-total usage at this boundary, projected as `usage.updated`. */
       readonly total?: Usage;
     }
+  // ── Audit (written to the audit shard, `AUDIT_ADDRESS`, via `appendAudit`) ──
   | {
       readonly type: "permission.record_approval";
       readonly toolCallId: string;
@@ -78,19 +92,13 @@ export type AgentRecordBody =
       /** The approval-rule subject of the approved call — the pattern an
        *  `approve for session` grant memorizes. */
       readonly approvalRule?: string;
-      /** "session" when the user granted approve-for-session; folded back into the
-       *  session's approval-pattern set on reopen. */
+      /** "session" when the user granted approve-for-session. Audit only: the session's grants
+       *  are restored from its stored permission state (`session:permission`). */
       readonly scope?: string;
     }
-  // Runtime permission-mode change: replayed on session open
-  // so the mode survives restarts. Last record wins.
+  // Runtime permission-mode change. Audit only: a reopen restores the mode from the session's
+  // stored permission state (`session:permission`).
   | { readonly type: "permission.set_mode"; readonly mode: string }
-  | {
-      readonly type: "config.update";
-      readonly model?: string;
-      readonly thinking?: string;
-      readonly tools?: readonly string[];
-    }
   /** Durable commit record for transferring the conversation head to a new root shard. */
   | {
       readonly type: "agent.handoff";
@@ -129,11 +137,34 @@ export type AgentRecordBody =
   | { readonly type: "custom"; readonly name: string; readonly data: unknown };
 
 /**
- * THE STORAGE RULE — what lives where:
+ * What a checkpoint carries besides the history: the shard's lifecycle at that instant
+ * (`#frame` — its agent, open turn, queued steers; see `FrameCheckpoint`), which a reader
+ * starting at the checkpoint could not otherwise fold, since the turn that compacted began
+ * before it. Session and capability state are NOT here: they live in the store's key/value
+ * side as current values (see `CapabilityDurableState`).
+ */
+export type CheckpointState = Readonly<Record<string, unknown>>;
+
+export type CheckpointRecord = Extract<AgentRecord, { type: "context.replace" | "context.apply_compaction" }>;
+
+/** True for the self-contained history resets a shard can be replayed from. */
+export function isCheckpointRecord(record: { readonly type: string }): record is CheckpointRecord {
+  return record.type === "context.replace" || record.type === "context.apply_compaction";
+}
+
+/**
+ * THE STORAGE RULE — what lives where (every record type, event and KV key is tabulated in
+ * docs/records-and-events.md; add a row there when you add one):
  *
- * - The append log (①) is the record for CONVERSATION-derived state. Anything whose loss
- *   loses conversation information — history, audit — is a record, and its current-state
- *   views are REDUCTIONS of it (a forward pass over the shard's records).
+ * - The append log (①) is the record of the CONVERSATION: what the model saw (history, read
+ *   from the shard's newest checkpoint — see `isCheckpointRecord`), the durable events a client
+ *   pages through (`event.lifecycle`, `usage.record`, `guardrail.blocked`), and the structure a
+ *   resume follows (handoff commits, subagent meta, workflow journals, managed control input).
+ *   Current state is NOT a reduction of it: the session and its capabilities keep their state as
+ *   current values in KV (② (e)), and a reopen reads those, never the log.
+ * - AUDIT lives in its own shard (`AUDIT_ADDRESS`): approvals, permission-mode changes, a
+ *   capability's own records, engine diagnostics. Nothing restores, replays or projects from
+ *   it, a read without an address leaves it out, and its writes are best effort.
  * - BACKGROUND-TASK lifecycle is the one deliberate exception: a background task's status
  *   (running → completed/failed/lost) lives in a dedicated per-task store, NOT a reduction of
  *   the log — disk sessions keep it under `<sessionDir>/tasks/<id>/`, other backends in KV
@@ -143,10 +174,12 @@ export type AgentRecordBody =
  *   truth. `session.background?.listSubagents() ?? []`/`listWorkflows()` PROJECT that task store — a foreground
  *   subagent/workflow is a plain tool call (conversation + its own shard), never a task.
  * - KV state (②) may hold only (a) handles to external systems (`environment`), (b)
- *   rebuildable foreground control state (`interrupt`), (c) capability current-state (goal/plan/permission/
- *   config/cron/subagents), and (d) the background task store on non-disk backends. If deleting
- *   a KV key would lose information not recoverable elsewhere, that information belonged in the
- *   log or the task store.
+ *   rebuildable foreground control state (`interrupt`) and indexes (`checkpoint:*` — where a
+ *   shard's newest checkpoint is), (c) capability current-state a capability keeps there itself
+ *   (cron/subagents), (d) the background task store on non-disk backends, and (e) session and
+ *   capability durable state — `session:permission`, `session:usage`, and each
+ *   `CapabilityDurableState` under `durable:<capability>:<address>` — which is the authority
+ *   for that state: the log keeps what the model saw of it, never its current value.
  * - The Environment filesystem holds work products (process logs, plan drafts) —
  *   cache-grade relative to the log; harvest what must outlive it into a record.
  * - Pure runtime (live output tails) is not storage at all: its durable record is the
@@ -155,7 +188,58 @@ export type AgentRecordBody =
 export type StateKey = "interrupt" | "meta" | "environment" | "cron" | (string & {});
 
 export interface ReadRecordsFilter {
+  /** One shard. Without it, every CONVERSATION shard — the audit shard (`AUDIT_ADDRESS`) is only
+   *  ever read by naming it, so no whole-log reader (a reopen, a projection, `events.list`) pays
+   *  for it or sees it. */
   readonly address?: string;
+  /**
+   * Start at the shard's newest checkpoint (see `isCheckpointRecord`) instead of its head —
+   * without `address`, EVERY shard from its own newest checkpoint, merged in append order.
+   * Replaying from a checkpoint yields the same history and state as replaying the whole shard,
+   * because a checkpoint does not depend on what precedes it — so a store that cannot locate one
+   * (or does not implement this) may return the whole shard, and the result is still correct,
+   * only slower.
+   */
+  readonly fromCheckpoint?: boolean;
+}
+
+/**
+ * The audit shard: records about the session that nothing restores, replays or projects from —
+ * approvals, permission-mode changes, an extension's own records (`SessionContext.record`), and
+ * the engine's diagnostics. It is an ordinary shard to the backends (so a fork copies it and a
+ * delete removes it), but a read without an address leaves it out, and writing to it is best
+ * effort: losing an audit record never changes what the session does.
+ */
+export const AUDIT_ADDRESS = "audit";
+
+/** Append `body` to the audit shard; `about` names the conversation shard it concerns. */
+export function appendAudit(store: SessionStore, body: AgentRecordBody, about?: string): Promise<string> {
+  return store.appendRecord({ ...body, address: AUDIT_ADDRESS, ...(about !== undefined ? { about } : {}) } as AgentRecord);
+}
+
+/** The audit shard's records in append order (its leading `metadata` record left out). */
+export async function readAudit(store: SessionStore): Promise<AgentRecord[]> {
+  const out: AgentRecord[] = [];
+  for await (const record of store.readRecords({ address: AUDIT_ADDRESS })) {
+    if (record.type !== "metadata") out.push(record);
+  }
+  return out;
+}
+
+/** Where capability `owner`'s current state for journal `address` is kept in KV state. */
+export function durableStateKey(owner: string, address: string): StateKey {
+  return `durable:${owner}:${address}`;
+}
+
+/** The session's own current state in KV: its runtime permission state, and its running usage
+ *  (the root agent's turns only — see `SessionSummary.usage`). */
+export const SESSION_PERMISSION_KEY: StateKey = "session:permission";
+export const SESSION_USAGE_KEY: StateKey = "session:usage";
+
+/** KV key under which a store indexes a shard's newest checkpoint. An index, not state:
+ *  stale or missing, the reader falls back to the shard's head. */
+export function checkpointIndexKey(address: string): StateKey {
+  return `checkpoint:${address}`;
 }
 
 /** One durable append-log record together with its store-assigned position.
@@ -245,9 +329,9 @@ interface ReducedHistory {
  * Reduce a shard's records (append order) into live history, in a single forward pass.
  *
  * History-bearing records (`context.append_message` / `custom_message`) append a message;
- * `context.replace` resets the list; `context.apply_compaction` drops the first `cutoff`
- * messages and prepends the summary. Everything else (metadata / usage / approval / config /
- * handoff / custom) is audit/bookkeeping and never enters history.
+ * `context.replace` resets the list; `context.apply_compaction` resets it to the summary plus
+ * the kept tail. Everything else (metadata / usage / approval / handoff / custom) is
+ * audit/bookkeeping and never enters history.
  */
 /**
  * The mutable pair every history fold maintains. `origins[i]` describes `messages[i]`.
@@ -280,7 +364,11 @@ export function foldReplace(
   while (state.origins.length < state.messages.length) state.origins.push(undefined);
 }
 
-/** Drop the first `cutoff` messages and prepend the summary in their place. */
+/**
+ * Drop the first `cutoff` messages and prepend the summary in their place — the LIVE splice, as
+ * the `history.compacted` event describes it to a consumer already holding the history. Replay
+ * of a record does not use this: the record is self-contained (see `foldCompactionRecord`).
+ */
 export function foldCompaction(
   state: HistoryFold,
   cutoff: number,
@@ -291,6 +379,20 @@ export function foldCompaction(
   const clamped = Math.min(cutoff, state.messages.length);
   state.messages.splice(0, clamped, summaryMessage(summary, summaryTimestamp));
   state.origins.splice(0, clamped, compactionSummaryOrigin(loadedTools));
+}
+
+/** Reset to `[summary, ...kept]` — a compaction record replayed on its own. */
+export function foldCompactionRecord(state: HistoryFold, record: Extract<AgentRecord, { type: "context.apply_compaction" }>): void {
+  if (!Array.isArray(record.kept)) {
+    // Written before compaction records were self-contained (wire version < 3). Not upgraded:
+    // its meaning depends on every message before it, which a checkpoint replay never reads.
+    throw new Error("context.apply_compaction without `kept`: this session log predates self-contained compaction records and cannot be replayed.");
+  }
+  foldReplace(
+    state,
+    [summaryMessage(record.summary, record.summaryTimestamp), ...record.kept],
+    [compactionSummaryOrigin(record.loadedTools), ...(record.keptOrigins ?? record.kept.map(() => null))],
+  );
 }
 
 export function compactionSummaryOrigin(loadedTools?: readonly LoadedToolSchema[]): CompactionSummaryOrigin {
@@ -314,7 +416,7 @@ export function reduceHistory(records: readonly AgentRecord[]): ReducedHistory {
         foldReplace(state, record.messages, record.origins);
         break;
       case "context.apply_compaction":
-        foldCompaction(state, record.cutoff, record.summary, record.summaryTimestamp, record.loadedTools);
+        foldCompactionRecord(state, record);
         break;
       // Audit / bookkeeping — not reduced into history. A queued steer (`event.lifecycle` /
       // `steer.queued`) is the accepted input, not the seen input: what the model saw is
@@ -324,7 +426,6 @@ export function reduceHistory(records: readonly AgentRecord[]): ReducedHistory {
       case "usage.record":
       case "permission.record_approval":
       case "permission.set_mode":
-      case "config.update":
       case "agent.handoff":
       case "agent.handoff.accepted":
       case "guardrail.blocked":

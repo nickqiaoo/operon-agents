@@ -984,7 +984,7 @@ export class BackgroundManager implements BackgroundSpawner {
     if (store === undefined) return emptyOutputSnapshot();
     try {
       const records: AgentRecord[] = [];
-      for await (const record of store.readRecords({ address })) records.push(record);
+      for await (const record of store.readRecords({ address, fromCheckpoint: true })) records.push(record);
       const { messages } = reduceHistory(records);
       // The agent's answer is the last thing it said. Tool calls and their results are steps
       // toward it, already in the shard for anyone who wants the whole trace.

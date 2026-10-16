@@ -38,6 +38,8 @@ export interface ExecuteStepDeps {
   readonly responder?: QuestionResponder;
   /** Session-scoped file freshness ledger for this agent line; forwarded to tool contexts. */
   readonly fileLedger?: FileFreshnessLedger;
+  /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
+  readonly hostContext?: unknown;
   readonly system?: string;
   readonly params?: LlmRequest["params"];
   readonly context: ConversationContext;
@@ -198,7 +200,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
         });
       },
       // A dropped failed attempt is a transcript record, not an event (#8) — replay must not resurrect it.
-      onDropPartial: (failed) => deps.context.record({ type: "custom", name: "dropped_partial", data: failed }),
+      onDropPartial: (failed) => deps.context.audit({ type: "custom", name: "dropped_partial", data: failed }),
     });
     message = retryResult.message;
     if (hooks?.afterModelResponse) {
@@ -228,7 +230,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
     // The adapter reduced the transport error to a message string, hence the text match and
     // the synthetic status code 0.
     if (stopReason === "error" && isContextOverflowMessage(message.errorMessage ?? "")) {
-      deps.context.record({ type: "custom", name: "overflow_dropped", data: message });
+      deps.context.audit({ type: "custom", name: "overflow_dropped", data: message });
       throw new APIContextOverflowError(0, message.errorMessage ?? "context overflow", null);
     }
 
@@ -260,7 +262,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, hostContext: deps.hostContext, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
       message,
     );
 

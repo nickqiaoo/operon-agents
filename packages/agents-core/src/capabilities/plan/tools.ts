@@ -83,7 +83,7 @@ export function exitPlanModeTool(planMode: PlanMode): Tool {
         display,
         run: async (): Promise<ToolResult> => {
           const wasActive = planMode.isActive;
-          planMode.exit();
+          await planMode.exit();
           if (!wasActive) {
             return { content: [{ type: "text", text: "Plan mode was not active. All tools available." }], details: planMode.details() };
           }

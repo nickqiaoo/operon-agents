@@ -206,7 +206,7 @@ function projectableEventBody(record: AgentRecord): AgentEventBody | undefined {
     case "context.apply_compaction":
       return {
         type: "history.compacted",
-        cutoff: record.cutoff,
+        cutoff: record.compactedCount,
         summary: record.summary,
         summaryTimestamp: record.summaryTimestamp,
         ...(record.loadedTools !== undefined ? { loadedTools: record.loadedTools } : {}),
@@ -250,7 +250,6 @@ function projectableEventBody(record: AgentRecord): AgentEventBody | undefined {
     case "metadata":
     case "permission.record_approval":
     case "permission.set_mode":
-    case "config.update":
     case "agent.handoff.accepted":
       return undefined;
     default: {

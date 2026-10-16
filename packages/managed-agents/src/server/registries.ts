@@ -9,6 +9,23 @@ import type {
 import type { AgentRef, EnvironmentRef } from "../protocol/types.ts";
 import { ManagedInvalidRequestError } from "./errors.ts";
 
+/**
+ * Which session a registry is resolving for. Handed to both registries by the service at create
+ * and by the worker on every open, so a host can choose per session — per tenant — the agent,
+ * the environment and the credentials (`resumeOptions.mcpCredentials`) it runs with.
+ */
+export interface ManagedSessionContext {
+  readonly sessionId: string;
+  /** Stamped by `SessionService({ ownerKey })` at create. Trusted: no client can set it. */
+  readonly ownerKey?: string;
+  /**
+   * The create request's `metadata`. Untrusted: a client wrote it. A host that acts on it (a
+   * vault id, a repository) must check it against `ownerKey`, or a client names another
+   * tenant's.
+   */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
 export interface AgentResolution<TContext = unknown> {
   readonly agent?: Agent<TContext>;
   readonly createOptions?: Omit<CreateSessionOptions<TContext>, "id" | "title" | "workDir" | "agent">;
@@ -16,7 +33,7 @@ export interface AgentResolution<TContext = unknown> {
 }
 
 export interface ManagedAgentRegistry<TContext = unknown> {
-  resolve(ref: AgentRef): AgentResolution<TContext> | Promise<AgentResolution<TContext>>;
+  resolve(ref: AgentRef, session: ManagedSessionContext): AgentResolution<TContext> | Promise<AgentResolution<TContext>>;
 }
 
 /** Let managed sessions use the Harness's configured default Agent. */
@@ -41,7 +58,7 @@ export interface EnvironmentResolution {
 }
 
 export interface ManagedEnvironmentRegistry {
-  resolve(ref: EnvironmentRef): EnvironmentResolution | Promise<EnvironmentResolution>;
+  resolve(ref: EnvironmentRef, session: ManagedSessionContext): EnvironmentResolution | Promise<EnvironmentResolution>;
 }
 
 export class StaticEnvironmentRegistry implements ManagedEnvironmentRegistry {

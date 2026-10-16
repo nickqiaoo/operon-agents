@@ -1,5 +1,4 @@
-import { DEFAULT_ADDRESS, type AgentRecord } from "../../store/index.ts";
-import { latestToolDetailsByAddress } from "../capability-state.ts";
+import { DEFAULT_ADDRESS } from "../../store/index.ts";
 
 export const TODO_LIST_TOOL_NAME = "TodoList";
 
@@ -10,7 +9,8 @@ export interface TodoItem {
   readonly status: TodoStatus;
 }
 
-/** Snapshot carried in the TodoList tool result `details`, folded back on session open. */
+/** The frame's whole list: carried in the TodoList tool result `details` for the transcript,
+ *  and what is stored as the frame's durable state. */
 export interface TodoDetails {
   readonly todos: readonly TodoItem[];
 }
@@ -28,6 +28,13 @@ const NO_TODOS: readonly TodoItem[] = [];
  */
 export class TodoStore {
   private readonly byFrame = new Map<string, readonly TodoItem[]>();
+  /** Persists one frame's list after a change. Absent in a bare store (tests). */
+  private persist: ((address: string) => void) | undefined;
+
+  /** Where a change to a frame's list becomes durable (`SessionContext.persistState`). */
+  attachPersistence(persist: (address: string) => void): void {
+    this.persist = persist;
+  }
 
   /** The list for one frame. Defaults to the root agent's, which is what `session.todo` reads. */
   get(address: string = DEFAULT_ADDRESS): readonly TodoItem[] {
@@ -37,6 +44,7 @@ export class TodoStore {
   set(address: string, todos: readonly TodoItem[]): readonly TodoItem[] {
     const normalized = normalizeTodos(todos);
     this.byFrame.set(address, normalized);
+    this.persist?.(address);
     return normalized;
   }
 
@@ -45,12 +53,19 @@ export class TodoStore {
     return [...this.byFrame.keys()];
   }
 
-  /** Rebuild from the log: within each shard, the latest TodoList result is that frame's list. */
-  reconstruct(entries: readonly AgentRecord[]): void {
-    this.byFrame.clear();
-    for (const [address, details] of latestToolDetailsByAddress(entries, TODO_LIST_TOOL_NAME)) {
-      if (isTodoDetails(details)) this.byFrame.set(address, normalizeTodos(details.todos));
-    }
+  /** One frame's list as its durable state; undefined when the frame has none. */
+  snapshot(address: string): TodoDetails | undefined {
+    const todos = this.byFrame.get(address);
+    return todos === undefined ? undefined : { todos };
+  }
+
+  /**
+   * Restore one frame's list from the value stored for it (undefined: none). A frame's list is
+   * restored when its shard is reopened — `main` at open, a subagent's on resume.
+   */
+  restore(address: string, value: unknown): void {
+    if (isTodoDetails(value)) this.byFrame.set(address, normalizeTodos(value.todos));
+    else this.byFrame.delete(address);
   }
 }
 

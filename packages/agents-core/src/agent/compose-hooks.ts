@@ -112,8 +112,12 @@ function buildAuthorizer<TContext>(
     if (answer) {
       // Audit record: this is the single chokepoint both live and durable approvals
       // flow through (the responder/resume answer is applied here).
-      context.record({ type: "permission.record_approval", toolCallId: ctx.toolCall.id, toolName: ctx.toolCall.name, decision: answer.decision, feedback: answer.feedback, approvalRule: ctx.plan.approvalRule, scope: answer.scope });
+      context.audit({ type: "permission.record_approval", toolCallId: ctx.toolCall.id, toolName: ctx.toolCall.name, decision: answer.decision, feedback: answer.feedback, approvalRule: ctx.plan.approvalRule, scope: answer.scope });
+      // That record is this frame's audit trail. A session grant is the SESSION's state, so the
+      // session persists it — what a reopen restores from — whichever frame earned it.
+      const grants = answer.decision === "approved" && answer.scope === "session" && !state.permission.sessionGrants.includes(ctx.plan.approvalRule);
       const ok = state.permission.applyApproval(ctx.plan.approvalRule, answer);
+      if (grants) state.session.persistPermissionState();
       if (ok) return undefined;
       return { block: true, reason: answer.feedback ?? `Tool ${ctx.toolCall.name} was ${answer.decision}.` };
     }

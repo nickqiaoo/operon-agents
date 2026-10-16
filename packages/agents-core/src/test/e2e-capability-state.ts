@@ -1,8 +1,11 @@
-// Capability state lives in the linear session log: a stateful capability writes its
-// snapshot into the tool result `details`, and rebuilds in-memory state by folding the log. This
-// verifies cold-resume reconstruction and goal counter re-derivation from usage records.
-import { GoalStore, MemoryStore, PlanMode, TodoStore } from "../index.ts";
-import type { AgentRecord, SessionStore, Usage } from "../index.ts";
+// Capability state lives in the store's key/value side as its CURRENT value, not in the log:
+// every change asks the session to persist the whole new state (`SessionContext.persistState`),
+// and a reopen hands the stored value straight back to `restore`. This pins, per capability, that
+// every change persists and that the stored value round-trips — plus the writer underneath
+// (ordering, coalescing, removal, failure). e2e-checkpoint-restore.ts drives it end to end.
+import { GoalStore, MemoryStore, PlanMode, TodoStore, noopLogger } from "../index.ts";
+import type { Usage } from "../index.ts";
+import { DurableStateWriter } from "../agent/durable-state.ts";
 
 let passed = 0;
 let failed = 0;
@@ -16,105 +19,158 @@ function check(label: string, ok: boolean): void {
   }
 }
 
-let seq = 0;
-function nextId(): string {
-  seq += 1;
-  return `e${seq}`;
-}
-
 function mkUsage(total: number): Usage {
   return { input: total, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: total, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 }
 
-async function toolResult(store: SessionStore, toolName: string, details: unknown): Promise<string> {
-  const id = nextId();
-  await store.appendRecord({
-    address: "main",
-    type: "context.append_message",
-    message: { role: "toolResult", toolCallId: id, toolName, content: [{ type: "text", text: "" }], details, isError: false, timestamp: Date.now() },
-  });
-  return id;
-}
-
-async function usageEntry(store: SessionStore, total: number): Promise<string> {
-  const id = nextId();
-  await store.appendRecord({ address: "main", type: "usage.record", model: "m", usage: mkUsage(total) });
-  return id;
-}
-
-async function branch(store: SessionStore): Promise<AgentRecord[]> {
-  const out: AgentRecord[] = [];
-  for await (const r of store.readRecords({ address: "main" })) out.push(r);
-  return out;
-}
-
-function activeGoal(objective: string, budget = { turnBudget: null as number | null, tokenBudget: null as number | null, wallClockBudgetMs: null as number | null }) {
-  return { goal: { objective, status: "active", budget, startedAtMs: Date.now() } };
+/** A GoalStore whose persistence records the value a session would store at each change. */
+function persistedGoal(): { goal: GoalStore; stored: unknown[] } {
+  const goal = new GoalStore();
+  const stored: unknown[] = [];
+  goal.attachPersistence(() => stored.push(goal.durable()));
+  return { goal, stored };
 }
 
 async function main(): Promise<void> {
-  // ── A: cold resume rebuilds todo / goal / plan from the branch ──
+  // ── A: every goal change persists the whole state, counters included ──
   {
-    const store = new MemoryStore();
-    await toolResult(store, "TodoList", { todos: [{ title: "a", status: "in_progress" }, { title: "b", status: "pending" }] });
-    await toolResult(store, "UpdateGoal", activeGoal("ship"));
-    await usageEntry(store, 100);
-    await usageEntry(store, 50);
-    await toolResult(store, "EnterPlanMode", { planActive: true, planId: "p1", planFilePath: "/tmp/p1.md" });
+    const { goal, stored } = persistedGoal();
+    goal.update({ objective: "ship", status: "active" });
+    goal.accountTurn(mkUsage(100));
+    goal.accountTurn(mkUsage(50));
+    check("goal: one persist per change (create + 2 turns)", stored.length === 3);
+    const restored = new GoalStore();
+    restored.restore(stored.at(-1));
+    const snap = restored.snapshot();
+    check("goal: restored active with its counters (2 turns / 150 tokens)", snap?.status === "active" && snap.turnsUsed === 2 && snap.tokensUsed === 150);
+  }
 
-    const todo = new TodoStore();
-    todo.reconstruct(await branch(store));
-    check("resume: todo list rebuilt (2 items, first in_progress)", todo.get().length === 2 && todo.get()[0]!.title === "a" && todo.get()[0]!.status === "in_progress");
+  // ── B: a change from outside the loop (a host `/goal pause`) persists too ──
+  {
+    const { goal, stored } = persistedGoal();
+    await goal.create({ objective: "long task" });
+    await goal.pause("Paused by the user");
+    const restored = new GoalStore();
+    restored.restore(stored.at(-1));
+    check("goal: a host-side pause survives", restored.snapshot()?.status === "paused");
+  }
 
-    const goal = new GoalStore();
-    goal.reconstruct(await branch(store));
-    const snap = goal.snapshot();
-    check("resume: goal rebuilt active", snap?.status === "active" && snap.objective === "ship");
-    check("resume: goal counters re-derived from usage (2 turns / 150 tokens)", snap?.turnsUsed === 2 && snap.tokensUsed === 150);
+  // ── C: the turn budget blocks in the same change that counts the turn ──
+  {
+    const { goal, stored } = persistedGoal();
+    goal.update({ objective: "bounded", status: "active" });
+    goal.setBudget({ turns: 2 });
+    goal.accountTurn(mkUsage(10));
+    const blocked = goal.accountTurn(mkUsage(10));
+    check("goal budget: second turn blocks the goal", blocked && goal.snapshot()?.status === "blocked");
+    const restored = new GoalStore();
+    restored.restore(stored.at(-1));
+    check("goal budget: restored blocked at 2 turns", restored.snapshot()?.status === "blocked" && restored.snapshot()?.turnsUsed === 2);
+  }
 
+  // ── D: completing clears; nothing stored restores no goal ──
+  {
+    const { goal, stored } = persistedGoal();
+    goal.update({ objective: "done soon", status: "active" });
+    goal.update({ status: "complete" });
+    check("goal: completing persists the cleared state (null)", stored.length === 2 && stored[1] === null);
+    const restored = new GoalStore();
+    restored.update({ objective: "stale in memory", status: "active" });
+    restored.restore(undefined);
+    check("goal: restore(undefined) leaves no goal", restored.snapshot() === null);
+  }
+
+  // ── E: plan mode — enter/exit wait for the write; the stored value round-trips ──
+  {
     const plan = new PlanMode();
-    plan.reconstruct(await branch(store));
-    check("resume: plan mode rebuilt active with file path", plan.isActive && plan.planFilePath === "/tmp/p1.md");
+    let release: (() => void) | undefined;
+    const writes: boolean[] = [];
+    plan.attachPersistence(() => {
+      writes.push(plan.isActive);
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    let entered = false;
+    const entering = plan.enter(false).then(() => {
+      entered = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    check("plan: enter does not settle before its state is durable", !entered && writes[0] === true);
+    release!();
+    await entering;
+    check("plan: enter settles once the write did", entered);
+    let exited = false;
+    const exiting = plan.exit().then(() => {
+      exited = true;
+    });
+    await Promise.resolve();
+    check("plan: exit waits for its write too", !exited && writes[1] === false);
+    release!();
+    await exiting;
+
+    const restored = new PlanMode();
+    restored.restore({ planActive: true, planId: "p1", planFilePath: "/tmp/p1.md" });
+    check("plan: restored active with its file path", restored.isActive && restored.planFilePath === "/tmp/p1.md");
+    restored.restore(undefined);
+    check("plan: nothing stored restores plan mode off", !restored.isActive && restored.planFilePath === null);
   }
 
-  // ── B: usage before goal creation does NOT count toward the goal ──
+  // ── F: todo is per frame — each address persists and restores its own list ──
   {
-    const store = new MemoryStore();
-    await usageEntry(store, 999); // pre-goal turn — must be ignored
-    await toolResult(store, "UpdateGoal", activeGoal("later"));
-    await usageEntry(store, 10);
-    const goal = new GoalStore();
-    goal.reconstruct(await branch(store));
-    check("scope: pre-goal usage ignored (1 turn / 10 tokens)", goal.snapshot()?.turnsUsed === 1 && goal.snapshot()?.tokensUsed === 10);
+    const todo = new TodoStore();
+    const persisted: string[] = [];
+    todo.attachPersistence((address) => persisted.push(address));
+    todo.set("main", [{ title: "a", status: "in_progress" }]);
+    todo.set("main/sub-1", [{ title: "child", status: "pending" }]);
+    check("todo: each change persists its own frame", persisted.join(",") === "main,main/sub-1");
+    const restored = new TodoStore();
+    restored.restore("main", todo.snapshot("main"));
+    restored.restore("main/sub-1", todo.snapshot("main/sub-1"));
+    check("todo: main list restored", restored.get()[0]?.title === "a" && restored.get()[0]?.status === "in_progress");
+    check("todo: subagent list restored to its own address", restored.get("main/sub-1")[0]?.title === "child");
+    restored.restore("main", undefined);
+    check("todo: nothing stored clears the frame", restored.get().length === 0 && restored.get("main/sub-1").length === 1);
   }
 
-  // ── C: budget auto-block is re-derived on replay ──
+  // ── G: the writer — newest value, per-key order, coalescing, removal, failure ──
   {
     const store = new MemoryStore();
-    await toolResult(store, "UpdateGoal", activeGoal("bounded", { turnBudget: 2, tokenBudget: null, wallClockBudgetMs: null }));
-    await usageEntry(store, 10);
-    await usageEntry(store, 10);
-    await usageEntry(store, 10); // would-be 3rd turn: goal already blocked, must not count
-    const goal = new GoalStore();
-    goal.reconstruct(await branch(store));
-    const snap = goal.snapshot();
-    check("budget: goal auto-blocked on replay at turn budget", snap?.status === "blocked" && snap.turnsUsed === 2);
-  }
+    const writer = new DurableStateWriter(store, noopLogger);
+    let value = 1;
+    let reads = 0;
+    const read = () => {
+      reads += 1;
+      return { value };
+    };
+    const first = writer.write("k", read);
+    value = 2;
+    const second = writer.write("k", read);
+    value = 3;
+    check("writer: a write asked for while one waits shares it", first === second);
+    await first;
+    check("writer: the shared write carries the newest value, read once", reads === 1 && (await store.getState("k") as { value: number }).value === 3);
+    value = 4;
+    await writer.write("k", read);
+    check("writer: a later write lands after it", (await store.getState("k") as { value: number }).value === 4);
+    await writer.write("k", () => null);
+    check("writer: null removes the key", (await store.getState("k")) === null);
 
-  // ── D: goal cleared later in the log reconstructs as cleared at the tip ──
-  {
-    const store = new MemoryStore();
-    await toolResult(store, "TodoList", { todos: [{ title: "x", status: "pending" }] });
-    await toolResult(store, "UpdateGoal", activeGoal("forky"));
-    await usageEntry(store, 20);
-    // complete (clear) the goal and empty the todo list
-    await toolResult(store, "UpdateGoal", { goal: null });
-    await toolResult(store, "TodoList", { todos: [] });
-    const mainGoal = new GoalStore();
-    mainGoal.reconstruct(await branch(store));
-    const mainTodo = new TodoStore();
-    mainTodo.reconstruct(await branch(store));
-    check("tip: goal cleared + todo empty at the log tip", mainGoal.snapshot() === null && mainTodo.get().length === 0);
+    const failing = new MemoryStore();
+    let fail = true;
+    const put = failing.putState.bind(failing);
+    failing.putState = (key, v) => (fail ? Promise.reject(new Error("disk full")) : put(key, v));
+    const flaky = new DurableStateWriter(failing, noopLogger);
+    let rejected = false;
+    await flaky.write("k", () => "lost").catch(() => {
+      rejected = true;
+    });
+    fail = false;
+    await flaky.write("k", () => "kept");
+    check("writer: a failed write rejects, and the next one still runs", rejected && (await failing.getState("k")) === "kept");
+    await flaky.flush();
+    check("writer: flush settles after a failure", true);
   }
 
   console.log(`\n${passed}/${passed + failed} checks passed`);
@@ -122,7 +178,7 @@ async function main(): Promise<void> {
     console.log("❌ CAPABILITY-STATE E2E FAIL");
     process.exit(1);
   }
-  console.log("✅ CAPABILITY-STATE E2E PASS — log-sourced todo/goal/plan: cold resume + counter re-derivation + budget block");
+  console.log("✅ CAPABILITY-STATE E2E PASS — every change persists the whole state; stored values round-trip; writer order/coalescing/failure");
 }
 
 main().catch((error) => {

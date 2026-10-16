@@ -9,8 +9,25 @@ export type {
   ReadRecordPageOptions,
   RecordPage,
   WatchRecordsOptions,
+  CheckpointState,
+  CheckpointRecord,
 } from "./store.ts";
-export { DEFAULT_ADDRESS, reduceHistory, summaryMessage, customMessage, watchRecordsByPolling } from "./store.ts";
+export {
+  DEFAULT_ADDRESS,
+  reduceHistory,
+  summaryMessage,
+  customMessage,
+  watchRecordsByPolling,
+  isCheckpointRecord,
+  checkpointIndexKey,
+  AUDIT_ADDRESS,
+  appendAudit,
+  readAudit,
+  durableStateKey,
+  SESSION_PERMISSION_KEY,
+  SESSION_USAGE_KEY,
+} from "./store.ts";
+export { CheckpointingSessionStore } from "./checkpointing-store.ts";
 export { MemorySessionLock, SessionBusyError } from "./lock.ts";
 export type { SessionLock, SessionLease, AcquireLeaseOptions } from "./lock.ts";
 export { LogSessionStore, MemoryStore } from "./log-store.ts";

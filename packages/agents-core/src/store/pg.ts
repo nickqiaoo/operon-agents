@@ -16,6 +16,7 @@ import {
 } from "./repository.ts";
 import { storageOver, type SessionStorage } from "./storage.ts";
 import type { SessionStore, StateKey } from "./store.ts";
+import type { Usage } from "../protocol/index.ts";
 import { normalizeWorkDir } from "./workdir-key.ts";
 
 /**
@@ -99,6 +100,9 @@ const SCHEMA_STATEMENTS = [
   // index keeps that predicate from touching them at all.
   `create index if not exists session_meta_live on session_meta (updated_at desc, id desc) where deleted_at is null`,
   `create index if not exists session_meta_recency on session_meta (updated_at desc, id desc)`,
+  // The root agent's running usage (JSON) — see `SessionSummary.usage`. Added after the table
+  // first shipped, hence an ALTER rather than a column in the CREATE.
+  `alter table session_meta add column if not exists usage text`,
 ];
 
 /** Tree session store for one session over a shared pool. Tree/migration/blobs live in LogSessionStore. */
@@ -277,6 +281,9 @@ export class PgSessionRepository implements SessionRepository {
         if (title === undefined) return patch({ updatedAt });
         await exec.query(`update session_meta set title=$2, updated_at=$3 where id=$1`, [id, title, updatedAt]);
       },
+      usage: async (usage) => {
+        await exec.query(`update session_meta set usage=$2 where id=$1`, [id, JSON.stringify(usage)]);
+      },
     };
     return new CatalogSessionStore(raw, observer);
   }
@@ -324,7 +331,7 @@ export class PgSessionRepository implements SessionRepository {
   async get(id: string): Promise<SessionSummary | undefined> {
     await this.ready();
     const { rows } = await this.pool.query(
-      `select m.id, m.work_dir, m.owner_key, m.deleted_at, m.title, m.created_at, m.updated_at,
+      `select m.id, m.work_dir, m.owner_key, m.deleted_at, m.title, m.created_at, m.updated_at, m.usage,
               case when s.session_id is null then 'idle' else 'interrupted' end as durable_state
          from session_meta m left join session_state s on s.session_id=m.id and s.key='interrupt'
         where m.id=$1`,
@@ -342,6 +349,7 @@ export class PgSessionRepository implements SessionRepository {
           createdAt: Number(row.created_at),
           updatedAt: Number(row.updated_at),
           durableState: parseDurableState(row.durable_state),
+          ...usageField(row.usage),
         };
   }
 
@@ -361,7 +369,7 @@ export class PgSessionRepository implements SessionRepository {
     if (filter?.includeDeleted !== true) conditions.push("m.deleted_at is null");
     const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")} `;
     const { rows } = await this.pool.query(
-      `select m.id, m.work_dir, m.owner_key, m.deleted_at, m.title, m.created_at, m.updated_at,
+      `select m.id, m.work_dir, m.owner_key, m.deleted_at, m.title, m.created_at, m.updated_at, m.usage,
               case when s.session_id is null then 'idle' else 'interrupted' end as durable_state
          from session_meta m left join session_state s on s.session_id=m.id and s.key='interrupt'
         ${where}order by m.updated_at desc, m.id desc`,
@@ -376,6 +384,7 @@ export class PgSessionRepository implements SessionRepository {
       createdAt: Number(r.created_at),
       updatedAt: Number(r.updated_at),
       durableState: parseDurableState(r.durable_state),
+      ...usageField(r.usage),
     }));
   }
 
@@ -403,6 +412,11 @@ export class PgSessionRepository implements SessionRepository {
         [id, workDir, ownerKey ?? null, title ?? null, now],
       );
       if (ins.rows.length === 0) throw new SessionRepositoryConflictError(id);
+      // The fork's log is a copy, so its running usage is the source's.
+      const usage = await exec.query(`select usage from session_meta where id=$1`, [sourceId]);
+      if (typeof usage.rows[0]?.usage === "string") {
+        await exec.query(`update session_meta set usage=$2 where id=$1`, [id, usage.rows[0]!.usage]);
+      }
       // Copy log + state into the new id; blobs are content-addressed + global, so they're shared.
       await exec.query(
         `insert into session_log(session_id, address, line) select $1, address, line from session_log where session_id=$2 order by seq`,
@@ -461,6 +475,19 @@ export class PgSessionRepository implements SessionRepository {
 /** Postgres-backed {@link SessionStorage}. Inject a `pg.Pool`; tables are created on first use. */
 export function pgStorage(options: PgStorageOptions): SessionStorage {
   return storageOver(new PgSessionRepository(options.pool, options.ownsPool ?? false));
+}
+
+/** The summary's `usage`, from the column's JSON; nothing when absent or unreadable. */
+function usageField(value: unknown): { usage?: Usage } {
+  if (typeof value !== "string" || value === "") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && typeof (parsed as { totalTokens?: unknown }).totalTokens === "number"
+      ? { usage: parsed as Usage }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function parseDurableState(value: unknown): DurableSessionState {

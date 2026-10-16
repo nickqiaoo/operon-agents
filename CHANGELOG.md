@@ -7,6 +7,92 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `SessionSummary.usage`: the root agent's running token usage, readable from the repository
+  without opening the session (memory, disk, Postgres, Redis). `Session.usage` is the same total
+  in an open session (`operon-agents-core`).
+
+- `McpCredentialProvider` and `mcpCredentials` on `createSession` / `resumeSession`: a host hands
+  an http MCP server its credential per session and per connect — the seam a per-user vault is
+  built on. On a 401 the provider's `invalidate` is called and the connect retried once. A
+  config's own `headers` / `bearerTokenEnvVar` still win; the OAuth service is asked only when
+  the provider gives nothing (`operon-agents-core`, `operon-agents`).
+- Managed registries are told whose session they resolve for:
+  `resolve(ref, { sessionId, ownerKey, metadata })`, by the service at create and by the worker
+  on every open. A one-argument `resolve` still satisfies the interface
+  (`operon-managed-agents`).
+- `strictIsolation` on session open and in `defaultCapabilities`: nothing process-shared reaches
+  the session, MCP is http-only, and `bearerTokenEnvVar` is refused. `Harness.processSharedParts()`
+  lists what the `harness` hook built for the whole process (`operon-agents`).
+- `docs/server-profile.md`: what a managed host may decide, and what it may not get wrong.
+
+### Changed
+
+- **Breaking (log format, wire version 3):** reopening a session reads `main` from its newest
+  checkpoint instead of replaying the whole log. `context.apply_compaction` now journals the kept
+  tail (`kept`, `keptOrigins`) instead of a `cutoff`. Logs with an older compaction record are
+  not upgraded and fail to replay (`operon-agents-core`).
+- **Breaking:** session and capability state are no longer read from the log. Each stateful
+  capability declares `Capability.durableState` (`snapshot` / `restore(address, value)`) and calls
+  the new `SessionContext.persistState(address)` after every change; the session stores the value
+  under `durable:<capability>:<address>` in the store's key/value state, and a reopen or an attach
+  reads it back — whenever the history was last compacted, and whether or not the capability was
+  open then. The session's runtime permission state and running usage are stored the same way
+  (`session:permission`, `session:usage`). `GoalStore` / `PlanMode` / `TodoStore` `reconstruct`
+  are replaced by `restore`, their journal hooks by `attachPersistence`, and
+  `GoalStore.recordTurn` by `accountTurn`; `PlanMode.exit()` is now async and, like `enter()`,
+  waits for the write. `permission.set_mode` and `permission.record_approval` are kept as audit
+  only (see the audit shard, below). A subagent's todo list is restored when its shard is reopened to resume it, not at
+  open (`operon-agents-core`).
+- **Breaking:** audit records move out of the conversation log into the session's audit shard
+  (`AUDIT_ADDRESS`, written with `appendAudit`, read with `readAudit` /
+  `Session.getAuditRecords()`; each names the shard it concerns in `about`). That covers
+  `permission.record_approval`, `permission.set_mode`, a capability's `SessionContext.record`
+  entries (so `records()` no longer reads the whole log), extension attach/detach, and the
+  engine's `dropped_partial` / `overflow_dropped` diagnostics. A read without an address —
+  `readRecords()`, `readRecordPage`, `readSessionTails`, `Session.getRecords()` — leaves the
+  audit shard out; a fork copies it. `ConversationContext.audit(body)` writes to it, and
+  `flush()` waits for it. `usage.record`, `event.lifecycle` and `guardrail.blocked` stay in the
+  log as durable events for `events.list`. `usage.record.sessionTotal` is removed — the catalog's
+  `SessionSummary.usage` now follows the stored `session:usage` — and the unused `config.update`
+  record type is gone (`operon-agents-core`, `operon-agents`).
+- Reopening through the harness reads every shard from its own newest checkpoint
+  (`readSessionTails`) for both `SessionProjection` and `Session.open`. A checkpoint carries its
+  shard's lifecycle (`checkpoint["#frame"]`: live agent, open turn, in-flight tool calls, queued
+  steers), so a tail-seeded projection — and the orphan-turn repair that reads it — matches a
+  whole-log one. `SessionContext.logRecords` no longer returns the harness's preloaded records;
+  it reads the whole log on first call (`operon-agents-core`, `operon-agents`).
+
+- **Breaking:** `SessionWorker` runs multi-tenant by default and refuses a session whose
+  environment does not come from the environment registry, a harness holding process-wide MCP
+  connections or an OAuth service, MCP over stdio, and `bearerTokenEnvVar`; it opens every
+  session with `strictIsolation`, and closes one a custom `session` hook connected over stdio
+  anyway. Pass `profile: "single-tenant"` for a one-owner deployment (`operon-managed-agents`).
+
+### Fixed
+
+- An active goal no longer drives subagents: a subagent's stop was counted toward the goal and
+  continued while the goal was active — and since a subagent cannot complete the goal, it ran
+  until its turn limit. `StoppedStepContext.isRootAgent` now tells continuation hooks which frame
+  stopped (`operon-agents-core`).
+- Goal and plan-mode changes made outside the loop (`/goal pause|resume|cancel`, `/plan on|off`,
+  the app-server `goal.*` methods) are journaled and survive a reopen (`operon-agents-core`).
+- An approve-for-session grant earned inside a subagent survives a reopen (`permission.grant` in
+  `main`) (`operon-agents-core`).
+
+- A managed session's background task was declared `lost` by the next open. The worker closed
+  the session when its turn ended, orphaning a task still running in it; it now keeps the
+  session and its lease while a background task is live or a run is about to start
+  (`operon-managed-agents`).
+- A session opened with its own environment still received the harness's process-wide MCP
+  connections and skill scan when the harness had no `session` hook: the default path did not
+  pass `ownEnvironment`. It also dropped the session's own `mcpServers` (`operon-agents`).
+- A `detachable` capability carrying `policies` is refused at open and at attach. The rule was
+  documented and not enforced; a dropped permission rule fails open (`operon-agents-core`).
+
 ## [0.1.0-alpha.16] — 2026-10-09
 
 ### Added

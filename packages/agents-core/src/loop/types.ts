@@ -152,6 +152,12 @@ export interface AfterStepContext extends ContextStepHookContext {
 export interface StoppedStepContext extends StepHookContext {
   readonly usage: Usage;
   readonly stopReason: TerminalStepStopReason;
+  /**
+   * False when the frame that stopped is a subagent's or a workflow agent's — one the Runner
+   * spawned under another frame. Absent when the loop runs outside a Runner, which has only
+   * the one frame: treat absent as root.
+   */
+  readonly isRootAgent?: boolean;
 }
 
 export interface BeforeStepResult {

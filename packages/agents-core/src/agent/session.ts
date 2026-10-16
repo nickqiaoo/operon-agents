@@ -24,12 +24,27 @@ import type { ActivateSkillRequest, SkillActivationResult, SkillSummary } from "
 import type { PluginInfo, PluginSummary, ReloadSummary } from "../plugins/index.ts";
 import { type EventSink, joinAddress, ListenerSink, SessionEventPublisher } from "../events/index.ts";
 import { type Logger, envLogger, noopLogger } from "../logging/index.ts";
-import { type AgentRecord, type AgentRecordBody, DEFAULT_ADDRESS, type SessionStore } from "../store/index.ts";
+import {
+  type AgentRecord,
+  type AgentRecordBody,
+  appendAudit,
+  CheckpointingSessionStore,
+  DEFAULT_ADDRESS,
+  durableStateKey,
+  isCheckpointRecord,
+  readAudit,
+  SESSION_PERMISSION_KEY,
+  SESSION_USAGE_KEY,
+  type SessionStore,
+} from "../store/index.ts";
+import type { Usage } from "../protocol/index.ts";
+import { addUsage } from "../loop/usage.ts";
 import { eventSinkTracingBridge, type TracingProcessor } from "../tracing/index.ts";
 import { subscribeTelemetryProjection } from "../telemetry/projection.ts";
-import { ConversationContext } from "../loop/context.ts";
+import { ConversationContext, readShardTail } from "../loop/context.ts";
 import { readLog } from "../capabilities/capability-state.ts";
 import { CapabilityData } from "../capabilities/capability-data.ts";
+import { DurableStateWriter } from "./durable-state.ts";
 import type { McpServerView, MCPTool } from "../mcp/index.ts";
 import { SteerBus, type SteerContent, type SteerOptions, type SteerOrigin, type SteerReceipt } from "../loop/steer.ts";
 import type { Capability, CapabilityDiagnostic, SessionContext, SessionControls } from "../capabilities/capability.ts";
@@ -51,6 +66,13 @@ import type { PermissionManagerOptions } from "../permission/manager.ts";
 
 /** The session's whole append log, read once at open and memoized (see `Session.open`). */
 export type SessionLogReader = () => Promise<readonly AgentRecord[]>;
+
+/** The session's runtime permission state, as stored under `session:permission`. */
+interface PermissionState {
+  /** Present only when the mode was set at runtime; see `Session.explicitPermissionMode`. */
+  readonly mode?: PermissionMode;
+  readonly grants: readonly string[];
+}
 
 let CLOSE_TIMEOUT_MS = 5_000;
 /** store.flush persists data (vs. telemetry), so it gets a longer grace. The run journal
@@ -100,12 +122,12 @@ export interface SessionOpenOptions {
    */
   readonly store?: SessionStore;
   /**
-   * The session's full append log, pre-read by the caller. `open` then skips its own
-   * `readLog` and every open-time consumer (log-fold capabilities, context pre-build)
-   * folds THESE records — sharing the read AND the `Message` object graph with whatever
-   * else the caller seeded from them (e.g. a `SessionProjection`), instead of holding a
-   * second parsed+blob-rehydrated copy for the session's lifetime.
-   * Must be the complete log (all addresses, append order) as `readRecords()` returns it.
+   * The session's log, pre-read by the caller: every shard from its newest checkpoint on
+   * (`readSessionTails`), or the whole log. `open` then reads no log itself — the context
+   * pre-build folds `main`'s records from THESE, sharing the read AND the `Message` object graph
+   * with whatever else the caller seeded from them (e.g. a `SessionProjection`). Without it,
+   * `open` reads only `main` from its newest checkpoint. State is read from the store's
+   * key/value side either way.
    */
   readonly preloadedLog?: readonly AgentRecord[];
   /** Reopened from a store (vs created fresh). Only telemetry cares; the stream cannot tell. */
@@ -206,6 +228,16 @@ export interface SessionPort {
   setConversationHead(head: ConversationHead): void;
   /** Register a forked frame's inbox; the returned function unregisters it. */
   registerFrameBus(address: string, bus: SteerBus): () => void;
+  /**
+   * Rebuild a frame's conversation from its shard to resume it — read from the shard's newest
+   * checkpoint, never its head — and restore the frame's own capability state (its todo list)
+   * from what is stored for its address. Requires a store.
+   */
+  openFrameContext(address: string): Promise<ConversationContext>;
+  /** Add one root-agent turn's usage to the session's running total and return the new total. */
+  addSessionUsage(usage: Usage): Usage;
+  /** Persist the session's runtime permission state after a grant was applied in memory. */
+  persistPermissionState(): void;
 }
 
 /** An attach or detach waiting for a moment with no run in flight. */
@@ -296,12 +328,25 @@ export class Session implements SessionPort {
   private lastContextBreakdown?: ContextBreakdown;
   /** Built at the end of `open`, once every capability's policies are in. */
   private permissionManager?: PermissionManager;
+  /** The mode set at RUNTIME (`setPermissionMode`, or restored from one) — what is persisted.
+   *  A mode that only came from the host's options is not session state: reopening with
+   *  different options must still take effect. */
+  private explicitPermissionMode: PermissionMode | undefined;
+  /** The root agent's usage across the session's whole life, stored as `session:usage`. */
+  private totalUsage: Usage | undefined;
+  /** Beneath the publisher: stamps checkpoints, and folds each shard's lifecycle for them. */
+  private readonly checkpointing: CheckpointingSessionStore | undefined;
+  /** Writes capability and session current state to the store's key/value side. */
+  private readonly durable: DurableStateWriter;
+  /** Each stateful capability's `durableState`, by name — registered when it is restored. */
+  private readonly durableOwners = new Map<string, NonNullable<Capability["durableState"]>>();
 
   private constructor(
     id: string,
     signal: AbortSignal,
     ownController: AbortController,
     publisher: SessionEventPublisher,
+    checkpointing: CheckpointingSessionStore | undefined,
     environment: Environment,
     opts: SessionOpenOptions,
   ) {
@@ -311,8 +356,11 @@ export class Session implements SessionPort {
     this.environment = environment;
     this.eventPublisher = publisher;
     // The publishing wrapper around the host's store: record-backed events surface on `events` when
-    // the append commits, so everything in the session writes through THIS store.
+    // the append commits, so everything in the session writes through THIS store. Beneath it, the
+    // checkpointing wrapper, so every history checkpoint carries the shard's lifecycle — it sees
+    // the lifecycle records the publisher journals, too.
     this.store = this.eventPublisher.store;
+    this.checkpointing = checkpointing;
     this.events = this.eventPublisher;
     this.tracing = opts.tracing;
     this.unsubscribeTracing = this.tracing === undefined ? undefined : eventSinkTracingBridge(this.events, this.tracing);
@@ -347,6 +395,7 @@ export class Session implements SessionPort {
     // the Runner's ephemeral session, or the harness — honors it from one place. The harness
     // normally passes its logger in; a session opened directly has nothing else to fall back on.
     this.logger = opts.logger ?? envLogger() ?? noopLogger;
+    this.durable = new DurableStateWriter(this.store, this.logger);
     this.allCapabilities = opts.capabilities ?? [];
     this.preloadedLog = opts.preloadedLog;
   }
@@ -372,8 +421,9 @@ export class Session implements SessionPort {
           : opts.environment;
     // The publisher is the session's OWN object — one producer, one consumer, both inside this
     // class — so it is built here and held as a field.
-    const publisher = new SessionEventPublisher(id, opts.events ?? new ListenerSink(), opts.store, opts.eventPublication ?? "immediate");
-    const session = new Session(id, signal, ownController, publisher, environment, opts);
+    const checkpointing = opts.store === undefined ? undefined : new CheckpointingSessionStore(opts.store, id);
+    const publisher = new SessionEventPublisher(id, opts.events ?? new ListenerSink(), checkpointing, opts.eventPublication ?? "immediate");
+    const session = new Session(id, signal, ownController, publisher, checkpointing, environment, opts);
     await session.openCapabilities();
     return session;
   }
@@ -386,21 +436,28 @@ export class Session implements SessionPort {
    * which the assembler drives.
    */
   private async openCapabilities(): Promise<void> {
-    // Shared restore: read the log at most once and let every log-fold capability
-    // (goal/plan/todo) reconstruct from that one read via `SessionContext.logRecords`, then reuse it to
-    // pre-build the main conversation context — instead of each capability, plus the first
-    // run's `replayContext`, re-reading the log separately. A caller-preloaded log IS that
-    // one read, done outside.
-    let log: readonly AgentRecord[] | undefined = this.preloadedLog;
+    // History reads `main` from its newest checkpoint on — the history after it is
+    // self-contained, so nothing before it is needed. A caller-preloaded log already holds those
+    // records; only the WHOLE log stays lazy, for a capability that asks for it
+    // (`SessionContext.logRecords`). State is not in the log at all: each owner reads its current
+    // value from the store's key/value side.
+    const preloaded = this.preloadedLog;
     this.preloadedLog = undefined;
+    const mainRecords = preloaded !== undefined
+      ? preloaded.filter((record) => (record.address ?? DEFAULT_ADDRESS) === DEFAULT_ADDRESS)
+      : this.store !== undefined
+        ? await this.readShardForRestore(DEFAULT_ADDRESS)
+        : [];
+    this.checkpointing?.restoreFrame(DEFAULT_ADDRESS, mainRecords);
+    let log: readonly AgentRecord[] | undefined;
     const logRecords: SessionLogReader = async () => {
       if (log === undefined) log = await readLog(this.store);
       return log;
     };
     const data = new CapabilityData({
       ...(this.store !== undefined ? { store: this.store } : {}),
-      readLog: logRecords,
-      append: (body) => this.appendToMain(body),
+      readAudit: async () => (this.store !== undefined ? readAudit(this.store) : []),
+      append: (body) => this.appendAuditRecord(body),
     });
     const shared = {
       sessionId: this.id,
@@ -418,7 +475,10 @@ export class Session implements SessionPort {
       state: data.stateFor(owner),
       records: data.recordsFor(owner),
       record: data.recorderFor(owner),
+      persistState: (address = DEFAULT_ADDRESS) => this.persistOwnerState(owner, address),
     }));
+    // Checked before anything opens, so a refusal has nothing to undo.
+    for (const cap of this.allCapabilities) assertPoliciesInvariant(cap);
     const opened: Capability[] = [];
     const seen = new Set<string>();
     for (const cap of this.allCapabilities) {
@@ -436,6 +496,7 @@ export class Session implements SessionPort {
         // A capability that throws here is absent for the session — its per-run assembly too,
         // since it is not pushed onto `opened`. An `invariant` one is not allowed to be absent,
         // so its failure fails the open instead.
+        await this.restoreOwner(cap, DEFAULT_ADDRESS);
         await cap.openSession?.(contextFor(cap.name));
       } catch (error) {
         // An `invariant` capability may not be absent, so its failure fails the open — but the
@@ -459,40 +520,126 @@ export class Session implements SessionPort {
     }
     this.provisionedCapabilities = opened;
     this.openedForClose = opened;
-    await this.buildPermissionManager(opened, logRecords);
+    const [usage, permission] = this.store === undefined
+      ? [undefined, undefined]
+      : await Promise.all([this.store.getState(SESSION_USAGE_KEY), this.store.getState(SESSION_PERMISSION_KEY)]);
+    if (usage !== null && usage !== undefined) this.totalUsage = usage as Usage;
+    this.buildPermissionManager(opened, (permission ?? undefined) as PermissionState | undefined);
     // A session opened without the workflow capability still needs ONE manager per session (the
     // resume journals of every workflow run in the session must land in the same store).
     if (!this.services.has("workflow")) this.services.set("workflow", new WorkflowManager(this.store));
-    // If a capability triggered the log read, reuse those records to seed the main live
-    // context so the first run appends to it instead of replaying the log a second time.
-    if (log !== undefined && this.store !== undefined && this.liveContext(DEFAULT_ADDRESS) === undefined) {
+    // Seed the main live context from the same records, so the first run appends to it
+    // instead of reading the shard a second time.
+    if (this.store !== undefined && this.liveContext(DEFAULT_ADDRESS) === undefined) {
       const context = new ConversationContext({
         store: this.store,
         address: DEFAULT_ADDRESS,
       });
-      context.loadFromRecords([...log]);
+      context.loadFromRecords(mainRecords);
       this.setLiveContext(DEFAULT_ADDRESS, context);
     }
     this.isOpen = true;
   }
 
   /**
-   * Journal a capability's record into the main conversation. Through its live context when
-   * there is one, so the record keeps its place in the context's write order; straight to the
-   * store before the first run has built it. A storeless session with no context keeps nothing
-   * durable — `records()` still sees the write, from memory.
+   * A shard's records from its newest checkpoint on. A checkpoint written without the shard's
+   * lifecycle (by a context outside any session) can restore history but not the open turn, so
+   * in that case the whole shard is read and the lifecycle is folded from its head.
    */
-  private appendToMain(body: AgentRecordBody): void {
-    const context = this.liveContext(DEFAULT_ADDRESS);
-    if (context !== undefined) {
-      context.record(body);
+  private async readShardForRestore(address: string): Promise<AgentRecord[]> {
+    const store = this.store!;
+    const tail = await readShardTail(store, address);
+    const head = tail[0];
+    // Complete = it carries the shard's lifecycle (`#frame`).
+    if (head === undefined || !isCheckpointRecord(head) || head.checkpoint?.["#frame"] !== undefined) return tail;
+    return this.readWholeShard(address);
+  }
+
+  private async readWholeShard(address: string): Promise<AgentRecord[]> {
+    const all: AgentRecord[] = [];
+    for await (const record of this.store!.readRecords({ address })) all.push(record);
+    return all;
+  }
+
+  /**
+   * Restore `cap`'s state for `address` from the value stored for it. Any write of that value
+   * still in flight lands first, so the read is never older than what this process last wrote.
+   */
+  private async restoreOwner(cap: Capability, address: string): Promise<void> {
+    const durable = cap.durableState;
+    if (durable === undefined) return;
+    this.durableOwners.set(cap.name, durable);
+    if (this.store === undefined) {
+      durable.restore(address, undefined);
       return;
     }
+    const key = durableStateKey(cap.name, address);
+    await this.durable.settled(key);
+    durable.restore(address, (await this.store.getState(key)) ?? undefined);
+  }
+
+  /** `SessionContext.persistState` for capability `owner`. */
+  private persistOwnerState(owner: string, address: string): Promise<void> {
+    const durable = this.durableOwners.get(owner);
+    if (durable === undefined) return Promise.resolve();
+    return this.durable.write(durableStateKey(owner, address), () => durable.snapshot(address));
+  }
+
+  /** The session's runtime permission state as persisted: the runtime mode, and its grants. */
+  private permissionState(): PermissionState {
+    return {
+      ...(this.explicitPermissionMode !== undefined ? { mode: this.explicitPermissionMode } : {}),
+      grants: this.permissionManager?.sessionGrants ?? [],
+    };
+  }
+
+  addSessionUsage(usage: Usage): Usage {
+    const total = (this.totalUsage = this.totalUsage === undefined ? usage : addUsage(this.totalUsage, usage));
+    void this.durable.write(SESSION_USAGE_KEY, () => this.totalUsage);
+    return total;
+  }
+
+  /** The root agent's token usage across the session's whole life — every run, every reopen.
+   *  Subagents' turns are not in it (each is audited in its own shard). */
+  get usage(): Usage | undefined {
+    return this.totalUsage;
+  }
+
+  async openFrameContext(address: string): Promise<ConversationContext> {
+    if (this.store === undefined) throw new Error("Session has no store; a frame can only be replayed from a durable log.");
+    return this.frameContextFrom(address, await this.readShardForRestore(address));
+  }
+
+  /** @internal `openFrameContext` over records the caller already read (the shard from a
+   *  checkpoint on, or whole). */
+  async frameContextFrom(address: string, records: readonly AgentRecord[]): Promise<ConversationContext> {
+    if (this.store === undefined) throw new Error("Session has no store; a frame can only be replayed from a durable log.");
+    const context = new ConversationContext({ store: this.store, address });
+    context.loadFromRecords(records);
+    this.checkpointing?.restoreFrame(address, records);
+    // `main`'s owners were restored at open and have been live since. Any other address's frame
+    // state (a subagent's todo list) is restored here, from what is stored for that address.
+    if (address !== DEFAULT_ADDRESS) {
+      for (const cap of this.provisionedCapabilities) {
+        try {
+          await this.restoreOwner(cap, address);
+        } catch (error) {
+          this.logger.log("warn", `capability "${cap.name}" durableState.restore failed for ${address}`, { capability: cap.name, error: messageOf(error) });
+        }
+      }
+    }
+    return context;
+  }
+
+  /** Write a capability's record to the audit shard (about `main`). Best effort: a failure is
+   *  logged, and `records()` still sees the write, from memory. */
+  private appendAuditRecord(body: AgentRecordBody): void {
     if (this.store === undefined) return;
-    this.store.appendRecord({ time: Date.now(), address: DEFAULT_ADDRESS, ...body } as AgentRecord).catch((error: unknown) => {
+    appendAudit(this.store, body, DEFAULT_ADDRESS).catch((error: unknown) => {
       this.logger.log("warn", "capability record failed to persist", { error: messageOf(error) });
     });
   }
+
 
   // ==========================================================================
   // Capabilities added and removed while the session is open
@@ -562,9 +709,12 @@ export class Session implements SessionPort {
     if (capability.contract === "invariant") {
       throw new Error(`capability "${name}" is invariant: it is part of the session from open and cannot be attached later`);
     }
+    assertPoliciesInvariant(capability);
     if (this.provisionedCapabilities.some((open) => open.name === name)) {
       throw new Error(`a capability named "${name}" is already open in this session`);
     }
+    // Same restore as at open: its stored state outlived any earlier detach.
+    await this.restoreOwner(capability, DEFAULT_ADDRESS);
     await capability.openSession?.(this.contextFor!(name));
     if (capability.service !== undefined) this.services.set(name, capability.service);
     this.provisionedCapabilities = [...this.provisionedCapabilities, capability];
@@ -609,14 +759,10 @@ export class Session implements SessionPort {
    * Construct the session-lived PermissionManager: capability policy slots are collected from
    * the opened capabilities' static `policies` (session-tier fault isolation: a capability whose
    * provision failed contributes nothing; a per-run `start()` failure does NOT retract its
-   * policies — they are pure evaluators over session-lived state). Then runtime permission
-   * state is folded back from the log — `permission.set_mode` (last wins) and approve-for-session
-   * grants (`permission.record_approval` with scope "session").
+   * policies — they are pure evaluators over session-lived state). Then the runtime permission
+   * state stored for the session (`session:permission`) is applied over the host's options.
    */
-  private async buildPermissionManager(
-    opened: readonly Capability[],
-    logRecords: SessionLogReader,
-  ): Promise<void> {
+  private buildPermissionManager(opened: readonly Capability[], saved: PermissionState | undefined): void {
     const overrides = new Map<string, PermissionPolicy>();
     for (const capability of opened) {
       for (const policy of capability.policies ?? []) {
@@ -657,19 +803,23 @@ export class Session implements SessionPort {
     });
     this.permissionManager = permission;
 
-    if (this.store === undefined) return;
-    for (const record of await logRecords()) {
-      if (record.type === "permission.set_mode") {
-        permission.setMode(record.mode as PermissionMode);
-      } else if (
-        record.type === "permission.record_approval" &&
-        record.decision === "approved" &&
-        record.scope === "session" &&
-        record.approvalRule !== undefined
-      ) {
-        permission.applyApproval(record.approvalRule, { decision: "approved", scope: "session" });
-      }
-    }
+    if (saved?.mode !== undefined) this.restorePermissionMode(saved.mode);
+    for (const rule of saved?.grants ?? []) permission.applyApproval(rule, { decision: "approved", scope: "session" });
+  }
+
+  private restorePermissionMode(mode: PermissionMode): void {
+    this.explicitPermissionMode = mode;
+    this.permission.setMode(mode);
+  }
+
+  /**
+   * Persist the session's runtime permission state — after an approve-for-session grant, which
+   * is already applied in memory (`PermissionManager.applyApproval`); this is the durable half.
+   * Not awaited: a lost grant only means the user is asked again. The frame's
+   * `permission.record_approval` stays the audit record of who granted it.
+   */
+  persistPermissionState(): void {
+    void this.durable.write(SESSION_PERMISSION_KEY, () => this.permissionState());
   }
 
   /** The session-lived permission manager (policy chain + mode + approval memory). Built by
@@ -790,9 +940,11 @@ export class Session implements SessionPort {
 
   // ── Conversation log (flat, linear) ──────────────────────────────────────────────────────
   // The log is a single append-only record stream per address (no branching). `getRecords`
-  // exposes it read-only for inspection / transcript rendering.
+  // exposes it read-only for inspection / transcript rendering; `getAuditRecords` the audit
+  // shard beside it (approvals, permission-mode changes, capability records, diagnostics).
 
-  /** Every record of an address in append order (for rendering the transcript). */
+  /** Every record of an address in append order (for rendering the transcript). Without an
+   *  address, every conversation shard — the audit shard is read with `getAuditRecords`. */
   async getRecords(address?: string): Promise<AgentRecord[]> {
     if (this.store === undefined) {
       throw new Error("Session has no store; the conversation log requires a durable store.");
@@ -800,6 +952,14 @@ export class Session implements SessionPort {
     const records: AgentRecord[] = [];
     for await (const record of this.store.readRecords({ ...(address !== undefined ? { address } : {}) })) records.push(record);
     return records;
+  }
+
+  /** The audit shard's records in append order; each names the shard it concerns in `about`. */
+  async getAuditRecords(): Promise<AgentRecord[]> {
+    if (this.store === undefined) {
+      throw new Error("Session has no store; the audit log requires a durable store.");
+    }
+    return readAudit(this.store);
   }
 
   // ── live context cache (perf: append across turns instead of replaying the log) ──
@@ -916,13 +1076,15 @@ export class Session implements SessionPort {
    * rejection is pre-handled internally, so ignoring it never trips unhandledRejection).
    */
   setPermissionMode(mode: PermissionMode): Promise<void> {
+    this.explicitPermissionMode = mode;
     this.permission.setMode(mode);
     if (this.store === undefined) return Promise.resolve();
-    const persisted = this.store.appendRecord({ type: "permission.set_mode", mode, address: DEFAULT_ADDRESS });
-    persisted.catch((error) => {
+    // The audit trail of the change, best effort; the stored state is what a reopen reads, and
+    // what the returned promise waits for.
+    appendAudit(this.store, { type: "permission.set_mode", mode }, DEFAULT_ADDRESS).catch((error: unknown) => {
       this.logger.log("warn", "failed to journal permission.set_mode", { error: error instanceof Error ? error.message : String(error) });
     });
-    return persisted.then(() => undefined);
+    return this.durable.write(SESSION_PERMISSION_KEY, () => this.permissionState());
   }
   get modelSetting(): string | ChatModel | undefined {
     return this.modelOverride;
@@ -989,6 +1151,7 @@ export class Session implements SessionPort {
     }
     try {
       await withTimeout(this.eventPublisher.flush(), STORE_FLUSH_TIMEOUT_MS);
+      await withTimeout(this.durable.flush(), STORE_FLUSH_TIMEOUT_MS);
       await withTimeout(Promise.resolve(this.store?.flush?.()), STORE_FLUSH_TIMEOUT_MS);
     } catch (error) {
       this.pendingDiagnostics.push({
@@ -1043,6 +1206,14 @@ function normalizeGoalBudget(input: GoalBudgetInput): GoalBudgetInput {
 function positiveInt(name: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`Goal budget ${name} must be a positive integer.`);
   return value;
+}
+
+/** A permission rule that can be timed out or detached is one that fails OPEN — see
+ *  `Capability.policies`. Refused rather than dropped, since dropping a rule fails open too. */
+function assertPoliciesInvariant(capability: Capability): void {
+  if (capability.contract !== "invariant" && (capability.policies?.length ?? 0) > 0) {
+    throw new Error(`capability "${capability.name}" is detachable and may not contribute policies; declare it invariant`);
+  }
 }
 
 function safeCwd(environment: Environment): string {

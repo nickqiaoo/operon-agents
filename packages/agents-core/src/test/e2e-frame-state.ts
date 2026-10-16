@@ -63,12 +63,15 @@ async function testTodoPerFrame(): Promise<void> {
   check("todo: `session.todo.get()` still reads the root agent's list", session.todo.get() === todos.get("main"));
   await session.close();
 
-  // The fold on resume: each shard restores its own frame, from the one linear log.
+  // The fold on resume: each shard restores its own frame, when that shard is read. Opening the
+  // session reads `main` only; a subagent's list comes back when its shard is replayed to resume
+  // it — the open never pays for frames nobody resumes.
   const restored = new TodoStore();
   const reopened = await openTestSession({ store: new DiskSessionStore(join(root, "todo")), capabilities: [todoCapability(restored)] });
   check("resume: the main agent's list folds back from its shard", restored.get().map((t) => t.title).join(",") === "MAIN-A,MAIN-B");
-  const restoredSub = restored.frames().find((f) => f !== "main");
-  check("resume: the subagent's list folds back from its own shard", restoredSub !== undefined && restored.get(restoredSub).map((t) => t.title).join(",") === "SUB-1");
+  check("resume: opening the session does not read the subagent's shard", restored.frames().every((f) => f === "main"));
+  await reopened.openFrameContext(subFrame!);
+  check("resume: the subagent's list folds back from its own shard when it is replayed", restored.get(subFrame!).map((t) => t.title).join(",") === "SUB-1");
   await reopened.close();
 }
 

@@ -3,7 +3,7 @@ import type { AssistantMessage, Message, Usage } from "../protocol/index.ts";
 import { addUsage, emptyUsage } from "../loop/usage.ts";
 import { runTurn } from "../loop/run-turn.ts";
 import { isAbortError } from "../loop/errors.ts";
-import { ConversationContext, replayContext } from "../loop/context.ts";
+import { ConversationContext, readShardTail } from "../loop/context.ts";
 import type { BatchResume, PendingApprovalInterrupt } from "../loop/types.ts";
 import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
@@ -394,7 +394,7 @@ export class Runner<TContext = unknown> {
           try {
             await store.putState(INTERRUPTION_STATE_KEY, updated);
             // History is the log's job — replay it (the active agent's shard) to rebuild context.
-            context = await replayContext(store, rootFrame.address);
+            context = await session.openFrameContext(rootFrame.address);
             session.setLiveContext(rootFrame.address, context);
           } catch (error) {
             // The run's capabilities are started: stop them before the error leaves.
@@ -499,18 +499,19 @@ export class Runner<TContext = unknown> {
         }
         visited.add(head.address);
 
-        const records: AgentRecord[] = [];
-        for await (const record of store.readRecords({ address: head.address })) records.push(record);
-
-        if (
-          expectedAcceptance !== undefined &&
-          !records.some(
+        // From the shard's newest checkpoint: a committed handoff freezes the shard, so it is
+        // always after the last checkpoint, and the tail is all the live context needs.
+        const records = await readShardTail(store, head.address);
+        const accepted = (from: readonly AgentRecord[]): boolean =>
+          from.some(
             (record) =>
               record.type === "agent.handoff.accepted" &&
               record.handoffId === expectedAcceptance!.handoffId &&
               record.fromAddress === expectedAcceptance!.fromAddress,
-          )
-        ) {
+          );
+        // The acceptance opens the target shard, so a compaction there has since moved the
+        // tail past it: only then is the rest of the shard worth reading to find it.
+        if (expectedAcceptance !== undefined && !accepted(records) && !accepted(await readWholeShard(store, head.address))) {
           throw new Error(
             `Cannot continue session: handoff "${expectedAcceptance.handoffId}" points to uninitialized shard "${head.address}".`,
           );
@@ -529,12 +530,7 @@ export class Runner<TContext = unknown> {
           // Reuse the leaf records we already read to seed the live cache; otherwise the caller
           // would immediately replay the same shard a second time before appending the prompt.
           if (session.liveContext(head.address) === undefined) {
-            const context = new ConversationContext({
-              store,
-              address: head.address,
-            });
-            context.loadFromRecords(records);
-            session.setLiveContext(head.address, context);
+            session.setLiveContext(head.address, await session.frameContextFrom(head.address, records));
           }
           break;
         }
@@ -610,7 +606,7 @@ export class Runner<TContext = unknown> {
         context = live;
       } else {
         context = state.store
-          ? await replayContext(state.store, state.address)
+          ? await session.openFrameContext(state.address)
           : new ConversationContext({
               store: state.store,
               address: state.address,
@@ -666,6 +662,7 @@ export class Runner<TContext = unknown> {
           state.usage = addUsage(state.usage, error.usage);
           const activeContext = session.liveContext(state.address) ?? context;
           activeContext.record({ type: "usage.record", usage: error.usage, total: state.usage });
+          countSessionUsage(state, error.usage);
           if (state.store === undefined) void emitRunEvent(state, { type: "usage.updated", usage: state.usage });
         }
         const blocked = {
@@ -956,6 +953,7 @@ class Engine<TContext> {
           // Per-address ledger: main agent and each subagent line keep independent
           // read-before-write state that survives across turns and run() calls.
           fileLedger: state.session.fileLedgerFor(state.address),
+          hostContext: state.context,
           system,
           context,
           tools: toolset.tools,
@@ -1011,6 +1009,7 @@ class Engine<TContext> {
       state.usage = addUsage(state.usage, r.usage);
       // Audit record: per-turn cost, journaled in order with the message stream (not history).
       context.record({ type: "usage.record", model: model.id, usage: r.usage, total: state.usage });
+      countSessionUsage(state, r.usage);
       if (state.store === undefined) emitRunEvent(state, { type: "usage.updated", usage: state.usage });
       if (r.stopReason === "interrupt") {
         const pending = r.pending ?? [];
@@ -1120,10 +1119,14 @@ class Engine<TContext> {
       const result = await hook({
         turnId: `${state.sessionId}-t${state.turns}`,
         stepNumber: state.turns,
+        address: state.address,
         usage,
         stopReason: "end_turn",
         signal: state.signal,
         model,
+        // A child frame shares its parent's capabilities (`deriveChild`), so every
+        // continuation hook also sees subagent stops — this is how it tells them apart.
+        isRootAgent: state.parentFrameId === undefined,
       });
       if (result?.continue === true) return true;
     }
@@ -1166,4 +1169,18 @@ function mergeSignals(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined
   if (a === undefined) return b;
   if (b === undefined) return a;
   return AbortSignal.any([a, b]);
+}
+
+/**
+ * Add a turn's usage to the session's running total (`Session.usage`), for a ROOT frame only.
+ * A subagent's turns are audited in its own shard but are not the session's.
+ */
+function countSessionUsage<TContext>(state: RunState<TContext>, usage: Usage): void {
+  if (state.parentFrameId === undefined) state.session.addSessionUsage(usage);
+}
+
+async function readWholeShard(store: SessionStore, address: string): Promise<AgentRecord[]> {
+  const records: AgentRecord[] = [];
+  for await (const record of store.readRecords({ address })) records.push(record);
+  return records;
 }

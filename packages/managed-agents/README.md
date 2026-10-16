@@ -125,3 +125,35 @@ describe the relay and are refused without the declaration. Declaring `external`
 so it needs no permission of its own; the `authorize` hook receives `origin` on
 `messages.create`, and a deployment that hands a credential to something that only relays (a
 webhook bridge, a teammate agent) can refuse it anything else.
+
+A worker serves many tenants by default, and refuses what would leak between them or run outside
+the sandbox: a session whose environment does not come from the environment registry, a harness
+holding process-wide MCP connections or an OAuth service, MCP over stdio, and a token read from
+the process environment. A self-hosted, one-owner deployment says so —
+`new SessionWorker({ profile: "single-tenant", … })` — and the worker logs that it did.
+
+What a host decides per tenant goes through the registries, which are told whose session they
+resolve for: `resolve(ref, { sessionId, ownerKey, metadata })`. `ownerKey` is stamped by the
+service and trustworthy; `metadata` came from the client. Per-user MCP credentials — a vault —
+are a provider the agent registry hands out, asked on every connect:
+
+```ts
+const agents: ManagedAgentRegistry = {
+  resolve: (_ref, { ownerKey }) => ({
+    resumeOptions: {
+      mcpServers: { linear: { transport: "http", url: "https://mcp.linear.app/mcp" } },
+      mcpCredentials: {
+        credentialsFor: async ({ url }) => {
+          const token = await vault.tokenFor(ownerKey!, url); // the host's store, refresh, lock
+          return token === undefined ? undefined : { headers: { Authorization: `Bearer ${token}` } };
+        },
+        invalidate: ({ url }) => vault.refresh(ownerKey!, url), // on a 401; the connect retries once
+      },
+    },
+  }),
+};
+```
+
+The engine never stores, refreshes or logs a credential, and since the MCP client runs in the
+worker, a credential never enters the sandbox. The rules and their reasons are in
+`docs/server-profile.md`.

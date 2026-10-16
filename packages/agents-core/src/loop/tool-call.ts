@@ -45,6 +45,8 @@ export interface ToolCallStepContext {
   readonly responder?: QuestionResponder;
   /** Session-scoped file freshness ledger, forwarded into both tool contexts. */
   readonly fileLedger?: FileFreshnessLedger;
+  /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
+  readonly hostContext?: unknown;
   /** Surfaces each tool result the moment it lands (the unified loop event out). */
   readonly dispatchEvent?: LoopEventDispatcher;
   readonly logger?: Logger;
@@ -238,6 +240,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       signal: step.signal,
       environment: step.environment,
       ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
+      ...(step.hostContext !== undefined ? { context: step.hostContext } : {}),
     });
   } catch (error) {
     if (isToolSuspendSignal(error)) {
@@ -293,6 +296,7 @@ async function runAndFinalize(
         dispatch: createNestedDispatcher(step, call),
         responder: step.responder,
         ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
+        ...(step.hostContext !== undefined ? { context: step.hostContext } : {}),
         ...(detachSignal !== undefined ? { detachSignal } : {}),
         suspend: (request: ToolInputRequest, state?: unknown): never => {
           throw new ToolSuspendSignal(request, snapshotSuspendState(call.name, state));

@@ -1,6 +1,6 @@
 /**
- * A capability's own durable data: a key/value `state` and a stream of named `records`, each
- * partitioned by the capability's name. What `SessionContext.state` / `records` / `record` are
+ * A capability's own durable data: a key/value `state` and a stream of named `records` (kept in
+ * the session's audit shard, never the conversation), each partitioned by the capability's name. What `SessionContext.state` / `records` / `record` are
  * built from — one `CapabilityData` per session, one view per capability.
  *
  * The partition prefix is `extension:<owner>:`, not `capability:`, on purpose: extensions wrote
@@ -26,15 +26,15 @@ const PREFIX = "extension:";
 
 export interface CapabilityDataOptions {
   readonly store?: SessionStore;
-  /** The session's memoized log read — the same one the log-folding capabilities share. */
-  readonly readLog: () => Promise<readonly AgentRecord[]>;
-  /** Journal a record into the session's main conversation. */
+  /** The session's audit shard, where capability records are kept (see `AUDIT_ADDRESS`). */
+  readonly readAudit: () => Promise<readonly AgentRecord[]>;
+  /** Write a record to the session's audit shard. */
   readonly append: (body: AgentRecordBody) => void;
 }
 
 export class CapabilityData {
   private readonly store: SessionStore | undefined;
-  private readonly readLog: () => Promise<readonly AgentRecord[]>;
+  private readonly readAudit: () => Promise<readonly AgentRecord[]>;
   private readonly append: (body: AgentRecordBody) => void;
   /** Storeless sessions keep state here, for the session's lifetime. */
   private readonly memoryState = new Map<string, unknown>();
@@ -50,7 +50,7 @@ export class CapabilityData {
 
   constructor(options: CapabilityDataOptions) {
     this.store = options.store;
-    this.readLog = options.readLog;
+    this.readAudit = options.readAudit;
     this.append = options.append;
   }
 
@@ -91,10 +91,10 @@ export class CapabilityData {
     };
   }
 
-  /** One pass over the log buckets every owner's records; owners are colon-free slugs, so the
-   *  prefix parse is unambiguous. */
+  /** One pass over the audit shard buckets every owner's records; owners are colon-free slugs,
+   *  so the prefix parse is unambiguous. Never a read of the conversation log. */
   private earlier(): Promise<Map<string, CapabilityRecord[]>> {
-    this.snapshot ??= this.readLog().then((log) => {
+    this.snapshot ??= this.readAudit().then((log) => {
       const buckets = new Map<string, CapabilityRecord[]>();
       for (const record of log) {
         if (record.type !== "custom" || (record.time ?? 0) >= this.openedAt) continue;

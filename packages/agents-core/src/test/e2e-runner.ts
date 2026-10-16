@@ -30,6 +30,7 @@ import {
   type ChatModel,
   type Message,
   type Responder,
+  readAudit,
 } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -775,9 +776,11 @@ async function testHitlResume(dir: string, environment: LocalEnvironment): Promi
   const log: Array<{ type: string; decision?: string; toolName?: string }> = [];
   for await (const e of store.readRecords()) log.push(e as { type: string; decision?: string; toolName?: string });
   check("hitl: usage audit records journaled", log.some((e) => e.type === "usage.record"));
+  const audit = await readAudit(store);
   check(
-    "hitl: approval audit record journaled (Write → approved)",
-    log.some((e) => e.type === "permission.record_approval" && e.toolName === "Write" && e.decision === "approved"),
+    "hitl: approval audit record in the audit shard (Write → approved), not the log",
+    audit.some((e) => e.type === "permission.record_approval" && e.toolName === "Write" && e.decision === "approved" && e.about === "main") &&
+      !log.some((e) => e.type === "permission.record_approval"),
   );
   check(
     "hitl cache: injection was journaled exactly once",

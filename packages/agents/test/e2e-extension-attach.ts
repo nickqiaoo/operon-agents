@@ -66,9 +66,9 @@ async function attachLifecycle(): Promise<void> {
   const after = await session.prompt("three");
   check("detach: handlers are gone on the next run", modelRequests === requestsBeforeDetach && after.output === "gone");
 
-  const records = await session.getRecords();
+  const records = await session.getAuditRecords();
   const names = records.filter((r) => r.type === "custom").map((r) => (r as { name: string }).name);
-  check("journal: attach and detach are both recorded", names.includes("extensions.attached") && names.includes("extensions.detached"));
+  check("journal: attach and detach are both recorded in the audit shard", names.includes("extensions.attached") && names.includes("extensions.detached"));
 
   const receipt = stashedActions?.steer("zombie steer");
   check("revocation: stashed actions.steer is a warn-noop after detach", receipt === undefined);

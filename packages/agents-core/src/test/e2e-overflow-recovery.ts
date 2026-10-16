@@ -18,6 +18,7 @@ import {
   type AgentEvent,
   type AgentRecord,
   type Message,
+  readAudit,
 } from "../index.ts";
 import { runTurn } from "../internal.ts";
 
@@ -99,10 +100,12 @@ async function testOverflowCompactRetry(dir: string, environment: LocalEnvironme
 
   const entries: AgentRecord[] = [];
   for await (const e of store.readRecords()) entries.push(e);
+  const audit = await readAudit(store);
   check(
-    "recover: dropped overflow message kept as transcript record",
-    entries.some((e) => e.type === "custom" && (e as { name?: string }).name === "overflow_dropped"),
+    "recover: dropped overflow message kept in the audit shard, about the shard it was dropped from",
+    audit.some((e) => e.type === "custom" && (e as { name?: string }).name === "overflow_dropped" && e.about === "main"),
   );
+  check("recover: and not in the conversation log", !entries.some((e) => e.type === "custom" && (e as { name?: string }).name === "overflow_dropped"));
 }
 
 /** Overflow with no claimant (no compaction capability) → the turn settles as "error",

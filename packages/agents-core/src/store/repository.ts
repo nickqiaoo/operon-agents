@@ -9,7 +9,8 @@ import {
   type DiskSessionCatalogEntry,
   type DiskSessionCatalogRecord,
 } from "./session-catalog.ts";
-import type { SessionStore } from "./store.ts";
+import { AUDIT_ADDRESS, type SessionStore } from "./store.ts";
+import type { Usage } from "../protocol/index.ts";
 import { encodeWorkdirKey, normalizeWorkDir } from "./workdir-key.ts";
 
 export interface SessionMeta {
@@ -37,6 +38,13 @@ export interface SessionSummary {
   readonly updatedAt: number;
   /** Durable control state only. Live `running` belongs to the open HarnessSession. */
   readonly durableState: DurableSessionState;
+  /**
+   * The root agent's token usage over the session's whole life, as of its last finished turn —
+   * readable without opening the session. Subagents' usage is not included (it is audited in
+   * their own shards). A read model like the rest of the summary: absent until the first turn
+   * ends, and possibly one turn behind after a crash, until the next turn ends.
+   */
+  readonly usage?: Usage;
 }
 
 export interface SessionHandle {
@@ -169,7 +177,7 @@ function summaryFromMeta(meta: SessionMeta): SessionSummary {
 }
 
 export class MemorySessionRepository implements SessionRepository {
-  private readonly sessions = new Map<string, { handle: SessionHandle; meta: SessionMeta }>();
+  private readonly sessions = new Map<string, { handle: SessionHandle; meta: SessionMeta; usage?: Usage }>();
 
   async create(input: CreateSessionInput): Promise<SessionHandle> {
     const id = input.id ?? generateSessionId();
@@ -195,7 +203,7 @@ export class MemorySessionRepository implements SessionRepository {
 
   async get(id: string): Promise<SessionSummary | undefined> {
     const entry = this.sessions.get(id);
-    return entry === undefined ? undefined : summaryFromMeta(entry.meta);
+    return entry === undefined ? undefined : withUsage(summaryFromMeta(entry.meta), entry.usage);
   }
 
   async list(filter?: ListSessionsFilter): Promise<readonly SessionSummary[]> {
@@ -207,7 +215,7 @@ export class MemorySessionRepository implements SessionRepository {
         (wanted === undefined || meta.workDir === wanted)
         && (owner === undefined || meta.ownerKey === owner)
         && (deleted || meta.deletedAt === undefined))
-      .map(({ meta }) => summaryFromMeta(meta))
+      .map(({ meta, usage }) => withUsage(summaryFromMeta(meta), usage))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
@@ -226,6 +234,8 @@ export class MemorySessionRepository implements SessionRepository {
     // shard's linear record sequence is reconstructed exactly, not interleaved across shards.
     const addresses = new Set<string>();
     for await (const record of source.handle.store.readRecords()) addresses.add(record.address ?? "main");
+    // A read without an address leaves the audit shard out; the fork carries it all the same.
+    addresses.add(AUDIT_ADDRESS);
     for (const address of addresses) {
       for await (const record of source.handle.store.readRecords({ address })) await target.appendRecord(record);
     }
@@ -240,6 +250,9 @@ export class MemorySessionRepository implements SessionRepository {
       const value = await source.handle.store.getState(key);
       if (value !== null) await target.putState(key, value);
     }
+    // The fork's log is a copy, so its running usage is the source's.
+    const forkedEntry = this.sessions.get(forked.id);
+    if (forkedEntry !== undefined && source.usage !== undefined) forkedEntry.usage = source.usage;
     return forked;
   }
 
@@ -284,8 +297,16 @@ export class MemorySessionRepository implements SessionRepository {
         const meta = asSessionMeta(value);
         patch({ ...(meta?.title !== undefined ? { title: meta.title } : {}), updatedAt: at });
       },
+      usage: (usage) => {
+        const current = this.sessions.get(id);
+        if (current !== undefined) current.usage = usage;
+      },
     };
   }
+}
+
+function withUsage(summary: SessionSummary, usage: Usage | undefined): SessionSummary {
+  return usage === undefined ? summary : { ...summary, usage };
 }
 
 export class DiskSessionRepository implements SessionRepository {
@@ -400,6 +421,8 @@ export class DiskSessionRepository implements SessionRepository {
         createdAt: now,
         updatedAt: now,
         durableState: source.durableState,
+        // The fork's log is a copy, so its running usage is the source's.
+        ...(source.usage !== undefined ? { usage: source.usage } : {}),
       },
     });
     const store = this.diskStore(id, raw);
@@ -469,6 +492,7 @@ export class DiskSessionRepository implements SessionRepository {
           updatedAt: at,
         });
       },
+      usage: (usage) => this.patchDiskCatalog(id, { usage }),
       flush: async () => {
         await this.flushActivity();
         await this.catalogWrite;
@@ -543,7 +567,7 @@ export class DiskSessionRepository implements SessionRepository {
 
   private async patchDiskCatalog(
     id: string,
-    patch: { readonly title?: string | null; readonly updatedAt?: number; readonly durableState?: DurableSessionState },
+    patch: { readonly title?: string | null; readonly updatedAt?: number; readonly durableState?: DurableSessionState; readonly usage?: Usage },
   ): Promise<void> {
     const catalog = await this.ensureCatalog();
     if (!catalog.has(id)) return;
@@ -607,6 +631,7 @@ function summaryFromCatalog(entry: DiskSessionCatalogEntry): SessionSummary {
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
     durableState: entry.durableState,
+    ...(entry.usage !== undefined ? { usage: entry.usage } : {}),
   };
 }
 
@@ -629,6 +654,7 @@ function applyCatalogRecord(
     ...(record.title !== undefined ? { title: record.title ?? undefined } : {}),
     ...(record.updatedAt !== undefined ? { updatedAt: Math.max(current.updatedAt, record.updatedAt) } : {}),
     ...(record.durableState !== undefined ? { durableState: record.durableState } : {}),
+    ...(record.usage !== undefined ? { usage: record.usage } : {}),
   });
 }
 

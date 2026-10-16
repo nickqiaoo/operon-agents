@@ -137,7 +137,7 @@ test('a Markdown export carries the conversation and skips framing the user neve
       userRecord('todo list', { kind: 'injection', variant: 'todo' }),
       assistantRecord('on it', [{ id: 'c1', name: 'Bash', args: { command: 'ls' } }]),
       toolResultRecord('c1', 'Bash', 'a.ts'),
-      { type: 'context.apply_compaction', summary: 'earlier work', cutoff: 2, compactedCount: 2, tokensBefore: 100, tokensAfter: 20 } as AgentRecord,
+      { type: 'context.apply_compaction', summary: 'earlier work', summaryTimestamp: 1, kept: [], compactedCount: 2, tokensBefore: 100, tokensAfter: 20 } as AgentRecord,
     ],
   });
   assert.match(markdown, /# Refactor/);

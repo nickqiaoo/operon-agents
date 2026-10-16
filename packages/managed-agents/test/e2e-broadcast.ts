@@ -152,7 +152,7 @@ async function realTurnProducesDeltas(): Promise<void> {
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });
-  const worker = new SessionWorker({ harness, repository, metadataStore, environments, work: sessionWork, broadcaster });
+  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork, broadcaster });
   const service = new SessionService({ repository, work: sessionWork, metadataStore, environments, broadcaster });
 
   const session = await service.create({ agent: "default", environment: "default" });

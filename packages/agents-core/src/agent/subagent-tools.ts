@@ -11,7 +11,7 @@
 import { z } from "zod";
 import type { Message, Usage } from "../protocol/index.ts";
 import { addUsage, subtractUsage } from "../loop/usage.ts";
-import { ConversationContext, replayContext } from "../loop/context.ts";
+import { ConversationContext } from "../loop/context.ts";
 import { historyChangeEmitter } from "./run-support.ts";
 import { SteerBus } from "../loop/steer.ts";
 import {
@@ -251,7 +251,7 @@ export function buildAgentTool<TContext>(
             const childState = spawner.derive({ address, signal: deadline.signal, parentToolCallId: ctx.toolCallId, steer: new SteerBus() });
             // Rebuild the subagent's context, validate the new prompt, then append it only
             // after acceptance. A rejected prompt is audit-only in the child shard.
-            const childContext = await replayContext(parent.store, address);
+            const childContext = await parent.session.openFrameContext(address);
             const promptMessage: Message = { role: "user", content: [{ type: "text", text: args.prompt }], timestamp: Date.now() };
             await guardSubagentInput(sub, [promptMessage], childState, spawner);
             childContext.appendMessage(promptMessage);
@@ -603,7 +603,7 @@ async function resumeInterruptedChild<TContext>(
     resumeFrame: frame,
     steer: new SteerBus(),
   });
-  const childContext = await replayContext(parent.store, frame.address);
+  const childContext = await parent.session.openFrameContext(frame.address);
   childState.session.setLiveContext(frame.address, childContext);
   const resumeFrom = findAnchoredAssistant(childContext.messages, frame.anchor);
   // Same contract as a fresh spawn: the resumed frame must be steerable at its address.

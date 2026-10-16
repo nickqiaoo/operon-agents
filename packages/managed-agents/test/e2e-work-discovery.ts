@@ -72,7 +72,7 @@ async function apiNodeWithoutWorker(): Promise<void> {
   // The API node: writes, nudges nobody.
   const service = new SessionService({ repository: f.repository, work: f.sessionWork, metadataStore: f.metadataStore, environments: f.environments });
   // The worker node: shares only the store and the table.
-  const worker = new SessionWorker({
+  const worker = new SessionWorker({ profile: "single-tenant",
     harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments,
     work: f.sessionWork, claimIntervalMs: 20,
   });
@@ -120,7 +120,7 @@ async function inputDuringReleaseIsClaimed(): Promise<void> {
     },
   };
   service = new SessionService({ repository: f.repository, work: table, metadataStore: f.metadataStore, environments: f.environments });
-  const worker = new SessionWorker({
+  const worker = new SessionWorker({ profile: "single-tenant",
     harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments,
     work: table, claimIntervalMs: 20,
   });
@@ -148,7 +148,7 @@ async function strandedMeansUnprocessedInbox(): Promise<void> {
     repository: f.repository, work: f.sessionWork, metadataStore: f.metadataStore, environments: f.environments,
     broadcaster: new MemoryEventBroadcaster(), stallCheckMs: 60,
   });
-  const worker = new SessionWorker({ harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments, work: f.sessionWork });
+  const worker = new SessionWorker({ profile: "single-tenant", harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments, work: f.sessionWork });
   const session = await service.create({ agent: "default", environment: "default" });
   await service.appendEvent(session.id, { input: "hello" });
   await worker.drain(session.id);
@@ -177,7 +177,7 @@ async function crashedTurnIsClaimedAndClosed(): Promise<void> {
   const f = fixture("crashed-turn", 1, { ttlMs: 80 });
   const broadcaster = new MemoryEventBroadcaster();
   const service = new SessionService({ repository: f.repository, work: f.sessionWork, metadataStore: f.metadataStore, environments: f.environments, broadcaster });
-  const worker = new SessionWorker({
+  const worker = new SessionWorker({ profile: "single-tenant",
     harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments,
     work: f.sessionWork, broadcaster, claimIntervalMs: 20, renewIntervalMs: 20,
   });
@@ -231,7 +231,7 @@ async function modelFailureIsSeenAsFailedTurn(): Promise<void> {
   f.faux.setResponses([(async () => { throw new Error("model exploded"); }) as never]);
   const broadcaster = new MemoryEventBroadcaster();
   const service = new SessionService({ repository: f.repository, work: f.sessionWork, metadataStore: f.metadataStore, environments: f.environments, broadcaster });
-  const worker = new SessionWorker({ harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments, work: f.sessionWork, broadcaster });
+  const worker = new SessionWorker({ profile: "single-tenant", harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: f.environments, work: f.sessionWork, broadcaster });
   const session = await service.create({ agent: "default", environment: "default" });
   const live: AgentEvent[] = [];
   const unsubscribe = broadcaster.subscribe(session.id, (event) => live.push(event));
@@ -263,7 +263,7 @@ async function setupFailureIsBroadcastAsError(): Promise<void> {
     resolve: () => { throw new Error("environment unavailable"); },
   };
   const errors: unknown[] = [];
-  const worker = new SessionWorker({
+  const worker = new SessionWorker({ profile: "single-tenant",
     harness: f.harness, repository: f.repository, metadataStore: f.metadataStore, environments: brokenEnvironments,
     work: f.sessionWork, broadcaster, onError: (error) => errors.push(error),
   });

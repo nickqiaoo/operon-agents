@@ -22,23 +22,26 @@ import type {
  * `ctx.fileLedger`), plan fields beyond approvalRule/accesses/display, or an
  * args-dependent plan structure.
  */
-export interface ToolDef<S extends ZodType> {
+export interface ToolDef<S extends ZodType, TContext = unknown> {
   readonly name: string;
   readonly description: string;
   readonly params: S;
-  readonly resolve: (args: z.infer<S>, ctx: ToolResolveContext) => ToolPlan | Promise<ToolPlan>;
+  readonly resolve: (args: z.infer<S>, ctx: ToolResolveContext<TContext>) => ToolPlan | Promise<ToolPlan>;
   /** Security-relevant projection for the `auto`-mode judge. See `Tool.toAutoApprovalInput`. */
   readonly toAutoApprovalInput?: (args: z.infer<S>) => unknown;
 }
 
-/** Build a tool from a {@link ToolDef}. See that type's doc for when to prefer {@link tool}. */
-export function defineTool<S extends ZodType>(def: ToolDef<S>): Tool {
+/**
+ * Build a tool from a {@link ToolDef}. See that type's doc for when to prefer {@link tool}.
+ * `TContext` declares the host context `ctx.context` carries (see `ToolContextBase.context`).
+ */
+export function defineTool<S extends ZodType, TContext = unknown>(def: ToolDef<S, TContext>): Tool {
   const parameters = z.toJSONSchema(def.params) as Record<string, unknown>;
   return {
     schema: { name: def.name, description: def.description, parameters },
     resolve(rawArgs, ctx) {
       const args = def.params.parse(rawArgs) as z.infer<S>;
-      return def.resolve(args, ctx);
+      return def.resolve(args, ctx as ToolResolveContext<TContext>);
     },
     // Project from the raw (history) args. The judge passes unvalidated tool_use input from
     // the transcript, so parse defensively and let the judge's try/catch handle throws.
@@ -57,11 +60,11 @@ export type ToolReturn = string | ToolResultContent | ToolResult;
  * hand; for resolve-time validation or plan fields not exposed here, use
  * {@link defineTool} instead.
  */
-export interface FunctionToolDef<S extends ZodType> {
+export interface FunctionToolDef<S extends ZodType, TContext = unknown> {
   readonly name: string;
   readonly description: string;
   readonly parameters: S;
-  readonly execute: (args: z.infer<S>, ctx: ToolRunContext) => ToolReturn | Promise<ToolReturn>;
+  readonly execute: (args: z.infer<S>, ctx: ToolRunContext<TContext>) => ToolReturn | Promise<ToolReturn>;
   readonly approvalRule?: string | ((args: z.infer<S>) => string);
   readonly accesses?: ToolAccesses;
   readonly display?: (args: z.infer<S>) => ToolDisplay;
@@ -69,8 +72,11 @@ export interface FunctionToolDef<S extends ZodType> {
   readonly toAutoApprovalInput?: (args: z.infer<S>) => unknown;
 }
 
-/** Build a tool from a {@link FunctionToolDef} — the right default for most tools. */
-export function tool<S extends ZodType>(def: FunctionToolDef<S>): Tool {
+/**
+ * Build a tool from a {@link FunctionToolDef} — the right default for most tools.
+ * `TContext` declares the host context `ctx.context` carries (see `ToolContextBase.context`).
+ */
+export function tool<S extends ZodType, TContext = unknown>(def: FunctionToolDef<S, TContext>): Tool {
   const parameters = z.toJSONSchema(def.parameters) as Record<string, unknown>;
   return {
     schema: { name: def.name, description: def.description, parameters },
@@ -85,7 +91,7 @@ export function tool<S extends ZodType>(def: FunctionToolDef<S>): Tool {
         approvalRule,
         accesses: def.accesses,
         display: def.display?.(args),
-        run: async (ctx) => normalizeToolReturn(await def.execute(args, ctx)),
+        run: async (ctx) => normalizeToolReturn(await def.execute(args, ctx as ToolRunContext<TContext>)),
       };
     },
   };

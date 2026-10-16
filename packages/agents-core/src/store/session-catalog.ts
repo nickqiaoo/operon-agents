@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { DurableSessionState } from "./catalog-store.ts";
+import type { Usage } from "../protocol/index.ts";
 
 export interface DiskSessionCatalogEntry {
   readonly sessionId: string;
@@ -14,6 +15,8 @@ export interface DiskSessionCatalogEntry {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly durableState: DurableSessionState;
+  /** See `SessionSummary.usage`. */
+  readonly usage?: Usage;
 }
 
 export type DiskSessionCatalogRecord =
@@ -24,6 +27,7 @@ export type DiskSessionCatalogRecord =
       readonly title?: string | null;
       readonly updatedAt?: number;
       readonly durableState?: DurableSessionState;
+      readonly usage?: Usage;
     }
   | { readonly op: "delete"; readonly sessionId: string };
 
@@ -67,6 +71,7 @@ export async function readSessionCatalog(sessionsDir: string): Promise<Map<strin
       ...current,
       ...(record.title !== undefined ? { title: record.title ?? undefined } : {}),
       ...(record.durableState !== undefined ? { durableState: record.durableState } : {}),
+      ...(record.usage !== undefined ? { usage: record.usage } : {}),
       ...(record.updatedAt !== undefined
         ? { updatedAt: Math.max(current.updatedAt, record.updatedAt) }
         : {}),
@@ -94,6 +99,7 @@ function parseCatalogLine(line: string, sessionsDir: string): DiskSessionCatalog
         ...(typeof parsed.title === "string" || parsed.title === null ? { title: parsed.title } : {}),
         ...(typeof parsed.updatedAt === "number" ? { updatedAt: parsed.updatedAt } : {}),
         ...(durableState !== undefined ? { durableState } : {}),
+        ...(isUsage(parsed.usage) ? { usage: parsed.usage } : {}),
       };
     }
     if (parsed.op !== "upsert" || !isRecord(parsed.entry)) return undefined;
@@ -120,11 +126,16 @@ function parseCatalogLine(line: string, sessionsDir: string): DiskSessionCatalog
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
         durableState,
+        ...(isUsage(entry.usage) ? { usage: entry.usage } : {}),
       },
     };
   } catch {
     return undefined;
   }
+}
+
+function isUsage(value: unknown): value is Usage {
+  return typeof value === "object" && value !== null && typeof (value as { totalTokens?: unknown }).totalTokens === "number";
 }
 
 function parseDurableState(value: unknown): DurableSessionState | undefined {

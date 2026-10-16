@@ -18,7 +18,7 @@ import {
   type TelemetryService,
   type AgentEventListener,
   type AgentInput,
-  readLog,
+  readSessionTails,
   SessionProjection,
   type SessionSnapshot,
   type SnapshotOptions,
@@ -83,6 +83,7 @@ import {
   type HookDef,
   type McpServerConfig,
   type McpTransportKind,
+  type McpCredentialProvider,
   type PluginManager,
   type ApprovalRequestOptions,
   type Environment,
@@ -225,6 +226,17 @@ export interface DefaultCapabilitiesOptions {
    * to run is the host's statement, not the kernel's.
    */
   readonly allowedMcpTransports?: readonly McpTransportKind[];
+  /** Credentials the host hands out per connect for this session's http MCP servers. See
+   *  `McpCredentialProvider`. */
+  readonly mcpCredentials?: McpCredentialProvider;
+  /**
+   * The session belongs to one tenant among many (a managed host's default): nothing the process
+   * shares reaches it — no process-wide MCP set, skill scan, OAuth service or directory pool —
+   * MCP runs over http only, and no server may read its token from the process environment.
+   * Each is refused rather than skipped where skipping would hide a misconfiguration. See
+   * docs/server-profile.md.
+   */
+  readonly strictIsolation?: boolean;
 }
 
 /**
@@ -241,9 +253,15 @@ export interface DefaultCapabilitiesOptions {
 export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
   const manager = options.pluginManager ?? options.shared?.pluginManager;
   // A session on its own environment ignores the process-wide registry: it was scanned elsewhere.
-  const sharedSkills = options.ownEnvironment === true ? undefined : options.shared?.skillRegistry;
-  const sharedServers = options.ownEnvironment === true ? undefined : options.shared?.mcpServers;
-  const oauthService = options.oauthService ?? options.shared?.oauthService;
+  const strict = options.strictIsolation === true;
+  // A session on its own environment, or one tenant among many, gets nothing the process shares.
+  const isolated = strict || options.ownEnvironment === true;
+  const sharedSkills = isolated ? undefined : options.shared?.skillRegistry;
+  const sharedServers = isolated ? undefined : options.shared?.mcpServers;
+  const oauthService = options.oauthService ?? (strict ? undefined : options.shared?.oauthService);
+  const allowedMcpTransports: readonly McpTransportKind[] | undefined = strict
+    ? (options.allowedMcpTransports ?? ["http", "stdio"]).filter((kind) => kind === "http")
+    : options.allowedMcpTransports;
   // Shared registry so the plugin session-start injector can render a skill the skills capability
   // loaded (its roots include the plugin skill dirs below). A process-wide registry is scanned
   // once for every session; a session-level one is scanned here.
@@ -269,7 +287,8 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
   const sessionMcp = options.sessionMcpServers ?? {};
   const mcpOptions = {
     ...(oauthService !== undefined ? { oauthService } : {}),
-    ...(options.allowedMcpTransports !== undefined ? { allowedTransports: options.allowedMcpTransports } : {}),
+    ...(allowedMcpTransports !== undefined ? { allowedTransports: allowedMcpTransports } : {}),
+    ...(options.mcpCredentials !== undefined ? { credentials: options.mcpCredentials } : {}),
   };
   // Everything this session would connect that is not private to it: the directory's servers
   // last, so they win over a same-named plugin server the way they did as a session overlay.
@@ -278,7 +297,15 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     ...(manager?.mcpServerConfigs() ?? {}),
     ...(options.workspaceMcp?.servers ?? {}),
   };
-  const pooled = sharedServers === undefined && options.ownEnvironment !== true ? options.workspaceMcp : undefined;
+  if (strict) {
+    // The process environment has no tenant boundary: a token read from it is every tenant's.
+    for (const [name, config] of Object.entries({ ...shareable, ...sessionMcp })) {
+      if (config.bearerTokenEnvVar !== undefined) {
+        throw new Error(`MCP server "${name}" reads its token from the process environment (bearerTokenEnvVar), which every tenant on this host shares; hand it out per session with mcpCredentials instead.`);
+      }
+    }
+  }
+  const pooled = sharedServers === undefined && !isolated ? options.workspaceMcp : undefined;
   if (pooled !== undefined && Object.keys(shareable).length > 0) {
     // Borrowed per directory: the capability views the pool's set, `sessionMcp` is its overlay.
     capabilities.push(workspaceMcpCapability({ pool: pooled.pool, workDir: pooled.workDir, servers: shareable, overlay: sessionMcp, overlayOptions: mcpOptions }));
@@ -510,6 +537,11 @@ export interface SessionCapabilityContext {
   /** The session brought its own environment (`{ environment }` on this open): harness-shared objects
    *  derived from the harness's environment (the skill scan) do not apply to it. */
   readonly ownEnvironment: boolean;
+  /** {@link OpenSessionOptionsBase.mcpCredentials} for this open. */
+  readonly mcpCredentials?: McpCredentialProvider;
+  /** {@link OpenSessionOptionsBase.strictIsolation} for this open. A custom factory owns honouring
+   *  it the way `defaultCapabilities` does. */
+  readonly strictIsolation: boolean;
 }
 
 /**
@@ -538,6 +570,16 @@ interface OpenSessionOptionsBase<TContext = unknown> {
    * shared one for this session; a custom factory can decide otherwise.
    */
   readonly mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Where this session's http MCP servers get their credentials, asked on every connect: the
+   * seam a host builds a per-user vault on. Not persisted — a resume passes it again.
+   */
+  readonly mcpCredentials?: McpCredentialProvider;
+  /**
+   * This session is one tenant's among many: see `DefaultCapabilitiesOptions.strictIsolation`.
+   * A managed host's worker sets it on every open unless it runs single-tenant.
+   */
+  readonly strictIsolation?: boolean;
   /**
    * Per-session argument for each registered extension, by extension id — handed to that
    * extension's `session(api, ctx)` as `ctx.params`. A value of `false` skips the extension for
@@ -1182,6 +1224,10 @@ export class HarnessSession<TContext = unknown> {
     return this.core.getRecords(...args);
   }
 
+  getAuditRecords(): ReturnType<Session["getAuditRecords"]> {
+    return this.core.getAuditRecords();
+  }
+
   // ── context introspection — where the model's window is spent, as of the last turn ──
   getContextBreakdown(): ReturnType<Session["getContextBreakdown"]> {
     return this.core.getContextBreakdown();
@@ -1404,6 +1450,20 @@ export class Harness<TContext = unknown> {
       : (absorb(composed), this.registerDefinitions(options.extensions));
     // Surfaced to whoever opens a session; never an unhandled rejection on its own.
     this.sharedReady.catch(() => undefined);
+  }
+
+  /**
+   * Which session-facing parts the `harness` hook built for the whole process — what a
+   * multi-tenant host must not have, since every session on the process would share them.
+   * Infrastructure (repository, logger, model runtime) is not listed: sharing it is the point.
+   */
+  async processSharedParts(): Promise<readonly ("mcpServers" | "oauthService" | "skillRegistry")[]> {
+    await this.sharedReady;
+    const parts: ("mcpServers" | "oauthService" | "skillRegistry")[] = [];
+    if (this.parts.mcpServers !== undefined) parts.push("mcpServers");
+    if (this.parts.oauthService !== undefined) parts.push("oauthService");
+    if (this.parts.skillRegistry !== undefined) parts.push("skillRegistry");
+    return parts;
   }
 
   /** The session repository, once the `harness` hook has had its say. */
@@ -1885,7 +1945,17 @@ export class Harness<TContext = unknown> {
     ctx: SessionCapabilityContext,
     params: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly Capability[]> {
-    const base = this.options.session !== undefined ? await this.options.session(ctx) : defaultCapabilities({ shared: this.parts });
+    // A session on its own environment (a sandbox) does not get the process's MCP connections or
+    // skill scan: both describe the HARNESS's machine, not the one this session's tools run on.
+    const base = this.options.session !== undefined
+      ? await this.options.session(ctx)
+      : defaultCapabilities({
+        shared: this.parts,
+        ownEnvironment: ctx.ownEnvironment,
+        strictIsolation: ctx.strictIsolation,
+        ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
+        ...(ctx.mcpCredentials !== undefined ? { mcpCredentials: ctx.mcpCredentials } : {}),
+      });
     // Every definition registered on this harness: by value (`extensions`, harness halves
     // included — their per-session `session` is mounted here like any other), then from files.
     const extensions = [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
@@ -1967,12 +2037,13 @@ export class Harness<TContext = unknown> {
       // Environment: this call's override → the harness's default → a LocalEnvironment at the
       // session's own workDir. The session only OPERATES a caller-supplied environment.
       const environment = opts.environment ?? this.parts.environment ?? new LocalEnvironment(workDir);
-      // ONE open-time log read, shared: the projection seeds from it, and Session.open
-      // receives it as `preloadedLog` so its capability restore + context pre-build fold the
-      // same records — same IO, and the same `Message` objects (no second parsed copy).
+      // ONE open-time log read, shared: every shard from its newest checkpoint on (each
+      // checkpoint carries the history and lifecycle before it). The projection seeds from it,
+      // and Session.open receives it as `preloadedLog` so its capability restore + context
+      // pre-build fold the same records — same IO, and the same `Message` objects.
       // Attach still happens BEFORE Session.open: no events flow yet, so the seed cannot
       // race the subscription, and anything capabilities emit during open is already folded.
-      let preloadedLog = await readLog(store);
+      let preloadedLog = await readSessionTails(store);
       // A fresh session has an empty log; anything else is a reopen. Telemetry is the only reader.
       const resumed = preloadedLog.length > 0;
       projection = await SessionProjection.attach({ id, store, events }, preloadedLog);
@@ -1986,7 +2057,9 @@ export class Harness<TContext = unknown> {
           sessionId: id,
           workDir,
           ownEnvironment: opts.environment !== undefined,
+          strictIsolation: opts.strictIsolation === true,
           ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
+          ...(opts.mcpCredentials !== undefined ? { mcpCredentials: opts.mcpCredentials } : {}),
         },
         params,
       );
@@ -2108,7 +2181,7 @@ export class Harness<TContext = unknown> {
  */
 export async function closeOrphanedTurns(sessionId: string, store: SessionStore): Promise<readonly AgentEvent[]> {
   if ((await store.getState(INTERRUPTION_STATE_KEY)) !== null) return [];
-  const projection = await SessionProjection.attach({ id: sessionId, store, events: new ListenerSink() }, await readLog(store));
+  const projection = await SessionProjection.attach({ id: sessionId, store, events: new ListenerSink() }, await readSessionTails(store));
   const records = await closeOrphanedProjectionFrames(sessionId, store, projection);
   const events: AgentEvent[] = [];
   for (const record of records) {

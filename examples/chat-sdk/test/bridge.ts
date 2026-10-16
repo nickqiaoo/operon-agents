@@ -85,7 +85,8 @@ const metadataStore = new DiskManagedSessionMetadataStore(join(home, "managed"))
 const environments = new StaticEnvironmentRegistry({ research: { workDir: work } });
 const broadcaster = new MemoryEventBroadcaster();
 const sessionWork = new MemorySessionWork({ repository });
-const worker = new SessionWorker({ harness, repository, metadataStore, environments, broadcaster, work: sessionWork, defaultAgentId: "analyst" });
+// One tenant, one shared workspace: the test runs the worker single-tenant on purpose.
+const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, broadcaster, work: sessionWork, defaultAgentId: "analyst" });
 worker.start();
 const service = new SessionService({ repository, work: sessionWork, metadataStore, environments, broadcaster });
 const managed = createManagedHttpServer({ service, worker, authorize: allowAllRequests, heartbeatMs: 50 });

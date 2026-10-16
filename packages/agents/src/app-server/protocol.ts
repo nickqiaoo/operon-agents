@@ -297,8 +297,9 @@ export const INVOKABLE_METHODS = [
   // slash commands — the serializable control surface for extensions (cron et al.):
   // per-feature cron RPCs are gone with the capability, /cron rides this instead.
   "runCommand",
-  // conversation log
+  // conversation log, and the audit shard beside it
   "getRecords",
+  "getAuditRecords",
   // context introspection
   "getContextBreakdown",
   // mcp

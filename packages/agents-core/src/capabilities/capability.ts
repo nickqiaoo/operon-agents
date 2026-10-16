@@ -58,8 +58,18 @@ export interface SessionContext {
   /** The session's logger, when the host gave it one. */
   readonly logger?: Logger;
   /**
-   * The session's records (append order), read once at open and memoized, so the log-folding
-   * capabilities (goal/plan/todo) share one read instead of each calling `readLog`.
+   * Write THIS capability's current state for `address` (default `main`) to the store — the
+   * `durableState.snapshot(address)` as of when the write runs. Writes for one address are
+   * ordered and coalesced: a call made while one is waiting to start shares it. Resolves once
+   * the value is durable; rejects when the write failed (already logged, so a caller that does
+   * not need to know may ignore the promise). A no-op for a capability without `durableState`
+   * and for a storeless session.
+   */
+  persistState(address?: string): Promise<void>;
+  /**
+   * The session's WHOLE log (every shard, append order), read on first call and memoized. A full
+   * read — restoring state does not need it (see {@link CapabilityDurableState}); it is for a
+   * capability that genuinely wants history from before the newest checkpoint.
    * Use `readSessionLog(ctx)` — it falls back to a direct read when this is absent.
    */
   readonly logRecords?: () => Promise<readonly AgentRecord[]>;
@@ -203,6 +213,33 @@ export interface CapabilityGates {
  */
 export type CapabilityContract = "invariant" | "detachable";
 
+/**
+ * How a stateful capability's current state survives a reopen: as its CURRENT VALUE in the
+ * store's key/value state, never as a reduction of the log.
+ *
+ * After every change the capability calls `SessionContext.persistState(address)`; the session
+ * then writes `snapshot(address)` under the capability's key for that address. A reopen reads
+ * that value back and hands it to `restore` — no log is read, so the state does not depend on
+ * when the history was last compacted, nor on whether this capability was open at the time.
+ * A detached capability's state stays in the store, and an attach reads it back the same way.
+ *
+ * The log still carries what the MODEL saw (a tool call and its result), but restoring never
+ * reads it, and the two may disagree by one change after a crash between the writes: the state
+ * is the authority, and the next change rewrites it. So keep state that must never lag behind
+ * what the user was told (a mode that restricts the agent) on an awaited `persistState`.
+ *
+ * Per address: `main` holds session-owned state; a subagent's address holds that frame's own
+ * state, restored when its shard is reopened to resume it.
+ */
+export interface CapabilityDurableState {
+  /** This capability's state for `address`, as of now; undefined or null when it has none
+   *  there (the stored value is then removed). Synchronous — read when the write runs. */
+  snapshot(address: string): unknown;
+  /** Replace this capability's state for `address` with `value`, the value last stored for it
+   *  (undefined: none stored). Must not persist anything. */
+  restore(address: string, value: unknown): void;
+}
+
 /** Why `closeSession` runs: the session is closing, or the capability alone is being detached. */
 export type CloseReason = "close" | "detach";
 
@@ -248,9 +285,15 @@ export interface Capability {
    */
   readonly service?: unknown;
   /**
-   * Session-lived setup: fold the log, attach to the store, connect. Runs once, at `Session.open`,
-   * with everything the session decided to hand out. A `detachable` capability that throws here
-   * is absent for the session (logged, run continues); an `invariant` one fails the open.
+   * Durable current state the session restores on open WITHOUT reading the whole log. See
+   * {@link CapabilityDurableState}.
+   */
+  readonly durableState?: CapabilityDurableState;
+  /**
+   * Session-lived setup: attach to the store, connect. Runs once, at `Session.open`, with
+   * everything the session decided to hand out — after `durableState.restore`, so the state is
+   * already back. A `detachable` capability that throws here is absent for the session (logged,
+   * run continues); an `invariant` one fails the open.
    */
   openSession?(ctx: SessionContext): Promise<void> | void;
   /** Session-lived teardown, in reverse registration order. `reason` says whether the whole

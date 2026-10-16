@@ -11,6 +11,7 @@ import {
   DiskSessionStore,
   type Message,
   type SessionStore,
+  readAudit,
 } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -97,16 +98,19 @@ async function testReplaceHistoryAndAudit(): Promise<void> {
   // An explicit history rewrite collapses the noise into one clean summary.
   ctx.replaceHistory([user("clean handoff summary")]);
   ctx.appendMessage(assistant("specialist reply"));
-  // Audit records — journaled, but must NOT enter history on replay.
+  // A usage record is journaled in the shard but must NOT enter history on replay; an approval
+  // goes to the audit shard instead.
   ctx.record({ type: "usage.record", model: "m", usage: emptyUsage() });
-  ctx.record({ type: "permission.record_approval", toolCallId: "tc1", toolName: "Write", decision: "approved" });
+  ctx.audit({ type: "permission.record_approval", toolCallId: "tc1", toolName: "Write", decision: "approved" });
   await ctx.flush();
 
   const live = texts(ctx.history);
   check("replace: live history is the filtered set", live === "clean handoff summary|specialist reply");
 
   const rows = await entries(store);
-  check("audit: usage + approval rows present in the log", rows.some((r) => r.type === "usage.record") && rows.some((r) => r.type === "permission.record_approval"));
+  check("audit: usage row present in the log, approval row only in the audit shard", rows.some((r) => r.type === "usage.record") && !rows.some((r) => r.type === "permission.record_approval"));
+  const audit = await readAudit(store);
+  check("audit: the approval is in the audit shard, about main", audit.some((r) => r.type === "permission.record_approval" && r.about === "main"));
   check("audit: context.replace row present", rows.some((r) => r.type === "context.replace"));
 
   const replayed = await replayContext(store);

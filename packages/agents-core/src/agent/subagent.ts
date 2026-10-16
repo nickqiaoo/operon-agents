@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { SessionStore } from "../store/index.ts";
+import type { AgentRecord, SessionStore } from "../store/index.ts";
 
 // `lost` is reconcile-only: a background subagent with no terminal status in the task store when a
 // new process opens the session — its previous process died, so no live task is driving it.
@@ -76,19 +76,31 @@ export interface SubagentMeta {
 }
 
 export async function readSubagentMeta(store: SessionStore, address: string): Promise<SubagentMeta | undefined> {
+  // The meta record is journaled when the shard is created, so it is among its first records:
+  // look at the head first (a range read on a seeking backend) and scan on only if it is not.
+  const head = await store.readRecordPage({ address, limit: 16 });
+  for (const { record } of head.data) {
+    const meta = subagentMetaOf(record);
+    if (meta !== undefined) return meta;
+  }
+  if (head.next === undefined) return undefined;
   for await (const record of store.readRecords({ address })) {
-    if (record.type !== "custom" || record.name !== SUBAGENT_META) continue;
-    const data = record.data as Partial<SubagentMeta> | undefined;
-    if (data !== undefined && typeof data.type === "string" && typeof data.agentId === "string") {
-      return {
-        agentId: data.agentId,
-        type: data.type,
-        description: data.description,
-        background: data.background === true,
-        parentAddress: data.parentAddress,
-        parentToolCallId: data.parentToolCallId,
-      };
-    }
+    const meta = subagentMetaOf(record);
+    if (meta !== undefined) return meta;
   }
   return undefined;
+}
+
+function subagentMetaOf(record: AgentRecord): SubagentMeta | undefined {
+  if (record.type !== "custom" || record.name !== SUBAGENT_META) return undefined;
+  const data = record.data as Partial<SubagentMeta> | undefined;
+  if (data === undefined || typeof data.type !== "string" || typeof data.agentId !== "string") return undefined;
+  return {
+    agentId: data.agentId,
+    type: data.type,
+    description: data.description,
+    background: data.background === true,
+    parentAddress: data.parentAddress,
+    parentToolCallId: data.parentToolCallId,
+  };
 }

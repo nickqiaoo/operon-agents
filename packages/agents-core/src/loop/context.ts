@@ -3,6 +3,7 @@ import type { PromptOrigin } from "../store/origin.ts";
 import {
   type AgentRecord,
   type AgentRecordBody,
+  appendAudit,
   compactionSummaryOrigin,
   DEFAULT_ADDRESS,
   reduceHistory,
@@ -53,6 +54,8 @@ export class ConversationContext {
   /** Runtime provenance for live messages; replay rebuilds it from record origins. */
   private readonly origins = new WeakMap<Message, PromptOrigin>();
   private writeChain: Promise<void> = Promise.resolve();
+  /** Audit writes in flight (never rejects — see `audit`). */
+  private auditWrites: Promise<void> = Promise.resolve();
   /** Errors from failed appendRecord calls, surfaced (and cleared) on the next flush(). */
   private writeErrors: unknown[] = [];
 
@@ -91,19 +94,23 @@ export class ConversationContext {
   }
 
   applyCompaction(c: CompactionApply): void {
-    // Every model-visible message is journaled, so replay drops the same prefix count as live.
     // Deferred-tool definitions the removed prefix loaded for calls the tail keeps ride on the
     // summary's origin (see `CompactionSummaryOrigin.loadedTools`), computed before the splice.
     const loadedTools = loadedToolsForCompaction(this, c.compactedCount);
     const summary = summaryMessage(c.summary);
     this._history.splice(0, c.compactedCount, summary);
     this.origins.set(summary, compactionSummaryOrigin(loadedTools));
+    // The record carries the kept tail itself, so it is a checkpoint: replay can start here
+    // without the messages before it (see `isCheckpointRecord`).
+    const kept = this._history.slice(1);
+    const keptOrigins = kept.map((message) => this.origins.get(message) ?? null);
     this.journal({
       type: "context.apply_compaction",
       summary: c.summary,
       // Pinned so the summary message replay builds is identical to this one.
       summaryTimestamp: summary.timestamp,
-      cutoff: c.compactedCount,
+      kept,
+      ...(keptOrigins.some((origin) => origin !== null) ? { keptOrigins } : {}),
       compactedCount: c.compactedCount,
       tokensBefore: c.tokensBefore,
       tokensAfter: c.tokensAfter,
@@ -130,6 +137,18 @@ export class ConversationContext {
   }
 
   /**
+   * Write `body` to the session's audit shard, about this context's shard — for what nothing
+   * restores or replays from (an approval, a dropped partial). Best effort and unordered against
+   * this context's own records: a failed audit write is swallowed, never a turn's failure.
+   * `flush` waits for it to land.
+   */
+  audit(body: AgentRecordBody): void {
+    if (this.store === undefined) return;
+    const write = appendAudit(this.store, body, this.address).then(() => undefined, () => undefined);
+    this.auditWrites = Promise.all([this.auditWrites, write]).then(() => undefined);
+  }
+
+  /**
    * Wait for all journaled records to finish writing. Throws (once) if any write in the
    * batch since the last flush failed — a failed record is never silently dropped from
    * this check, even though the chain itself keeps moving so later records still get their
@@ -137,15 +156,22 @@ export class ConversationContext {
    */
   async flush(): Promise<void> {
     await this.writeChain;
+    await this.auditWrites;
     if (this.writeErrors.length > 0) {
       const errors = this.writeErrors.splice(0, this.writeErrors.length);
       throw new AggregateError(errors, `${String(errors.length)} record(s) failed to persist to the session store`);
     }
   }
 
-  /** Replace live state from a shard's records, WITHOUT re-journaling (resume). */
+  /**
+   * Replace live state from this context's shard, WITHOUT re-journaling (resume). Records of
+   * other addresses are skipped, so a caller may hand in the whole session log: the open-time
+   * pre-build does exactly that, and folding a subagent's shard into `main` would splice its
+   * turns between main's tool calls and results.
+   */
   loadFromRecords(records: readonly AgentRecord[]): void {
-    const { messages, origins } = reduceHistory(records);
+    const own = records.filter((record) => (record.address ?? DEFAULT_ADDRESS) === this.address);
+    const { messages, origins } = reduceHistory(own);
     this._history.splice(0, this._history.length, ...messages);
     for (let i = 0; i < messages.length; i++) {
       const origin = origins[i];
@@ -182,8 +208,17 @@ export async function replayContext(
   // bypasses `journal`, because replaying is not a new history change — a consumer that seeded
   // itself from the same log would otherwise see every message twice.
   const ctx = new ConversationContext({ store, address, ...(onHistoryChange !== undefined ? { onHistoryChange } : {}) });
-  const records: AgentRecord[] = [];
-  for await (const record of store.readRecords({ address })) records.push(record);
-  ctx.loadFromRecords(records);
+  ctx.loadFromRecords(await readShardTail(store, ctx.address));
   return ctx;
+}
+
+/**
+ * A shard's records from its newest checkpoint on — all a replay needs, since a checkpoint does
+ * not depend on what precedes it. A store that cannot locate the checkpoint returns the whole
+ * shard, which folds to the same result.
+ */
+export async function readShardTail(store: SessionStore, address: string = DEFAULT_ADDRESS): Promise<AgentRecord[]> {
+  const records: AgentRecord[] = [];
+  for await (const record of store.readRecords({ address, fromCheckpoint: true })) records.push(record);
+  return records;
 }

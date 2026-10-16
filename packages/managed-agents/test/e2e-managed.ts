@@ -70,7 +70,7 @@ async function start(
     metadataStore: new DiskManagedSessionMetadataStore(join(home, "managed")),
     environments: new StaticEnvironmentRegistry({ workspace: { workDir: work } }),
   });
-  const worker = new SessionWorker({
+  const worker = new SessionWorker({ profile: "single-tenant",
     harness,
     repository,
     metadataStore: new DiskManagedSessionMetadataStore(join(home, "managed")),

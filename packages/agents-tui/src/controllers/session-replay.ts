@@ -182,7 +182,6 @@ export class SessionReplayRenderer {
         return;
       case 'metadata':
       case 'usage.record':
-      case 'config.update':
       case 'agent.handoff.accepted':
       case 'custom':
         return;

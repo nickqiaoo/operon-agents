@@ -2,7 +2,10 @@ import { BlobStore, offloadRecord, rehydrateRecord } from "./blob-store.ts";
 import { migrateRecord, WIRE_PROTOCOL_VERSION, WIRE_VERSION_KEY } from "./migrate.ts";
 import {
   type AgentRecord,
+  AUDIT_ADDRESS,
+  checkpointIndexKey,
   DEFAULT_ADDRESS,
+  isCheckpointRecord,
   type ReadRecordPageOptions,
   type ReadRecordsFilter,
   type RecordPage,
@@ -97,11 +100,61 @@ export abstract class LogSessionStore implements SessionStore {
     else await this.ensureMetadata(address);
     const stamped: AgentRecord = record.time !== undefined ? record : { ...record, time: Date.now() };
     const stored = await offloadRecord(stamped, this.#blobs);
-    return this.appendLine(address, JSON.stringify(stored));
+    const sequence = await this.appendLine(address, JSON.stringify(stored));
+    // Index the shard's newest checkpoint so a replay can start there. Written after the line:
+    // a crash in between leaves the index at an OLDER checkpoint, which is still a valid start.
+    if (isCheckpointRecord(record)) await this.putState(checkpointIndexKey(address), sequence);
+    return sequence;
   }
 
   async *readRecords(filter?: ReadRecordsFilter): AsyncIterable<AgentRecord> {
+    if (filter?.fromCheckpoint === true) {
+      const addresses = filter.address !== undefined ? [filter.address] : await this.conversationAddresses();
+      const all: StoredAgentRecord[] = [];
+      for (const address of addresses) all.push(...((await this.recordsFromCheckpoint(address)) ?? (await this.parsedRecords(address))));
+      if (addresses.length > 1) all.sort((a, b) => compareSequence(a.sequence, b.sequence));
+      for (const item of all) yield item.record;
+      return;
+    }
     for (const item of await this.storedRecords(filter?.address)) yield item.record;
+  }
+
+  /**
+   * The shard's records from its indexed checkpoint on, or undefined when the index is missing
+   * or does not point at a checkpoint of this shard (a fork that renumbered the log, an index
+   * written by a crashed process) — the caller then reads the whole shard.
+   */
+  private async recordsFromCheckpoint(address: string): Promise<StoredAgentRecord[] | undefined> {
+    const indexed = await this.getState(checkpointIndexKey(address));
+    if (typeof indexed !== "string" || !/^[1-9]\d*$/.test(indexed)) return undefined;
+    const start = BigInt(indexed);
+    const lines: StoredLogLine[] = [];
+    if (this.readLinesPage !== undefined) {
+      // `after` is exclusive; sequences are positive, so `start - 1` admits the checkpoint itself.
+      let after: string | undefined = start > 1n ? String(start - 1n) : undefined;
+      while (true) {
+        const page = await this.readLinesPage(address, { ...(after !== undefined ? { after } : {}), limit: 512, order: "asc" });
+        lines.push(...page);
+        if (page.length < 512) break;
+        after = page[page.length - 1]!.sequence;
+      }
+    } else {
+      for await (const storedLine of this.readLines(address)) {
+        if (lines.length > 0 || BigInt(storedLine.sequence) >= start) lines.push(storedLine);
+      }
+    }
+    const first = lines[0];
+    if (first === undefined || first.sequence !== indexed) return undefined;
+    const version = await this.version();
+    const out: StoredAgentRecord[] = [];
+    for (const storedLine of lines) {
+      const migrated = migrateRecord(JSON.parse(storedLine.line) as AgentRecord, version);
+      if (migrated === null) continue;
+      out.push({ sequence: storedLine.sequence, record: await rehydrateRecord(migrated, this.#blobs) });
+    }
+    const head = out[0];
+    if (head === undefined || head.sequence !== indexed || !isCheckpointRecord(head.record)) return undefined;
+    return out;
   }
 
   async readRecordPage(options: ReadRecordPageOptions): Promise<RecordPage> {
@@ -183,10 +236,15 @@ export abstract class LogSessionStore implements SessionStore {
     return out;
   }
 
+  /** Every shard a read without an address covers: all of them but the audit shard. */
+  private async conversationAddresses(): Promise<string[]> {
+    return (await this.listShardAddresses()).filter((address) => address !== AUDIT_ADDRESS);
+  }
+
   private async storedRecords(address?: string): Promise<StoredAgentRecord[]> {
     if (address !== undefined) return this.parsedRecords(address);
     const all: StoredAgentRecord[] = [];
-    for (const shard of await this.listShardAddresses()) all.push(...(await this.parsedRecords(shard)));
+    for (const shard of await this.conversationAddresses()) all.push(...(await this.parsedRecords(shard)));
     all.sort((a, b) => compareSequence(a.sequence, b.sequence));
     return all;
   }

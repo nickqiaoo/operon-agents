@@ -17,6 +17,7 @@ import {
 } from "./repository.ts";
 import { storageOver, type SessionStorage } from "./storage.ts";
 import type { SessionStore } from "./store.ts";
+import type { Usage } from "../protocol/index.ts";
 import { encodeWorkdirKey, normalizeWorkDir } from "./workdir-key.ts";
 
 /**
@@ -270,6 +271,10 @@ export class RedisSessionRepository implements SessionRepository {
         await this.client.zadd(this.sessionsKey, updatedAt, id);
       },
       durableState: () => undefined,
+      usage: async (usage) => {
+        if ((await this.client.exists(this.metaKey(id))) === 0) return;
+        await this.client.hset(this.metaKey(id), "usage", JSON.stringify(usage));
+      },
       metadata: async (value, updatedAt) => {
         const title = sessionMetaTitle(value);
         if ((await this.client.exists(this.metaKey(id))) === 0) return;
@@ -311,6 +316,7 @@ export class RedisSessionRepository implements SessionRepository {
       createdAt: Number(m.created_at),
       updatedAt: Number(m.updated_at),
       durableState: parseDurableState(m.durable_state),
+      ...usageField(m.usage),
     };
   }
 
@@ -408,6 +414,8 @@ export class RedisSessionRepository implements SessionRepository {
       durableState: parseDurableState(src.durable_state),
     };
     await this.writeMeta(meta);
+    // The fork's log is a copy, so its running usage is the source's.
+    if (src.usage) await this.client.hset(this.metaKey(id), "usage", src.usage);
     const store = this.storeFor(id);
     await store.putState("meta", meta);
     return { id, workDir, createdAt: now, store };
@@ -460,6 +468,19 @@ function normalizeRedisSequence(value: string): string {
   const normalized = value.replace(/\.0$/, "");
   if (!/^[1-9]\d*$/.test(normalized)) throw new Error(`invalid Redis sequence "${value}"`);
   return normalized;
+}
+
+/** The summary's `usage`, from the meta hash's JSON field; nothing when absent or unreadable. */
+function usageField(value: string | undefined): { usage?: Usage } {
+  if (value === undefined || value === "") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && typeof (parsed as { totalTokens?: unknown }).totalTokens === "number"
+      ? { usage: parsed as Usage }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function parseDurableState(value: unknown): DurableSessionState {

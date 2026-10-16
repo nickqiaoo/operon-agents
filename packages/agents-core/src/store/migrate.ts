@@ -7,8 +7,13 @@ import type { AgentRecord } from "./store.ts";
  *
  * Version 1 introduced the linear `AgentRecord` format. Version 2 adds
  * durable handoff linkage and seed provenance without invalidating version-1 records.
+ * Version 3 makes the history resets self-contained checkpoints: `context.apply_compaction`
+ * journals its kept tail (`kept`) instead of a `cutoff` into the history before it, and both
+ * resets may carry the session's state (`checkpoint`). A version-2 compaction record cannot be
+ * upgraded — its kept tail is not in the record — so it passes through unchanged and replay
+ * rejects it (see `foldCompactionRecord`).
  */
-export const WIRE_PROTOCOL_VERSION = 2;
+export const WIRE_PROTOCOL_VERSION = 3;
 
 /** KV state key under which a session stamps the version its log was written at. */
 export const WIRE_VERSION_KEY = "wire_version";
@@ -19,9 +24,11 @@ export const WIRE_VERSION_KEY = "wire_version";
  */
 export type RecordMigration = (raw: Record<string, unknown>) => Record<string, unknown> | null;
 
-/** Version 2 adds durable handoff linkage/provenance; every version-1 record remains valid. */
+/** Version 2 adds durable handoff linkage/provenance; every version-1 record remains valid.
+ *  Version 3 changes only the compaction record, which has no upgrade (see above). */
 export const RECORD_MIGRATIONS: Readonly<Record<number, RecordMigration>> = {
   1: (raw) => raw,
+  2: (raw) => raw,
 };
 
 /**

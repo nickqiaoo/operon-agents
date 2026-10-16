@@ -27,6 +27,7 @@ export { mcpCapability } from "./capability.ts";
 export type { MCPCapabilityOptions } from "./capability.ts";
 
 export { serverFromConfig, mcpOAuthSettings, mcpServersCapability, createMcpServers, DEFAULT_RECONNECT_POLICY, McpTransportNotPermittedError } from "./manager.ts";
+export type { McpCredential, McpCredentialProvider, McpCredentialRequest } from "./credentials.ts";
 export type {
   McpServerStatus,
   McpTransportKind,

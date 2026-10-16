@@ -42,6 +42,8 @@ export interface RunTurnInput {
   readonly responder?: QuestionResponder;
   /** Session-scoped file freshness ledger for this agent line; forwarded to tool contexts. */
   readonly fileLedger?: FileFreshnessLedger;
+  /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
+  readonly hostContext?: unknown;
   readonly system?: string;
   readonly params?: LlmRequest["params"];
   readonly context: ConversationContext;
@@ -117,7 +119,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, fileLedger, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, fileLedger, hostContext: input.hostContext, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -165,6 +167,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           background: input.background,
           responder: input.responder,
           fileLedger,
+          hostContext: input.hostContext,
           system: input.system,
           context: input.context,
           params: input.params,

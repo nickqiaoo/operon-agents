@@ -1,13 +1,12 @@
 import type { Usage } from "../../protocol/index.ts";
-import type { AgentRecord } from "../../store/index.ts";
 
 export type GoalStatus = "active" | "blocked" | "paused" | "complete";
 
 /** Tool names whose results carry the durable goal record in `details.goal`. */
 export const GOAL_TOOL_NAMES = ["UpdateGoal", "SetGoalBudget"] as const;
 
-/** Durable goal identity carried in goal-tool result `details` (counters are NOT stored — they
- *  are re-derived from the log's per-turn `usage` entries, exactly as live accrued them). */
+/** Goal identity carried in goal-tool result `details`, for whoever renders the transcript.
+ *  Restore does not read it — it reads {@link GoalDurable}, which also carries the counters. */
 export interface GoalPersisted {
   readonly objective: string;
   readonly completionCriterion?: string;
@@ -53,6 +52,10 @@ interface GoalRecord {
   terminalReason?: string;
 }
 
+/** The goal's WHOLE durable state, counters included — what is stored after every change.
+ *  `null`: no goal. */
+export type GoalDurable = Readonly<Omit<GoalRecord, "budget">> & { readonly budget: GoalBudget };
+
 export interface UpdateGoalInput {
   readonly objective?: string;
   readonly completionCriterion?: string;
@@ -91,6 +94,21 @@ export class GoalStore {
   private goal: GoalRecord | null = null;
   /** Set by the capability's provision; absent in a bare store (tests, replay). */
   private announce: ((snapshot: GoalSnapshot | null) => Promise<void>) | undefined;
+  /** Persists the whole state after each change. Absent in a bare store (tests). */
+  private persist: (() => void) | undefined;
+
+  /**
+   * Where every goal change becomes durable. Every mutation goes through this store — a tool, a
+   * host command (`/goal pause`), the per-turn accounting — so persisting here, rather than in
+   * the goal tools' results, is what makes a change from OUTSIDE the loop survive a reopen.
+   */
+  attachPersistence(persist: () => void): void {
+    this.persist = persist;
+  }
+
+  private changed(): void {
+    this.persist?.();
+  }
 
   /**
    * Where a goal change becomes a `goal.updated` event. The store owns this because the store is
@@ -168,7 +186,9 @@ export class GoalStore {
 
   update(input: UpdateGoalInput): GoalSnapshot | null {
     if (input.status === "complete") {
+      const had = this.goal !== null;
       this.goal = null;
+      if (had) this.changed();
       return null;
     }
     if (this.goal === null) {
@@ -185,6 +205,7 @@ export class GoalStore {
         startedAtMs: Date.now(),
         terminalReason: input.reason,
       };
+      this.changed();
       return this.snapshot();
     }
     if (input.objective !== undefined) this.goal.objective = input.objective;
@@ -192,6 +213,7 @@ export class GoalStore {
     if (input.status !== undefined) this.goal.status = input.status;
     if (input.reason !== undefined) this.goal.terminalReason = input.reason;
     else if (input.status === "active") this.goal.terminalReason = undefined;
+    this.changed();
     return this.snapshot();
   }
 
@@ -200,16 +222,31 @@ export class GoalStore {
     if (budget.turns !== undefined) this.goal.budget.turnBudget = budget.turns;
     if (budget.tokens !== undefined) this.goal.budget.tokenBudget = budget.tokens;
     if (budget.wallClockMs !== undefined) this.goal.budget.wallClockBudgetMs = budget.wallClockMs;
+    this.changed();
     return this.snapshot();
   }
 
-  recordTurn(usage: Usage): void {
-    if (this.goal === null) return;
+  /**
+   * Account one finished turn of the ROOT agent, then auto-block if a budget is reached — one
+   * change, journaled once. Returns true when the budget blocked the goal. A subagent's turns
+   * are not the goal's: the goal driver never calls this for them.
+   */
+  accountTurn(usage: Usage): boolean {
+    if (this.goal === null) return false;
     this.goal.turnsUsed += 1;
     this.goal.tokensUsed += usage.totalTokens;
+    const blocked = this.applyBudget();
+    this.changed();
+    return blocked;
   }
 
   enforceBudget(): boolean {
+    const blocked = this.applyBudget();
+    if (blocked) this.changed();
+    return blocked;
+  }
+
+  private applyBudget(): boolean {
     if (this.goal === null || this.goal.status !== "active") return false;
     const { budget } = this.goal;
     const overTurns = budget.turnBudget !== null && this.goal.turnsUsed >= budget.turnBudget;
@@ -263,54 +300,15 @@ export class GoalStore {
     };
   }
 
-  /**
-   * Rebuild from the log by replaying it in order through the SAME mutations as live:
-   * each goal-tool result re-applies the durable record; each per-turn `usage` entry accrues a
-   * turn iff the goal is active then auto-blocks on budget — mirroring `goalDriver`. So counters
-   * and budget status come out identical to the live run, and correct for the current log.
-   */
-  reconstruct(entries: readonly AgentRecord[]): void {
-    this.goal = null;
-    for (const entry of entries) {
-      if (entry.type === "context.append_message") {
-        const msg = entry.message;
-        if (msg.role !== "toolResult" || !isGoalToolName(msg.toolName)) continue;
-        const details = msg.details as Partial<GoalDetails> | undefined;
-        if (details === undefined || !("goal" in details)) continue;
-        this.applyPersisted(details.goal ?? null);
-      } else if (entry.type === "usage.record" && this.isActive()) {
-        // Matches goalDriver: account the finished turn, then auto-block if a budget hit.
-        this.recordTurn(entry.usage);
-        this.enforceBudget();
-      }
-    }
+  /** The whole durable state — see {@link GoalDurable}. */
+  durable(): GoalDurable | null {
+    if (this.goal === null) return null;
+    return { ...this.goal, budget: { ...this.goal.budget } };
   }
 
-  private applyPersisted(p: GoalPersisted | null): void {
-    if (p === null) {
-      this.goal = null;
-      return;
-    }
-    if (this.goal === null) {
-      this.goal = {
-        objective: p.objective,
-        completionCriterion: p.completionCriterion,
-        status: p.status,
-        budget: { ...p.budget },
-        turnsUsed: 0,
-        tokensUsed: 0,
-        startedAtMs: p.startedAtMs,
-        terminalReason: p.terminalReason,
-      };
-      return;
-    }
-    // Update of an existing goal: replace the durable fields, keep accrued counters.
-    this.goal.objective = p.objective;
-    this.goal.completionCriterion = p.completionCriterion;
-    this.goal.status = p.status;
-    this.goal.budget = { ...p.budget };
-    this.goal.startedAtMs = p.startedAtMs;
-    this.goal.terminalReason = p.terminalReason;
+  /** Restore from the value stored for the goal (undefined: none). Persists nothing. */
+  restore(value: unknown): void {
+    this.goal = isGoalDurable(value) ? { ...value, budget: { ...value.budget } } : null;
   }
 
   private wallClockMs(): number {
@@ -318,6 +316,17 @@ export class GoalStore {
   }
 }
 
-function isGoalToolName(name: string): boolean {
-  return (GOAL_TOOL_NAMES as readonly string[]).includes(name);
+function isGoalDurable(value: unknown): value is GoalDurable {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const budget = v["budget"] as Record<string, unknown> | undefined;
+  return (
+    typeof v["objective"] === "string" &&
+    (v["status"] === "active" || v["status"] === "blocked" || v["status"] === "paused") &&
+    typeof v["turnsUsed"] === "number" &&
+    typeof v["tokensUsed"] === "number" &&
+    typeof v["startedAtMs"] === "number" &&
+    typeof budget === "object" &&
+    budget !== null
+  );
 }

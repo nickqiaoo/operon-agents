@@ -48,7 +48,7 @@ import {
   type SessionStore,
 } from "operon-agents";
 import type { ManagedSessionMetadata, ManagedSessionMetadataStore } from "./metadata.ts";
-import type { ManagedAgentRegistry, ManagedEnvironmentRegistry } from "./registries.ts";
+import type { ManagedAgentRegistry, ManagedEnvironmentRegistry, ManagedSessionContext } from "./registries.ts";
 import type { EventBroadcaster } from "./broadcast.ts";
 import { DefaultAgentRegistry } from "./registries.ts";
 import type { SessionWork, WorkLease } from "./work.ts";
@@ -93,6 +93,14 @@ export interface SessionWorkerOptions<TContext = unknown> {
    * to that session wakes it again. Default: `console.error`.
    */
   readonly onError?: (error: unknown, sessionId: string) => void;
+  /**
+   * Who this worker's sessions belong to. `"multi-tenant"` (the default) refuses what would leak
+   * across tenants or run outside the sandbox: an environment not from the registry, a harness
+   * holding process-wide MCP connections or an OAuth service, MCP over stdio, a token read from
+   * the process environment. `"single-tenant"` lifts all of that for a self-hosted, one-owner
+   * deployment, and says so once at construction. See docs/server-profile.md.
+   */
+  readonly profile?: "multi-tenant" | "single-tenant";
 }
 
 /**
@@ -115,6 +123,9 @@ export class SessionWorker<TContext = unknown> {
   private readonly concurrency: number;
   private readonly broadcaster: EventBroadcaster | undefined;
   private readonly onError: (error: unknown, sessionId: string) => void;
+  private readonly multiTenant: boolean;
+  /** The harness check, run once and remembered — a misconfigured harness fails every open alike. */
+  private harnessChecked: Promise<void> | undefined;
   private readonly running = new Map<string, Running>();
   /** Runs the claim loop started, counted synchronously so the cap is exact; nudges are not. */
   private claimed = 0;
@@ -134,6 +145,18 @@ export class SessionWorker<TContext = unknown> {
     this.concurrency = options.concurrency ?? 16;
     this.broadcaster = options.broadcaster;
     this.onError = options.onError ?? ((error, sessionId) => { console.error(`session ${sessionId}:`, error); });
+    this.multiTenant = options.profile !== "single-tenant";
+    if (!this.multiTenant) {
+      console.warn("SessionWorker: single-tenant profile — sessions may share process-wide MCP connections and credentials, run MCP over stdio, and run in the worker's own environment.");
+    }
+  }
+
+  /** Multi-tenant only: the harness must not carry what every session on the process would share. */
+  private async checkHarness(): Promise<void> {
+    const shared = (await this.harness.processSharedParts()).filter((part) => part !== "skillRegistry");
+    if (shared.length > 0) {
+      throw new Error(`server profile: the harness shares ${shared.join(" and ")} across every session in the process, which on a multi-tenant worker is across tenants. Build them per session (resumeOptions.mcpServers / mcpCredentials), or run the worker with profile: "single-tenant".`);
+    }
   }
 
   /** Begin claiming. Without this a worker only runs what it is nudged about in-process. */
@@ -285,16 +308,39 @@ export class SessionWorker<TContext = unknown> {
   }
 
   private async openSession(sessionId: string, metadata: ManagedSessionMetadata): Promise<HarnessSession<TContext>> {
+    // The owner is the repository's record, not the managed metadata: it is what the service
+    // stamped at create, and what a registry may trust.
+    const ownerKey = (await this.repository.get(sessionId))?.ownerKey;
+    const context: ManagedSessionContext = {
+      sessionId,
+      ...(ownerKey !== undefined ? { ownerKey } : {}),
+      ...(metadata.metadata !== undefined ? { metadata: metadata.metadata } : {}),
+    };
     const [agentResolution, environmentResolution] = await Promise.all([
-      this.agents.resolve(metadata.agent),
-      this.environments.resolve(metadata.environment),
+      this.agents.resolve(metadata.agent, context),
+      this.environments.resolve(metadata.environment, context),
     ]);
+    if (this.multiTenant) {
+      await (this.harnessChecked ??= this.checkHarness());
+      if (environmentResolution.environment === undefined) {
+        throw new Error(`server profile: environment "${metadata.environment.id}" resolved no environment for session ${sessionId}, so its tools would run in the harness's own. Return one per session from the environment registry, or run the worker with profile: "single-tenant".`);
+      }
+    }
     const session = await this.harness.resumeSession(sessionId, {
       ...agentResolution.resumeOptions,
       ...(environmentResolution.environment !== undefined ? { environment: environmentResolution.environment } : {}),
       ...(agentResolution.agent !== undefined ? { agent: agentResolution.agent } : {}),
+      ...(this.multiTenant ? { strictIsolation: true } : {}),
       eventPublication: "committed",
     });
+    if (this.multiTenant) {
+      // A custom `session` hook may ignore `strictIsolation`; what it connected is still visible.
+      const local = (session.mcp?.list() ?? []).filter((view) => view.transport !== "http");
+      if (local.length > 0) {
+        await session.close();
+        throw new Error(`server profile: MCP server ${local.map((view) => `"${view.name}"`).join(", ")} runs over ${local[0]!.transport}, a process on the worker host outside the sandbox. Serve it over http, or run the worker with profile: "single-tenant".`);
+      }
+    }
     if (this.broadcaster !== undefined) {
       // Not unsubscribed: the subscription dies with the session it is attached to.
       session.onEvent((event: AgentEvent) => { this.broadcaster?.publish(sessionId, event); });
@@ -323,7 +369,12 @@ export class SessionWorker<TContext = unknown> {
     wake: Wakeup,
   ): Promise<boolean> {
     const consumed = new Set<string>();
+    const settledInBackground = new Wakeup();
     const unsubscribe = session.onEvent((event: AgentEvent) => {
+      if (event.type === "background.task.terminated") {
+        settledInBackground.raise();
+        return;
+      }
       if (event.type !== "message.appended") return;
       // A message is in the conversation when its journal record carries the steer it came in
       // as — whatever kind of origin it was filed under.
@@ -341,6 +392,31 @@ export class SessionWorker<TContext = unknown> {
       // contiguous consumed prefix, so an item can never be skipped by a later one landing first.
       const outstanding: InboxItem[] = [];
       let resuming: Promise<unknown> | undefined;
+
+      // A background task lives in THIS object: closing it orphans the task, and whoever opens the
+      // session next reconciles the orphan to `lost` while it may still be running here. So while
+      // one is live the session stays open and the lease stays held — until it settles (its
+      // notification wakes a run like any input) or something new arrives. True: go around.
+      //
+      // A settle that lands just as the last run ends has already queued its notification, and
+      // the idle wake starts a run for it a microtask later. Closing then would abort that run,
+      // so a run in flight — or one a tick away — is also a reason to go around.
+      // Read through a call: `status` is a live getter, and a narrowed property would not see the
+      // run the tick below starts.
+      const state = (): string => session.status.state;
+      const busy = async (): Promise<boolean> => {
+        if (state() === "running") return true;
+        if (state() !== "idle" || !session.status.hasQueuedMessages) return false;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return state() === "running";
+      };
+      const holdOpen = async (): Promise<boolean> => {
+        settledInBackground.take();
+        if (await busy()) return !halted();
+        if ((session.background?.list(true).length ?? 0) === 0) return false;
+        await Promise.race([settledInBackground.wait(), wake.wait()]);
+        return !halted();
+      };
 
       const advance = async (): Promise<void> => {
         let moved = false;
@@ -377,7 +453,10 @@ export class SessionWorker<TContext = unknown> {
         // they are done, not dispatchable. Without a resume there is nothing to do but wait.
         if (session.status.state === "interrupted" && resuming === undefined) {
           const resumeAt = items.findIndex((item) => item.kind === "control" && item.command.kind === "resume");
-          if (resumeAt === -1) break;
+          if (resumeAt === -1) {
+            if (await holdOpen()) continue;
+            break;
+          }
           for (const item of items.slice(0, resumeAt)) {
             outstanding.push(item);
             consumed.add(inboxItemId(item));
@@ -410,10 +489,11 @@ export class SessionWorker<TContext = unknown> {
           resuming = undefined;
         }
         await advance();
-        // Idle and nothing new: done. Anything still outstanding was requeued to a run that
-        // ended without taking it; it is still after the cursor, and the next run — the next
-        // append, or the next claim — requeues it again on a fresh object.
-        if (settled === "idle" && items.length === 0) break;
+        // Idle and nothing new: done, unless a background task still needs this object. Anything
+        // still outstanding was requeued to a run that ended without taking it; it is still after
+        // the cursor, and the next run — the next append, or the next claim — requeues it again
+        // on a fresh object.
+        if (settled === "idle" && items.length === 0 && !(await holdOpen())) break;
       }
     } finally {
       unsubscribe();

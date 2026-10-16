@@ -8,7 +8,7 @@
 import { Runner, type RunnerConfig } from "./agent/runner.ts";
 import { Session, type SessionOpenOptions } from "./agent/session.ts";
 import type { Environment, EnvironmentFactory } from "./tool/environment.ts";
-import { DEFAULT_ADDRESS, type SessionStore, type AgentRecord } from "./store/index.ts";
+import { appendAudit, DEFAULT_ADDRESS, readAudit, type AgentRecord, type SessionStore } from "./store/index.ts";
 import { ListenerSink, type EventSink, type EventPublicationMode } from "./events/index.ts";
 import type { TracingProcessor } from "./tracing/index.ts";
 import type { Responder } from "./permission/types.ts";
@@ -111,6 +111,8 @@ export function testSessionContext(wiring: TestSessionWiring = {}): SessionConte
     signal: new AbortController().signal,
     steer: wiring.steer ?? new SteerBus(),
     logRecords: () => readLog(store),
+    // No session owns a `durableState` here to snapshot, so persisting is inert.
+    persistState: () => Promise.resolve(),
     ...(store !== undefined ? { store } : {}),
     // The same partitioned view a real session hands a capability, owned by "test".
     ...capabilityDataView(store),
@@ -130,9 +132,9 @@ export function testSessionContext(wiring: TestSessionWiring = {}): SessionConte
 function capabilityDataView(store: SessionStore | undefined): Pick<SessionContext, "state" | "records" | "record"> {
   const data = new CapabilityData({
     ...(store !== undefined ? { store } : {}),
-    readLog: () => readLog(store),
+    readAudit: async () => (store !== undefined ? readAudit(store) : []),
     append: (body) => {
-      void store?.appendRecord({ time: Date.now(), address: DEFAULT_ADDRESS, ...body } as AgentRecord);
+      if (store !== undefined) void appendAudit(store, body, DEFAULT_ADDRESS).catch(() => undefined);
     },
   });
   return { state: data.stateFor("test"), records: data.recordsFor("test"), record: data.recorderFor("test") };
