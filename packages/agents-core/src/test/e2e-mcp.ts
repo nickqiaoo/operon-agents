@@ -204,6 +204,35 @@ async function testErrorFunction(environment: LocalEnvironment): Promise<void> {
   await rethrow.close();
 }
 
+/** A declared `outputSchema` reaches the tool's schema; `structuredContent` reaches `structured`, beside the model-facing text. */
+async function testStructured(environment: LocalEnvironment): Promise<void> {
+  const outputSchema = { type: "object", properties: { count: { type: "number" } }, required: ["count"] };
+  const transport = new MockMCPTransport({
+    name: "typed",
+    tools: [
+      { name: "count", description: "Count things.", outputSchema },
+      { name: "plain", description: "Text only." },
+    ],
+    call: async (name) =>
+      name === "count" ? { content: [{ type: "text", text: "3 things" }], structuredContent: { count: 3 } } : { content: [{ type: "text", text: "just text" }] },
+  });
+  const server = new TransportMCPServer({ name: "typed", transport });
+  await server.connect();
+  const tools = await mcpToolProvider(server).listTools(minimalCtx(environment));
+  const run = async (name: string) => {
+    const tool = tools.find((t) => t.schema.name === name)!;
+    const ctx = { turnId: "t", toolCallId: "c", signal: new AbortController().signal, environment };
+    const plan = await tool.resolve({}, ctx);
+    return { schema: tool.schema, result: await plan.run(ctx) };
+  };
+  const count = await run("mcp__typed__count");
+  const plain = await run("mcp__typed__plain");
+  check("structured: a declared outputSchema is on the tool's schema", count.schema.outputSchema === outputSchema && plain.schema.outputSchema === undefined);
+  check("structured: structuredContent arrives as `structured`, the text stays the content", JSON.stringify(count.result.structured) === '{"count":3}' && count.result.content.some((c) => c.type === "text" && c.text === "3 things"));
+  check("structured: a text-only result has no `structured`", plain.result.structured === undefined);
+  await server.close();
+}
+
 async function main(): Promise<void> {
   const environment = new LocalEnvironment(process.cwd());
   testNaming();
@@ -214,6 +243,7 @@ async function main(): Promise<void> {
   await testPermissionGlob(environment);
   await testResourcesInjection(environment);
   await testErrorFunction(environment);
+  await testStructured(environment);
 
   const passed = checks.filter(([, ok]) => ok).length;
   const total = checks.length;

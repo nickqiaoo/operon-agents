@@ -1038,7 +1038,7 @@ function messageOf(error: unknown): string {
 function toolFromSpec(spec: ExtensionToolSpec): Tool {
   const parameters = spec.parameters ?? { type: "object", properties: {} };
   return {
-    schema: { name: spec.name, description: spec.description, parameters },
+    schema: { name: spec.name, description: spec.description, parameters, ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}) },
     resolve(rawArgs) {
       return {
         approvalRule: spec.approvalRule ?? spec.name,

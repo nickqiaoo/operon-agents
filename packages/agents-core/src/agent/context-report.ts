@@ -75,7 +75,9 @@ export function computeContextBreakdown(input: ComputeContextBreakdownInput): Co
   let builtinTools = 0;
   let mcpTools = 0;
   for (const tool of input.tools) {
-    const tokens = estimateTokens(JSON.stringify(tool.schema));
+    // What goes on the wire: `outputSchema` is for programs calling the tool, never sent to the model.
+    const { outputSchema: _programOnly, ...sent } = tool.schema;
+    const tokens = estimateTokens(JSON.stringify(sent));
     if (isMcpToolName(tool.schema.name)) mcpTools += tokens;
     else builtinTools += tokens;
   }

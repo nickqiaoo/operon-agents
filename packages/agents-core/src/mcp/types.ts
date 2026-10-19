@@ -2,6 +2,8 @@ export interface MCPTool {
   readonly name: string;
   readonly description?: string;
   readonly inputSchema?: Record<string, unknown>;
+  /** JSON Schema of `structuredContent` in this tool's results, when the server declares one. */
+  readonly outputSchema?: Record<string, unknown>;
   readonly [key: string]: unknown;
 }
 
@@ -23,6 +25,8 @@ export interface MCPContentBlock {
 
 export interface MCPToolResult {
   readonly content: readonly MCPContentBlock[];
+  /** The result as JSON, conforming to the tool's `outputSchema`. */
+  readonly structuredContent?: unknown;
   readonly isError?: boolean;
   readonly [key: string]: unknown;
 }

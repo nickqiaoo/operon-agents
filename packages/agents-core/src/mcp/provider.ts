@@ -6,6 +6,10 @@ import { qualifyMcpToolName } from "./tool-naming.ts";
 import { mcpResultToContent } from "./output.ts";
 import type { MCPTool } from "./types.ts";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function asArgs(raw: unknown): Record<string, unknown> | null {
   return raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
 }
@@ -24,6 +28,7 @@ export function wrapMcpTool(server: MCPServer, def: MCPTool): Tool {
       name: qualifiedName,
       description: def.description ?? `MCP tool "${rawName}" from server "${server.name}".`,
       parameters: (def.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} },
+      ...(isRecord(def.outputSchema) ? { outputSchema: def.outputSchema } : {}),
     },
     resolve: (rawArgs): ToolPlan => {
       const args = asArgs(rawArgs);
@@ -36,7 +41,7 @@ export function wrapMcpTool(server: MCPServer, def: MCPTool): Tool {
           try {
             const result = await server.callTool(rawName, args, { signal: ctx.signal });
             const { content, isError } = mcpResultToContent(result, qualifiedName);
-            return { content, isError };
+            return { content, isError, ...(result.structuredContent !== undefined ? { structured: result.structuredContent } : {}) };
           } catch (error) {
             const text = await defaultErrorText(server, rawName, error);
             return { content: [{ type: "text", text }], isError: true };

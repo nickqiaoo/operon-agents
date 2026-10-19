@@ -47,6 +47,12 @@ export interface ToolResumeContext {
 
 export interface ToolResult<Details = unknown> {
   readonly content: ToolResultContent;
+  /**
+   * The result as plain JSON data, conforming to the tool's `schema.outputSchema` (an MCP tool's
+   * `structuredContent`). The model reads `content`; a program calling the tool (Code Mode)
+   * receives this value instead of the text.
+   */
+  readonly structured?: unknown;
   readonly details?: Details;
   readonly isError?: boolean;
   readonly stopTurn?: boolean;

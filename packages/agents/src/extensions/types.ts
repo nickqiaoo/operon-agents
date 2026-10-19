@@ -544,6 +544,8 @@ export interface ExtensionToolSpec {
   readonly description: string;
   /** JSON Schema for the arguments. Defaults to an empty object schema. */
   readonly parameters?: Record<string, unknown>;
+  /** JSON Schema of `structured` in the results `execute` returns; programs (Code Mode) get that value instead of text. */
+  readonly outputSchema?: Record<string, unknown>;
   /** Permission subject for approval rules; defaults to the tool name. */
   readonly approvalRule?: string;
   execute(args: unknown, ctx: ToolRunContext): string | ToolResultContent | ToolResult | Promise<string | ToolResultContent | ToolResult>;
