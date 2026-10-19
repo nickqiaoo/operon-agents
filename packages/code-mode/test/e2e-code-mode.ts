@@ -361,6 +361,23 @@ return { names: found.map((f) => f.name), declaration: found[0].declaration, one
     check("catalog: a tool missing from the request is still callable from a program", text.includes("mcp__github__list_issues:7"));
   }
 
+  // ── The context report counts what was sent: the catalog RunCode took out is not in it ──
+  {
+    const harness = createHarness({
+      model: faux.getChatModel(),
+      workDir: work,
+      permission: { mode: "yolo" },
+      extensions: [fakeMcp({ github: ["list_issues", "create_issue"] }), codeMode()],
+    });
+    const session = await harness.createSession();
+    faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
+    await session.prompt("hello");
+    const breakdown = session.getContextBreakdown();
+    await harness.close();
+    check("report: MCP tools hidden behind RunCode count nothing", breakdown?.toolsMcp.tokens === 0);
+    check("report: RunCode, catalog included, counts with the built-ins", (breakdown?.toolsBuiltin.tokens ?? 0) > 0);
+  }
+
   // ── `catalog` with everything inside the budget declares it all ──
   {
     const s = await scenario({}, { mode: "yolo" }, `return 1`, undefined, [fakeMcp({ github: ["list_issues", "create_issue"] })]);

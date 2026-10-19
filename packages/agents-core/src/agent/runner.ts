@@ -11,7 +11,7 @@ import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Capability, RunContext } from "../capabilities/capability.ts";
 import { assembleCapabilities, type AssembledCapabilities } from "../capabilities/assembler.ts";
-import { computeContextBreakdown } from "./context-report.ts";
+import { computeContextBreakdown, type ComputeContextBreakdownInput } from "./context-report.ts";
 import {
   type EventSink,
   IterableSink,
@@ -921,19 +921,21 @@ class Engine<TContext> {
       // The same projection the first step will send (announcements are that step's job).
       const visibleTools = prepareToolCatalog(context, toolset, { announce: false }).schemas.map((schema) => ({ schema }));
 
-      // Stamp a context-window breakdown snapshot from exactly what this turn will send, so
-      // `session.getContextBreakdown()` (and the app-server RPC) can report where tokens go.
-      state.session.recordContextBreakdown(
-        computeContextBreakdown({
-          model,
-          system,
-          tools: visibleTools,
-          messages: context.messages,
-          injectionTokens,
-          compactBufferTokens: state.session.compactionView?.reservedContextTokens ?? 0,
-          capturedAt: Date.now(),
-        }),
-      );
+      // Stamp a context-window breakdown snapshot, so `session.getContextBreakdown()` (and the
+      // app-server RPC) can report where tokens go: here from the projection the first step will
+      // send, then again from every step's final request — an extension's `model.request` hook may
+      // rewrite it (Code Mode takes the MCP catalog out), and the report must show what was sent.
+      const stampBreakdown = (snapshot: Pick<ComputeContextBreakdownInput, "system" | "tools" | "messages">): void =>
+        state.session.recordContextBreakdown(
+          computeContextBreakdown({
+            model,
+            ...snapshot,
+            injectionTokens,
+            compactBufferTokens: state.session.compactionView?.reservedContextTokens ?? 0,
+            capturedAt: Date.now(),
+          }),
+        );
+      stampBreakdown({ system, tools: visibleTools, messages: context.messages });
       const turnId = state.currentTurnId ?? `${state.sessionId}-t${state.turns}`;
       const outputGuardrails = current.guardrails.output ?? [];
 
@@ -960,6 +962,11 @@ class Engine<TContext> {
           deferredToolNames: toolset.deferredToolNames,
           deferEnabled: toolset.deferEnabled,
           onToolsPrepared: (tools) => { permissionTools = tools; },
+          onRequestPrepared: (request) => stampBreakdown({
+            system: request.system,
+            tools: (request.tools ?? []).map((schema) => ({ schema })),
+            messages: request.messages,
+          }),
           refreshTools: () => buildRunTools(
             current,
             state,

@@ -49,6 +49,8 @@ export interface ExecuteStepDeps {
   readonly deferEnabled?: boolean;
   readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
+  /** The request exactly as it goes to the model, after every hook (an extension may rewrite it). */
+  readonly onRequestPrepared?: (request: LlmRequest) => void;
   readonly hooks?: LoopHooks;
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
   readonly currentStep: number;
@@ -138,6 +140,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
     if (beforeModel?.request !== undefined) request = beforeModel.request;
   }
   signal.throwIfAborted();
+  deps.onRequestPrepared?.(request);
   const stepId = `${turnId}.${currentStep}`;
   const outputGuardrail = deps.createOutputGuardrailMonitor?.({
     turnId,

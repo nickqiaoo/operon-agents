@@ -323,8 +323,8 @@ export class Session implements SessionPort {
   private readonly pendingChanges: PendingCapabilityChange[] = [];
   /** Serializes applied changes, and lets `close()` wait for the one in progress. */
   private changeChain: Promise<void> = Promise.resolve();
-  // Most-recent per-turn context-window breakdown, stamped by the Runner at each turn boundary.
-  // Undefined until the first turn assembles a request.
+  // Most-recent context-window breakdown, stamped by the Runner at each turn boundary and from
+  // each step's final request. Undefined until the first turn assembles a request.
   private lastContextBreakdown?: ContextBreakdown;
   /** Built at the end of `open`, once every capability's policies are in. */
   private permissionManager?: PermissionManager;
@@ -927,7 +927,8 @@ export class Session implements SessionPort {
   }
 
   /** The most-recent context-window breakdown (system/tools/messages/injections/free), stamped
-   *  by the Runner at each turn boundary — or undefined if no turn has assembled a request yet.
+   *  by the Runner at each turn boundary and again from every step's request as sent, after every
+   *  hook (an extension may rewrite it) — or undefined if no turn has assembled a request yet.
    *  A read-only snapshot: it reflects the last turn sent, not a fresh recomputation. */
   getContextBreakdown(): ContextBreakdown | undefined {
     return this.lastContextBreakdown;

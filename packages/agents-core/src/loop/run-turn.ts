@@ -54,6 +54,8 @@ export interface RunTurnInput {
   /** Snapshot after beforeStep, so a connection completed during a turn is seen next step. */
   readonly refreshTools?: () => Promise<ToolCatalogSnapshot>;
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
+  /** Each step's request as it goes to the model, after every hook. */
+  readonly onRequestPrepared?: (request: LlmRequest) => void;
   readonly hooks?: LoopHooks;
   /** Per-step optimistic output guardrail adapter supplied by the active agent layer. */
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
@@ -176,6 +178,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           deferEnabled: input.deferEnabled,
           refreshTools: input.refreshTools,
           onToolsPrepared: input.onToolsPrepared,
+          onRequestPrepared: input.onRequestPrepared,
           hooks: input.hooks,
           createOutputGuardrailMonitor: input.createOutputGuardrailMonitor,
           currentStep: steps,

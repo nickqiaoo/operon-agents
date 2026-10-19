@@ -49,7 +49,7 @@ export interface ContextBreakdown {
   /** contextWindow − used − compactBuffer, clamped at 0. */
   readonly free: ContextSlice;
 
-  /** Epoch ms the snapshot was taken (turn boundary). */
+  /** Epoch ms the snapshot was taken (turn boundary, then each step's request). */
   readonly capturedAt: number;
 }
 

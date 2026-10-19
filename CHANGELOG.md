@@ -7,6 +7,15 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The context-window breakdown (`getContextBreakdown`) counts each step's request as it was
+  sent, after every `model.request` hook, instead of the tool list before them. With Code Mode
+  hiding the MCP catalog, the report showed the whole catalog as still in context
+  (`operon-agents-core`).
+
 ## [0.1.0-alpha.19] — 2026-10-19
 
 ### Changed
