@@ -54,12 +54,12 @@ Use it when the same operation applies to many items (read N files and grep each
 ## Writing the program
 - \`code\` is the BODY of an async function: top-level \`await\` and \`return\` work. Erasable TypeScript only — type annotations are fine; \`enum\`, \`namespace\` and decorators are not.
 - Pass raw source text: not JSON, not a quoted string, not a markdown code fence.
-- Call tools as \`await tools.Name(args)\`, exactly per the declarations below. A call resolves to the tool's text output. A failed call throws \`ToolCallError\` (\`.toolName\`, \`.message\`) — catch it if the program should carry on. A call that needs the user's approval waits for their answer (when nobody is there to give it, the program pauses until they answer and then continues without repeating the calls it already made); a rejection reaches it as a \`ToolCallError\`. A tool that asks the user a question (AskUserQuestion) cannot run inside a program; call it directly.
+- Call tools as \`await tools.Name(args)\`, exactly per the declarations below. A call resolves to what its declaration says: \`Promise<string>\` is the tool's text output; an object type is that object, already parsed — read its fields as declared. A failed call throws \`ToolCallError\` (\`.toolName\`, \`.message\`) — catch it if the program should carry on. A call that needs the user's approval waits for their answer (when nobody is there to give it, the program pauses until they answer and then continues without repeating the calls it already made); a rejection reaches it as a \`ToolCallError\`. A tool that asks the user a question (AskUserQuestion) cannot run inside a program; call it directly.
 - Independent read-only calls MAY run concurrently under \`Promise.all\`; calls that write run one at a time, in the order they were made. Dependent work sequences with \`await\`.
-- Only what you \`console.log(...)\` or \`return\` comes back to you — curate it. Return structured data (objects, arrays) rather than prose, and summarize inside the program instead of returning raw file contents: output beyond ${cap} is cut.
+- What you \`return\` comes back to you — make it the answer: structured data (objects, arrays) rather than prose, summarized inside the program instead of raw file contents. \`console.log\` lines come back too, after the return value under "Logs:"; use them for notes along the way, not for the result. Output beyond ${cap} is cut, logs first.
 - The program runs in a fresh, isolated environment: no filesystem, network, timers, imports, or state from earlier calls. Every effect goes through \`tools.*\`, with the same permissions as a direct call.
 - When the program finishes, unawaited promises are discarded silently — await everything you need.
-- \`ALL_TOOLS\` lists every callable tool as \`{ name, description }\`, including any not declared below. \`await searchTools("github issues")\` returns the full declarations of the best matches (\`{ name, declaration }[]\`; also \`searchTools({ query, limit })\`) — never guess a tool's arguments: look it up, then call it as \`tools[name](args)\`.
+- \`ALL_TOOLS\` lists every callable tool as \`{ name, description }\`, including any not declared below. \`await searchTools("github issues")\` returns the best matches with their full declarations (\`{ name, description, declaration }[]\`; also \`searchTools({ query, limit })\`) — never guess a tool's arguments: look it up, then call it as \`tools[name](args)\`.
 - A long program (polling, many slow calls) can run detached: pass \`run_in_background: true\`; its console output and result go to a log file you Read later (the result names the path). A detached program cannot pause for an approval — a call that needs one fails inside it.
 
 ${heading}
@@ -69,6 +69,6 @@ ${input.declarations}
 };
 declare class ToolCallError extends Error { readonly toolName: string; }
 declare const ALL_TOOLS: ReadonlyArray<{ name: string; description: string }>;
-declare function searchTools(query: string | { query: string; limit?: number }): Promise<Array<{ name: string; declaration: string }>>;
+declare function searchTools(query: string | { query: string; limit?: number }): Promise<Array<{ name: string; description: string; declaration: string }>>;
 \`\`\``;
 }

@@ -43,17 +43,23 @@ declare const tools: {
   Read(args: { path: string; line_offset?: number; n_lines?: number }): Promise<string>;
   /** Executes a bash command … */
   Bash(args: { command: string; timeout?: number; … }): Promise<string>;
-  "mcp__github__list-issues"(args: { state: "open" | "closed" }): Promise<string>;
+  "mcp__github__list-issues"(args: { state: "open" | "closed" }): Promise<{ issues: { number: number; title: string }[] }>;
 };
 declare class ToolCallError extends Error { readonly toolName: string; }
 declare const ALL_TOOLS: ReadonlyArray<{ name: string; description: string }>;
-declare function searchTools(query: string | { query: string; limit?: number }): Promise<Array<{ name: string; declaration: string }>>;
+declare function searchTools(query: string | { query: string; limit?: number }): Promise<Array<{ name: string; description: string; declaration: string }>>;
 ```
 
-A call resolves to the tool's text output; a failed call throws a catchable `ToolCallError`.
-Only what the program `console.log`s or `return`s comes back, under a byte cap. `searchTools`
-returns the full declarations of the tools that best match a query — the same keyword search
-SearchTool uses — for a tool the description does not declare.
+A call resolves to the tool's text output — or, for a tool whose schema declares an
+`outputSchema` (an MCP tool that declares one), to its structured result (`ToolResult.structured`,
+the MCP `structuredContent`), typed from that schema as above. The model still reads the text;
+only the program gets the object. A failed call throws a catchable `ToolCallError`; reading a
+tool that does not exist throws at once, naming the close matches.
+
+What the program `return`s comes back first, then its `console.log` lines under `Logs:`, all under
+a byte cap. `searchTools` returns the tools that best match a query — the same keyword search
+SearchTool uses — each with the `name` and `description` an `ALL_TOOLS` entry has plus its full
+`declaration`, for a tool the description does not declare.
 
 ## Many tools, any model: `hide: "catalog"` (the default)
 

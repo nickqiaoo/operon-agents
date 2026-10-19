@@ -5,7 +5,8 @@
  * Every `tools.X(args)` the program makes goes through `ToolRunContext.dispatch` — the engine's
  * own pipeline for a nested call — so it faces the same hooks and permissions a direct call
  * would. This file adds only the program-side policy: how many calls, how many at once, what a
- * binding resolves to (the tool's text), and how failures reach the program (`ToolCallError`).
+ * binding resolves to (the tool's structured result when its schema declares `outputSchema`,
+ * otherwise its text), and how failures reach the program (`ToolCallError`).
  *
  * ── Pausing for an approval ──
  *
@@ -127,6 +128,8 @@ interface JournalEntry {
   readonly args: string;
   readonly text: string;
   readonly isError: boolean;
+  /** What the call resolved to in the program, when that was not `text` (a tool with an `outputSchema`). */
+  readonly value?: unknown;
 }
 
 /** Recorded nested calls by sequence number. Holes are calls that never completed (the paused one). */
@@ -308,6 +311,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
     const bindings: Record<string, CodeBinding> = {};
     for (const schema of schemas) {
       const name = schema.name;
+      const structured = schema.outputSchema !== undefined;
       bindings[name] = async (args) => {
         if (pause !== undefined) throw new ToolCallFailure(name, PAUSING);
         if (run.signal.aborted) throw new ToolCallFailure(name, "the run was aborted");
@@ -329,7 +333,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
               replayed += 1;
               dispatches.push({ name, ok: !entry.isError, ms: 0, replayed: true });
               if (entry.isError) throw new ToolCallFailure(name, entry.text);
-              return entry.text;
+              return entry.value !== undefined ? entry.value : entry.text;
             }
             replaying = false;
             divergedAt = sequence;
@@ -360,14 +364,15 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
           const ms = Date.now() - started;
           const isError = result.isError === true;
           const text = textOf(result.content);
+          const value = structured && !isError ? structuredValueOf(result, text) : undefined;
           dispatches.push({ name, ok: !isError, ms });
-          journal[String(sequence)] = { name, args: argsJson, text, isError };
+          journal[String(sequence)] = { name, args: argsJson, text, isError, ...(value !== undefined ? { value } : {}) };
           const status = `tools.${name} -> ${isError ? "error" : "ok"} (${String(ms)} ms)`;
           ctx.onUpdate?.({ kind: "status", text: status });
           run.onLine(`[${status}]`);
           if (isError) throw new ToolCallFailure(name, text.length > 0 ? text : "the tool reported an error");
           for (const part of result.content) if (part.type === "image") images.push(part);
-          return text;
+          return value !== undefined ? value : text;
         } finally {
           gate.leave();
         }
@@ -418,19 +423,24 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
       : "";
     if (result.error !== undefined) {
       const where = result.error.line !== undefined ? ` at line ${String(result.error.line)}` : "";
-      const captured = result.logs.length > 0 ? `\n\nCaptured output:\n${result.logs.join("\n")}` : "";
+      const hint = hintFor(result.error);
+      const captured = result.logs.length > 0 ? `\n\nLogs:\n${result.logs.join("\n")}` : "";
       return {
         kind: "result",
         isError: true,
         result: {
-          content: [{ type: "text", text: `RunCode failed (${result.error.kind}${where}): ${result.error.message}${captured}${divergence}` }],
+          content: [{ type: "text", text: `RunCode failed (${result.error.kind}${where}): ${result.error.message}${hint}${captured}${divergence}` }],
           isError: true,
           details,
         },
       };
     }
-    const parts = [result.logs.join("\n"), renderValue(result.value)].filter((part) => part.length > 0);
-    let text = parts.length > 0 ? parts.join("\n") : "(RunCode completed with no output)";
+    // The return value is the answer, so it leads; console lines follow under their own heading.
+    const value = renderValue(result.value);
+    const logs = result.logs.join("\n");
+    let text = value.length > 0 && logs.length > 0
+      ? `${value}\n\nLogs:\n${logs}`
+      : value.length > 0 ? value : logs.length > 0 ? logs : "(RunCode completed with no output)";
     if (result.truncated) {
       text += `\n\n[output cut at ${String(limits.maxOutputBytes)} bytes; summarize inside the program instead of returning raw data]`;
     }
@@ -513,9 +523,10 @@ const SEARCH_MAX_LIMIT = 20;
 /**
  * The program's `searchTools(query)`: the full declarations of the tools that best match, by the
  * same keyword search SearchTool uses — how a program reaches a tool the description had no room
- * to declare without guessing its arguments.
+ * to declare without guessing its arguments. Each match carries the same `name` and `description`
+ * an `ALL_TOOLS` entry has, plus its `declaration`: a model that learned one shape uses the other.
  */
-function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ readonly name: string; readonly declaration: string }> {
+function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ readonly name: string; readonly description: string; readonly declaration: string }> {
   const request = typeof args === "string" ? { query: args, limit: undefined } : isRecord(args) && typeof args.query === "string" ? { query: args.query, limit: args.limit } : undefined;
   if (request === undefined) throw new Error('searchTools takes a query string, or { query, limit }');
   const limit = typeof request.limit === "number" && Number.isFinite(request.limit)
@@ -527,7 +538,7 @@ function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ rea
     if (schema === undefined) return [];
     // One member of `declare const tools`, de-indented to stand on its own.
     const declaration = renderToolDeclarations([schema], { descriptions: "full" }).replace(/^ {2}/gm, "");
-    return [{ name, declaration }];
+    return [{ name, description: briefOf(schema.description), declaration }];
   });
 }
 
@@ -558,6 +569,30 @@ function textOf(content: ToolResultContent): string {
     .filter((part): part is Extract<ToolResultContent[number], { type: "text" }> => part.type === "text")
     .map((part) => part.text)
     .join("");
+}
+
+/**
+ * What a call to a tool with an `outputSchema` resolves to: its structured result. A server that
+ * declares the schema but sends only text usually sends that JSON as the text (the MCP spec asks
+ * for it, for older clients), so parse it; anything else stays text rather than being lost.
+ */
+function structuredValueOf(result: ToolResult, text: string): unknown {
+  if (result.structured !== undefined) return result.structured;
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      // Not JSON after all: the text is all there is.
+    }
+  }
+  return text;
+}
+
+/** A pointer for failures that usually mean the program guessed a shape instead of reading it. */
+function hintFor(error: CodeRunFailure): string {
+  if (error.kind !== "exception" || !/cannot read propert/i.test(error.message)) return "";
+  return "\n\nHint: a value the program read a property from was undefined or null. Use the field names the declarations (or a searchTools result) give, rather than guessing them; console.log the value first if its shape is unclear.";
 }
 
 function renderValue(value: unknown): string {

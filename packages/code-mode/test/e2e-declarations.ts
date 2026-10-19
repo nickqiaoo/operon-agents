@@ -76,7 +76,12 @@ function main(): void {
   ], { descriptions: "full" });
   check("full: keeps every paragraph of the tool description", full.includes("First.") && full.includes("Second paragraph."));
   check("full: carries parameter descriptions inline", full.includes("{ /** Where to look */ path: string }"));
-  check("returnType is configurable", renderToolDeclarations([schema("X", "x", { type: "object" })], { returnType: "Promise<unknown>" }).includes("Promise<unknown>"));
+  check("a tool without outputSchema resolves to its text", renderToolDeclarations([schema("X", "x", { type: "object" })]).includes("X(args?: Record<string, unknown>): Promise<string>;"));
+  const typed = renderToolDeclarations([{
+    ...schema("Find", "find", { type: "object" }),
+    outputSchema: { type: "object", properties: { hits: { type: "array", items: { $ref: "#/$defs/Hit" } } }, required: ["hits"], $defs: { Hit: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
+  }]);
+  check("outputSchema types the result, its own $refs followed", typed.includes("Promise<{ hits: { path: string }[] }>;"));
 
   check("briefOf caps a long first paragraph", briefOf(`${"word ".repeat(100)}\n\nmore`).length <= 240);
   check("briefOf collapses whitespace", briefOf("a\n  b   c") === "a b c");

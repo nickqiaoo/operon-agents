@@ -52,6 +52,32 @@ const PRELUDE = `(() => {
   return (toolName, message) => new ToolCallError(toolName, message);
 })()`;
 
+/**
+ * Wraps the `tools` object so reading a tool that does not exist throws at once, naming the
+ * close matches, instead of yielding `undefined` and failing later as "not a function" with no
+ * clue what was meant. `in`, `Object.keys` and symbol reads (`then` for an await) behave as usual.
+ */
+const TOOLS_GUARD = `((tools, hint) => {
+  const names = Object.keys(tools);
+  const comparable = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const expression = (name) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? "tools." + name : "tools[" + JSON.stringify(name) + "]";
+  return new Proxy(tools, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || property in target || property === "then" || property === "toJSON") {
+        return Reflect.get(target, property, receiver);
+      }
+      const wanted = comparable(property);
+      const exact = names.filter((name) => comparable(name) === wanted);
+      const close = exact.length > 0 ? exact : wanted.length < 3 ? [] : names.filter((name) => comparable(name).includes(wanted) || wanted.includes(comparable(name)));
+      let message = expression(property) + " does not exist.";
+      if (close.length > 0) message += " Did you mean " + close.slice(0, 5).map(expression).join(", ") + "?";
+      else if (names.length <= 20) message += " Available: " + names.map(expression).join(", ") + ".";
+      if (hint) message += " " + hint;
+      throw new TypeError(message);
+    },
+  });
+})`;
+
 export function createQuickJSRuntime(options: QuickJSRuntimeOptions = {}): CodeRuntime {
   let modulePromise: Promise<QuickJSWASMModule> | undefined;
   const load = (): Promise<QuickJSWASMModule> => (modulePromise ??= newQuickJSWASMModuleFromVariant(options.variant ?? quickjsNg));
@@ -251,7 +277,15 @@ function installBindings(context: QuickJSContext, scope: Scope, request: CodeRun
   for (const [name, binding] of Object.entries(request.bindings)) {
     context.defineProp(tools, name, { value: bindingFunction(context, scope, name, binding, host), configurable: false, enumerable: true });
   }
-  context.defineProp(context.global, "tools", { value: tools, configurable: false, enumerable: false });
+  const guard = scope.manage(unwrap(context, context.evalCode(TOOLS_GUARD, "tools-guard.js", { type: "global" })));
+  // Point at the discovery globals this run actually installs.
+  const discovery = [
+    request.globals?.ALL_TOOLS !== undefined ? "ALL_TOOLS lists every tool" : undefined,
+    request.functions?.searchTools !== undefined ? "searchTools(query) finds one by what it does" : undefined,
+  ].filter((part) => part !== undefined);
+  const hint = scope.manage(context.newString(discovery.length > 0 ? `${discovery.join("; ")}.` : ""));
+  const guarded = scope.manage(unwrap(context, context.callFunction(guard, context.undefined, [tools, hint])));
+  context.defineProp(context.global, "tools", { value: guarded, configurable: false, enumerable: false });
   for (const [name, binding] of Object.entries(request.functions ?? {})) {
     context.defineProp(context.global, name, { value: bindingFunction(context, scope, name, binding, host), configurable: false, enumerable: false });
   }

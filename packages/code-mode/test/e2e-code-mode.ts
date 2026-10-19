@@ -41,6 +41,45 @@ function fakeMcp(servers: Readonly<Record<string, readonly string[]>>): Extensio
   };
 }
 
+/**
+ * Tools with machine-readable results, the way an MCP server that declares `outputSchema` offers
+ * them: `list_issues` sends `structuredContent` beside its text; `get_stats` declares a schema but
+ * sends only the JSON as text (what older servers do). `calls` counts real executions.
+ */
+function issueTracker(calls: { count: number }): ExtensionDefinition {
+  return {
+    id: "issue-tracker",
+    session(api) {
+      api.registerTool({
+        name: "mcp__tracker__list_issues",
+        description: "List the issues of a repository.",
+        parameters: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
+        outputSchema: {
+          type: "object",
+          properties: {
+            issues: {
+              type: "array",
+              items: { type: "object", properties: { number: { type: "number" }, state: { type: "string", enum: ["open", "closed"] } }, required: ["number", "state"] },
+            },
+          },
+          required: ["issues"],
+        },
+        execute: () => {
+          calls.count += 1;
+          return { content: [{ type: "text", text: "#12 open, #15 closed" }], structured: { issues: [{ number: 12, state: "open" }, { number: 15, state: "closed" }] } };
+        },
+      });
+      api.registerTool({
+        name: "mcp__tracker__get_stats",
+        description: "Issue counts of a repository.",
+        parameters: { type: "object", properties: {} },
+        outputSchema: { type: "object", properties: { open: { type: "number" } } },
+        execute: () => '{"open": 1}',
+      });
+    },
+  };
+}
+
 /** Registered AFTER codeMode, so it sees the request codeMode rewrote. */
 function requestSpy(seen: { tools?: readonly ToolSchema[] }): ExtensionDefinition {
   return {
@@ -112,6 +151,7 @@ return { hits };`);
     const details = s.parentResult?.result.details as RunCodeDetails | undefined;
     check("sweep: the turn completes and the model answers", s.result.output === "done");
     check("sweep: the program's logs and return value come back as the tool result", text.includes("checked 3") && text.includes('"a.txt"') && text.includes('"c.txt"') && !text.includes('"b.txt"'));
+    check("sweep: the return value leads, console lines follow under Logs:", text.startsWith("{") && text.endsWith("Logs:\nchecked 3"));
     check("sweep: the result is not an error", s.parentResult?.isError === false);
     const starts = s.nested.filter((event) => event.type === "tool.call.started");
     const results = s.nested.filter((event) => event.type === "tool.result");
@@ -143,8 +183,15 @@ return { hits };`);
   //    program continues without repeating what it already did ──
   {
     const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
+    const tracker = { count: 0 };
     const open = () =>
-      createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
+      createLocalHarness({
+        model: faux.getChatModel(),
+        homeDir: home,
+        workDir: work,
+        permission: { mode: "manual", rules: [{ decision: "allow", scope: "project", pattern: "mcp__tracker__list_issues" }] },
+        extensions: [issueTracker(tracker), codeMode({ hide: "none" })],
+      });
     let harness = await open();
     const session = await harness.createSession();
     const sessionId = session.id;
@@ -154,9 +201,10 @@ return { hits };`);
       fauxAssistantMessage(
         fauxToolCall(RUN_CODE_NAME, {
           code: `const a = await tools.Read({ path: "a.txt" });
+const listed = await tools.mcp__tracker__list_issues({ repo: "x" });
 await tools.Bash({ command: "echo approved > out.txt" });
 const c = await tools.Read({ path: "c.txt" });
-return { a: a.includes("hello"), c: c.includes("again") };`,
+return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.length };`,
           description: "Read, write, read",
         }),
         { stopReason: "toolUse" },
@@ -169,7 +217,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
     check("pause: the run interrupts instead of failing the call", result.status === "interrupted" && result.interruptions?.length === 1);
     check(
       "pause: the pending item is an input request shaped as the nested call's approval",
-      request?.kind === "approval" && request.display?.toolName === "Bash" && request.display.sequence === 2 && request.display.approvalRule.startsWith("Bash(") && request.display.program === "Read, write, read",
+      request?.kind === "approval" && request.display?.toolName === "Bash" && request.display.sequence === 3 && request.display.approvalRule.startsWith("Bash(") && request.display.program === "Read, write, read",
     );
     check("pause: the call before it ran once, the call after it not at all", before.filter((event) => event.type === "tool.call.started" && event.toolName === "Read").length === 1 && !existsSync(join(work, "out.txt")));
     check("pause: the RunCode call is reported suspended", before.some((event) => event.type === "tool.suspended" && event.toolName === RUN_CODE_NAME));
@@ -190,8 +238,9 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
     const text = finished === undefined ? "" : textOf(finished);
     check("resume: the run completes and the model answers", result.status === "completed" && result.output === "done");
     check("resume: the approved call ran", existsSync(join(work, "out.txt")));
-    check("resume: the call before the pause was replayed, not repeated", details?.replayed === 1 && details.dispatches[0]?.replayed === true && after.filter((event) => event.type === "tool.call.started" && event.toolName === "Read").length === 1);
+    check("resume: the calls before the pause were replayed, not repeated", details?.replayed === 2 && details.dispatches[0]?.replayed === true && after.filter((event) => event.type === "tool.call.started" && event.toolName === "Read").length === 1);
     check("resume: the program's result is complete", text.includes('"a": true') && text.includes('"c": true') && details?.divergedAt === undefined);
+    check("resume: a structured result is replayed as the object it was, not its text", text.includes('"issues": 2') && tracker.count === 1);
     await reopened.close();
     await harness.close();
     rmSync(home, { recursive: true, force: true });
@@ -319,9 +368,10 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
 
   // ── `exclude`: a tool kept out of programs is neither declared nor bound ──
   {
-    const s = await scenario({ hide: "none", exclude: ["Bash"] }, { mode: "yolo" }, `return { bash: typeof tools.Bash, listed: ALL_TOOLS.some((t) => t.name === "Bash") }`);
+    const s = await scenario({ hide: "none", exclude: ["Bash"] }, { mode: "yolo" }, `let read; try { tools.Bash } catch (e) { read = e.message } return { bash: "Bash" in tools, listed: ALL_TOOLS.some((t) => t.name === "Bash"), read }`);
     const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
-    check("exclude: the tool is absent from the program's world", text.includes('"bash": "undefined"') && text.includes('"listed": false'));
+    check("exclude: the tool is absent from the program's world", text.includes('"bash": false') && text.includes('"listed": false'));
+    check("exclude: reading it throws, pointing at the discovery globals", text.includes("tools.Bash does not exist.") && text.includes("ALL_TOOLS lists every tool"));
     check("exclude: and from the declarations", !(s.runCode?.description.includes("Bash(args") ?? true));
   }
 
@@ -343,7 +393,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
       `const found = await searchTools("github issue");
 const one = await searchTools({ query: "pull request", limit: 1 });
 const listed = await tools["mcp__github__list_issues"]({ id: "7" });
-return { names: found.map((f) => f.name), declaration: found[0].declaration, one: one.map((f) => f.name), listed };`,
+return { names: found.map((f) => f.name), declaration: found[0].declaration, brief: found[0].description, one: one.map((f) => f.name), listed };`,
       undefined,
       [mcp],
     );
@@ -357,8 +407,44 @@ return { names: found.map((f) => f.name), declaration: found[0].declaration, one
     check("catalog: built-ins are not part of the catalog", !description.includes("Read(args"));
     check("catalog: searchTools ranks by intent", text.includes('"mcp__github__list_issues"') && text.includes('"mcp__github__create_issue"') && !text.includes('"names": [\n    "mcp__analytics'));
     check("catalog: searchTools returns a full declaration, parameter docs included", text.includes("Identifier of the item to act on"));
+    check("catalog: a searchTools match carries the description an ALL_TOOLS entry has", /"brief": "[a-z ]+ on github\. Returns the item as text/.test(text));
     check("catalog: searchTools honours a limit", /"one": \[\s*"mcp__github__get_pull_request"\s*\]/.test(text));
     check("catalog: a tool missing from the request is still callable from a program", text.includes("mcp__github__list_issues:7"));
+  }
+
+  // ── A tool that declares `outputSchema` resolves to its structured result, typed from the schema ──
+  {
+    const tracker = { count: 0 };
+    const s = await scenario(
+      {},
+      { mode: "yolo" },
+      `const listed = await tools.mcp__tracker__list_issues({ repo: "x" });
+const stats = await tools.mcp__tracker__get_stats();
+const file = await tools.Read({ path: "a.txt" });
+console.log("note");
+return { open: listed.issues.filter((i) => i.state === "open").map((i) => i.number), stats: stats.open, file: typeof file };`,
+      undefined,
+      [issueTracker(tracker)],
+    );
+    const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
+    const description = s.runCode?.description ?? "";
+    const nestedText = s.nested.find((event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === "mcp__tracker__list_issues");
+    check("structured: the declaration's return type comes from outputSchema", description.includes('mcp__tracker__list_issues(args: { repo: string }): Promise<{ issues: { number: number; state: "open" | "closed" }[] }>;'));
+    check("structured: a tool without one still resolves to its text", text.includes('"file": "string"'));
+    check("structured: the program reads the object's fields directly", /"open": \[\s*12\s*\]/.test(text) && s.parentResult?.isError === false);
+    check("structured: a schema with only JSON text resolves to the parsed object", text.includes('"stats": 1'));
+    check("structured: the model-facing nested result is still the tool's text", nestedText !== undefined && textOf(nestedText) === "#12 open, #15 closed");
+    check("structured: outputSchema never reaches the model", !(s.seen.tools?.some((tool) => tool.outputSchema !== undefined) ?? true));
+  }
+
+  // ── Mistakes that come from guessing: a wrong tool name, a field that is not there ──
+  {
+    const s = await scenario({ hide: "none" }, { mode: "yolo" }, `try { await tools.read({ path: "a.txt" }); return "ran" } catch (e) { return e.message }`);
+    const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
+    check("guard: an unknown tool throws at once, naming the close match", text.includes("tools.read does not exist. Did you mean tools.Read?"));
+    const guessed = await scenario({ hide: "none" }, { mode: "yolo" }, `const r = JSON.parse("{}");\nreturn r.items.length`);
+    const failure = guessed.parentResult === undefined ? "" : textOf(guessed.parentResult);
+    check("hint: reading a property of undefined points at the declarations", failure.startsWith("RunCode failed (exception") && failure.includes("cannot read property 'length' of undefined") && failure.includes("Hint:") && failure.includes("searchTools result"));
   }
 
   // ── The context report counts what was sent: the catalog RunCode took out is not in it ──

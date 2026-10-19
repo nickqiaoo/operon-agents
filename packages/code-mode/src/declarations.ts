@@ -3,6 +3,9 @@
  * TypeScript method on `declare const tools`. A model has read far more `declare const x: {…}`
  * than JSON Schema, so this is the shape it calls correctly.
  *
+ * A call resolves to the tool's text, or — when the tool declares an `outputSchema` — to its
+ * structured result, typed from that schema.
+ *
  * Pure: schemas in, text out. Names are rendered as quoted keys when they are not identifiers
  * (`"mcp__github__list-issues"`), never aliased, so every tool stays reachable as written.
  * Local `$ref`s are followed (a schema may point into its own `$defs`); a cycle degrades to
@@ -17,8 +20,6 @@ export interface DeclarationOptions {
    * native schemas. `full` keeps everything — right when the program is the only way to call.
    */
   readonly descriptions?: "brief" | "full";
-  /** What each method resolves to. Defaults to `Promise<string>`: a binding returns the tool's text. */
-  readonly returnType?: string;
 }
 
 type JsonSchema = Readonly<Record<string, unknown>>;
@@ -30,13 +31,12 @@ const MAX_DEPTH = 8;
 /** Render the members of `declare const tools: { … }` — one method per tool, sorted by name. */
 export function renderToolDeclarations(tools: readonly ToolSchema[], options: DeclarationOptions = {}): string {
   const full = options.descriptions === "full";
-  const returnType = options.returnType ?? "Promise<string>";
   const sorted = [...tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const lines: string[] = [];
   for (const tool of sorted) {
     const doc = full ? tool.description : briefOf(tool.description);
     lines.push(...docLines(doc, 1));
-    lines.push(`  ${renderKey(tool.name)}(${renderArgs(tool.parameters, full)}): ${returnType};`);
+    lines.push(`  ${renderKey(tool.name)}(${renderArgs(tool.parameters, full)}): Promise<${renderReturn(tool.outputSchema, full)}>;`);
   }
   return lines.join("\n");
 }
@@ -99,6 +99,15 @@ export function briefOf(description: string): string {
   const paragraph = description.split(/\n\s*\n/, 1)[0] ?? "";
   const collapsed = paragraph.replace(/\s+/g, " ").trim();
   return collapsed.length > BRIEF_MAX_CHARS ? `${collapsed.slice(0, BRIEF_MAX_CHARS - 1)}…` : collapsed;
+}
+
+/**
+ * What a call resolves to: the type of the tool's structured result when it declares an
+ * `outputSchema` (the binding hands the program that value), otherwise its text.
+ */
+function renderReturn(outputSchema: JsonSchema | undefined, full: boolean): string {
+  if (outputSchema === undefined) return "string";
+  return renderType(outputSchema, outputSchema, 0, new Set(), full);
 }
 
 function renderArgs(parameters: JsonSchema, full: boolean): string {

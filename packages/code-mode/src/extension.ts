@@ -140,7 +140,7 @@ export function codeMode(options: CodeModeOptions = {}): ExtensionDefinition {
         const projection = project(tools);
         // Nothing for RunCode to do this step (`catalog` with native deferral, or nothing to hide).
         if (projection === undefined) return { request: withTools(event.request, tools.filter((schema) => schema.name !== RUN_CODE_NAME)) };
-        const key = projection.declared.map((schema) => `${schema.name} ${schema.description} ${JSON.stringify(schema.parameters)}`).join("\n");
+        const key = projection.declared.map((schema) => `${schema.name} ${schema.description} ${JSON.stringify(schema.parameters)} ${JSON.stringify(schema.outputSchema ?? null)}`).join("\n");
         if (last === undefined || last.key !== key) last = { key, description: describe(projection.declared) };
         const description = last.description;
         return {
