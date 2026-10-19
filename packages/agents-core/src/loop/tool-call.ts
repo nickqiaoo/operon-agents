@@ -1,7 +1,7 @@
 import type { AssistantMessage, JsonObject, JsonValue, ToolCall, ToolResultMessage } from "../protocol/index.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import type { NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
-import type { ApprovalResponse } from "../permission/types.ts";
+import type { NestedCallResult, NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
+import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
@@ -358,6 +358,11 @@ async function runAndFinalize(
  * and hooks a direct call would face. Nested calls of one parent are scheduled against each
  * other by resource conflict — the batch's own rule — and their events carry `parentToolCallId`.
  *
+ * An approval a nested call needs is asked in place when the run has a live approver (the
+ * responder answers inline, as the runner does for a top-level batch): the nested call waits for
+ * the answer while the rest of the program keeps running. `tool.call.started` goes out BEFORE the
+ * question, so a client has the call — name, arguments, parent — to hang the approval on.
+ *
  * What a nested call cannot do is pause the turn. An approval with no live approver, or a tool
  * that suspends for input, comes back as an error result instead of interrupting: the batch that
  * owns the turn is already running, and re-running a program to resume it would repeat its side
@@ -385,10 +390,29 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
       // program re-ran): file it where a resumed batch's answers live, so the authorize hook
       // records and applies it like any other.
       if (options?.approval !== undefined && step.answers !== undefined) step.answers[call.id] = options.approval;
-      const prepared = await prepareCall(nestedStep, call);
+      let prepared = await prepareCall(nestedStep, call);
+      let announced = false;
+      const approver = liveApproverOf(step.responder);
+      if (prepared.kind === "interrupt" && approver !== undefined && step.answers !== undefined) {
+        // Ask now, as the runner does for a live top-level batch, then authorize again with the
+        // answer filed — the same audited path a resumed batch's answers take.
+        const pending = prepared.pending;
+        await step.dispatchEvent?.({ type: "tool.call.started", toolCallId: call.id, toolName: name, args: call.arguments, parentToolCallId: parent.id });
+        announced = true;
+        step.answers[call.id] = await approver.requestApproval(
+          {
+            toolCallId: call.id,
+            toolName: name,
+            approvalRule: pending.approvalRule,
+            ...(pending.display !== undefined ? { display: pending.display } : {}),
+          },
+          { signal: step.signal },
+        );
+        prepared = await prepareCall(nestedStep, call);
+      }
       if (prepared.kind === "interrupt" || prepared.kind === "repark") {
         const pending = prepared.pending;
-        return {
+        const result: NestedCallResult = {
           ...errorResult(
             `${name} requires the user's approval, which cannot be requested from inside a nested call. Call the tool directly.`,
           ),
@@ -404,14 +428,21 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
               }
             : {}),
         };
+        // A call already announced must not be left running in the client's view.
+        if (announced) {
+          step.dispatchEvent?.({ type: "tool.result", toolCallId: call.id, toolName: name, result: { content: result.content, isError: true }, isError: true, parentToolCallId: parent.id });
+        }
+        return result;
       }
-      step.dispatchEvent?.({
-        type: "tool.call.started",
-        toolCallId: call.id,
-        toolName: name,
-        args: prepared.kind === "run" ? prepared.args : call.arguments,
-        parentToolCallId: parent.id,
-      });
+      if (!announced) {
+        step.dispatchEvent?.({
+          type: "tool.call.started",
+          toolCallId: call.id,
+          toolName: name,
+          args: prepared.kind === "run" ? prepared.args : call.arguments,
+          parentToolCallId: parent.id,
+        });
+      }
       let result: ToolResult;
       if (prepared.kind === "result") {
         result = prepared.result;
@@ -437,6 +468,17 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
       return result;
     },
   };
+}
+
+/**
+ * The responder, when it can answer an approval inline right now. The step carries it typed as
+ * the question channel (that is all a tool's run context gets); the runner hands in its full
+ * `Responder`, and `isLiveApprover() === false` means approvals go durable instead.
+ */
+function liveApproverOf(responder: QuestionResponder | undefined): Responder | undefined {
+  if (responder === undefined || !("requestApproval" in responder) || typeof responder.requestApproval !== "function") return undefined;
+  const approver = responder as Responder;
+  return (approver.isLiveApprover?.() ?? true) ? approver : undefined;
 }
 
 function planOf(p: PreparedCall | undefined): ToolPlan | undefined {

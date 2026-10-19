@@ -10,5 +10,9 @@ import type { AgentEventBody } from "../events/events.ts";
  * pi-agent design, where the loop emits AgentEvents through a single sink.
  *
  * (The loop has no `state`, so it cannot add the envelope itself — that is the sink's job.)
+ *
+ * The returned promise resolves once the event is published. Most emitters fire and forget; one
+ * that must order something after delivery (a nested call announced before its approval is
+ * asked) awaits it.
  */
-export type LoopEventDispatcher = (event: AgentEventBody) => void;
+export type LoopEventDispatcher = (event: AgentEventBody) => void | Promise<void>;

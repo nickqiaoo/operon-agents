@@ -976,7 +976,7 @@ class Engine<TContext> {
           maxRetriesPerStep: this.config.maxRetriesPerStep,
           drainSteering: () => state.steer.drainSteering().map((s) => ({ message: s.message, origin: s.origin })),
           // One sink: the loop dispatches real AgentEvent bodies; we only add the envelope.
-          dispatchEvent: (body) => void emitRunEvent(state, body),
+          dispatchEvent: (body) => emitRunEvent(state, body),
           logger: state.session.logger,
           resumeFrom: resume,
           resume: resume !== undefined ? frameResume(state) : undefined,

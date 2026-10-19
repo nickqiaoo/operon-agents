@@ -95,8 +95,9 @@ export interface NestedToolDispatcher {
   readonly schemas: readonly ToolSchema[];
   /**
    * Run `name` with `args`. Resolves to the tool's result; an unknown, denied or failed call is
-   * an error RESULT (`isError: true`), never a rejection. A call that would pause the run — an
-   * approval with no live approver, a tool that suspends for input — also comes back as an
+   * an error RESULT (`isError: true`), never a rejection. An approval the call needs is asked in
+   * place when the run has a live approver; the promise waits for the answer. A call that would
+   * pause the run — an approval with no live approver, a tool that suspends for input — comes back as an
    * error result: a nested call cannot park the turn. For the approval case the result carries
    * `interrupt`, so a caller able to pause ITSELF (`ToolRunContext.suspend`) can, and later
    * re-issue the same call with the user's answer in `options.approval`.
