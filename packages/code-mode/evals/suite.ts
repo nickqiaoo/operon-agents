@@ -59,7 +59,8 @@ export async function measureRun(
       workDir: work,
       permission: { mode: "yolo" },
       maxStepsPerTurn: options.maxStepsPerTurn ?? 12,
-      extensions: variant === "code" ? [codeMode()] : [],
+      // Orchestration is what is measured: RunCode beside every tool, nothing hidden.
+      extensions: variant === "code" ? [codeMode({ hide: "none" })] : [],
     });
     const session = await harness.createSession();
     let steps = 0;

@@ -41,6 +41,59 @@ export function renderToolDeclarations(tools: readonly ToolSchema[], options: De
   return lines.join("\n");
 }
 
+/** A budgeted slice of a large tool set: what the RunCode description declares up front. */
+export interface ToolCatalog {
+  /** Members of `declare const tools: { … }` for the tools that fit, brief, sorted by name. */
+  readonly declarations: string;
+  readonly shown: number;
+  readonly total: number;
+}
+
+/** Default catalog budget, in estimated tokens (characters / 4). */
+export const DEFAULT_CATALOG_BUDGET = 2000;
+
+/**
+ * Declare as many of `tools` as fit in `budget` estimated tokens; the rest are left for
+ * `searchTools`. Tools are grouped by MCP server (`mcp__<server>__…`; everything else is one
+ * group) and picked round-robin, cheapest first, so one chatty server cannot crowd out the
+ * others and every server shows the model what kind of thing it offers. A group whose cheapest
+ * remaining entry no longer fits drops out.
+ */
+export function renderToolCatalog(tools: readonly ToolSchema[], options: { readonly budget?: number } = {}): ToolCatalog {
+  const budget = options.budget ?? DEFAULT_CATALOG_BUDGET;
+  const groups = new Map<string, Array<{ readonly tool: ToolSchema; readonly cost: number }>>();
+  for (const tool of tools) {
+    const cost = Math.ceil(renderToolDeclarations([tool]).length / 4);
+    const group = groups.get(namespaceOf(tool.name)) ?? [];
+    group.push({ tool, cost });
+    groups.set(namespaceOf(tool.name), group);
+  }
+  let queues = [...groups.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, entries]) => entries.sort((a, b) => a.cost - b.cost || (a.tool.name < b.tool.name ? -1 : 1)));
+  const picked: ToolSchema[] = [];
+  let spent = 0;
+  while (queues.length > 0) {
+    const next: typeof queues = [];
+    for (const queue of queues) {
+      const head = queue[0]!;
+      if (spent + head.cost > budget) continue;
+      queue.shift();
+      picked.push(head.tool);
+      spent += head.cost;
+      if (queue.length > 0) next.push(queue);
+    }
+    queues = next;
+  }
+  return { declarations: renderToolDeclarations(picked), shown: picked.length, total: tools.length };
+}
+
+/** The MCP server a tool belongs to (`mcp__github__list_issues` → `github`); `""` for the rest. */
+function namespaceOf(name: string): string {
+  if (!name.startsWith("mcp__")) return "";
+  return name.slice(5).split("__", 1)[0] ?? "";
+}
+
 /** The first paragraph, whitespace collapsed, capped — enough to pick a tool, not to operate it. */
 export function briefOf(description: string): string {
   const paragraph = description.split(/\n\s*\n/, 1)[0] ?? "";

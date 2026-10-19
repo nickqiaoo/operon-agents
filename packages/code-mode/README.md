@@ -4,17 +4,21 @@ Code Mode for [operon-agents](https://github.com/nickqiaoo/operon-agents): the m
 TypeScript program that calls its tools, and one `RunCode` call does what would otherwise take a
 model round-trip per tool call.
 
+It does two jobs, chosen by `hide`:
+
 ```ts
 import { createHarness } from "operon-agents";
 import { codeMode } from "operon-code-mode";
 
-const harness = createHarness({
-  model,
-  extensions: [codeMode()],
-});
+// Default (`hide: "catalog"`): a large MCP catalog stays out of the context of any model that
+// cannot defer tools natively; programs reach it instead. Does nothing where nothing needs hiding.
+createHarness({ model, extensions: [codeMode()] });
+
+// Orchestration (`hide: "none"`): RunCode beside every tool, for work that takes many calls.
+createHarness({ model, extensions: [codeMode({ hide: "none" })] });
 ```
 
-Instead of `Read a.ts` → `Read b.ts` → `Read c.ts` → `Grep …`, four round-trips each dragging its
+For orchestration: instead of `Read a.ts` → `Read b.ts` → `Read c.ts` → `Grep …`, four round-trips each dragging its
 result back into context, the model writes:
 
 ```ts
@@ -43,10 +47,28 @@ declare const tools: {
 };
 declare class ToolCallError extends Error { readonly toolName: string; }
 declare const ALL_TOOLS: ReadonlyArray<{ name: string; description: string }>;
+declare function searchTools(query: string | { query: string; limit?: number }): Promise<Array<{ name: string; declaration: string }>>;
 ```
 
 A call resolves to the tool's text output; a failed call throws a catchable `ToolCallError`.
-Only what the program `console.log`s or `return`s comes back, under a byte cap.
+Only what the program `console.log`s or `return`s comes back, under a byte cap. `searchTools`
+returns the full declarations of the tools that best match a query — the same keyword search
+SearchTool uses — for a tool the description does not declare.
+
+## Many tools, any model: `hide: "catalog"` (the default)
+
+A model whose provider can add tools mid-conversation keeps a large MCP catalog behind SearchTool
+(deferred loading). Every other model would get every tool up front, and a few MCP servers are
+enough to fill its context. The default, `hide: "catalog"`, is the fallback for those:
+
+- When the request carries SearchTool, the model defers natively: RunCode is withheld and nothing
+  else changes.
+- Otherwise the catalog tools (`catalogTools`, MCP tools by default) leave the request. RunCode's
+  description declares as many of them as fit in `catalogBudget` estimated tokens — picked
+  round-robin across MCP servers, cheapest first, so one big server cannot crowd out the rest —
+  and says how many it left out. The model looks those up with `searchTools` in one program and
+  calls them in the next; what the search returned stays in the transcript.
+- Built-in tools stay directly callable; with no catalog tools in the request, RunCode is withheld.
 
 ## Where the program runs, and what it can reach
 
@@ -70,7 +92,9 @@ between programs.
 ## Pausing for an approval
 
 With a live approver (a terminal, a chat window answering prompts), a nested call that needs an
-approval simply waits for the answer, like a direct call. With none — a server, a session the user
+approval simply waits for the answer, like a direct call — and is announced first: its
+`tool.call.started` (carrying `parentToolCallId`) is published before the approver is asked, so a
+client already has the call to hang the approval on. With none — a server, a session the user
 comes back to tomorrow — the program **pauses**: RunCode records every nested call that already
 ran in a journal (the extension's durable state), and suspends the run with the approval request.
 The pending item is an input request whose `request.kind` is `"approval"`; its `display` carries the
@@ -117,11 +141,15 @@ records the run; later runs fail on a regression. `evals:selftest` checks the pl
 
 ```ts
 codeMode({
-  mode: "both",            // "both" (default): RunCode beside the direct tools
-                           // "only": direct surface = DEFAULT_DIRECT_TOOLS + directTools; the rest only via a program
-  directTools: [],         // under "only", extra tools kept directly callable
+  hide: "catalog",         // which tools only a program can reach:
+                           // "catalog" (default): the catalog, unless the model defers natively (above)
+                           // "none": nothing — RunCode beside every tool (orchestration)
+                           // "all": everything but DEFAULT_DIRECT_TOOLS + directTools
+  directTools: [],         // under "all" and "catalog", extra tools never hidden
+  catalogTools: (schema) => schema.name.startsWith("mcp__"), // under "catalog", what the catalog holds
+  catalogBudget: 2000,     // under "catalog", estimated tokens for the declared slice
   exclude: [],             // tools a program may never call (still callable directly)
-  descriptions: "brief",   // detail in the declarations; "full" by default under "only"
+  descriptions: "brief",   // detail in the declarations under "none"/"all"; "full" by default under "all"
   limits: {
     maxWallMs: 600_000,    // one program, tool calls included
     maxComputeMs: 30_000,  // the program's own JavaScript

@@ -81,3 +81,6 @@ export type { QuestionSpawnOptions } from "./background.ts";
 export { filesystemTools } from "./filesystem-tools.ts";
 export type { FilesystemToolsOptions } from "./filesystem-tools.ts";
 export * from "./web/index.ts";
+// The keyword search behind SearchTool, for other surfaces that look tools up by intent
+// (Code Mode's `searchTools`).
+export { searchDeferredTools } from "./search/deferral.ts";

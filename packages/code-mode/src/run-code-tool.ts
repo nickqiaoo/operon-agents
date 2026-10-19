@@ -29,9 +29,9 @@
  * fails inside it instead — the same as with no journal.
  */
 import { z } from "zod";
-import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, ToolAccesses } from "operon-agents-core";
-import type { ApprovalResponse, ImageContent, Environment, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext } from "operon-agents-core";
-import { briefOf } from "./declarations.ts";
+import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, searchDeferredTools, ToolAccesses } from "operon-agents-core";
+import type { ApprovalResponse, ImageContent, Environment, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext, ToolSchema } from "operon-agents-core";
+import { briefOf, renderToolDeclarations } from "./declarations.ts";
 import { BACKGROUND_PARAM_DESCRIPTION, CODE_PARAM_DESCRIPTION, DESCRIPTION_PARAM_DESCRIPTION, RUN_CODE_NAME } from "./prompt.ts";
 import { ToolCallFailure } from "./runtime.ts";
 import type { CodeBinding, CodeRunFailure, CodeRuntime } from "./runtime.ts";
@@ -378,6 +378,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
       program: run.code,
       bindings,
       globals: { ALL_TOOLS: schemas.map((schema) => ({ name: schema.name, description: briefOf(schema.description) })) },
+      functions: { searchTools: async (args) => searchTools(schemas, args) },
       limits: {
         maxWallMs: limits.maxWallMs,
         maxComputeMs: limits.maxComputeMs,
@@ -504,6 +505,30 @@ function approvalOf(answer: unknown): ApprovalResponse {
     };
   }
   return { decision: "rejected", feedback: "the answer to the approval request was not an approval response" };
+}
+
+const SEARCH_DEFAULT_LIMIT = 5;
+const SEARCH_MAX_LIMIT = 20;
+
+/**
+ * The program's `searchTools(query)`: the full declarations of the tools that best match, by the
+ * same keyword search SearchTool uses — how a program reaches a tool the description had no room
+ * to declare without guessing its arguments.
+ */
+function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ readonly name: string; readonly declaration: string }> {
+  const request = typeof args === "string" ? { query: args, limit: undefined } : isRecord(args) && typeof args.query === "string" ? { query: args.query, limit: args.limit } : undefined;
+  if (request === undefined) throw new Error('searchTools takes a query string, or { query, limit }');
+  const limit = typeof request.limit === "number" && Number.isFinite(request.limit)
+    ? Math.min(SEARCH_MAX_LIMIT, Math.max(1, Math.floor(request.limit)))
+    : SEARCH_DEFAULT_LIMIT;
+  const byName = new Map(schemas.map((schema) => [schema.name, schema]));
+  return searchDeferredTools(request.query, schemas, limit).flatMap((name) => {
+    const schema = byName.get(name);
+    if (schema === undefined) return [];
+    // One member of `declare const tools`, de-indented to stand on its own.
+    const declaration = renderToolDeclarations([schema], { descriptions: "full" }).replace(/^ {2}/gm, "");
+    return [{ name, declaration }];
+  });
 }
 
 /** At most `size` callers inside at once; the rest wait their turn in order. */

@@ -6,6 +6,7 @@
  * import { createHarness } from "operon-agents";
  * import { codeMode } from "operon-code-mode";
  *
+ * // By default, MCP tools are reached through programs whenever the model cannot defer them natively.
  * const harness = createHarness({ model, extensions: [codeMode()] });
  * ```
  *
@@ -14,7 +15,7 @@
  * permissions, hooks and the Environment apply exactly as for a direct call. See the README.
  */
 export { codeMode, CODE_MODE_EXTENSION_ID, DEFAULT_DIRECT_TOOLS } from "./extension.ts";
-export type { CodeModeMode, CodeModeOptions } from "./extension.ts";
+export type { CodeModeHide, CodeModeOptions } from "./extension.ts";
 export { createRunCodeTool, DEFAULT_RUN_CODE_LIMITS } from "./run-code-tool.ts";
 export type { RunCodeApprovalRequest, RunCodeDetails, RunCodeDispatch, RunCodeJournalStore, RunCodeLimits, RunCodeSuspendState, RunCodeToolOptions } from "./run-code-tool.ts";
 export { createQuickJSRuntime } from "./runtime-quickjs.ts";

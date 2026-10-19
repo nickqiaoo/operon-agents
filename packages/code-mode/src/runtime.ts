@@ -31,6 +31,8 @@ export interface CodeRunRequest {
   readonly bindings: Readonly<Record<string, CodeBinding>>;
   /** Plain-data globals installed (frozen) before the program runs — `ALL_TOOLS`, for one. */
   readonly globals?: Readonly<Record<string, unknown>>;
+  /** Async functions installed as globals (`searchTools`). They behave like bindings, minus the `tools.` namespace. */
+  readonly functions?: Readonly<Record<string, CodeBinding>>;
   readonly limits: CodeRunLimits;
   readonly signal?: AbortSignal;
   /** Called with each `console.log` line as the program produces it (the same lines `logs` collects). */

@@ -18,6 +18,29 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
+/**
+ * Stand-in MCP servers: tools named the way the framework names MCP tools (`mcp__<server>__<tool>`).
+ * Each returns its own name and the `id` it was called with.
+ */
+function fakeMcp(servers: Readonly<Record<string, readonly string[]>>): ExtensionDefinition {
+  return {
+    id: "fake-mcp",
+    session(api) {
+      for (const [server, actions] of Object.entries(servers)) {
+        for (const action of actions) {
+          const name = `mcp__${server}__${action}`;
+          api.registerTool({
+            name,
+            description: `${action.replaceAll("_", " ")} on ${server}. Returns the item as text; fails when the id is unknown.`,
+            parameters: { type: "object", properties: { id: { type: "string", description: "Identifier of the item to act on" } }, required: ["id"] },
+            execute: (args: unknown) => `${name}:${String((args as { id?: unknown }).id)}`,
+          });
+        }
+      }
+    },
+  };
+}
+
 /** Registered AFTER codeMode, so it sees the request codeMode rewrote. */
 function requestSpy(seen: { tools?: readonly ToolSchema[] }): ExtensionDefinition {
   return {
@@ -47,13 +70,14 @@ async function main(): Promise<void> {
     permission: PermissionManagerOptions,
     program: string,
     setup?: (session: Awaited<ReturnType<ReturnType<typeof createHarness>["createSession"]>>) => void,
+    extensions: readonly ExtensionDefinition[] = [],
   ) => {
     const seen: { tools?: readonly ToolSchema[] } = {};
     const harness = createHarness({
       model: faux.getChatModel(),
       workDir: work,
       permission,
-      extensions: [codeMode(options), requestSpy(seen)],
+      extensions: [...extensions, codeMode(options), requestSpy(seen)],
     });
     const session = await harness.createSession();
     setup?.(session);
@@ -79,7 +103,7 @@ async function main(): Promise<void> {
 
   // ── A program sweeps three files in one call ──
   {
-    const s = await scenario({}, { mode: "yolo" }, `const files = ["a.txt", "b.txt", "c.txt"];
+    const s = await scenario({ hide: "none" }, { mode: "yolo" }, `const files = ["a.txt", "b.txt", "c.txt"];
 const texts = await Promise.all(files.map((f) => tools.Read({ path: f })));
 const hits = files.filter((_, i) => texts[i].includes("hello"));
 console.log(\`checked \${files.length}\`);
@@ -97,7 +121,7 @@ return { hits };`);
     check("sweep: details carry the dispatch trace", details?.dispatches.length === 3 && details.dispatches.every((d) => d.name === "Read" && d.ok) && details.toolCalls === 3 && !details.truncated);
     check("request: RunCode's description carries declarations for this turn's tools", (s.runCode?.description.includes("declare const tools: {") ?? false) && (s.runCode?.description.includes("Read(args: {") ?? false) && (s.runCode?.description.includes("Bash(args: {") ?? false));
     check("request: RunCode does not declare itself", !(s.runCode?.description.includes("RunCode(args") ?? true));
-    check("request: under `both`, the direct tools are still offered", (s.seen.tools?.some((tool) => tool.name === "Read") ?? false) && (s.seen.tools?.some((tool) => tool.name === "Bash") ?? false));
+    check("request: under `hide: \"none\"`, the direct tools are still offered", (s.seen.tools?.some((tool) => tool.name === "Read") ?? false) && (s.seen.tools?.some((tool) => tool.name === "Bash") ?? false));
   }
 
   // ── A denied tool is a catchable ToolCallError inside the program ──
@@ -120,7 +144,7 @@ return { hits };`);
   {
     const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
     const open = () =>
-      createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode()] });
+      createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
     let harness = await open();
     const session = await harness.createSession();
     const sessionId = session.id;
@@ -176,7 +200,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
   // ── A rejection reaches the program as a catchable error, and the call never runs ──
   {
     const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
-    const harness = await createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode()] });
+    const harness = await createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
     const session = await harness.createSession();
     faux.setResponses([
       fauxAssistantMessage(
@@ -207,7 +231,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
 
   // ── A long program runs in the background: its console lines and result land in a task log ──
   {
-    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode()] });
+    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode({ hide: "none" })] });
     const session = await harness.createSession();
     const events: AgentEvent[] = [];
     session.onEvent((event) => events.push(event));
@@ -243,7 +267,7 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
 
   // ── A running program can be moved to the background; console lines stream as progress meanwhile ──
   {
-    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode()] });
+    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode({ hide: "none" })] });
     const session = await harness.createSession();
     const events: AgentEvent[] = [];
     let detachedAt: string | undefined;
@@ -283,19 +307,19 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
     await harness.close();
   }
 
-  // ── `only`: the direct surface shrinks; everything else is reachable through the program ──
+  // ── `hide: "all"`: the direct surface shrinks; everything else is reachable through the program ──
   {
-    const s = await scenario({ mode: "only" }, { mode: "yolo" }, `return (await tools.Read({ path: "a.txt" })).includes("hello")`);
+    const s = await scenario({ hide: "all" }, { mode: "yolo" }, `return (await tools.Read({ path: "a.txt" })).includes("hello")`);
     const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
     const offered = s.seen.tools?.map((tool) => tool.name) ?? [];
-    check("only: the model is offered RunCode and the keep-set, nothing else", offered.includes(RUN_CODE_NAME) && offered.every((name) => DEFAULT_DIRECT_TOOLS.includes(name)) && !offered.includes("Read"));
-    check("only: hidden tools are still callable from a program", text.trim() === "true");
-    check("only: declarations carry full descriptions, parameters included", (s.runCode?.description.includes("Relative paths resolve") ?? false) && (s.runCode?.description.includes("reachable ONLY through this program") ?? false));
+    check("hide all: the model is offered RunCode and the keep-set, nothing else", offered.includes(RUN_CODE_NAME) && offered.every((name) => DEFAULT_DIRECT_TOOLS.includes(name)) && !offered.includes("Read"));
+    check("hide all: hidden tools are still callable from a program", text.trim() === "true");
+    check("hide all: declarations carry full descriptions, parameters included", (s.runCode?.description.includes("Relative paths resolve") ?? false) && (s.runCode?.description.includes("reachable ONLY through this program") ?? false));
   }
 
   // ── `exclude`: a tool kept out of programs is neither declared nor bound ──
   {
-    const s = await scenario({ exclude: ["Bash"] }, { mode: "yolo" }, `return { bash: typeof tools.Bash, listed: ALL_TOOLS.some((t) => t.name === "Bash") }`);
+    const s = await scenario({ hide: "none", exclude: ["Bash"] }, { mode: "yolo" }, `return { bash: typeof tools.Bash, listed: ALL_TOOLS.some((t) => t.name === "Bash") }`);
     const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
     check("exclude: the tool is absent from the program's world", text.includes('"bash": "undefined"') && text.includes('"listed": false'));
     check("exclude: and from the declarations", !(s.runCode?.description.includes("Bash(args") ?? true));
@@ -303,10 +327,103 @@ return { a: a.includes("hello"), c: c.includes("again") };`,
 
   // ── A broken program is an error result the model can repair ──
   {
-    const s = await scenario({}, { mode: "yolo" }, `const a = 1\nconst b = ;\nreturn a`);
+    const s = await scenario({ hide: "none" }, { mode: "yolo" }, `const a = 1\nconst b = ;\nreturn a`);
     const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
     check("syntax: the failure names the kind and the line", s.parentResult?.isError === true && text.startsWith("RunCode failed (syntax at line 2)"));
     check("syntax: the turn goes on", s.result.output === "done");
+  }
+
+  // ── `hide: "catalog"` (the default): MCP tools leave the request; RunCode declares a budgeted slice; searchTools finds the rest ──
+  {
+    const filler = Array.from({ length: 40 }, (_, i) => `report_${String(i).padStart(2, "0")}_with_a_rather_long_name`);
+    const mcp = fakeMcp({ github: ["list_issues", "create_issue", "get_pull_request"], analytics: filler });
+    const s = await scenario(
+      { catalogBudget: 400 }, // the default hides the catalog
+      { mode: "yolo" },
+      `const found = await searchTools("github issue");
+const one = await searchTools({ query: "pull request", limit: 1 });
+const listed = await tools["mcp__github__list_issues"]({ id: "7" });
+return { names: found.map((f) => f.name), declaration: found[0].declaration, one: one.map((f) => f.name), listed };`,
+      undefined,
+      [mcp],
+    );
+    const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
+    const offered = s.seen.tools?.map((tool) => tool.name) ?? [];
+    const description = s.runCode?.description ?? "";
+    check("catalog: MCP tools leave the request, the built-ins and RunCode stay", offered.includes(RUN_CODE_NAME) && offered.includes("Read") && offered.includes("Bash") && !offered.some((name) => name.startsWith("mcp__")));
+    check("catalog: the description declares a partial slice and says how to find the rest", description.includes("PARTIAL") && description.includes("of 43 declared") && description.includes("searchTools("));
+    check("catalog: the slice is picked across servers, not filled by the biggest one", description.includes("mcp__github__") && description.includes("mcp__analytics__"));
+    check("catalog: the slice stays near its budget", description.length < 6000);
+    check("catalog: built-ins are not part of the catalog", !description.includes("Read(args"));
+    check("catalog: searchTools ranks by intent", text.includes('"mcp__github__list_issues"') && text.includes('"mcp__github__create_issue"') && !text.includes('"names": [\n    "mcp__analytics'));
+    check("catalog: searchTools returns a full declaration, parameter docs included", text.includes("Identifier of the item to act on"));
+    check("catalog: searchTools honours a limit", /"one": \[\s*"mcp__github__get_pull_request"\s*\]/.test(text));
+    check("catalog: a tool missing from the request is still callable from a program", text.includes("mcp__github__list_issues:7"));
+  }
+
+  // ── `catalog` with everything inside the budget declares it all ──
+  {
+    const s = await scenario({}, { mode: "yolo" }, `return 1`, undefined, [fakeMcp({ github: ["list_issues", "create_issue"] })]);
+    const description = s.runCode?.description ?? "";
+    check("catalog: a small catalog is declared complete", description.includes("(complete)") && !description.includes("PARTIAL") && description.includes("mcp__github__create_issue("));
+  }
+
+  // ── `catalog` steps aside when the model defers natively, and when there is nothing to hide ──
+  {
+    const nativeDeferral: ExtensionDefinition = {
+      id: "native-deferral",
+      session(api) {
+        // What the toolset adds when the model defers its catalog: only the decision is under test here.
+        api.registerTool({ name: "SearchTool", description: "Load deferred tools.", parameters: { type: "object", properties: {} }, execute: () => "" });
+      },
+    };
+    const deferred = await scenario({}, { mode: "yolo" }, `return 1`, undefined, [fakeMcp({ github: ["list_issues"] }), nativeDeferral]);
+    const offered = deferred.seen.tools?.map((tool) => tool.name) ?? [];
+    check("catalog: with SearchTool in the request RunCode is withheld and nothing else changes", !offered.includes(RUN_CODE_NAME) && offered.includes("mcp__github__list_issues"));
+    const empty = await scenario({}, { mode: "yolo" }, `return 1`);
+    check("catalog: with no catalog tools RunCode is withheld", !(empty.seen.tools?.some((tool) => tool.name === RUN_CODE_NAME) ?? true));
+  }
+
+  // ── A live approver answers a nested call in place: no pause, the program just waits ──
+  for (const decision of ["approved", "rejected"] as const) {
+    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
+    const session = await harness.createSession();
+    const events: AgentEvent[] = [];
+    session.onEvent((event) => events.push(event));
+    const asked: Array<{ readonly toolCallId: string; readonly toolName: string; readonly announced: boolean }> = [];
+    session.setApprovalHandler(async (request) => {
+      const announced = events.some((event) => event.type === "tool.call.started" && event.toolCallId === request.toolCallId && event.parentToolCallId !== undefined);
+      asked.push({ toolCallId: request.toolCallId, toolName: request.toolName, announced });
+      return decision === "approved" ? { decision } : { decision, feedback: "not now" };
+    });
+    const file = `live-${decision}.txt`;
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(RUN_CODE_NAME, {
+          code: `const a = await tools.Read({ path: "a.txt" });
+try { await tools.Bash({ command: "echo yes > ${file}" }); } catch (e) { return { caught: e.message } }
+return { wrote: true, a: a.includes("hello") };`,
+          description: "Read then write",
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done", { stopReason: "stop" }),
+    ]);
+    const result = await session.prompt("go");
+    await harness.close();
+    const parent = events.find((event): event is Extract<AgentEvent, { type: "tool.call.started" }> => event.type === "tool.call.started" && event.toolName === RUN_CODE_NAME);
+    const parentResult = events.find((event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolCallId === parent?.toolCallId);
+    const text = parentResult === undefined ? "" : textOf(parentResult);
+    const bashResult = events.find((event) => event.type === "tool.result" && event.toolName === "Bash");
+    check(`live ${decision}: the approver is asked once, about the nested call`, asked.length === 1 && asked[0]?.toolName === "Bash" && asked[0].toolCallId.startsWith(`${parent?.toolCallId ?? "?"}:code:`));
+    check(`live ${decision}: the nested call is announced before the question`, asked[0]?.announced === true);
+    check(`live ${decision}: the run never pauses`, result.status === "completed" && result.output === "done" && !events.some((event) => event.type === "tool.suspended"));
+    if (decision === "approved") {
+      check("live approved: the call ran and the program carried on", existsSync(join(work, file)) && text.includes('"wrote": true') && text.includes('"a": true'));
+    } else {
+      check("live rejected: the program catches the refusal with the user's feedback", !existsSync(join(work, file)) && text.includes('"caught"') && text.includes("not now"));
+      check("live rejected: the announced call gets an error result", bashResult !== undefined && bashResult.type === "tool.result" && bashResult.isError);
+    }
   }
 
   rmSync(work, { recursive: true, force: true });

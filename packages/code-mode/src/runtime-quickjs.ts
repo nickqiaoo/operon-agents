@@ -18,7 +18,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { newQuickJSWASMModuleFromVariant, Scope } from "quickjs-emscripten-core";
 import type { QuickJSContext, QuickJSDeferredPromise, QuickJSHandle, QuickJSSyncVariant, QuickJSWASMModule } from "quickjs-emscripten-core";
 import quickjsNg from "@jitl/quickjs-ng-wasmfile-release-sync";
-import type { CodeRunFailure, CodeRunFailureKind, CodeRunRequest, CodeRunResult, CodeRuntime } from "./runtime.ts";
+import type { CodeBinding, CodeRunFailure, CodeRunFailureKind, CodeRunRequest, CodeRunResult, CodeRuntime } from "./runtime.ts";
 
 export interface QuickJSRuntimeOptions {
   /** The QuickJS build to load. Defaults to quickjs-ng, release, sync. */
@@ -249,44 +249,51 @@ function installBindings(context: QuickJSContext, scope: Scope, request: CodeRun
   // Null-prototype: a tool named `constructor` or `__proto__` must land as an own property.
   const tools = scope.manage(unwrap(context, context.evalCode("Object.create(null)", "tools.js", { type: "global" })));
   for (const [name, binding] of Object.entries(request.bindings)) {
-    const fn = scope.manage(
-      context.newFunction(name, (argHandle) => {
-        const args: unknown = argHandle === undefined ? undefined : context.dump(argHandle);
-        const deferred = context.newPromise();
-        host.deferreds.add(deferred);
-        deferred.settled.then(
-          () => {
-            host.deferreds.delete(deferred);
-            if (deferred.alive) deferred.dispose();
-            host.pump();
-          },
-          () => undefined,
-        );
-        // Settling on a fresh macrotask: a program looping over an instantly-resolving binding
-        // would otherwise starve the event loop, and with it the wall clock and the abort signal.
-        Promise.resolve()
-          .then(() => binding(args))
-          .then((value) => new Promise<unknown>((resolve) => setImmediate(() => resolve(value))))
-          .then(
-            (value) => {
-              if (!host.alive() || !deferred.alive) return;
-              Scope.withScope((inner) => {
-                deferred.resolve(inner.manage(host.fromData(value)));
-              });
-            },
-            (error: unknown) => {
-              if (!host.alive() || !deferred.alive) return;
-              Scope.withScope((inner) => {
-                deferred.reject(inner.manage(errorToHandle(context, host.makeToolCallError, error)));
-              });
-            },
-          );
-        return deferred.handle;
-      }),
-    );
-    context.defineProp(tools, name, { value: fn, configurable: false, enumerable: true });
+    context.defineProp(tools, name, { value: bindingFunction(context, scope, name, binding, host), configurable: false, enumerable: true });
   }
   context.defineProp(context.global, "tools", { value: tools, configurable: false, enumerable: false });
+  for (const [name, binding] of Object.entries(request.functions ?? {})) {
+    context.defineProp(context.global, name, { value: bindingFunction(context, scope, name, binding, host), configurable: false, enumerable: false });
+  }
+}
+
+/** A guest function that calls `binding` on the host and resolves (or rejects) a guest promise with what it returns. */
+function bindingFunction(context: QuickJSContext, scope: Scope, name: string, binding: CodeBinding, host: BindingHost): QuickJSHandle {
+  return scope.manage(
+    context.newFunction(name, (argHandle) => {
+      const args: unknown = argHandle === undefined ? undefined : context.dump(argHandle);
+      const deferred = context.newPromise();
+      host.deferreds.add(deferred);
+      deferred.settled.then(
+        () => {
+          host.deferreds.delete(deferred);
+          if (deferred.alive) deferred.dispose();
+          host.pump();
+        },
+        () => undefined,
+      );
+      // Settling on a fresh macrotask: a program looping over an instantly-resolving binding
+      // would otherwise starve the event loop, and with it the wall clock and the abort signal.
+      Promise.resolve()
+        .then(() => binding(args))
+        .then((value) => new Promise<unknown>((resolve) => setImmediate(() => resolve(value))))
+        .then(
+          (value) => {
+            if (!host.alive() || !deferred.alive) return;
+            Scope.withScope((inner) => {
+              deferred.resolve(inner.manage(host.fromData(value)));
+            });
+          },
+          (error: unknown) => {
+            if (!host.alive() || !deferred.alive) return;
+            Scope.withScope((inner) => {
+              deferred.reject(inner.manage(errorToHandle(context, host.makeToolCallError, error)));
+            });
+          },
+        );
+      return deferred.handle;
+    }),
+  );
 }
 
 // ── values across the boundary ────────────────────────────────────────────────────────────────

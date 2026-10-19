@@ -9,6 +9,21 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Code Mode's `mode` option is now `hide` — which tools only a program can reach —
+  and the default changed. `hide: "catalog"` (new, the default): for models without native
+  deferred tool loading, MCP tools leave the request and RunCode declares a budgeted slice of them;
+  with SearchTool in the request, or nothing to hide, RunCode steps aside. `"none"` is the old
+  `"both"` (pass it to keep using Code Mode for orchestration), `"all"` the old `"only"`
+  (`operon-code-mode`).
+
+### Added
+
+- `searchTools()` inside a program: the full declarations of the tools that best match a query
+  (`operon-code-mode`).
+- `searchDeferredTools`, the keyword search behind SearchTool, is exported (`operon-agents-core`).
+
 ### Fixed
 
 - A nested tool call (inside RunCode) that needs approval is asked of the live approver in place,
