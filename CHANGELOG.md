@@ -7,6 +7,17 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.23] — 2026-10-19
+
+### Changed
+
+- Inside a RunCode program, a tool whose name is not an identifier is declared and listed under
+  its script name (`mcp__plugin-linear__list_teams` → `tools.mcp__plugin_linear__list_teams`), so
+  the name never parses as a subtraction; the real name still works in brackets
+  (`operon-code-mode`).
+- Reading a name cut at such a character (`tools.mcp__plugin-…`) says so and lists the names to
+  write instead; other near misses rank by how much of the name matches (`operon-code-mode`).
+
 ## [0.1.0-alpha.22] — 2026-10-19
 
 ### Changed
