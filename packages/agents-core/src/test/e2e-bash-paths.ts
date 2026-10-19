@@ -41,6 +41,27 @@ function main(): void {
   // `2>&1` duplicates a descriptor; treating `&1` as a filename would invent an access.
   expect("make 2>&1 | tee build.log", "write:build.log", "fd duplication is not a file");
 
+  // ── Stream devices are not files ────────────────────────────────────────────
+  // Discarding output is the most common redirect there is; a write to /dev/null is not a write
+  // outside the workspace and must not prompt.
+  expect("cat a.txt 2>/dev/null", "read:a.txt", "stderr discarded");
+  expectSilent("make > /dev/null 2>&1", "stdout discarded");
+  expectSilent("echo oops > /dev/stderr", "writing to stderr");
+  expectSilent("echo hi >/dev/fd/3", "writing to a descriptor");
+  expect("echo x > /dev/sda", "write:/dev/sda", "a real device is still reported");
+  expect(
+    'ls -la /Volumes/w | head -n 100; echo "---"; cat /Volumes/w/package.json 2>/dev/null | head -n 80',
+    "read:/Volumes/w/package.json",
+    "a survey command from a real session asks nothing",
+  );
+
+  // ── Option values are not files ─────────────────────────────────────────────
+  expect("head -n 100 notes.txt", "read:notes.txt", "head line count");
+  expect("tail -c 5 -n 2 log.txt", "read:log.txt", "tail byte and line counts");
+  expect("sort -k 2 -t , data.csv", "read:data.csv", "sort key and separator");
+  expect("head -n100 notes.txt", "read:notes.txt", "a value glued to its option");
+  expectSilent("ls -la | head -n 20", "a pipeline's head reads no file");
+
   // ── Command argument roles ──────────────────────────────────────────────────
   expect("rm -rf /tmp/x", "write:/tmp/x", "rm target");
   expect("cp a.txt /etc/foo", "read:a.txt,write:/etc/foo", "cp reads source, writes dest");

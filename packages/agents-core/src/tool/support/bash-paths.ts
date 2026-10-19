@@ -48,6 +48,32 @@ const READS_ALL_ARGS = new Set([
 ]);
 
 /**
+ * Options of the read commands above that take a value as the next word (`head -n 100`), so
+ * the value is not mistaken for a file. A value glued to its option (`-n100`) is one word and
+ * already dropped as an option.
+ */
+const OPTION_VALUES: Readonly<Record<string, ReadonlySet<string>>> = {
+  head: new Set(["-n", "-c", "--lines", "--bytes"]),
+  tail: new Set(["-n", "-c", "--lines", "--bytes", "-s", "--sleep-interval", "--pid"]),
+  sort: new Set(["-k", "-t", "-S", "-T", "--key", "--field-separator", "--buffer-size", "--temporary-directory"]),
+  nl: new Set(["-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w"]),
+  od: new Set(["-A", "-j", "-N", "-t", "-w"]),
+  xxd: new Set(["-c", "-g", "-l", "-o", "-s"]),
+  strings: new Set(["-n", "-t", "-e"]),
+  base64: new Set(["-w", "--wrap"]),
+  diff: new Set(["-U", "-C", "-L", "--label", "-I", "--ignore-matching-lines"]),
+  cmp: new Set(["-i", "-n", "--ignore-initial", "--bytes"]),
+  shasum: new Set(["-a", "--algorithm"]),
+};
+
+/**
+ * Character and stream devices a command reads or writes without touching a file: `2>/dev/null`
+ * is how a command discards its errors, not a write outside the workspace. Reporting them would
+ * prompt for exactly the most common harmless redirect.
+ */
+const STREAM_DEVICE = /^\/dev\/(?:null|zero|u?random|stdin|stdout|stderr|tty|fd\/\d+)$/;
+
+/**
  * Split one simple command into words, tracking whether each is a knowable literal.
  *
  * A double-quoted word containing `$` or a backtick is NOT literal — its value depends on the
@@ -197,16 +223,23 @@ function scriptCommandFiles(name: string, rawArgs: readonly Word[]): { inPlace: 
   return { inPlace, files: scriptIsAnOption ? nonEmpty : nonEmpty.slice(1) };
 }
 
-/** Drop option flags, and stop treating anything as an option after a bare `--`. */
-function operands(words: readonly Word[]): Word[] {
+/**
+ * Drop option flags — and the value of an option in `withValue` — and stop treating anything as
+ * an option after a bare `--`.
+ */
+function operands(words: readonly Word[], withValue?: ReadonlySet<string>): Word[] {
   const result: Word[] = [];
   let optionsEnded = false;
-  for (const word of words) {
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
     if (!optionsEnded && word.text === "--") {
       optionsEnded = true;
       continue;
     }
-    if (!optionsEnded && word.text.startsWith("-") && word.text.length > 1) continue;
+    if (!optionsEnded && word.text.startsWith("-") && word.text.length > 1) {
+      if (withValue?.has(word.text)) i++;
+      continue;
+    }
     result.push(word);
   }
   return result;
@@ -236,8 +269,8 @@ export function extractBashPaths(command: string): BashPathAccess[] {
     if (verb === undefined || !verb.literal) continue;
 
     const rawArgs = words.slice(1);
-    const args = operands(rawArgs);
     const name = verb.text.replace(/^.*\//, ""); // /bin/rm → rm
+    const args = operands(rawArgs, OPTION_VALUES[name]);
     if (SCRIPT_COMMANDS.has(name)) {
       const { inPlace, files } = scriptCommandFiles(name, rawArgs);
       pushLiteral(files, inPlace ? "write" : "read", out);
@@ -255,5 +288,5 @@ export function extractBashPaths(command: string): BashPathAccess[] {
       pushLiteral(args, "read", out);
     }
   }
-  return out;
+  return out.filter((access) => !STREAM_DEVICE.test(access.path));
 }
