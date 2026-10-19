@@ -22,7 +22,7 @@ export { createQuickJSRuntime } from "./runtime-quickjs.ts";
 export type { QuickJSRuntimeOptions } from "./runtime-quickjs.ts";
 export { ToolCallFailure } from "./runtime.ts";
 export type { CodeBinding, CodeRunFailure, CodeRunFailureKind, CodeRunLimits, CodeRunRequest, CodeRunResult, CodeRuntime } from "./runtime.ts";
-export { renderToolDeclarations, briefOf } from "./declarations.ts";
+export { renderToolDeclarations, briefOf, scriptNames } from "./declarations.ts";
 export type { DeclarationOptions } from "./declarations.ts";
 export { RUN_CODE_NAME, runCodeDescription } from "./prompt.ts";
 export type { RunCodePromptInput } from "./prompt.ts";

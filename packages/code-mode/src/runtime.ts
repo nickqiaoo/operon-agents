@@ -29,6 +29,12 @@ export interface CodeRunRequest {
   readonly program: string;
   /** Functions exposed as `tools.<name>`. */
   readonly bindings: Readonly<Record<string, CodeBinding>>;
+  /**
+   * Further names for bindings, alias → binding name: `tools.<alias>` is the same function. A
+   * binding with an alias is listed (enumerated) under the alias and stays reachable by its own
+   * name. For tools whose name is not an identifier.
+   */
+  readonly aliases?: Readonly<Record<string, string>>;
   /** Plain-data globals installed (frozen) before the program runs — `ALL_TOOLS`, for one. */
   readonly globals?: Readonly<Record<string, unknown>>;
   /** Async functions installed as globals (`searchTools`). They behave like bindings, minus the `tools.` namespace. */

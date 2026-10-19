@@ -6,8 +6,9 @@
  * A call resolves to the tool's text, or — when the tool declares an `outputSchema` — to its
  * structured result, typed from that schema.
  *
- * Pure: schemas in, text out. Names are rendered as quoted keys when they are not identifiers
- * (`"mcp__github__list-issues"`), never aliased, so every tool stays reachable as written.
+ * Pure: schemas in, text out. A tool whose name is not an identifier is declared under its
+ * script name ({@link scriptNames}: `mcp__github__list-issues` → `mcp__github__list_issues`), so
+ * `tools.X` never parses as subtraction; its original name stays reachable in brackets.
  * Local `$ref`s are followed (a schema may point into its own `$defs`); a cycle degrades to
  * `unknown` rather than recursing, as does anything the renderer does not understand.
  */
@@ -20,6 +21,12 @@ export interface DeclarationOptions {
    * native schemas. `full` keeps everything — right when the program is the only way to call.
    */
   readonly descriptions?: "brief" | "full";
+  /**
+   * The names the program calls tools by ({@link scriptNames}). Defaults to the script names of
+   * `tools` alone; pass the map of the whole callable set when rendering a part of it, so a name
+   * declared here is the name the program is given.
+   */
+  readonly scriptNames?: ReadonlyMap<string, string>;
 }
 
 type JsonSchema = Readonly<Record<string, unknown>>;
@@ -31,12 +38,13 @@ const MAX_DEPTH = 8;
 /** Render the members of `declare const tools: { … }` — one method per tool, sorted by name. */
 export function renderToolDeclarations(tools: readonly ToolSchema[], options: DeclarationOptions = {}): string {
   const full = options.descriptions === "full";
+  const names = options.scriptNames ?? scriptNames(tools.map((tool) => tool.name));
   const sorted = [...tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const lines: string[] = [];
   for (const tool of sorted) {
     const doc = full ? tool.description : briefOf(tool.description);
     lines.push(...docLines(doc, 1));
-    lines.push(`  ${renderKey(tool.name)}(${renderArgs(tool.parameters, full)}): Promise<${renderReturn(tool.outputSchema, full)}>;`);
+    lines.push(`  ${renderKey(names.get(tool.name) ?? tool.name)}(${renderArgs(tool.parameters, full)}): Promise<${renderReturn(tool.outputSchema, full)}>;`);
   }
   return lines.join("\n");
 }
@@ -61,9 +69,10 @@ export const DEFAULT_CATALOG_BUDGET = 2000;
  */
 export function renderToolCatalog(tools: readonly ToolSchema[], options: { readonly budget?: number } = {}): ToolCatalog {
   const budget = options.budget ?? DEFAULT_CATALOG_BUDGET;
+  const names = scriptNames(tools.map((tool) => tool.name));
   const groups = new Map<string, Array<{ readonly tool: ToolSchema; readonly cost: number }>>();
   for (const tool of tools) {
-    const cost = Math.ceil(renderToolDeclarations([tool]).length / 4);
+    const cost = Math.ceil(renderToolDeclarations([tool], { scriptNames: names }).length / 4);
     const group = groups.get(namespaceOf(tool.name)) ?? [];
     group.push({ tool, cost });
     groups.set(namespaceOf(tool.name), group);
@@ -85,7 +94,34 @@ export function renderToolCatalog(tools: readonly ToolSchema[], options: { reado
     }
     queues = next;
   }
-  return { declarations: renderToolDeclarations(picked), shown: picked.length, total: tools.length };
+  return { declarations: renderToolDeclarations(picked, { scriptNames: names }), shown: picked.length, total: tools.length };
+}
+
+/**
+ * The identifier a program calls each tool by, for the tools whose name is not one: every
+ * character that cannot appear in an identifier becomes `_` (`mcp__plugin-linear__list_teams` →
+ * `mcp__plugin_linear__list_teams`). `tools.mcp__plugin-linear__list_teams(…)` would parse as
+ * `tools.mcp__plugin - linear__list_teams(…)`. A script name that is some other tool's real name,
+ * or that two tools would share, is not given: those tools keep only their own (bracketed) name.
+ * Returns real name → script name, for the renamed tools only.
+ */
+export function scriptNames(names: readonly string[]): Map<string, string> {
+  const taken = new Set(names);
+  const candidates = new Map<string, string[]>();
+  for (const name of names) {
+    if (IDENTIFIER.test(name)) continue;
+    const script = toIdentifier(name);
+    if (taken.has(script)) continue;
+    candidates.set(script, [...(candidates.get(script) ?? []), name]);
+  }
+  const renamed = new Map<string, string>();
+  for (const [script, owners] of candidates) if (owners.length === 1) renamed.set(owners[0]!, script);
+  return renamed;
+}
+
+function toIdentifier(name: string): string {
+  const replaced = name.replace(/[^A-Za-z0-9_$]/g, "_");
+  return /^[A-Za-z_$]/.test(replaced) ? replaced : `_${replaced}`;
 }
 
 /** The MCP server a tool belongs to (`mcp__github__list_issues` → `github`); `""` for the rest. */

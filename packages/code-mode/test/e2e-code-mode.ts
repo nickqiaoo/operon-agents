@@ -437,6 +437,31 @@ return { open: listed.issues.filter((i) => i.state === "open").map((i) => i.numb
     check("structured: outputSchema never reaches the model", !(s.seen.tools?.some((tool) => tool.outputSchema !== undefined) ?? true));
   }
 
+  // ── A tool name that is not an identifier (a server called `plugin-linear`) gets a script name ──
+  {
+    const s = await scenario(
+      { hide: "none" },
+      { mode: "yolo" },
+      `const a = await tools.mcp__plugin_linear__list_teams({ id: "1" });
+const b = await tools["mcp__plugin-linear__list_issues"]({ id: "2" });
+let split; try { await tools.mcp__plugin-linear__list_teams({ id: "3" }) } catch (e) { split = e.message }
+let near; try { await tools.list_issues({ id: "4" }) } catch (e) { near = e.message }
+const found = await searchTools("list teams");
+return { a, b, split, near, found: found[0].name, listed: ALL_TOOLS.filter((t) => t.name.includes("linear")).map((t) => t.name), keys: Object.keys(tools).filter((k) => k.includes("linear")) };`,
+      undefined,
+      [fakeMcp({ "plugin-linear": ["list_teams", "list_issues", "get_attachment", "delete_attachment"] })],
+    );
+    const text = s.parentResult === undefined ? "" : textOf(s.parentResult);
+    const value = (JSON.parse(text.split("\n\nLogs:")[0] ?? "{}") ?? {}) as { a?: string; b?: string; split?: string; near?: string; found?: string; listed?: string[]; keys?: string[] };
+    const nestedNames = s.nested.filter((event) => event.type === "tool.call.started").map((event) => (event.type === "tool.call.started" ? event.toolName : ""));
+    check("script name: declared with '_' for '-'", (s.runCode?.description.includes("  mcp__plugin_linear__list_teams(args: {") ?? false) && !(s.runCode?.description.includes('"mcp__plugin-linear') ?? true));
+    check("script name: callable by it, and by the real name in brackets", value.a === "mcp__plugin-linear__list_teams:1" && value.b === "mcp__plugin-linear__list_issues:2");
+    check("script name: the nested call goes out under the real name", nestedNames.length === 2 && nestedNames.every((name) => name.startsWith("mcp__plugin-linear__")));
+    check("script name: ALL_TOOLS, searchTools and Object.keys list the script name", value.found === "mcp__plugin_linear__list_teams" && value.listed?.length === 4 && value.listed.every((name) => name.startsWith("mcp__plugin_linear__")) && value.keys?.length === 4 && value.keys.every((name) => name.startsWith("mcp__plugin_linear__")));
+    check("guard: a name cut at its '-' says why and lists the names to write instead", (value.split?.includes('tools.mcp__plugin does not exist: the "-" after it') ?? false) && (value.split?.includes("tools.mcp__plugin_linear__list_teams") ?? false) && !(value.split?.includes('tools["mcp__plugin-linear') ?? true));
+    check("guard: near misses rank by how much of the name matches", /Did you mean tools\.mcp__plugin_linear__list_issues[?,]/.test(value.near ?? ""));
+  }
+
   // ── Mistakes that come from guessing: a wrong tool name, a field that is not there ──
   {
     const s = await scenario({ hide: "none" }, { mode: "yolo" }, `try { await tools.read({ path: "a.txt" }); return "ran" } catch (e) { return e.message }`);

@@ -56,22 +56,48 @@ const PRELUDE = `(() => {
  * Wraps the `tools` object so reading a tool that does not exist throws at once, naming the
  * close matches, instead of yielding `undefined` and failing later as "not a function" with no
  * clue what was meant. `in`, `Object.keys` and symbol reads (`then` for an await) behave as usual.
+ *
+ * One mistake gets its own message: `tools.mcp__plugin-linear__list(…)` parses as
+ * `tools.mcp__plugin - linear__list(…)`, so the read is of a prefix of real names that continue
+ * with a character no identifier has. That is a spelling rule to state, not a near miss to guess.
  */
 const TOOLS_GUARD = `((tools, hint) => {
   const names = Object.keys(tools);
+  const MAX_SHOWN = 5;
   const comparable = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
   const expression = (name) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? "tools." + name : "tools[" + JSON.stringify(name) + "]";
+  const list = (shown) => shown.slice(0, MAX_SHOWN).map(expression).join(", ") + (shown.length > MAX_SHOWN ? " (and " + (shown.length - MAX_SHOWN) + " more)" : "");
+  // Same identity, best first: equal once case and separators are ignored; then one ends or
+  // starts with the other; then one contains the other. Ties go to the closer length.
+  const rank = (name, wanted) => {
+    const candidate = comparable(name);
+    if (candidate === wanted) return 0;
+    if (candidate.endsWith(wanted) || candidate.startsWith(wanted)) return 1;
+    if (candidate.includes(wanted) || wanted.includes(candidate)) return 2;
+    return 3;
+  };
   return new Proxy(tools, {
     get(target, property, receiver) {
       if (typeof property !== "string" || property in target || property === "then" || property === "toJSON") {
         return Reflect.get(target, property, receiver);
       }
-      const wanted = comparable(property);
-      const exact = names.filter((name) => comparable(name) === wanted);
-      const close = exact.length > 0 ? exact : wanted.length < 3 ? [] : names.filter((name) => comparable(name).includes(wanted) || wanted.includes(comparable(name)));
-      let message = expression(property) + " does not exist.";
-      if (close.length > 0) message += " Did you mean " + close.slice(0, 5).map(expression).join(", ") + "?";
-      else if (names.length <= 20) message += " Available: " + names.map(expression).join(", ") + ".";
+      const split = Reflect.ownKeys(target).filter((name) => typeof name === "string" && name.length > property.length && name.startsWith(property) && /[^A-Za-z0-9_$]/.test(name[property.length]));
+      let message;
+      if (split.length > 0) {
+        const char = split[0][property.length];
+        const shown = names.filter((name) => split.includes(name) || split.some((original) => tools[original] === tools[name] && original !== name));
+        message = expression(property) + " does not exist: the " + JSON.stringify(char) + " after it in a tool name is read as an operator, so the name was cut there. Write such a name as listed: " + list(shown.length > 0 ? shown : split) + ".";
+      } else {
+        const wanted = comparable(property);
+        const close = names
+          .map((name) => ({ name, rank: rank(name, wanted) }))
+          .filter((entry) => entry.rank === 0 || (entry.rank < 3 && wanted.length >= 3))
+          .sort((a, b) => a.rank - b.rank || Math.abs(a.name.length - property.length) - Math.abs(b.name.length - property.length) || (a.name < b.name ? -1 : 1))
+          .map((entry) => entry.name);
+        message = expression(property) + " does not exist.";
+        if (close.length > 0) message += " Did you mean " + list(close) + "?";
+        else if (names.length <= 20) message += " Available: " + names.map(expression).join(", ") + ".";
+      }
       if (hint) message += " " + hint;
       throw new TypeError(message);
     },
@@ -274,8 +300,17 @@ interface BindingHost {
 function installBindings(context: QuickJSContext, scope: Scope, request: CodeRunRequest, host: BindingHost): void {
   // Null-prototype: a tool named `constructor` or `__proto__` must land as an own property.
   const tools = scope.manage(unwrap(context, context.evalCode("Object.create(null)", "tools.js", { type: "global" })));
+  const aliases = Object.entries(request.aliases ?? {}).filter(([alias, target]) => !Object.hasOwn(request.bindings, alias) && Object.hasOwn(request.bindings, target));
+  const aliased = new Set(aliases.map(([, target]) => target));
+  const functions = new Map<string, QuickJSHandle>();
   for (const [name, binding] of Object.entries(request.bindings)) {
-    context.defineProp(tools, name, { value: bindingFunction(context, scope, name, binding, host), configurable: false, enumerable: true });
+    const fn = bindingFunction(context, scope, name, binding, host);
+    functions.set(name, fn);
+    // A tool with an alias is listed under it; its own name still reaches it.
+    context.defineProp(tools, name, { value: fn, configurable: false, enumerable: !aliased.has(name) });
+  }
+  for (const [alias, target] of aliases) {
+    context.defineProp(tools, alias, { value: functions.get(target)!, configurable: false, enumerable: true });
   }
   const guard = scope.manage(unwrap(context, context.evalCode(TOOLS_GUARD, "tools-guard.js", { type: "global" })));
   // Point at the discovery globals this run actually installs.

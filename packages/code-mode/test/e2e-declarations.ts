@@ -5,7 +5,7 @@
  */
 import { readTool, grepTool } from "operon-agents-core";
 import type { ToolSchema } from "operon-agents-core";
-import { briefOf, renderToolDeclarations } from "../src/index.ts";
+import { briefOf, renderToolDeclarations, scriptNames } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -52,7 +52,7 @@ function main(): void {
     schema("Weird*/Name", "Ends a comment */ here.", { type: "object", properties: { "not-an-identifier": { type: "boolean" } } }),
   ]);
   console.log(corners);
-  check("corner: a name that is not an identifier is a quoted key, never aliased", corners.includes('"mcp__github__list-issues"(args: {'));
+  check("corner: a name that is not an identifier is declared under its script name", corners.includes("  mcp__github__list_issues(args: {") && !corners.includes('"mcp__github__list-issues"'));
   check("corner: enum → string literal union", corners.includes('state: "open" | "closed"'));
   check("corner: const → literal", corners.includes('mode?: "fast"'));
   check("corner: array items", corners.includes("labels?: string[]"));
@@ -76,6 +76,12 @@ function main(): void {
   ], { descriptions: "full" });
   check("full: keeps every paragraph of the tool description", full.includes("First.") && full.includes("Second paragraph."));
   check("full: carries parameter descriptions inline", full.includes("{ /** Where to look */ path: string }"));
+  const renamed = scriptNames(["mcp__plugin-linear__list_teams", "Read", "a-b", "a_b", "x.y", "x-y", "9lives"]);
+  check("scriptNames: a name that is not an identifier gets one, '-' → '_'", renamed.get("mcp__plugin-linear__list_teams") === "mcp__plugin_linear__list_teams" && !renamed.has("Read"));
+  check("scriptNames: never another tool's real name, never shared by two tools", !renamed.has("a-b") && !renamed.has("x.y") && !renamed.has("x-y"));
+  check("scriptNames: a leading digit is prefixed", renamed.get("9lives") === "_9lives");
+  const aliasDecl = renderToolDeclarations([schema("mcp__plugin-linear__list_teams", "List teams.", { type: "object" })]);
+  check("declarations use the script name, unquoted", aliasDecl.includes("  mcp__plugin_linear__list_teams(args?:") && !aliasDecl.includes('"mcp__plugin-linear'));
   check("a tool without outputSchema resolves to its text", renderToolDeclarations([schema("X", "x", { type: "object" })]).includes("X(args?: Record<string, unknown>): Promise<string>;"));
   const typed = renderToolDeclarations([{
     ...schema("Find", "find", { type: "object" }),

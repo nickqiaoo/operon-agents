@@ -43,7 +43,7 @@ declare const tools: {
   Read(args: { path: string; line_offset?: number; n_lines?: number }): Promise<string>;
   /** Executes a bash command … */
   Bash(args: { command: string; timeout?: number; … }): Promise<string>;
-  "mcp__github__list-issues"(args: { state: "open" | "closed" }): Promise<{ issues: { number: number; title: string }[] }>;
+  mcp__github__list_issues(args: { state: "open" | "closed" }): Promise<{ issues: { number: number; title: string }[] }>;
 };
 declare class ToolCallError extends Error { readonly toolName: string; }
 declare const ALL_TOOLS: ReadonlyArray<{ name: string; description: string }>;
@@ -55,6 +55,12 @@ A call resolves to the tool's text output — or, for a tool whose schema declar
 the MCP `structuredContent`), typed from that schema as above. The model still reads the text;
 only the program gets the object. A failed call throws a catchable `ToolCallError`; reading a
 tool that does not exist throws at once, naming the close matches.
+
+A tool whose name is not an identifier is declared under its script name, `-` (and any other
+character an identifier cannot have) turned into `_`: `mcp__github__list-issues` is
+`tools.mcp__github__list_issues`, since `tools.mcp__github__list-issues(…)` would parse as a
+subtraction. The real name still works in brackets, and the nested call runs under it. A script
+name that would collide with another tool's name is not given.
 
 What the program `return`s comes back first, then its `console.log` lines under `Logs:`, all under
 a byte cap. `searchTools` returns the tools that best match a query — the same keyword search

@@ -32,7 +32,7 @@
 import { z } from "zod";
 import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, searchDeferredTools, ToolAccesses } from "operon-agents-core";
 import type { ApprovalResponse, ImageContent, Environment, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext, ToolSchema } from "operon-agents-core";
-import { briefOf, renderToolDeclarations } from "./declarations.ts";
+import { briefOf, renderToolDeclarations, scriptNames } from "./declarations.ts";
 import { BACKGROUND_PARAM_DESCRIPTION, CODE_PARAM_DESCRIPTION, DESCRIPTION_PARAM_DESCRIPTION, RUN_CODE_NAME } from "./prompt.ts";
 import { ToolCallFailure } from "./runtime.ts";
 import type { CodeBinding, CodeRunFailure, CodeRuntime } from "./runtime.ts";
@@ -379,11 +379,15 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
       };
     }
 
+    // The program knows a tool whose name is not an identifier by its script name; the real name
+    // still reaches it in brackets, and the nested call goes out under the real name either way.
+    const names = scriptNames(schemas.map((schema) => schema.name));
     const result = await options.runtime.run({
       program: run.code,
       bindings,
-      globals: { ALL_TOOLS: schemas.map((schema) => ({ name: schema.name, description: briefOf(schema.description) })) },
-      functions: { searchTools: async (args) => searchTools(schemas, args) },
+      aliases: Object.fromEntries([...names].map(([name, script]) => [script, name])),
+      globals: { ALL_TOOLS: schemas.map((schema) => ({ name: names.get(schema.name) ?? schema.name, description: briefOf(schema.description) })) },
+      functions: { searchTools: async (args) => searchTools(schemas, names, args) },
       limits: {
         maxWallMs: limits.maxWallMs,
         maxComputeMs: limits.maxComputeMs,
@@ -526,7 +530,7 @@ const SEARCH_MAX_LIMIT = 20;
  * to declare without guessing its arguments. Each match carries the same `name` and `description`
  * an `ALL_TOOLS` entry has, plus its `declaration`: a model that learned one shape uses the other.
  */
-function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ readonly name: string; readonly description: string; readonly declaration: string }> {
+function searchTools(schemas: readonly ToolSchema[], names: ReadonlyMap<string, string>, args: unknown): Array<{ readonly name: string; readonly description: string; readonly declaration: string }> {
   const request = typeof args === "string" ? { query: args, limit: undefined } : isRecord(args) && typeof args.query === "string" ? { query: args.query, limit: args.limit } : undefined;
   if (request === undefined) throw new Error('searchTools takes a query string, or { query, limit }');
   const limit = typeof request.limit === "number" && Number.isFinite(request.limit)
@@ -537,8 +541,8 @@ function searchTools(schemas: readonly ToolSchema[], args: unknown): Array<{ rea
     const schema = byName.get(name);
     if (schema === undefined) return [];
     // One member of `declare const tools`, de-indented to stand on its own.
-    const declaration = renderToolDeclarations([schema], { descriptions: "full" }).replace(/^ {2}/gm, "");
-    return [{ name, description: briefOf(schema.description), declaration }];
+    const declaration = renderToolDeclarations([schema], { descriptions: "full", scriptNames: names }).replace(/^ {2}/gm, "");
+    return [{ name: names.get(name) ?? name, description: briefOf(schema.description), declaration }];
   });
 }
 
