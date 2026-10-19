@@ -7,6 +7,25 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.22] — 2026-10-19
+
+### Changed
+
+- **Breaking:** inside a RunCode program, a call to a tool that declares `outputSchema` resolves
+  to its structured result instead of its text, typed `Promise<T>` from that schema;
+  `renderToolDeclarations` no longer takes `returnType` (`operon-code-mode`).
+- Reading a tool that does not exist (`tools.read`) throws at once with close matches; use
+  `"X" in tools` to test for one (`operon-code-mode`).
+- RunCode puts the program's return value first and its `console.log` lines after it under
+  `Logs:` (`operon-code-mode`).
+
+### Added
+
+- `ToolSchema.outputSchema` and `ToolResult.structured`; MCP tools carry the server's
+  `outputSchema` and `structuredContent`, and extension tool specs can declare `outputSchema`.
+  Neither reaches the model (`operon-agents-core`, `operon-agents`).
+- `searchTools()` matches carry `description`, like `ALL_TOOLS` entries (`operon-code-mode`).
+
 ## [0.1.0-alpha.21] — 2026-10-19
 
 ### Fixed
