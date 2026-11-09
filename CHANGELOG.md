@@ -7,6 +7,23 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.26] — 2026-11-09
+
+### Changed
+
+- pi's built-in request retries are off. `streamWithRetry` now retries a request that fails before
+  its response starts, and reports each wait through `turn.step.retrying` (`operon-agents-core`).
+- These retries back off exponentially from 1s to 5 minutes and honor `Retry-After` and rate-limit
+  reset headers. `ModelConnection.maxRetries` defaults to 10 and `maxRetryDelayMs` to 5 minutes; a
+  server asking for longer fails the request at once. Bedrock is now covered (`operon-agents-core`).
+- Compaction and the LLM auto-approver retry through the new `completeWithRetry`
+  (`operon-agents-core`).
+
+### Added
+
+- `CallOptions.onHttpExchange` reports the status and headers of every HTTP request, failed ones
+  included, on the APIs that accept a custom `fetch` (`operon-agents-core`).
+
 ## [0.1.0-alpha.25] — 2026-11-09
 
 ### Changed
