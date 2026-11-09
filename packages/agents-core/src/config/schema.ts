@@ -123,6 +123,11 @@ function renameKeys(value: Record<string, unknown>, keys: Readonly<Record<string
 function normalizeMcpServerKeys(value: unknown): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
   const out = renameKeys(value as Record<string, unknown>, MCP_SNAKE_CASE_KEYS);
+  // Hosts and other agents' config formats offer a separate "sse" type; here every URL-based
+  // server goes through the one http transport.
+  for (const key of ["type", "transport"]) {
+    if (out[key] === "sse") out[key] = "http";
+  }
   const oauth = out["oauth"];
   if (typeof oauth === "object" && oauth !== null && !Array.isArray(oauth)) {
     out["oauth"] = renameKeys(oauth as Record<string, unknown>, MCP_OAUTH_SNAKE_CASE_KEYS);
@@ -162,7 +167,8 @@ const McpServerConfigObjectSchema = z.object({
   }
 }).transform(({ type, transport, ...rest }) => ({
   ...rest,
-  transport: transport ?? type ?? "stdio",
+  // A bare `{ url }` can only be a network server; everything else keeps the stdio default.
+  transport: transport ?? type ?? (rest.command === undefined && rest.url !== undefined ? "http" : "stdio"),
 }));
 
 export const McpServerConfigSchema = z.preprocess(normalizeMcpServerKeys, McpServerConfigObjectSchema);

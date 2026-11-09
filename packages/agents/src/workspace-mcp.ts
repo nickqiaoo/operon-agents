@@ -29,9 +29,9 @@
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  assertMcpTransportsPermitted,
   createMcpServers,
   mcpServersCapability,
-  McpTransportNotPermittedError,
   type Capability,
   type McpServerConfig,
   type McpServersCapabilityOptions,
@@ -197,14 +197,7 @@ export interface WorkspaceMcpCapabilityOptions {
  * `mcpServersCapability` viewing a shared set — same tools, same `session.mcp`, same overlay.
  */
 export function workspaceMcpCapability(options: WorkspaceMcpCapabilityOptions): Capability {
-  const allowed = options.overlayOptions?.allowedTransports;
-  if (allowed !== undefined) {
-    for (const [name, config] of Object.entries(options.servers)) {
-      if (config.enabled !== false && !allowed.includes(config.transport)) {
-        throw new McpTransportNotPermittedError(name, config.transport, allowed);
-      }
-    }
-  }
+  assertMcpTransportsPermitted(options.servers, options.overlayOptions?.allowedTransports);
   let lease: WorkspaceMcpLease | undefined;
   /** The borrowed set while a lease is held; the view below is empty without one. */
   let bound: McpServersHandle | undefined;

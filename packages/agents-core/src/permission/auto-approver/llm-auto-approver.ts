@@ -193,10 +193,11 @@ export class LlmAutoApprover implements AutoApprover {
     const request: LlmRequest = {
       system: this.system(),
       messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
-      // No thinking (so temperature applies and tokens aren't spent reasoning), temp 0 for
-      // determinism (pi drops it for models that reject it). cacheRetention enables prompt
-      // caching of the shared system + transcript prefix across stages/calls.
-      params: { temperature: 0, maxTokens },
+      // No thinking, so tokens aren't spent reasoning. No temperature either: providers disagree
+      // on what they accept (Mistral rejects 0 without top_p 1), and a request refused here
+      // silently demotes `auto` to asking. cacheRetention enables prompt caching of the shared
+      // system + transcript prefix across stages/calls.
+      params: { maxTokens },
       providerOptions: { cacheRetention: "long" },
     };
     const message = await completeWithRetry(model, request, { signal }, CLASSIFIER_RETRY_POLICY);

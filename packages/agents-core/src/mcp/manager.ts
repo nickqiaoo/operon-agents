@@ -9,7 +9,7 @@ import type { McpOAuthClientSettings, McpOAuthService } from "./oauth/index.ts";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Capability, SessionContext, RunContext, Tool, ToolProvider } from "../index.ts";
 import type { EventSink } from "../events/index.ts";
-import type { McpServerConfig } from "../config/schema.ts";
+import { McpServerConfigSchema, type McpServerConfig } from "../config/schema.ts";
 import type { McpCredential, McpCredentialProvider, McpCredentialRequest } from "./credentials.ts";
 
 export type McpServerStatus = "pending" | "connected" | "failed" | "disabled" | "needs-auth";
@@ -120,7 +120,31 @@ export interface ServerFromConfigOptions {
   readonly credential?: McpCredential;
 }
 
-export function serverFromConfig(name: string, config: McpServerConfig, opts: ServerFromConfigOptions = {}): TransportMCPServer {
+/**
+ * Apply the config schema to one server entry.
+ *
+ * The type says `McpServerConfig`, but hosts pass JSON from their own settings straight through
+ * (`{ command, args }`, `{ type: "http", url }`), so `transport` cannot be assumed to be set here.
+ * Parsing an already-parsed config changes nothing. An invalid entry comes back with `error` and
+ * a placeholder config, so it can fail alone instead of taking its siblings down.
+ */
+function normalizeServerConfig(name: string, raw: unknown): { readonly config: McpServerConfig; readonly error?: string } {
+  const parsed = McpServerConfigSchema.safeParse(raw);
+  if (parsed.success) return { config: parsed.data };
+  const issues = parsed.error.issues.map((issue) => (issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message));
+  const entry = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    config: {
+      transport: entry["command"] === undefined && entry["url"] !== undefined ? "http" : "stdio",
+      ...(entry["enabled"] === false ? { enabled: false } : {}),
+    },
+    error: `MCP server "${name}" has an invalid configuration: ${issues.join("; ")}`,
+  };
+}
+
+export function serverFromConfig(name: string, rawConfig: McpServerConfig, opts: ServerFromConfigOptions = {}): TransportMCPServer {
+  const { config, error } = normalizeServerConfig(name, rawConfig);
+  if (error !== undefined) throw new Error(error);
   const transport = opts.transport ?? transportFromConfig(name, config, opts.oauthService, opts.credential);
   const filter = staticFilterFromConfig(config);
   return new TransportMCPServer({
@@ -197,6 +221,8 @@ function isUnauthorizedLikeError(error: unknown): boolean {
 interface ControllerOptions {
   readonly name: string;
   readonly config: McpServerConfig;
+  /** Why `config` is unusable. The server then reports `failed` without attempting a connection. */
+  readonly configError?: string;
   readonly oauthService?: McpOAuthService;
   readonly credentials?: McpCredentialProvider;
   readonly cacheToolsList: boolean;
@@ -210,6 +236,7 @@ interface ControllerOptions {
 class McpServerController {
   readonly name: string;
   private readonly config: McpServerConfig;
+  private readonly configError: string | undefined;
   private readonly oauthService: McpOAuthService | undefined;
   private readonly credentials: McpCredentialProvider | undefined;
   private readonly cacheToolsList: boolean;
@@ -231,6 +258,7 @@ class McpServerController {
   constructor(opts: ControllerOptions) {
     this.name = opts.name;
     this.config = opts.config;
+    this.configError = opts.configError;
     this.oauthService = opts.oauthService;
     this.credentials = opts.credentials;
     this.cacheToolsList = opts.cacheToolsList;
@@ -277,6 +305,11 @@ class McpServerController {
   }
 
   private async attempt(retriedAuth = false): Promise<McpServerStatus> {
+    if (this.configError !== undefined) {
+      this.setStatus("failed", this.configError);
+      this.emitWarning(this.configError);
+      return this._status;
+    }
     // Attempts can overlap: a manual reconnect() can fire while an in-flight attempt is still
     // awaiting connect(). Every mutation of the shared `this.server` slot is therefore guarded
     // by identity — an attempt only ever publishes/retracts the server IT created, never a
@@ -566,13 +599,15 @@ function keepAliveOptions(
  * how one configuration file serves both a laptop and a server, and rejecting it would take
  * that away for no gain — a disabled server spawns nothing.
  */
-function assertTransportsPermitted(
+export function assertMcpTransportsPermitted(
   configs: Record<string, McpServerConfig>,
   allowed: readonly McpTransportKind[] | undefined,
 ): void {
   if (allowed === undefined) return;
-  for (const [name, config] of Object.entries(configs)) {
-    if (config.enabled === false) continue;
+  for (const [name, raw] of Object.entries(configs)) {
+    const { config, error } = normalizeServerConfig(name, raw);
+    // An invalid entry never starts, and its transport is only a guess: it fails on its own.
+    if (error !== undefined || config.enabled === false) continue;
     if (!allowed.includes(config.transport)) {
       throw new McpTransportNotPermittedError(name, config.transport, allowed);
     }
@@ -595,27 +630,28 @@ export function createMcpServers(
   configs: Record<string, McpServerConfig>,
   options: McpServersCapabilityOptions = {},
 ): McpServersHandle {
-  assertTransportsPermitted(configs, options.allowedTransports);
+  assertMcpTransportsPermitted(configs, options.allowedTransports);
   const listeners = new Set<McpStatusListener>();
   const notify: McpStatusListener = (view) => {
     for (const listener of listeners) listener(view);
   };
 
-  const controllers = Object.entries(configs).map(
-    ([name, config]) =>
-      new McpServerController({
-        name,
-        config,
-        ...(options.oauthService !== undefined ? { oauthService: options.oauthService } : {}),
-        ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
-        cacheToolsList: options.cacheToolsList ?? DEFAULT_CACHE_TOOLS,
-        ...(options.transportFactory !== undefined ? { transportFactory: options.transportFactory } : {}),
-        ...(options.reconnectPolicy !== undefined ? { reconnectPolicy: options.reconnectPolicy } : {}),
-        ...keepAliveOptions(config, options.keepAlive),
-        onStatusChange: notify,
-        timer: options.timer ?? REAL_TIMER,
-      }),
-  );
+  const controllers = Object.entries(configs).map(([name, raw]) => {
+    const { config, error } = normalizeServerConfig(name, raw);
+    return new McpServerController({
+      name,
+      config,
+      ...(error !== undefined ? { configError: error } : {}),
+      ...(options.oauthService !== undefined ? { oauthService: options.oauthService } : {}),
+      ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+      cacheToolsList: options.cacheToolsList ?? DEFAULT_CACHE_TOOLS,
+      ...(options.transportFactory !== undefined ? { transportFactory: options.transportFactory } : {}),
+      ...(options.reconnectPolicy !== undefined ? { reconnectPolicy: options.reconnectPolicy } : {}),
+      ...keepAliveOptions(config, options.keepAlive),
+      onStatusChange: notify,
+      timer: options.timer ?? REAL_TIMER,
+    });
+  });
   const byName = new Map(controllers.map((c) => [c.name, c]));
   let shuttingDown: Promise<void> | undefined;
 

@@ -65,5 +65,5 @@ export type {
 } from "./plugins/index.ts";
 // The per-workspace MCP capability, exposed so `defaultCapabilities` can build it from
 // workspace + plugin servers (it lives under the ./mcp subtree, not the main capabilities barrel).
-export { mcpServersCapability, createMcpServers, McpOAuthService, JsonFileStore, MemoryMcpCredentialStore, McpTransportNotPermittedError } from "./mcp/index.ts";
+export { mcpServersCapability, createMcpServers, assertMcpTransportsPermitted, McpOAuthService, JsonFileStore, MemoryMcpCredentialStore, McpTransportNotPermittedError } from "./mcp/index.ts";
 export type { McpServersCapabilityOptions, McpOAuthServiceOptions, McpCredentialStore, McpTransportKind, McpServersHandle, McpServerView, McpCredential, McpCredentialProvider, McpCredentialRequest } from "./mcp/index.ts";

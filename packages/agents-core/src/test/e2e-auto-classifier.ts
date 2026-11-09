@@ -79,6 +79,23 @@ async function main(): Promise<void> {
     checks.push(["stage1 allow → allow, 1 call, outcome=allow/fast", v.decision === "allow" && fc.calls() === 1 && reports[0]?.outcome === "allow" && reports[0]?.stage === "fast"]);
   }
 
+  // The judge sets no temperature: a provider refusing the value (Mistral rejects 0 without
+  // top_p 1) would turn every auto-mode decision into an approval prompt.
+  {
+    const faux = registerFauxProvider();
+    let sent: { temperature?: number; maxTokens?: number } | undefined;
+    faux.setResponses([
+      (_context: Context, options) => {
+        sent = options as typeof sent;
+        return fauxAssistantMessage("<block>no</block>", { stopReason: "stop" });
+      },
+    ]);
+    const judge = new LlmAutoApprover();
+    await judge.classify({ ...stub(faux.getChatModel()!, BASH("ls -la")), approvalRule: "Bash" });
+    faux.unregister();
+    checks.push(["judge request carries maxTokens but no temperature", sent?.maxTokens !== undefined && sent.temperature === undefined]);
+  }
+
   // 2. Stage 1 block → stage 2 block → escalate, with reason; two calls.
   {
     const fc = fauxClassifier([
