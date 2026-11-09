@@ -7,6 +7,19 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.25] — 2026-11-09
+
+### Changed
+
+- A request that fails before its response starts (429, 408, 409, 5xx, connection failures) is
+  retried inside the provider call, honoring `Retry-After`. `ModelConnection.maxRetries` defaults
+  to 8; 0 turns these retries off. Bedrock and `pi-messages` do not read it (`operon-agents-core`).
+- `streamWithRetry` only recovers a response that failed after it started (`operon-agents-core`).
+
+### Removed
+
+- `classifyError`, `isRetryableGenerateError` and `RetryHint` (`operon-agents-core`).
+
 ## [0.1.0-alpha.24] — 2026-11-09
 
 ### Added
