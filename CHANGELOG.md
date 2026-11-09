@@ -7,6 +7,16 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.27] — 2026-11-09
+
+### Fixed
+
+- MCP accepts raw host configuration, including command-only and URL-only entries and the
+  `sse` transport alias. Invalid entries fail individually, and transport restrictions apply
+  to the normalized configuration (`operon-agents-core`, `operon-agents`).
+- The LLM auto-approver leaves temperature at the provider default so providers such as Mistral
+  can accept classifier requests (`operon-agents-core`).
+
 ## [0.1.0-alpha.26] — 2026-11-09
 
 ### Changed
