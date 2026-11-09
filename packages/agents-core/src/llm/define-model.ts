@@ -10,8 +10,11 @@ import {
   forceRefreshOAuth,
   type ModelRuntime,
 } from "./runtime.ts";
-import { classifyError } from "./errors.ts";
-import type { CallOptions, LlmRequest, RetryHint } from "./model.ts";
+import { createRetryingFetch } from "./retrying-fetch.ts";
+import type { CallOptions, LlmRequest } from "./model.ts";
+
+/** Roughly 30–40s of backoff with pi's policy, enough to outlast a typical short rate-limit window. */
+const DEFAULT_PROVIDER_MAX_RETRIES = 8;
 
 /** A finished attempt: either resolved (terminal already pushed to the out stream) or a
  *  clean pre-content failure the caller may retry. */
@@ -40,10 +43,10 @@ export interface ModelConnection {
   /** HTTP request timeout, for providers/SDKs that support it. */
   readonly timeoutMs?: number;
   /**
-   * Retries INSIDE the provider call, below `streamWithRetry`. Leave unset: pi defaults it to
-   * 0 and the loop's own retry is the one with the context to decide (it can tell a
-   * mid-stream failure from a clean one and fall back to non-streaming). Setting it here
-   * multiplies with that — 3 loop attempts × N here.
+   * Retries of a request that failed before its response started: 429, 408, 409, 5xx and
+   * connection failures, honoring `Retry-After`. Defaults to 8; 0 turns them off. These run
+   * inside the provider call and emit no events. A failure after the response has started is
+   * `streamWithRetry`'s. Bedrock and `pi-messages` do not read this setting.
    */
   readonly maxRetries?: number;
   /** Cap on honoring a server-requested retry delay. pi defaults to 60s; 0 disables the cap. */
@@ -119,9 +122,15 @@ export class ChatModel {
   constructor(spec: ModelSpec) {
     this.runtime = spec.runtime ?? createModelRuntime();
     this.piModel = withAnthropicToolChanges(resolvePiModel(spec, this.runtime));
+    const maxRetries = spec.connection?.maxRetries ?? DEFAULT_PROVIDER_MAX_RETRIES;
+    const maxRetryDelayMs = spec.connection?.maxRetryDelayMs;
     this.requestDefaults = {
       ...(spec.apiKey !== undefined ? { apiKey: spec.apiKey } : {}),
       ...spec.connection,
+      maxRetries,
+      ...(this.piModel.api === "mistral-conversations"
+        ? { fetch: createRetryingFetch({ maxRetries, ...(maxRetryDelayMs !== undefined ? { maxRetryDelayMs } : {}) }) }
+        : {}),
     };
     this.id = this.piModel.id;
     this.provider = this.piModel.provider;
@@ -232,10 +241,6 @@ export class ChatModel {
       return { resolved: true };
     }
     return { resolved: false, errorMessage, terminal };
-  }
-
-  classifyError(err: unknown): RetryHint {
-    return classifyError(err);
   }
 
   private errorEvent(text: string): AssistantMessageEvent {

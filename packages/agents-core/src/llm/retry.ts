@@ -1,4 +1,5 @@
 import type { ChatModel } from "./define-model.ts";
+import { isContextOverflowMessage } from "./errors.ts";
 import { streamResult } from "./model.ts";
 import type { CallOptions, LlmRequest } from "./model.ts";
 import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "../protocol/index.ts";
@@ -46,6 +47,11 @@ interface AttemptResult {
   readonly mode: "stream" | "complete";
 }
 
+/**
+ * Recovers a response that failed after it had started. A request that never got a response is
+ * retried below this, inside the provider call (`ModelConnection.maxRetries`), so a failure
+ * without a successful status or any output is final here.
+ */
 export async function streamWithRetry(input: StreamWithRetryInput): Promise<StreamWithRetryResult> {
   const { model, request, call } = input;
   const logger = input.logger ?? noopLogger;
@@ -60,9 +66,13 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       ? { model: model.id, attempt, mode, messages: request.messages.length, tools: request.tools?.length ?? 0 }
       : { model: model.id, attempt, mode, system: request.system, messages: request.messages, tools: request.tools?.map((t) => t.name), params: request.params });
 
+    let httpStatus: number | undefined;
+    const attemptRequest = observeHttpStatus(request, (status) => {
+      httpStatus = status;
+    });
     const attemptResult = useCompleteFallback
-      ? await runCompleteAttempt(model, request, call)
-      : await runStreamAttempt(model, request, call, input.onEvent);
+      ? await runCompleteAttempt(model, attemptRequest, call)
+      : await runStreamAttempt(model, attemptRequest, call, input.onEvent);
     const result: StreamWithRetryResult = { message: attemptResult.message, stopReason: attemptResult.message.stopReason };
 
     if (result.stopReason !== "error") {
@@ -73,10 +83,10 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       return result; // success (stop / toolUse / length / aborted)
     }
 
-    const reason = result.message.errorMessage ?? "";
-    const hint = model.classifyError(reason);
-    if (!hint.retryable || attempt >= maxRetries) {
-      logger.log("error", "llm error", { model: model.id, attempt, mode: attemptResult.mode, retryable: hint.retryable, reason: result.message.errorMessage });
+    const retryable = failedAfterResponseStarted(attemptResult.surfaced, httpStatus)
+      && !isContextOverflowMessage(result.message.errorMessage ?? "");
+    if (!retryable || attempt >= maxRetries) {
+      logger.log("error", "llm error", { model: model.id, attempt, mode: attemptResult.mode, retryable, reason: result.message.errorMessage });
       return result; // give up → environment error as the result
     }
 
@@ -91,7 +101,7 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       });
     }
 
-    const delayMs = retryDelayMs(attempt, hint.afterMs);
+    const delayMs = retryDelayMs(attempt);
     logger.log("warn", "llm retry", { model: model.id, attempt: attempt + 1, maxAttempts: maxRetries, delayMs, reason: result.message.errorMessage });
     input.onRetrying?.({
       type: "step_retrying",
@@ -187,8 +197,27 @@ function isSurfacedEvent(event: AssistantMessageEvent): boolean {
   }
 }
 
-function retryDelayMs(attempt: number, retryAfterMs: number | undefined): number {
-  if (retryAfterMs !== undefined) return retryAfterMs;
+/** Report each HTTP response's status to `observe`, ahead of any `onResponse` already set. */
+function observeHttpStatus(request: LlmRequest, observe: (status: number) => void): LlmRequest {
+  const prior = request.providerOptions?.["onResponse"] as ((...args: unknown[]) => unknown) | undefined;
+  return {
+    ...request,
+    providerOptions: {
+      ...request.providerOptions,
+      onResponse: async (response: { readonly status: number }, ...rest: unknown[]): Promise<void> => {
+        observe(response.status);
+        await prior?.(response, ...rest);
+      },
+    },
+  };
+}
+
+/** Output was shown, or the last HTTP response succeeded: either way the failure came later. */
+function failedAfterResponseStarted(surfaced: boolean, httpStatus: number | undefined): boolean {
+  return surfaced || (httpStatus !== undefined && httpStatus >= 200 && httpStatus < 300);
+}
+
+function retryDelayMs(attempt: number): number {
   const baseDelay = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_BACKOFF_MS);
   return Math.round(baseDelay + Math.random() * 0.25 * baseDelay);
 }

@@ -11,7 +11,6 @@ import {
   MemoryStore,
   ConversationContext,
   compactionCapability,
-  classifyError,
   isContextOverflowMessage,
   APIContextOverflowError,
   readTool,
@@ -42,8 +41,6 @@ function testClassification(): void {
     isContextOverflowMessage("This model's maximum context length is 200000 tokens."),
   );
   check("classify: ordinary error not overflow", !isContextOverflowMessage("socket hang up"));
-  check("classify: string-path overflow is non-retryable", classifyError(OVERFLOW_TEXT).retryable === false);
-  check("classify: string-path transient stays non-overflow-classified", classifyError("socket hang up").retryable === false);
 }
 
 /** Overflow on a step → compaction claims via recoverStepError → step re-runs and completes. */

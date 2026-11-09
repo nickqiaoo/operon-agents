@@ -10,8 +10,6 @@ import type {
 
 export type { ThinkingBudgets, ThinkingLevel };
 
-export type RetryHint = { readonly retryable: boolean; readonly afterMs?: number };
-
 /**
  * How the model should behave for one request — the knobs that legitimately vary per agent
  * and per turn. Deliberately NOT pi's `SimpleStreamOptions`: connection-tier settings

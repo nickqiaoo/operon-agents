@@ -39,7 +39,8 @@ async function runWithChildStopReason(stopReason: "stop" | "error" | "aborted"):
     fauxAssistantMessage(stopReason === "stop" ? "child succeeded" : "child output before trouble", { stopReason }),
     fauxAssistantMessage("main acknowledges", { stopReason: "stop" }),
   ]);
-  const runner = testRunner({});
+  // No step retries: an error after output is otherwise retried, and this is about the final failure.
+  const runner = testRunner({ maxRetriesPerStep: 0 });
   const r = await runner.run(main, "delegate", {});
   faux.unregister();
   return subagentToolResult(r.messages, "agent_flaky");

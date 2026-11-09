@@ -656,7 +656,6 @@ async function testStreamRetryResetFallback(environment: LocalEnvironment): Prom
   let streamCalls = 0;
   let completeCalls = 0;
 
-  model.classifyError = () => ({ retryable: true, afterMs: 0 });
   model.stream = () => {
     streamCalls++;
     const out = createAssistantMessageEventStream();
