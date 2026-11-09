@@ -82,6 +82,8 @@ async function main(): Promise<void> {
     const agent = defineAgent({ name: "root", model: faux.getChatModel()!, instructions: "x", tools: [work] });
     void new Runner({}).run(agent, "start", { session });
     await crashed;
+    // Seeing the appended checkpoint does not mean its tail index is committed yet.
+    await session.liveContext("main")!.flush();
     await waitFor(async () => (await readAll(handle.store)).some((record) => record.type === "context.apply_compaction"));
 
     // ── what a tail read sees, against the whole log ──

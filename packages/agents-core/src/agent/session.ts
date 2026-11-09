@@ -1,3 +1,5 @@
+import { recoverOrphanedTurns } from "./lifecycle-recovery.ts";
+import { readSessionTails } from "../events/projection.ts";
 import type { Environment } from "../tool/environment.ts";
 import { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { ChatModel } from "../llm/define-model.ts";
@@ -398,6 +400,26 @@ export class Session implements SessionPort {
     this.durable = new DurableStateWriter(this.store, this.logger);
     this.allCapabilities = opts.capabilities ?? [];
     this.preloadedLog = opts.preloadedLog;
+  }
+
+  private lifecycleRecovered = false;
+
+  /**
+   * Reconcile a cold session before its first run. The caller MUST hold this session's
+   * run lock and exclusive execution ownership (a distributed lease for shared stores).
+   * Opening/observing a session alone never proves that the previous executor is dead.
+   */
+  async recoverLifecycle(): Promise<void> {
+    if (this.lifecycleRecovered) return;
+    if (this.store !== undefined) {
+      const records = await readSessionTails(this.store);
+      for (const address of new Set(records.map((record) => record.address ?? DEFAULT_ADDRESS))) {
+        this.checkpointing?.restoreFrame(address, records);
+      }
+      await recoverOrphanedTurns(this.id, this.store, records);
+      await this.flushEvents();
+    }
+    this.lifecycleRecovered = true;
   }
 
   /**

@@ -579,6 +579,7 @@ export class Runner<TContext = unknown> {
     if (session.store && (await session.store.getState(INTERRUPTION_STATE_KEY)) !== null) {
       throw new Error("This session has an interrupted run. Resume or resolve it before starting a new prompt.");
     }
+    await session.recoverLifecycle();
     const head = await this.resolveConversationHead(session, rootAgent);
     const agent = head.agent;
     const state = await this.beginRun(session, opts, undefined, head.address);

@@ -31,8 +31,7 @@ import {
   type InterruptAnswer,
   type ChatModel,
   ListenerSink,
-  agentEventFromRecord,
-  newAgentEventId,
+  recoverOrphanedTurns,
   type PermissionManagerOptions,
   type PermissionMode,
   type PendingRunInterrupt,
@@ -2049,8 +2048,11 @@ export class Harness<TContext = unknown> {
       projection = await SessionProjection.attach({ id, store, events }, preloadedLog);
       const interrupted = await store.getState(INTERRUPTION_STATE_KEY) !== null;
       if (!interrupted) {
-        const recoveryRecords = await closeOrphanedProjectionFrames(id, store, projection);
-        if (recoveryRecords.length > 0) preloadedLog = [...preloadedLog, ...recoveryRecords];
+        const recoveryRecords = await recoverOrphanedTurns(id, store, preloadedLog);
+        if (recoveryRecords.length > 0) {
+          for (const record of recoveryRecords) projection.applyRecord(record);
+          preloadedLog = [...preloadedLog, ...recoveryRecords];
+        }
       }
       const capabilities = await this.resolveCapabilities(
         {
@@ -2157,74 +2159,6 @@ export class Harness<TContext = unknown> {
 
   private contextFor(options: { readonly context?: TContext }): TContext | undefined {
     return hasOwnContext(options) ? options.context : this.options.context;
-  }
-}
-
-/**
- * A cold open proves that no in-process run still owns lifecycle frames left open in the
- * previous journal. Close those frames durably so historical event consumers and Projection
- * agree with HarnessSession.status. A durable interruption is excluded by the caller: its
- * open turn is intentional continuation state, not a crash remnant.
- */
-/**
- * Close the turns a dead process left open, without opening the session.
- *
- * A worker that dies mid-turn journals no `turn.ended`; to every reader the turn is still
- * running. Opening the session repairs that (the same recovery runs inside `resumeSession`),
- * but opening boots capabilities and an environment just to write two records. This does only the
- * repair: fold the log, and for every frame still inside a turn append `turn.ended` with
- * `reason: "failed"` (and `agent.ended` for a live sub-agent). Returns the events those records
- * project to, so a host that has live subscribers can hand them on — a record appended here
- * reaches the log, not any broadcast channel.
- *
- * A session paused for an answer is left alone: its open turn is waiting, not dead.
- */
-export async function closeOrphanedTurns(sessionId: string, store: SessionStore): Promise<readonly AgentEvent[]> {
-  if ((await store.getState(INTERRUPTION_STATE_KEY)) !== null) return [];
-  const projection = await SessionProjection.attach({ id: sessionId, store, events: new ListenerSink() }, await readSessionTails(store));
-  const records = await closeOrphanedProjectionFrames(sessionId, store, projection);
-  const events: AgentEvent[] = [];
-  for (const record of records) {
-    const event = agentEventFromRecord(record, sessionId);
-    if (event !== undefined) events.push(event);
-  }
-  return events;
-}
-
-async function closeOrphanedProjectionFrames(
-  sessionId: string,
-  store: SessionStore,
-  projection: SessionProjection,
-): Promise<AgentRecord[]> {
-  const recovered: AgentRecord[] = [];
-  const snapshot = projection.snapshot({ maxMessages: 0 });
-  for (const agent of snapshot.agents) {
-    if (agent.turn !== undefined) {
-      await appendRecoveryLifecycle({
-        type: "event.lifecycle",
-        eventId: newAgentEventId(),
-        time: Date.now(),
-        address: agent.address,
-        event: { type: "turn.ended", turnId: agent.turn.turnId, reason: "failed" },
-      });
-    }
-    if (agent.live && agent.agent !== undefined) {
-      await appendRecoveryLifecycle({
-        type: "event.lifecycle",
-        eventId: newAgentEventId(),
-        time: Date.now(),
-        address: agent.address,
-        event: { type: "agent.ended", agent: agent.agent },
-      });
-    }
-  }
-  return recovered;
-
-  async function appendRecoveryLifecycle(record: AgentRecord): Promise<void> {
-    await store.appendRecord(record);
-    recovered.push(record);
-    const event = agentEventFromRecord(record, sessionId);
-    if (event !== undefined) projection.apply(event, record.time ?? Date.now());
   }
 }
 

@@ -102,3 +102,5 @@ export type {
 // Workflow engine (the deterministic subagent-orchestration runtime) + its manager
 // and snapshot/journal layers, exposed so upper layers can integrate programmatically.
 export * from "./workflow/index.ts";
+
+export { closeOrphanedTurns, recoverOrphanedTurns } from "./lifecycle-recovery.ts";

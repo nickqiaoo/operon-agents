@@ -1116,10 +1116,10 @@ async function testLiveContextReuse(environment: LocalEnvironment): Promise<void
   await runner.run(agent, "t2", { session });
   await runner.run(agent, "t3", { session });
   faux.unregister();
-  // Two constant reads: session open (permission fold + live-context seed) and the first
-  // prompt's conversation-head resolution. The invariant is that turns after the first
+  // Three constant reads: session open (permission fold + live-context seed), cold
+  // lifecycle recovery, and the first prompt's conversation-head resolution. Later turns
   // APPEND to the live context instead of replaying — reads must not grow with turns.
-  check("live-context: log reads are constant across 3 turns (then appends)", readsAfterFirstTurn === 2 && store.pathReads === 2);
+  check("live-context: log reads are constant across 3 turns (then appends)", readsAfterFirstTurn === 3 && store.pathReads === 3);
   check(
     "live-context: 3rd turn still sees turn 1 (continuity preserved)",
     (seen[2] ?? []).some((m) => m.role === "user" && JSON.stringify(m.content).includes("t1")),
