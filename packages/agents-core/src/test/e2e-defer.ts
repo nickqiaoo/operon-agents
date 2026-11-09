@@ -416,7 +416,9 @@ async function testResponsesWire(): Promise<void> {
   check(
     "pi/Responses: additional_tools anchors the load where supported",
     JSON.stringify(additional.input).includes('"type":"additional_tools"') &&
-      !(additional.tools as Array<{ name?: string }>).some((candidate) => candidate.name === slackTool.schema.name),
+      JSON.stringify(additional.input).includes(slackTool.schema.name) &&
+      // Every tool now lives in `additional_tools`, so the request may have no top-level list at all.
+      !((additional.tools ?? []) as Array<{ name?: string }>).some((candidate) => candidate.name === slackTool.schema.name),
   );
 }
 

@@ -2,7 +2,6 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type {
   Context,
   ModelsSimpleStreamOptions,
-  TSchema,
 } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Model, PiTool, Provider, ProviderHeaders, ToolSchema, Transport } from "../protocol/index.ts";
 import { emptyUsage } from "../loop/usage.ts";
@@ -393,7 +392,7 @@ function toPiTool(tool: ToolSchema): PiTool {
     name: tool.name,
     description: tool.description,
     // protocol-level params are a JSON Schema object; pi serializes it as the tool schema.
-    parameters: tool.parameters as unknown as TSchema,
+    parameters: tool.parameters as unknown as PiTool["parameters"],
   };
 }
 
