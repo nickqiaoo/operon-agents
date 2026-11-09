@@ -1,5 +1,6 @@
 import type { ChatModel } from "../../llm/define-model.ts";
 import type { LlmRequest } from "../../llm/model.ts";
+import { completeWithRetry } from "../../llm/retry.ts";
 import type { AssistantMessage, TextContent } from "../../protocol/index.ts";
 import type { AutoApprovalInput, AutoApprovalVerdict, AutoApprover } from "../types.ts";
 import { buildClassifierSystemPrompt, type ClassifierRules } from "./prompts.ts";
@@ -54,6 +55,9 @@ const XML_S2_SUFFIX =
 
 const DEFAULT_STAGE1_MAX_TOKENS = 512;
 const DEFAULT_STAGE2_MAX_TOKENS = 4096;
+/** A tool call is waiting on this verdict, so it gets seconds of retries, not minutes. */
+const CLASSIFIER_RETRY_POLICY = { maxRetries: 5, maxDelayMs: 8_000 };
+
 const DEFAULT_MAX_CONSECUTIVE_ERRORS = 3;
 const DEFAULT_BREAKER_PROBE_DELAY_MS = 30_000;
 const DEFAULT_BREAKER_MAX_PROBE_DELAY_MS = 5 * 60_000;
@@ -195,7 +199,7 @@ export class LlmAutoApprover implements AutoApprover {
       params: { temperature: 0, maxTokens },
       providerOptions: { cacheRetention: "long" },
     };
-    const message = await model.complete(request, { signal });
+    const message = await completeWithRetry(model, request, { signal }, CLASSIFIER_RETRY_POLICY);
     if (message.stopReason === "error") throw new Error(message.errorMessage ?? "classifier stream error");
     this.consecutiveErrors = 0; // the model responded — clear the breaker
     return textOf(message);

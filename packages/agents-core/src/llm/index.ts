@@ -2,6 +2,7 @@ export { streamResult } from "./model.ts";
 export type {
   LlmRequest,
   CallOptions,
+  HttpExchange,
   ModelSettings,
   ThinkingBudgets,
   ThinkingLevel,
@@ -12,7 +13,9 @@ export * from "./provider.ts";
 export type { ModelConnection, ModelSpec } from "./define-model.ts";
 export { createModelRuntime, forceRefreshOAuth } from "./runtime.ts";
 export type { ModelRuntime, CreateModelRuntimeOptions } from "./runtime.ts";
-export { streamWithRetry, DEFAULT_MAX_RETRIES_PER_STEP } from "./retry.ts";
+export { completeWithRetry, streamWithRetry, DEFAULT_MAX_RETRIES_PER_STEP } from "./retry.ts";
+export { DEFAULT_REQUEST_RETRY_POLICY } from "./request-retry.ts";
+export type { RequestRetryPolicy } from "./request-retry.ts";
 export type { StreamWithRetryInput, StreamWithRetryResult, StepRetryingEvent, StepResetEvent } from "./retry.ts";
 export {
   InMemoryCredentialStore,

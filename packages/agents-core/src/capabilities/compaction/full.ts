@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message } from "../../protocol/index.ts";
 import type { ChatModel } from "../../llm/define-model.ts";
+import { completeWithRetry } from "../../llm/retry.ts";
 import { type Logger, logDataPolicy, noopLogger } from "../../logging/index.ts";
 import { type ConversationContext, summaryMessage } from "../../loop/context.ts";
 import type { InjectionManager } from "../injection.ts";
@@ -151,7 +152,7 @@ async function summarize(deps: FullCompactionDeps, initialCount: number): Promis
     let summaryText = "";
     let truncatedOrError = false;
     try {
-      const message = await deps.model.complete(request, { signal: deps.signal });
+      const message = await completeWithRetry(deps.model, request, { signal: deps.signal }, undefined, logger);
       if (message.stopReason === "error") throw new Error(message.errorMessage ?? "compaction stream error");
       summaryText = textOf(message);
       if (message.stopReason === "length" || summaryText.trim().length === 0) truncatedOrError = true;

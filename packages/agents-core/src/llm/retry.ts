@@ -1,7 +1,8 @@
 import type { ChatModel } from "./define-model.ts";
 import { isContextOverflowMessage } from "./errors.ts";
 import { streamResult } from "./model.ts";
-import type { CallOptions, LlmRequest } from "./model.ts";
+import type { CallOptions, HttpExchange, LlmRequest } from "./model.ts";
+import { DEFAULT_REQUEST_RETRY_POLICY, requestRetryDelayMs, type RequestRetryPolicy } from "./request-retry.ts";
 import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "../protocol/index.ts";
 import { type Logger, logDataPolicy, noopLogger } from "../logging/index.ts";
 
@@ -48,16 +49,22 @@ interface AttemptResult {
 }
 
 /**
- * Recovers a response that failed after it had started. A request that never got a response is
- * retried below this, inside the provider call (`ModelConnection.maxRetries`), so a failure
- * without a successful status or any output is final here.
+ * Retries a failed step, the only place besides `completeWithRetry` that does: pi's retries are
+ * off so that every wait reaches `onRetrying`.
+ *
+ * The two kinds of failure have separate budgets. A request that never got a response costs
+ * nothing to resend and may need minutes to clear (`ModelConnection.maxRetries`). A response that
+ * failed after it started has been paid for, so it gets the few retries in `maxRetries`.
  */
 export async function streamWithRetry(input: StreamWithRetryInput): Promise<StreamWithRetryResult> {
   const { model, request, call } = input;
   const logger = input.logger ?? noopLogger;
   const maxRetries = input.maxRetries ?? DEFAULT_MAX_RETRIES_PER_STEP;
   const signal = call?.signal;
+  const requestPolicy = requestPolicyOf(model);
   let useCompleteFallback = false;
+  let responseRetries = 0;
+  let requestRetries = 0;
 
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
@@ -66,13 +73,15 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       ? { model: model.id, attempt, mode, messages: request.messages.length, tools: request.tools?.length ?? 0 }
       : { model: model.id, attempt, mode, system: request.system, messages: request.messages, tools: request.tools?.map((t) => t.name), params: request.params });
 
-    let httpStatus: number | undefined;
-    const attemptRequest = observeHttpStatus(request, (status) => {
-      httpStatus = status;
-    });
+    let exchange: HttpExchange | undefined;
+    const observe = (seen: HttpExchange): void => {
+      exchange = seen;
+    };
+    const attemptRequest = observeResponses(request, observe);
+    const attemptCall: CallOptions = { ...call, onHttpExchange: observe };
     const attemptResult = useCompleteFallback
-      ? await runCompleteAttempt(model, attemptRequest, call)
-      : await runStreamAttempt(model, attemptRequest, call, input.onEvent);
+      ? await runCompleteAttempt(model, attemptRequest, attemptCall)
+      : await runStreamAttempt(model, attemptRequest, attemptCall, input.onEvent);
     const result: StreamWithRetryResult = { message: attemptResult.message, stopReason: attemptResult.message.stopReason };
 
     if (result.stopReason !== "error") {
@@ -83,10 +92,23 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       return result; // success (stop / toolUse / length / aborted)
     }
 
-    const retryable = failedAfterResponseStarted(attemptResult.surfaced, httpStatus)
-      && !isContextOverflowMessage(result.message.errorMessage ?? "");
-    if (!retryable || attempt >= maxRetries) {
-      logger.log("error", "llm error", { model: model.id, attempt, mode: attemptResult.mode, retryable, reason: result.message.errorMessage });
+    let retry: { readonly attempt: number; readonly maxAttempts: number; readonly delayMs: number } | undefined;
+    if (!isContextOverflowMessage(result.message.errorMessage ?? "")) {
+      if (failedAfterResponseStarted(attemptResult.surfaced, (exchange as HttpExchange | undefined)?.status)) {
+        if (responseRetries < maxRetries) {
+          retry = { attempt: responseRetries + 1, maxAttempts: maxRetries, delayMs: retryDelayMs(responseRetries) };
+          responseRetries++;
+        }
+      } else {
+        const delayMs = requestRetryDelayMs(result.message, exchange, requestRetries, requestPolicy);
+        if (delayMs !== undefined) {
+          retry = { attempt: requestRetries + 1, maxAttempts: requestPolicy.maxRetries, delayMs };
+          requestRetries++;
+        }
+      }
+    }
+    if (retry === undefined) {
+      logger.log("error", "llm error", { model: model.id, attempt, mode: attemptResult.mode, reason: result.message.errorMessage });
       return result; // give up → environment error as the result
     }
 
@@ -101,17 +123,38 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
       });
     }
 
-    const delayMs = retryDelayMs(attempt);
-    logger.log("warn", "llm retry", { model: model.id, attempt: attempt + 1, maxAttempts: maxRetries, delayMs, reason: result.message.errorMessage });
-    input.onRetrying?.({
-      type: "step_retrying",
-      attempt: attempt + 1,
-      maxAttempts: maxRetries,
-      delayMs,
-      reason: result.message.errorMessage,
-    });
-    await abortableSleep(delayMs, signal);
+    logger.log("warn", "llm retry", { model: model.id, ...retry, reason: result.message.errorMessage });
+    input.onRetrying?.({ type: "step_retrying", ...retry, reason: result.message.errorMessage });
+    await abortableSleep(retry.delayMs, signal);
   }
+}
+
+/**
+ * `model.complete` with the request retries a step gets, for callers outside the turn loop.
+ * `policy` overrides the model's, for a caller that cannot wait minutes.
+ */
+export async function completeWithRetry(
+  model: ChatModel,
+  request: LlmRequest,
+  call?: CallOptions,
+  policy?: Partial<RequestRetryPolicy>,
+  logger: Logger = noopLogger,
+): Promise<AssistantMessage> {
+  const resolved = { ...requestPolicyOf(model), ...policy };
+  for (let retries = 0; ; retries++) {
+    let exchange: HttpExchange | undefined;
+    const message = await model.complete(request, { ...call, onHttpExchange: (seen) => { exchange = seen; } });
+    if (message.stopReason !== "error" || isContextOverflowMessage(message.errorMessage ?? "")) return message;
+    const delayMs = requestRetryDelayMs(message, exchange, retries, resolved);
+    if (delayMs === undefined) return message;
+    logger.log("warn", "llm retry", { model: model.id, attempt: retries + 1, maxAttempts: resolved.maxRetries, delayMs, reason: message.errorMessage });
+    await abortableSleep(delayMs, call?.signal);
+  }
+}
+
+/** Test doubles cast to `ChatModel` carry no policy. */
+function requestPolicyOf(model: ChatModel): RequestRetryPolicy {
+  return (model.requestRetry as RequestRetryPolicy | undefined) ?? DEFAULT_REQUEST_RETRY_POLICY;
 }
 
 async function runStreamAttempt(
@@ -197,15 +240,15 @@ function isSurfacedEvent(event: AssistantMessageEvent): boolean {
   }
 }
 
-/** Report each HTTP response's status to `observe`, ahead of any `onResponse` already set. */
-function observeHttpStatus(request: LlmRequest, observe: (status: number) => void): LlmRequest {
+/** Report each response pi surfaces to `observe`, ahead of any `onResponse` already set. */
+function observeResponses(request: LlmRequest, observe: (exchange: HttpExchange) => void): LlmRequest {
   const prior = request.providerOptions?.["onResponse"] as ((...args: unknown[]) => unknown) | undefined;
   return {
     ...request,
     providerOptions: {
       ...request.providerOptions,
-      onResponse: async (response: { readonly status: number }, ...rest: unknown[]): Promise<void> => {
-        observe(response.status);
+      onResponse: async (response: Required<HttpExchange>, ...rest: unknown[]): Promise<void> => {
+        observe(response);
         await prior?.(response, ...rest);
       },
     },

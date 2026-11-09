@@ -1,13 +1,14 @@
 /**
  * Who retries what, against a local HTTP server speaking the real wire formats.
  *
- * A request that never got a response is retried inside the provider call, for Mistral through
- * `createRetryingFetch`. `streamWithRetry` only recovers a response that failed after it started.
+ * pi's retries are off, so `streamWithRetry` owns both kinds: a request that never got a response,
+ * on its own budget and reporting each wait, and a response that failed after it started.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { defineModel, streamResult, streamWithRetry, type ChatModel, type ModelSpec } from "../llm/index.ts";
+import { completeWithRetry, defineModel, streamWithRetry, type ChatModel, type ModelSpec } from "../llm/index.ts";
+import type { StepRetryingEvent } from "../llm/index.ts";
 import type { AssistantMessage, Message } from "../protocol/index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -95,8 +96,23 @@ function textOf(message: AssistantMessage): string {
   return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 }
 
-async function streamOnce(model: ChatModel, signal?: AbortSignal): Promise<AssistantMessage> {
-  return streamResult(model.stream(REQUEST, signal ? { signal } : undefined));
+/** Backoff capped at 20ms, so the retries a test needs do not cost it seconds. */
+const FAST: NonNullable<ModelSpec["connection"]> = { maxRetryDelayMs: 20 };
+
+interface Retried {
+  readonly message: AssistantMessage;
+  readonly waits: readonly StepRetryingEvent[];
+}
+
+async function run(model: ChatModel, signal?: AbortSignal): Promise<Retried> {
+  const waits: StepRetryingEvent[] = [];
+  const { message } = await streamWithRetry({
+    model,
+    request: REQUEST,
+    ...(signal ? { call: { signal } } : {}),
+    onRetrying: (event) => waits.push(event),
+  });
+  return { message, waits };
 }
 
 async function withServer(steps: readonly Step[], run: (server: Harness) => Promise<void>): Promise<void> {
@@ -108,72 +124,143 @@ async function withServer(steps: readonly Step[], run: (server: Harness) => Prom
   }
 }
 
-async function testMistralProviderRetry(): Promise<void> {
+function deepseekModel(baseUrl: string, connection: ModelSpec["connection"] = FAST): ChatModel {
+  return defineModel({ provider: "deepseek", model: "deepseek-v4-pro", baseUrl, apiKey: "k", connection });
+}
+
+const quotaExhausted: Step = status(429, {}, '{"error":{"message":"You exceeded your current quota","code":"insufficient_quota"}}');
+
+async function testRequestRetries(): Promise<void> {
   await withServer([rateLimited(), rateLimited(), ok("after 429")], async (server) => {
-    const message = await streamOnce(mistralModel(server.baseUrl));
+    const { message, waits } = await run(mistralModel(server.baseUrl, FAST));
     check("mistral: recovers from repeated 429s", message.stopReason === "stop" && textOf(message) === "after 429");
-    check("mistral: sent once per attempt", server.requests() === 3);
+    check("mistral: pi does not retry underneath", server.requests() === 3);
+    check("each wait is reported", waits.length === 2 && waits[0]!.attempt === 1 && waits[1]!.attempt === 2 && waits[0]!.maxAttempts === 10);
   });
 
-  await withServer([rateLimited("1"), ok("waited")], async (server) => {
-    const started = Date.now();
-    const message = await streamOnce(mistralModel(server.baseUrl));
-    check("mistral: Retry-After is honored", message.stopReason === "stop" && Date.now() - started >= 950);
-  });
-
-  await withServer([rateLimited()], async (server) => {
-    const message = await streamOnce(mistralModel(server.baseUrl, { maxRetries: 1 }));
-    check("mistral: exhausted retries report the provider's error", message.errorMessage === `Mistral API error (429): ${RATE_LIMIT_BODY}`);
-    check("mistral: maxRetries bounds the attempts", server.requests() === 2);
+  await withServer([rateLimited(), ok("after sdk 429")], async (server) => {
+    const { message, waits } = await run(deepseekModel(server.baseUrl));
+    check("openai-compatible: recovers from a 429", message.stopReason === "stop" && textOf(message) === "after sdk 429");
+    check("openai-compatible: pi does not retry underneath", server.requests() === 2 && waits.length === 1);
   });
 
   await withServer([rateLimited()], async (server) => {
-    await streamOnce(mistralModel(server.baseUrl, { maxRetries: 0 }));
-    check("mistral: maxRetries 0 turns retries off", server.requests() === 1);
+    const { message, waits } = await run(mistralModel(server.baseUrl, { ...FAST, maxRetries: 1 }));
+    check("exhausted retries report the provider's error", message.errorMessage === `Mistral API error (429): ${RATE_LIMIT_BODY}`);
+    check("maxRetries bounds the attempts", server.requests() === 2 && waits.length === 1);
+  });
+
+  await withServer([rateLimited()], async (server) => {
+    await run(mistralModel(server.baseUrl, { maxRetries: 0 }));
+    check("maxRetries 0 turns retries off", server.requests() === 1);
   });
 
   await withServer([status(400, {}, '{"message":"bad request"}')], async (server) => {
-    const message = await streamOnce(mistralModel(server.baseUrl));
-    check("mistral: a 400 fails at once", server.requests() === 1 && message.errorMessage?.includes("(400)") === true);
+    const { message, waits } = await run(mistralModel(server.baseUrl));
+    check("a 400 fails at once", server.requests() === 1 && waits.length === 0 && message.errorMessage?.includes("(400)") === true);
   });
 
-  await withServer([rateLimited("120")], async (server) => {
-    const message = await streamOnce(mistralModel(server.baseUrl));
-    check("mistral: an over-long Retry-After fails at once", server.requests() === 1 && message.errorMessage?.includes("Server requested 120s") === true);
+  await withServer([status(503, {}, '{"message":"no"}'), ok("after 503")], async (server) => {
+    check("a 5xx is retried", textOf((await run(deepseekModel(server.baseUrl))).message) === "after 503");
   });
 
   await withServer([dropConnection, ok("reconnected")], async (server) => {
-    const message = await streamOnce(mistralModel(server.baseUrl));
-    check("mistral: a connection failure is retried", message.stopReason === "stop" && textOf(message) === "reconnected");
+    check("a connection failure is retried", textOf((await run(mistralModel(server.baseUrl, FAST))).message) === "reconnected");
   });
+
+  await withServer([quotaExhausted], async (server) => {
+    const { waits } = await run(deepseekModel(server.baseUrl));
+    check("exhausted quota is a 429 that is not waited on", server.requests() === 1 && waits.length === 0);
+  });
+
+  await withServer([status(500, { "x-should-retry": "false" }, "{}")], async (server) => {
+    await run(deepseekModel(server.baseUrl));
+    check("x-should-retry: false is obeyed", server.requests() === 1);
+  });
+}
+
+async function testWaits(): Promise<void> {
+  await withServer([rateLimited("1"), ok("waited")], async (server) => {
+    const started = Date.now();
+    const { message, waits } = await run(mistralModel(server.baseUrl));
+    check("Retry-After sets the wait", message.stopReason === "stop" && Date.now() - started >= 950 && waits[0]!.delayMs >= 1_000 && waits[0]!.delayMs < 2_100);
+  });
+
+  await withServer([rateLimited("90"), ok("late")], async (server) => {
+    const controller = new AbortController();
+    const seen: number[] = [];
+    const running = streamWithRetry({
+      model: deepseekModel(server.baseUrl, {}),
+      request: REQUEST,
+      call: { signal: controller.signal },
+      onRetrying: (event) => {
+        seen.push(event.delayMs);
+        controller.abort();
+      },
+    }).catch(() => undefined);
+    await running;
+    check("a Retry-After past pi's old 60s limit is waited for", seen.length === 1 && seen[0]! >= 90_000 && seen[0]! < 91_100);
+  });
+
+  await withServer([rateLimited("400")], async (server) => {
+    const { message, waits } = await run(mistralModel(server.baseUrl));
+    check("a Retry-After past the 5 minute cap fails at once", server.requests() === 1 && waits.length === 0 && message.stopReason === "error");
+  });
+
+  const firstDelay = async (headers: Record<string, string>): Promise<number | undefined> => {
+    let delay: number | undefined;
+    await withServer([status(429, headers), ok("x")], async (server) => {
+      const controller = new AbortController();
+      await streamWithRetry({
+        model: deepseekModel(server.baseUrl, {}),
+        request: REQUEST,
+        call: { signal: controller.signal },
+        onRetrying: (event) => {
+          delay = event.delayMs;
+          controller.abort();
+        },
+      }).catch(() => undefined);
+    });
+    return delay;
+  };
+
+  const openaiReset = await firstDelay({ "x-ratelimit-remaining-tokens": "0", "x-ratelimit-reset-tokens": "1m30s", "x-ratelimit-remaining-requests": "5", "x-ratelimit-reset-requests": "1h" });
+  check("the exhausted OpenAI limit's reset sets the wait", openaiReset !== undefined && openaiReset >= 90_000 && openaiReset < 91_100);
+
+  const anthropicReset = await firstDelay({ "anthropic-ratelimit-input-tokens-remaining": "0", "anthropic-ratelimit-input-tokens-reset": new Date(Date.now() + 40_000).toISOString() });
+  check("the exhausted Anthropic limit's reset sets the wait", anthropicReset !== undefined && anthropicReset > 30_000 && anthropicReset < 41_100);
+
+  const noHint = await firstDelay({});
+  check("without a hint the first wait is about a second", noHint !== undefined && noHint >= 750 && noHint <= 1_000);
+
+  const zeroHint = await firstDelay({ "retry-after": "0" });
+  check("Retry-After: 0 falls back to backoff", zeroHint !== undefined && zeroHint >= 750 && zeroHint <= 1_000);
 
   await withServer([rateLimited("30")], async (server) => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 100);
     const started = Date.now();
-    const message = await streamOnce(mistralModel(server.baseUrl), controller.signal);
-    check("mistral: abort interrupts the backoff", message.stopReason === "aborted" && Date.now() - started < 5_000);
+    const failure = await run(mistralModel(server.baseUrl), controller.signal).catch((error: unknown) => error);
+    check("abort interrupts the wait", failure instanceof Error && failure.name === "AbortError" && Date.now() - started < 5_000);
   });
 }
 
-async function testSdkProviderRetry(): Promise<void> {
-  await withServer([rateLimited(), ok("after sdk 429")], async (server) => {
-    const model = defineModel({ provider: "deepseek", model: "deepseek-v4-pro", baseUrl: server.baseUrl, apiKey: "k" });
-    const message = await streamOnce(model);
-    check("openai-compatible: default retries recover from a 429", message.stopReason === "stop" && textOf(message) === "after sdk 429");
-    check("openai-compatible: sent once per attempt", server.requests() === 2);
+async function testCompleteWithRetry(): Promise<void> {
+  await withServer([rateLimited(), ok("completed")], async (server) => {
+    const message = await completeWithRetry(deepseekModel(server.baseUrl), REQUEST);
+    check("complete: recovers from a 429", textOf(message) === "completed" && server.requests() === 2);
+  });
+
+  await withServer([rateLimited()], async (server) => {
+    await completeWithRetry(deepseekModel(server.baseUrl), REQUEST, undefined, { maxRetries: 2 });
+    check("complete: a caller's policy overrides the model's", server.requests() === 3);
   });
 }
 
 async function testStreamWithRetryScope(): Promise<void> {
   await withServer([rateLimited()], async (server) => {
-    const retries: number[] = [];
-    const result = await streamWithRetry({
-      model: mistralModel(server.baseUrl, { maxRetries: 0 }),
-      request: REQUEST,
-      onRetrying: (event) => retries.push(event.attempt),
-    });
-    check("loop: a request that got no response is not retried here", result.stopReason === "error" && retries.length === 0 && server.requests() === 1);
+    const { waits } = await run(mistralModel(server.baseUrl, { ...FAST, maxRetries: 2 }));
+    check("loop: maxRetries sets the request budget alone", waits.length === 2 && waits.at(-1)!.maxAttempts === 2);
   });
 
   await withServer([dropAfter(""), ok("second try")], async (server) => {
@@ -232,8 +319,9 @@ async function testStreamWithRetryScope(): Promise<void> {
   check("loop: context overflow goes to compaction, not a retry", result.stopReason === "error" && attempts === 1);
 }
 
-await testMistralProviderRetry();
-await testSdkProviderRetry();
+await testRequestRetries();
+await testWaits();
+await testCompleteWithRetry();
 await testStreamWithRetryScope();
 
 const failures = checks.filter(([, passed]) => !passed);

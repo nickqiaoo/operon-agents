@@ -10,11 +10,22 @@ import {
   forceRefreshOAuth,
   type ModelRuntime,
 } from "./runtime.ts";
-import { createRetryingFetch } from "./retrying-fetch.ts";
-import type { CallOptions, LlmRequest } from "./model.ts";
+import type { CallOptions, HttpExchange, LlmRequest } from "./model.ts";
+import { DEFAULT_REQUEST_RETRY_POLICY, type RequestRetryPolicy } from "./request-retry.ts";
 
-/** Roughly 30–40s of backoff with pi's policy, enough to outlast a typical short rate-limit window. */
-const DEFAULT_PROVIDER_MAX_RETRIES = 8;
+/** Node's longest timer, which is what "no cap" on a retry wait amounts to. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** pi's adapters that send through `options.fetch`; the Google ones reject it outright. */
+const APIS_WITH_CUSTOM_FETCH: ReadonlySet<string> = new Set([
+  "anthropic-messages",
+  "azure-openai-responses",
+  "mistral-conversations",
+  "openai-codex-responses",
+  "openai-completions",
+  "openai-responses",
+  "pi-messages",
+]);
 
 /** A finished attempt: either resolved (terminal already pushed to the out stream) or a
  *  clean pre-content failure the caller may retry. */
@@ -44,12 +55,15 @@ export interface ModelConnection {
   readonly timeoutMs?: number;
   /**
    * Retries of a request that failed before its response started: 429, 408, 409, 5xx and
-   * connection failures, honoring `Retry-After`. Defaults to 8; 0 turns them off. These run
-   * inside the provider call and emit no events. A failure after the response has started is
-   * `streamWithRetry`'s. Bedrock and `pi-messages` do not read this setting.
+   * connection failures. Exponential backoff, honoring `Retry-After` and rate-limit reset
+   * headers. Defaults to 10; 0 turns them off. pi's own retries are always off, so
+   * `streamWithRetry` can report each wait.
    */
   readonly maxRetries?: number;
-  /** Cap on honoring a server-requested retry delay. pi defaults to 60s; 0 disables the cap. */
+  /**
+   * The longest single retry wait. Defaults to 5 minutes; 0 removes the cap. A server asking for
+   * longer fails the request at once.
+   */
   readonly maxRetryDelayMs?: number;
   /**
    * Wire transport. Today only `openai-codex-responses` (the ChatGPT-subscription backend)
@@ -118,19 +132,22 @@ export class ChatModel {
   /** Build-time settings (`apiKey` + `connection`) flattened once into pi's option shape.
    *  Every request starts from these; `params` and `providerOptions` layer on top. */
   private readonly requestDefaults: Omit<ModelsSimpleStreamOptions, "signal">;
+  /** Read by `streamWithRetry` and `completeWithRetry`, which own every retry. */
+  readonly requestRetry: RequestRetryPolicy;
 
   constructor(spec: ModelSpec) {
     this.runtime = spec.runtime ?? createModelRuntime();
     this.piModel = withAnthropicToolChanges(resolvePiModel(spec, this.runtime));
-    const maxRetries = spec.connection?.maxRetries ?? DEFAULT_PROVIDER_MAX_RETRIES;
-    const maxRetryDelayMs = spec.connection?.maxRetryDelayMs;
+    const { maxRetries, maxRetryDelayMs, ...transport } = spec.connection ?? {};
+    this.requestRetry = {
+      ...DEFAULT_REQUEST_RETRY_POLICY,
+      ...(maxRetries !== undefined ? { maxRetries } : {}),
+      ...(maxRetryDelayMs !== undefined ? { maxDelayMs: maxRetryDelayMs === 0 ? MAX_TIMER_MS : maxRetryDelayMs } : {}),
+    };
     this.requestDefaults = {
       ...(spec.apiKey !== undefined ? { apiKey: spec.apiKey } : {}),
-      ...spec.connection,
-      maxRetries,
-      ...(this.piModel.api === "mistral-conversations"
-        ? { fetch: createRetryingFetch({ maxRetries, ...(maxRetryDelayMs !== undefined ? { maxRetryDelayMs } : {}) }) }
-        : {}),
+      ...transport,
+      maxRetries: 0,
     };
     this.id = this.piModel.id;
     this.provider = this.piModel.provider;
@@ -177,7 +194,9 @@ export class ChatModel {
   }
 
   private options(req: LlmRequest, call?: CallOptions): ModelsSimpleStreamOptions {
-    return toOptions(req, call, this.requestDefaults);
+    const options = toOptions(req, call, this.requestDefaults);
+    if (call?.onHttpExchange === undefined || !APIS_WITH_CUSTOM_FETCH.has(this.api)) return options;
+    return { ...options, fetch: observingFetch(options.fetch, call.onHttpExchange) };
   }
 
   private async streamWithAuthRetry(
@@ -260,6 +279,24 @@ export class ChatModel {
       timestamp: Date.now(),
     };
   }
+}
+
+/** Reports each exchange and changes nothing about it. */
+function observingFetch(
+  inner: typeof globalThis.fetch | undefined,
+  observe: (exchange: HttpExchange) => void,
+): typeof globalThis.fetch {
+  return async (input, init) => {
+    let response: Response;
+    try {
+      response = await (inner ?? globalThis.fetch)(input, init);
+    } catch (error) {
+      observe({ headers: {} });
+      throw error;
+    }
+    observe({ status: response.status, headers: Object.fromEntries(response.headers) });
+    return response;
+  };
 }
 
 function messageOf(error: unknown): string {
