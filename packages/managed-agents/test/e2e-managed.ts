@@ -4,7 +4,6 @@ import { join } from "node:path";
 import {
   createHarness,
   createModelManager,
-  defineModel,
   DiskSessionRepository,
   SessionProjection,
 } from "operon-agents";
@@ -47,7 +46,7 @@ function createFauxModel() {
   if (descriptor === undefined) throw new Error("faux model unavailable");
   return {
     provider,
-    model: defineModel({ manager: runtime, descriptor }),
+    harnessModel: { model: `${provider.provider.id}/${descriptor.id}`, modelManager: runtime },
     close: () => runtime.models.deleteProvider(provider.provider.id),
   };
 }
@@ -55,12 +54,12 @@ function createFauxModel() {
 async function start(
   home: string,
   work: string,
-  model: ReturnType<typeof createFauxModel>["model"],
+  harnessModel: ReturnType<typeof createFauxModel>["harnessModel"],
 ) {
   const repository = new DiskSessionRepository(home);
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository }),
-    model,
+    ...harnessModel,
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });
@@ -141,7 +140,7 @@ try {
     fauxAssistantMessage("second answer", { stopReason: "stop" }),
     fauxAssistantMessage("third answer", { stopReason: "stop" }),
   ]);
-  let running = await start(home, work, faux.model);
+  let running = await start(home, work, faux.harnessModel);
   let unauthorized = false;
   try {
     await new ManagedAgentsClient({ baseUrl: running.baseUrl }).sessions.list();
@@ -378,7 +377,7 @@ try {
   await filteredIterator.return?.();
 
   await running.managed.close();
-  running = await start(home, work, faux.model);
+  running = await start(home, work, faux.harnessModel);
   const reopened = await running.client.sessions.retrieve(session.id);
   check("restart: metadata and conversation reopen by id", reopened.id === session.id && reopened.agent.id === "default");
   const afterRestart = await listAllEvents(running.client, session.id);

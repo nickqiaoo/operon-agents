@@ -15,8 +15,6 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createModelManager,
-  defineModel,
-  type ChatModel,
   type ModelManager,
 } from "operon-agents-core";
 
@@ -30,9 +28,7 @@ export {
 export type { Api, Context, FauxResponseStep, Model, ToolCall };
 
 export interface FauxChatProvider extends FauxProviderHandle {
-  readonly runtime: ModelManager;
-  getChatModel(): ChatModel;
-  getChatModel(modelId: string): ChatModel | undefined;
+  harnessModel(): { readonly model: string; readonly modelManager: ModelManager };
   unregister(): void;
 }
 
@@ -44,22 +40,9 @@ export function registerFauxProvider(
   const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(handle.provider);
 
-  function getChatModel(modelId?: string): ChatModel | undefined {
-    const descriptor = modelId === undefined
-      ? handle.getModel()
-      : handle.getModel(modelId);
-    return descriptor === undefined
-      ? undefined
-      : defineModel({
-          manager: runtime,
-          descriptor: descriptor as Model<Api>,
-        });
-  }
-
   return {
     ...handle,
-    runtime,
-    getChatModel: getChatModel as FauxChatProvider["getChatModel"],
+    harnessModel: () => ({ model: `${handle.provider.id}/${handle.getModel().id}`, modelManager: runtime }),
     unregister(): void {
       runtime.models.deleteProvider(handle.provider.id);
     },

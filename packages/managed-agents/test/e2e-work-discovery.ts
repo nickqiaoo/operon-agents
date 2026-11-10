@@ -40,7 +40,7 @@ function fixture(name: string, responses: number, options: { readonly ttlMs?: nu
   const sessionWork = new MemorySessionWork({ repository, ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}) });
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const assistants = async (service: SessionService, id: string): Promise<number> =>

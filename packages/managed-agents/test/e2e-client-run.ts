@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   const environments = new StaticEnvironmentRegistry({ workspace: { workDir: work } });
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     // `manual` with no approval handler registered anywhere is what makes a tool call pause
     // durably: there is no live responder to ask, so the run persists the request and stops.
     permission: { mode: "manual" },

@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, createModelManager, defineModel, DiskSessionRepository } from "operon-agents";
+import { createHarness, createModelManager, DiskSessionRepository } from "operon-agents";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import {
   DiskManagedSessionMetadataStore,
@@ -41,11 +41,11 @@ async function main(): Promise<void> {
   runtime.models.setProvider(provider.provider);
   const descriptor = provider.getModel();
   if (descriptor === undefined) throw new Error("faux model unavailable");
-  const model = defineModel({ manager: runtime, descriptor });
+  const model = `${provider.provider.id}/${descriptor.id}`;
 
   try {
     const repository = new DiskSessionRepository(join(root, "home"));
-    const harness = createHarness({ infrastructure: () => ({ sessionRepository: repository }), model, permission: { mode: "yolo" } });
+    const harness = createHarness({ infrastructure: () => ({ sessionRepository: repository }), model, modelManager: runtime, permission: { mode: "yolo" } });
     const host = new SessionService({
       repository,
       work: new MemorySessionWork({ repository }),

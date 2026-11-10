@@ -41,7 +41,7 @@ function fixture(name: string, options: { readonly permission?: "yolo" | "manual
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: options.permission ?? "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });

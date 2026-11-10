@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const broadcaster = new MemoryEventBroadcaster();
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });

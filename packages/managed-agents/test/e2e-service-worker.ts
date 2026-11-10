@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   const service = new SessionService({ repository, work: sessionWork, environments, metadataStore });
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork });
@@ -152,7 +152,7 @@ async function cursorAdvancesOnceTheInputIsInTheConversation(): Promise<void> {
 
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });

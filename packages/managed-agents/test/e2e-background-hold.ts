@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });

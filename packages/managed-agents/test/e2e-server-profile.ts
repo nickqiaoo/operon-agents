@@ -74,7 +74,7 @@ async function scenario(name: string, options: FixtureOptions) {
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, ...(options.parts ?? {}) }),
     ...(options.session !== undefined ? { sessionCapabilities: options.session } : {}),
-    model: faux.getChatModel(),
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
   });
   const sessionWork = new MemorySessionWork({ repository });
