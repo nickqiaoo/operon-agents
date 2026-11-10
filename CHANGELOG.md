@@ -7,6 +7,15 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.28] — 2026-11-10
+
+### Added
+
+- Auto approval can use a catalog decision model to assess tool calls. The decision judge asks
+  for confirmation when the model is uncertain, unavailable, or times out (`operon-agents-core`).
+- `ProviderManager.resolveReviewModel` and `createAutoApprover` let callers use the same model
+  setting for chat and decision judges (`operon-agents-core`).
+
 ## [0.1.0-alpha.27] — 2026-11-09
 
 ### Fixed
