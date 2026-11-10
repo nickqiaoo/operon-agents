@@ -15,10 +15,10 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
-  createModelRuntime,
+  createModelManager,
   defineModel,
   type ChatModel,
-  type ModelRuntime,
+  type ModelManager,
 } from "operon-agents-core";
 
 export {
@@ -37,9 +37,11 @@ export function offeredToolNames(context: Pick<Context, "messages">): string[] {
 }
 
 export interface FauxChatProvider extends FauxProviderHandle {
-  readonly runtime: ModelRuntime;
+  readonly runtime: ModelManager;
   getChatModel(): ChatModel;
   getChatModel(modelId: string): ChatModel | undefined;
+  /** The `model` and `modelManager` a harness needs to run on this provider. */
+  harnessModel(): { readonly model: string; readonly modelManager: ModelManager };
   unregister(): void;
 }
 
@@ -48,7 +50,7 @@ export function registerFauxProvider(
   options?: RegisterFauxProviderOptions,
 ): FauxChatProvider {
   const handle = fauxProvider(options);
-  const runtime = createModelRuntime({ builtins: false });
+  const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(handle.provider);
 
   function getChatModel(modelId?: string): ChatModel | undefined {
@@ -58,7 +60,7 @@ export function registerFauxProvider(
     return descriptor === undefined
       ? undefined
       : defineModel({
-          runtime,
+          manager: runtime,
           descriptor: descriptor as Model<Api>,
         });
   }
@@ -67,6 +69,7 @@ export function registerFauxProvider(
     ...handle,
     runtime,
     getChatModel: getChatModel as FauxChatProvider["getChatModel"],
+    harnessModel: () => ({ model: `${handle.provider.id}/${handle.getModel().id}`, modelManager: runtime }),
     unregister(): void {
       runtime.models.deleteProvider(handle.provider.id);
     },

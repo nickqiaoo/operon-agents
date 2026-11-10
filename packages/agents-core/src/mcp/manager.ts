@@ -26,7 +26,7 @@ export type McpTransportKind = "stdio" | "http";
  * pushed out to a sandbox. On a single-tenant local host that is exactly right. On a server it
  * is four problems at once:
  *
- *  - LIFECYCLE. `HarnessParts.mcpServers` is "one set of connections per process", which holds
+ *  - LIFECYCLE. `HarnessInfrastructure.mcpServers` is "one set of connections per process", which holds
  *    inside one process and stops holding the moment the server runs as more than one replica:
  *    each replica spawns its own children, and a rolling restart takes them with it.
  *  - FAULT DOMAIN. A leaking or crashing `npx`-launched server takes down a process that is
@@ -616,7 +616,7 @@ export function assertMcpTransportsPermitted(
 
 /**
  * The controller set behind a group of configured servers — buildable on its own so a HARNESS
- * can hold one set of connections for every session it serves (`HarnessParts.mcpServers`), or a session can
+ * can hold one set of connections for every session it serves (`HarnessInfrastructure.mcpServers`), or a session can
  * own a private set (`mcpServersCapability`). Nothing connects until `handle.connect()`.
  *
  * Transport admission is checked HERE, while the set is being built, and not where the

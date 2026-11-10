@@ -12,7 +12,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AppServer, nodeStreamTransport } from "operon-agents/app-server";
-import { createHarness, defineModel, filesystemTools, bashTool, type ChatModel } from "operon-agents";
+import { createHarness, filesystemTools, bashTool } from "operon-agents";
 
 const MODEL = process.env.MODEL ?? "anthropic/claude-opus-4-8";
 const WORK = join(process.cwd(), "workspace");
@@ -24,7 +24,7 @@ console.info = console.error;
 console.debug = console.error;
 
 const harness = createHarness({
-  model: resolveModel(MODEL),
+  model: MODEL,
   workDir: WORK,
   appendSystemPrompt: "Use the tools; explain briefly what you do.",
   tools: [...filesystemTools(), bashTool],
@@ -42,9 +42,3 @@ await new AppServer({
   serverInfo: { name: "example-app-server", version: "0.0.0" },
   log: (m) => process.stderr.write(`[server] ${m}\n`),
 }).serve();
-
-function resolveModel(id: string): ChatModel {
-  const slash = id.indexOf("/");
-  if (slash <= 0) throw new Error(`MODEL must be "provider/model", got "${id}"`);
-  return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-}

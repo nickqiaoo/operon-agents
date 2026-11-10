@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const gateEntered = new Promise<void>((resolve) => { enteredGate = resolve; });
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{
       id: "projection-gate",
@@ -93,8 +93,8 @@ async function main(): Promise<void> {
   {
     const repository = new MemorySessionRepository();
     const crashHarness = createHarness({
-      harness: () => ({ sessionRepository: repository }),
-      model: faux.getChatModel()!,
+      infrastructure: () => ({ sessionRepository: repository }),
+      ...faux.harnessModel(),
       permission: { mode: "yolo" },
     });
     const crashed = await crashHarness.createSession();
@@ -185,7 +185,7 @@ async function main(): Promise<void> {
       },
     };
     faux.setResponses([fauxAssistantMessage("counted", { stopReason: "stop" })]);
-    const harness2 = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
+    const harness2 = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
     const counted = await harness2.createSession();
     const { store } = stores.get(counted.id)!;
     check("open: full-log readRecords happens exactly once", store.reads === 1);

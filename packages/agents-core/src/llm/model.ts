@@ -56,7 +56,6 @@ export interface HttpExchange {
 
 export interface CallOptions {
   readonly signal?: AbortSignal;
-  readonly timeoutMs?: number;
   /**
    * Called after every HTTP request, failed ones included, unlike pi's `onResponse`. Not called
    * for APIs that accept no custom `fetch`: Google, Vertex and Bedrock.

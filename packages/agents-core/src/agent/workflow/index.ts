@@ -13,6 +13,7 @@ export {
 export { workflowPrompt } from "./prompt.ts";
 export {
   makeStructuredOutputTool,
+  cloneAgentWithModel,
   cloneAgentWithTool,
   validateValue,
   structuredInstruction,

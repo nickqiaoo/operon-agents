@@ -14,7 +14,6 @@ import {
   ConsoleSink,
   createHarness,
   defineAgent,
-  defineModel,
   DirectFetchProvider,
   DiskSessionRepository,
   fetchUrlTool,
@@ -56,12 +55,7 @@ const tools: Tool[] = [...(search ? [webSearchTool(search)] : []), fetchUrlTool(
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
   model: MODEL,
-  resolveModel(id) {
-    const slash = id.indexOf("/");
-    if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
-    return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-  },
-  harness: () => {
+  infrastructure: () => {
     return {
       sessionRepository: repository,
       logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
@@ -76,7 +70,7 @@ const harness = createHarness({
   workflowTool: false,
   // Only what a long chat needs. The task/background/skills capabilities would add tools this
   // agent has no use for.
-  session: () => [compactionCapability({ maxContextTokens: 200_000 })],
+  sessionCapabilities: () => [compactionCapability({ maxContextTokens: 200_000 })],
   workDir: WORK,
   // Web tools are always allowed by policy; nothing else exists to ask about. If you re-enable
   // a tool that prompts (Bash, Edit), the chat has no approval surface: the session will park

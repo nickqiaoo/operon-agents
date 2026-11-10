@@ -40,23 +40,19 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import {
-  DecisionModel,
-  createModelRuntime,
+  NO_KEY_PLACEHOLDER,
+  PROVIDER_APIS,
+  createModelManager,
   createProvider,
-  defineModel,
-  lazyApi,
+  dialectStreams,
+  endpointModel,
   type Api,
   type ApiKeyAuth,
-  type ChatModel,
   type Model,
-  type ModelRuntime,
+  type ModelManager,
+  type ProviderApi,
   type RefreshModelsContext,
 } from "operon-agents-core";
-import type { Provider } from "@earendil-works/pi-ai";
-
-/** The wire dialects a configured endpoint can speak. Almost everything speaks the first. */
-export const PROVIDER_APIS = ["openai-completions", "openai-responses", "anthropic-messages"] as const;
-export type ProviderApi = (typeof PROVIDER_APIS)[number];
 
 const ModelOverrideSchema = z.object({
   name: z.string().optional(),
@@ -128,13 +124,6 @@ export async function loadProviderConfigs(homeDir: string): Promise<LoadedProvid
   }
 }
 
-/**
- * What a keyless endpoint sends as its bearer token. The engine's OpenAI dialect refuses to build a
- * client without one, and a local server that wants no key ignores whatever arrives; pi uses the
- * same literal for the same reason.
- */
-const NO_KEY_PLACEHOLDER = "unused";
-
 /** The key this provider authenticates with, or undefined when its env var is declared but unset. */
 function configuredKey(entry: ProviderEntry): string | undefined {
   if (entry.api_key !== undefined) return entry.api_key;
@@ -173,12 +162,9 @@ function configAuth(providerId: string, entry: ProviderEntry): ApiKeyAuth {
   };
 }
 
-/** Zero cost: a self-hosted endpoint has no per-token price, and a wrong number is worse than none. */
-const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-
 function modelFrom(providerId: string, entry: ProviderEntry, modelId: string): Model<Api> {
   const override = entry.models[modelId];
-  return {
+  return endpointModel({
     id: modelId,
     name: override?.name ?? modelId,
     api: (override?.api ?? entry.api) as Api,
@@ -186,11 +172,10 @@ function modelFrom(providerId: string, entry: ProviderEntry, modelId: string): M
     baseUrl: entry.base_url,
     reasoning: override?.reasoning ?? entry.reasoning,
     input: (override?.vision ?? entry.vision) ? ["text", "image"] : ["text"],
-    cost: NO_COST,
     contextWindow: override?.context_window ?? entry.context_window,
     maxTokens: override?.max_output_tokens ?? entry.max_output_tokens,
-    ...(entry.headers !== undefined ? { headers: entry.headers } : {}),
-  };
+    headers: entry.headers,
+  });
 }
 
 /** The model ids an OpenAI-compatible `/models` response lists, in the order the endpoint gave. */
@@ -253,111 +238,7 @@ export function providerFromConfig(providerId: string, entry: ProviderEntry) {
   });
 }
 
-/** pi's API implementations load on first use, so an unused dialect is never imported. */
-function dialectStreams(api: ProviderApi) {
-  switch (api) {
-    case "anthropic-messages":
-      return lazyApi(() => import("@earendil-works/pi-ai/api/anthropic-messages"));
-    case "openai-responses":
-      return lazyApi(() => import("@earendil-works/pi-ai/api/openai-responses"));
-    case "openai-completions":
-      return lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions"));
-  }
-}
-
-/**
- * One model, named by a host that already knows which it wants.
- *
- * The picked fields are pi's own. `baseUrl` is used exactly as given; without it, pi's catalog says
- * where each model lives. The others describe a model the catalog lacks: a catalogued one keeps its own.
- */
-export interface ChatModelConfig
-  extends Readonly<Partial<Pick<Model<Api>, "baseUrl" | "contextWindow" | "maxTokens" | "input" | "reasoning">>> {
-  /** pi's provider id to use its catalog; any other name needs `api` and `baseUrl`. */
-  readonly provider: string;
-  readonly model: string;
-  readonly apiKey?: string;
-  /** Marks a custom endpoint, built with `createProvider`. Only the dialects it can load. */
-  readonly api?: ProviderApi;
-}
-
-/** An id newer than a catalog provider's list runs on the API of that provider's default endpoint. */
-function modelNewerThanCatalog(provider: Provider, config: ChatModelConfig): Model<Api> {
-  const models = provider.getModels();
-  const template = models.find((model) => model.baseUrl === provider.baseUrl) ?? models[0];
-  if (template === undefined) throw new Error(`Provider "${provider.id}" lists no models to run "${config.model}" like.`);
-  return {
-    id: config.model,
-    name: config.model,
-    api: template.api,
-    provider: provider.id,
-    baseUrl: template.baseUrl,
-    reasoning: config.reasoning ?? false,
-    input: [...(config.input ?? ["text"])],
-    cost: NO_COST,
-    contextWindow: config.contextWindow ?? 128_000,
-    maxTokens: config.maxTokens ?? 8_192,
-  };
-}
-
-function catalogChatModel(config: ChatModelConfig): ChatModel {
-  const runtime = createModelRuntime();
-  const provider = runtime.models.getProvider(config.provider);
-  if (provider === undefined) {
-    throw new Error(`Provider "${config.provider}" is not in pi's catalog. Set \`api\` and \`baseUrl\` for a custom endpoint.`);
-  }
-  const descriptor = runtime.models.getModel(config.provider, config.model) ?? modelNewerThanCatalog(provider, config);
-  return defineModel({
-    runtime,
-    descriptor: config.baseUrl === undefined ? descriptor : { ...descriptor, baseUrl: config.baseUrl },
-    ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
-  });
-}
-
-function customChatModel(config: ChatModelConfig, api: ProviderApi): ChatModel {
-  if (config.baseUrl === undefined) throw new Error(`Custom provider "${config.provider}" needs a \`baseUrl\`.`);
-  const entry = ProviderEntrySchema.parse({
-    base_url: config.baseUrl,
-    api,
-    api_key: config.apiKey,
-    fetch_models: false,
-    context_window: config.contextWindow,
-    max_output_tokens: config.maxTokens,
-    reasoning: config.reasoning,
-    vision: config.input?.includes("image"),
-    models: { [config.model]: {} },
-  });
-  const runtime = createModelRuntime({ builtins: false });
-  runtime.models.setProvider(providerFromConfig(config.provider, entry));
-  return defineModel({ runtime, descriptor: modelFrom(config.provider, entry, config.model) });
-}
-
-/** Build the `ChatModel` a host picked: from pi's catalog, or from `api` and `baseUrl` for a custom endpoint. */
-export function resolveChatModel(config: ChatModelConfig): ChatModel {
-  return config.api === undefined ? catalogChatModel(config) : customChatModel(config, config.api);
-}
-
-export interface DecisionModelConfig {
-  /** pi's provider id: decision models only exist in its catalog. */
-  readonly provider: string;
-  readonly model: string;
-  readonly apiKey: string;
-}
-
-/**
- * The decision model a config names, or undefined when it is an LLM. An id catalogued as both
- * (OpenAI's `gpt-6-luna`) counts as an LLM, and an id the catalog doesn't know can only be one.
- */
-export async function resolveDecisionModel(config: DecisionModelConfig): Promise<DecisionModel | undefined> {
-  const runtime = createModelRuntime();
-  if (runtime.models.getModel(config.provider, config.model) !== undefined) return undefined;
-  const descriptor = runtime.models.getModelOfType("classifier", config.provider, config.model);
-  if (descriptor === undefined) return undefined;
-  await runtime.credentials.modify(config.provider, async () => ({ type: "api_key", key: config.apiKey }));
-  return new DecisionModel({ runtime, descriptor });
-}
-
-export interface ModelRuntimeFromConfigOptions {
+export interface ModelManagerFromConfigOptions {
   readonly homeDir: string;
   /**
    * Ask each configured endpoint for its models. Default true. With it off the runtime carries
@@ -373,14 +254,12 @@ export interface ModelRuntimeFromConfigOptions {
  * One model runtime carrying the engine's built-in providers plus everything in
  * `<homeDir>/providers.toml`, with each configured endpoint asked what it serves.
  *
- * Hand the same runtime to `defineModel({ provider, model, runtime })` and to
- * `createLocalHarness({ modelRuntime })`, so the model a host resolves and the models its sessions
- * can switch to come from one registry.
+ * Hand it to `createLocalHarness({ modelManager })`, so every model a session runs on comes from it.
  */
-export async function createModelRuntimeFromConfig(
-  options: ModelRuntimeFromConfigOptions,
-): Promise<ModelRuntime> {
-  const runtime = createModelRuntime();
+export async function createModelManagerFromConfig(
+  options: ModelManagerFromConfigOptions,
+): Promise<ModelManager> {
+  const runtime = createModelManager();
   const { providers, warnings } = await loadProviderConfigs(options.homeDir);
   for (const warning of warnings) options.onWarning?.(warning);
 

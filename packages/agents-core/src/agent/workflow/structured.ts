@@ -88,6 +88,11 @@ export function cloneAgentWithTool<TContext>(sub: Agent<TContext>, extra: Tool):
   });
 }
 
+/** Clone an agent onto another model: the script's `agent(prompt, { model })`. */
+export function cloneAgentWithModel<TContext>(sub: Agent<TContext>, model: string): Agent<TContext> {
+  return new Agent<TContext>({ ...sub, model });
+}
+
 /** Instruction appended to the prompt so the subagent knows to call the tool. */
 export function structuredInstruction(schema: Record<string, unknown>): string {
   return (

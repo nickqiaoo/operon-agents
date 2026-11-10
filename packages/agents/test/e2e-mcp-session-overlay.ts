@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider, type Context, offeredToolNames } from "./faux.ts";
-import { createHarness, createLocalHarness, createMcpServers, defaultCapabilities, mcpServersCapability, type HarnessParts, type McpServersHandle } from "../src/index.ts";
+import { createHarness, createLocalHarness, createMcpServers, defaultCapabilities, mcpServersCapability, type HarnessInfrastructure, type McpServersHandle } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -52,10 +52,10 @@ async function main(): Promise<void> {
     let shared: McpServersHandle | undefined;
 
     const harness = createHarness({
-      model,
+      ...faux.harnessModel(),
       workDir: dir,
       permission: { mode: "yolo" },
-      harness: async () => {
+      infrastructure: async () => {
         const servers = createMcpServers(
           { ws: { transport: "http", url: "http://ws.example" }, dup: { transport: "http", url: "http://dup.example" } },
           { transportFactory: transport("ws_tool", ws) },
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
         return { mcpServers: servers, close: async () => { wsShutdowns += 1; await servers.shutdown(); } };
       },
       // What `localHarnessOptions` wires, minus the transport injection tests need.
-      session: (ctx) => [
+      sessionCapabilities: (ctx) => [
         ...defaultCapabilities({ shared: shared !== undefined ? { mcpServers: shared } : {} }).filter((c) => c.name !== "mcp"),
         mcpServersCapability(ctx.mcpServers ?? {}, {
           transportFactory: transport("own_tool", own),
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     const pinOwn = { connects: 0, closes: 0 };
     let pinWsShutdowns = 0;
     let pinShared: McpServersHandle | undefined;
-    const pinnedParts = async (): Promise<HarnessParts> => {
+    const pinnedParts = async (): Promise<HarnessInfrastructure> => {
       const servers = createMcpServers(
         { ws: { transport: "http", url: "http://ws.example" } },
         { transportFactory: transport("ws_tool", pinWs) },
@@ -136,12 +136,12 @@ async function main(): Promise<void> {
     };
 
     const pinned = createHarness({
-      model,
+      ...faux.harnessModel(),
       workDir: dir,
       permission: { mode: "yolo" },
-      harness: pinnedParts,
+      infrastructure: pinnedParts,
       // No `sharedServers` passed: this session is pinned to its own, and must not be backfilled.
-      session: (ctx) => [
+      sessionCapabilities: (ctx) => [
         ...defaultCapabilities({ shared: {} }).filter((c) => c.name !== "mcp"),
         mcpServersCapability(ctx.mcpServers ?? {}, { transportFactory: transport("own_tool", pinOwn) }),
       ],
@@ -172,11 +172,11 @@ async function main(): Promise<void> {
     // than quietly resolving the very set it was told to ignore.
     const misassemblyLogs: string[] = [];
     const misassembled = createHarness({
-      model,
+      ...faux.harnessModel(),
       workDir: dir,
       permission: { mode: "yolo" },
-      harness: () => ({ logger: { log: (_level, message, fields) => misassemblyLogs.push(`${message} ${JSON.stringify(fields ?? {})}`) } }),
-      session: () => [
+      infrastructure: () => ({ logger: { log: (_level, message, fields) => misassemblyLogs.push(`${message} ${JSON.stringify(fields ?? {})}`) } }),
+      sessionCapabilities: () => [
         ...defaultCapabilities({ shared: {} }).filter((c) => c.name !== "mcp"),
         mcpServersCapability({}),
       ],
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
 
     // ── the default local preset actually consumes `createSession({ mcpServers })` ──
     const local = await createLocalHarness({
-      model,
+      ...faux.harnessModel(),
       workDir: dir,
       homeDir,
       permission: { mode: "yolo" },

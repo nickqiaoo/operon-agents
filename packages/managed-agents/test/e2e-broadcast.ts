@@ -147,7 +147,7 @@ async function realTurnProducesDeltas(): Promise<void> {
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const broadcaster = new MemoryEventBroadcaster();
   const harness = createHarness({
-    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
+    infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

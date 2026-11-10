@@ -63,7 +63,7 @@ and inner rings know nothing of outer ones. That is the onion.
 | ② Capability | `agents-core/src/capabilities/`, `mcp/`, `plugins/` | Detachable modules that **change run semantics**, participating in the loop via `LoopHooks`/tools/injectors/gates/policies | Not cross-session, not hot-reloadable, never "skipped" (present means in effect) |
 | ③ Harness | `packages/agents` (`harness.ts`, `extensions/`, `local.ts`) | The process-level runtime: session fleet, service registry, extension runtime and loader, deployment presets | Contains no new engine behavior (pure composition of core primitives) |
 | ④ Extension | `packages/agents/src/cron/`, `agents-peers`, `examples/*-extension` | Behavior **on top of** the engine: tools, injection, commands, events, shared resources; attachable, time-limited, absent-tolerant | Carries no vetoing or safety logic |
-| ⑤ Host | `packages/agents/src/app-server/`, `agents-tui`, `managed-agents` | Exposes the harness to a person or a network: stdio JSON-RPC / SSE+HTTP / terminal | Does not change the engine; only injects backends |
+| ⑤ Host | `packages/agents/src/app-server/`, `managed-agents` | Exposes the harness to a person or a network: stdio JSON-RPC / SSE+HTTP / terminal | Does not change the engine; only injects backends |
 | ⑥ Adapter | `sandbox`, `os-sandbox`, `store/{disk,pg,redis}.ts`, `llm/` providers | Implements the three ports the kernel defines (Environment / SessionStore / ChatModel) | Contains no business logic |
 
 **Why an onion rather than a flat set of packages**: this framework serves two deployments at once
@@ -102,7 +102,7 @@ frame through `deriveChild`, which is the **only** place in the project that min
 |---|---|---|---|
 | Execution substrate | `Environment` (`tool/environment.ts`) | `LocalEnvironment`, `NullEnvironment`, SSH | `operon-sandbox` (direct E2B/Cloudflare vendor SDKs), `operon-os-sandbox` (Seatbelt/bubblewrap wrapping LocalEnvironment) |
 | Persistence | `SessionStore` + `SessionRepository` (`store/`) | memory, disk (JSONL) | pg, redis — **four backends, one contract** |
-| Model | `ChatModel` / `ModelRuntime` (`llm/`) | provider registry | each vendor |
+| Model | `ChatModel` / `ModelManager` (`llm/`) | provider registry | each vendor |
 
 The design stance of `Environment` deserves its own note: `RunCommandOptions` expresses **intent**
 (timeoutMs, maxOutputBytes, onOutput) which each backend honors with its own native means, rather than
@@ -237,11 +237,11 @@ which is why an outer ring is required:
 | Only the harness has this | Where it shows up |
 |---|---|
 | **Another session** | `ExtensionHost.newSession / fork / openSession / listSessions`; the peers spawn factory |
-| **A process-level shared instance** | `HarnessParts`, what the `harness` hook returns (§5.7); extension services sit beside it by id in `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
+| **A process-level shared instance** | `HarnessInfrastructure`, what the `infrastructure` hook returns (§5.7); extension services sit beside it by id in `ServiceRegistry` (`extensions/services.ts`) — indirect handles, lease counting, one generation serving only its own |
 | **A per-directory shared instance** | does not exist. Share it with the whole process, or build it per session (§5.7) |
 | **Extension runtime** | `extensionCapability` (`extensions/index.ts`) mounts each extension as its own `detachable` capability, named by its id; `ExtensionRuntime` (`extensions/runtime.ts`) translates between the engine and the extension API — `api` registrations into capability parts, hook slots **one by one** into extension events, each handler under its own budget. Assembly, attach/detach at a run boundary, state and records are the engine's, as for any capability |
 | **File loading** | `extensions/loader.ts`: file → import → value → attach; manual approval accounted by mtime |
-| **Model provider registry** | `HarnessParts.modelRuntime`, returned by the `harness` hook |
+| **Model provider registry** | `HarnessOptions.modelManager`: one per harness, edited in place through `harness.modelManager` — `register()` for plain configuration, `models.setProvider()` for a provider built with pi's `createProvider` |
 | **Deployment presets** | `createLocalHarness` in `local.ts`: disk sessions, LocalEnvironment, rolling logs, file-based MCP credentials, disk agent profiles, the cron extension |
 
 The comment on `createHarness()` pins down its nature: **"pure composition of core primitives — no new
@@ -359,7 +359,7 @@ Two layers:
 There are exactly TWO lifetimes, and nothing between them:
 
 ```
-Process   (one per harness)    HarnessParts: the repository, logger, model runtime, default
+Process   (one per harness)    HarnessInfrastructure: the repository, logger, model runtime, default
                                environment, one set of MCP connections, one skill scan, plus the
                                `harness` half of every extension (by id, in `ServiceRegistry`)
  └ Session (one per session)   everything a capability opens: goal, plan, todo, background, mcp, …
@@ -384,12 +384,12 @@ what a server does anyway, since its sessions do not share a filesystem.
 `Session.close` runs each capability's `closeSession` in reverse open order, each under a
 deadline, each failure isolated and logged; an `invariant` capability that fails to open takes the
 ones already opened down before the error leaves; `harness.close` closes every session, then
-unregisters the extension services newest-first, then calls `HarnessParts.close()` — the one seam
+unregisters the extension services newest-first, then calls `HarnessInfrastructure.close()` — the one seam
 by which a preset tears down what it opened (its MCP connections, its handles).
 
 The rule for what may sit in the process tier: **it must hold for every session in the process.**
 Anything derived from an ENVIRONMENT only if it is the harness's environment: the local preset
-scans skills through `HarnessParts.environment`, publishes no shared registry when that is a
+scans skills through `HarnessInfrastructure.environment`, publishes no shared registry when that is a
 per-session factory, and a session that brings its own environment (`createSession({ environment })`)
 scans through it instead — the catalog the model sees is always the one whose scripts its tools
 can reach. Where MCP servers RUN is a separate axis: stdio servers are spawned by the host process
@@ -430,7 +430,7 @@ for opening a seam: at least two imaginable consumers, and core remains ignorant
 
 - `app-server`: NDJSON JSON-RPC over stdio, the protocol a desktop client uses to drive the harness;
   the generic `runCommand` RPC carries extension commands.
-- `agents-tui`: a terminal client (internal debugging only).
+- `agents-tui`: a terminal client, no longer maintained and excluded from the workspace build.
 - All local conventions are gathered in `createLocalHarness`: interactive approval (a human is
   present), extension hot reloading, cron.
 
@@ -473,14 +473,14 @@ process — and the split is worth stating, because it is invisible in the capab
 That MCP stays host-side is the **right default, not an oversight**. Most MCP servers are API
 clients (Linear, Notion, GitHub), and for those, host-side is where they belong: credentials never
 enter the sandbox, `McpOAuthService` and its swappable credential store keep working, and
-`HarnessParts.mcpServers` reuses one set of connections across every session of the process. Servers
+`HarnessInfrastructure.mcpServers` reuses one set of connections across every session of the process. Servers
 that genuinely need the workspace's files — filesystem, shell — are the case MCP is the wrong tool
 for; the built-in tools already run there.
 
 **Therefore stdio is a local-host transport.** It is fine, and normal, on a laptop or a
 single-tenant self-deployment. On a server host it is four separate problems: the child process
 does not follow the environment into the sandbox, so it reads the *host's* disk instead of the
-workspace; `HarnessParts.mcpServers`'s "one set of connections per process" stops holding across
+workspace; `HarnessInfrastructure.mcpServers`'s "one set of connections per process" stops holding across
 replicas and rolling restarts; a crashing `npx`-launched server takes down a process carrying every
 tenant's sessions; and stdio secrets travel in `config.env`, which has no tenant boundary. A server
 host therefore states its transports once, where it assembles capabilities:

@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   await writeFile(join(consumerDir, "index.js"), consumerSource);
 
   const faux = registerFauxProvider();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, extensionDir: dir });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensionDir: dir });
   const manager = harness.extensions!;
 
   const listed = await manager.list();

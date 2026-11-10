@@ -12,10 +12,9 @@ import {
   ConsoleSink,
   createHarness,
   defaultCapabilities,
-  defineModel,
   DiskSessionRepository,
   sinkLogger,
-  type ChatModel,
+  type ModelManager,
   type TracingProcessor,
 } from "operon-agents";
 import {
@@ -37,7 +36,9 @@ import { pullRequestExtension } from "./pull-request-tool.ts";
 import { E2BCheckouts, type E2BCheckoutOptions } from "./sandbox.ts";
 
 export interface ServerOptions {
-  readonly model: string | ChatModel;
+  readonly model: string;
+  /** What `model` resolves against. Omitted, the harness builds its own. */
+  readonly modelManager?: ModelManager;
   readonly github: GitHubApi;
   /** Session logs and managed metadata. */
   readonly home: string;
@@ -60,12 +61,8 @@ export async function composeServer(options: ServerOptions) {
   const sandboxes = options.sandbox !== undefined ? new E2BCheckouts(options.sandbox, options.github, options.work) : undefined;
   const harness = createHarness({
     model: options.model,
-    resolveModel(id) {
-      const slash = id.indexOf("/");
-      if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
-      return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-    },
-    harness: () => ({
+    ...(options.modelManager !== undefined ? { modelManager: options.modelManager } : {}),
+    infrastructure: () => ({
       sessionRepository: repository,
       ...(options.log ? { logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })) } : {}),
       // One processor for the process; every session bridges its events into it. `close` flushes
@@ -81,7 +78,7 @@ export async function composeServer(options: ServerOptions) {
     // One engineer per issue: no subagent fleet, no workflow tool.
     subagentProvider: null,
     workflowTool: false,
-    session: (ctx) => {
+    sessionCapabilities: (ctx) => {
       const base = defaultCapabilities({ ownEnvironment: ctx.ownEnvironment });
       if (sandboxes === undefined) return base;
       // The sandbox lease is session-lived, so it is a capability: closing the session releases

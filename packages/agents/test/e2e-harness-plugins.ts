@@ -41,16 +41,15 @@ async function main(): Promise<void> {
   await pm.install(pluginRoot);
 
   const faux = registerFauxProvider();
-  const model = faux.getChatModel()!;
 
   let factoryCalls = 0;
   const harness = createHarness({
-    model,
+    ...faux.harnessModel(),
     homeDir: home,
     workDir: work,
     permission: { mode: "yolo" },
     // Fresh capabilities per session, self-driven from the plugin manager.
-    session: () => {
+    sessionCapabilities: () => {
       factoryCalls += 1;
       return defaultCapabilities({ pluginManager: pm });
     },

@@ -74,7 +74,7 @@ async function callTool(
 async function main(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [shapes("v1"), consumer("old")],
   });

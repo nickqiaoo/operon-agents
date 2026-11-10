@@ -439,7 +439,7 @@ async function testOpenRouterSendsEverything(): Promise<void> {
   ]);
   try {
     const descriptor = faux.getModel()!;
-    const model = defineModel({ runtime: faux.runtime, descriptor: { ...descriptor, baseUrl: "https://openrouter.ai/api/v1" } as Model<Api> });
+    const model = defineModel({ manager: faux.runtime, descriptor: { ...descriptor, baseUrl: "https://openrouter.ai/api/v1" } as Model<Api> });
     check("openrouter: a non-Claude Responses model on openrouter.ai does not defer", !model.supportsDeferredTools);
     const agent = defineAgent({ name: "or", model, instructions: "x" });
     const result = await testRunner({ capabilities: [{ name: "deferred-test", tools: [slackTool] }], permission: { mode: "yolo" } }).run(agent, "send");

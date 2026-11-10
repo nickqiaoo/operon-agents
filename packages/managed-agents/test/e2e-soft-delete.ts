@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, createModelRuntime, defineModel, DiskSessionRepository } from "operon-agents";
+import { createHarness, createModelManager, defineModel, DiskSessionRepository } from "operon-agents";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import {
   DiskManagedSessionMetadataStore,
@@ -37,15 +37,15 @@ async function notFound(fn: () => Promise<unknown>): Promise<boolean> {
 async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "managed-soft-delete-"));
   const provider = fauxProvider();
-  const runtime = createModelRuntime({ builtins: false });
+  const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(provider.provider);
   const descriptor = provider.getModel();
   if (descriptor === undefined) throw new Error("faux model unavailable");
-  const model = defineModel({ runtime, descriptor });
+  const model = defineModel({ manager: runtime, descriptor });
 
   try {
     const repository = new DiskSessionRepository(join(root, "home"));
-    const harness = createHarness({ harness: () => ({ sessionRepository: repository }), model, permission: { mode: "yolo" } });
+    const harness = createHarness({ infrastructure: () => ({ sessionRepository: repository }), model, permission: { mode: "yolo" } });
     const host = new SessionService({
       repository,
       work: new MemorySessionWork({ repository }),

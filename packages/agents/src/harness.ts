@@ -30,6 +30,8 @@ import {
   type Capability,
   type InterruptAnswer,
   type ChatModel,
+  type ModelSettings,
+  type RunOptions,
   ListenerSink,
   recoverOrphanedTurns,
   type PermissionManagerOptions,
@@ -65,6 +67,7 @@ import {
   isGuardrailTripwireError,
   type GuardrailTripwireError,
   askUserQuestionTool,
+  createModelManager,
   backgroundCapability,
   compactionCapability,
   filesystemTools,
@@ -110,7 +113,7 @@ import type {
   GoalStore,
   PlanMode,
   Logger,
-  ModelRuntime,
+  ModelManager,
   TracingProcessor,
 } from "operon-agents-core";
 import { mkdirSync } from "node:fs";
@@ -160,7 +163,7 @@ export interface DefaultCapabilitiesOptions {
    * an OAuth service, the bundle uses THOSE instead of building per-session ones. Without it
    * everything here is built per session.
    */
-  readonly shared?: HarnessParts;
+  readonly shared?: HarnessInfrastructure;
   /**
    * The session brought its own environment (`createSession({ environment })`). The shared
    * `skillRegistry` was scanned through the HARNESS's environment and does not describe this one,
@@ -175,7 +178,7 @@ export interface DefaultCapabilitiesOptions {
   /**
    * MCP servers private to the session being built — `SessionCapabilityContext.mcpServers`, i.e.
    * what the caller passed to `createSession({ mcpServers })`. They are layered OVER the
-   * harness's shared servers (`HarnessParts.mcpServers`) and over `mcpServers` above: same name, the
+   * harness's shared servers (`HarnessInfrastructure.mcpServers`) and over `mcpServers` above: same name, the
    * session's wins for this session only. Built, connected and shut down with the session.
    */
   readonly sessionMcpServers?: Record<string, McpServerConfig>;
@@ -340,7 +343,7 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
  */
 function defaultSubagentProvider<TContext>(
   agentTools: readonly Tool[],
-  resolveModel: HarnessOptions<TContext>["resolveModel"],
+  resolveModel: (modelId: string) => ChatModel | Promise<ChatModel>,
   extraProfiles: Record<string, ResolvedAgentProfile> = {},
 ): SubagentProvider<TContext> {
   const tools: Record<string, Tool> = {};
@@ -352,26 +355,23 @@ function defaultSubagentProvider<TContext>(
   return profileSubagentProvider<TContext>(profiles, {
     only,
     tools,
-    ...(resolveModel !== undefined ? { resolveModel } : {}),
+    resolveModel,
   });
 }
 
 /**
- * The process-lived objects a harness is built on — what `HarnessOptions.harness` returns.
+ * The process-lived objects a harness is built on — what `HarnessOptions.infrastructure` returns.
  * Each one is optional; what is absent simply has no provider, and the harness falls back to
  * its own default (an in-memory repository, a silent logger, a `LocalEnvironment` per session).
  */
-export interface HarnessParts {
+export interface HarnessInfrastructure {
   readonly logger?: Logger;
   readonly sessionRepository?: SessionRepository;
-  readonly modelRuntime?: ModelRuntime;
   /** The default environment for sessions that bring none: an instance shared by all of them, or
    *  a factory called once per session. */
   readonly environment?: Environment | EnvironmentFactory;
   readonly tracing?: TracingProcessor;
-  readonly telemetry?: TelemetryService;
   readonly pluginManager?: PluginManager;
-  readonly eventPublication?: EventPublicationMode;
   /** One set of MCP connections for every session in this process. */
   readonly mcpServers?: McpServersHandle;
   /** One skill scan for every session in this process. */
@@ -385,45 +385,63 @@ export interface HarnessParts {
   close?(): void | Promise<void>;
 }
 
-export interface HarnessOptions<TContext = unknown> {
-  /** Model for the default agent. Either a constructed `ChatModel` or an id resolved via `resolveModel`. */
-  readonly model: string | ChatModel;
-  /** Resolve string model ids (needed only if `model`/agent models are strings). */
-  readonly resolveModel?: (modelId: string) => ChatModel | Promise<ChatModel>;
+/** The settings every run on one session carries. */
+type SessionRunOverrides<TContext> = Pick<RunOptions<TContext>, "maxTurns" | "subagentProvider" | "workflowTool" | "maxConcurrentSubagents">;
+
+function toolPaletteOf(tools: readonly Tool[]): Readonly<Record<string, Tool>> {
+  return Object.fromEntries(tools.map((tool) => [tool.schema.name, tool]));
+}
+
+/**
+ * What a harness sets for every session and a session may set for itself. A value given when a
+ * session is opened replaces the harness's, whole; nothing merges.
+ */
+export interface SessionSettings<TContext = unknown> {
   /**
-   * The process-lived parts this harness runs on, built once. Everything a session needs that is
-   * NOT per-session lives here: the repository (disk locally, Pg/Redis on a server; in-memory
-   * when absent), the logger, the model runtime, the default environment, one set of MCP
-   * connections, one skill scan. Runs before the by-value extensions' `harness` halves, so they
-   * can consume what it returns.
-   *
-   * There is no tier between this and a session. A shared object is shared by the WHOLE process
-   * or it is built per session — nothing is shared by "the sessions in one directory".
+   * This session's model: a `provider/model` id, or a built `ChatModel`, which is how one session
+   * gets its own API key. Applied like `setModel` at open, so it also beats `agent`'s own model.
+   * Not persisted: a resume passes it again or runs on the harness's model.
    */
-  readonly harness?: () => HarnessParts | Promise<HarnessParts>;
+  readonly model?: string | ChatModel;
   /**
-   * Session-tier composition: called once per session being opened. Return its capabilities.
-   * Defaults to `defaultCapabilities()`. Always called fresh per session, so per-session state
-   * (goal/plan/todo/background/skills/mcp) is isolated by construction.
+   * How the default agent's model should behave: `maxTokens`, `temperature`, `reasoning` and so on.
+   * Ignored when `agent` is given, whose own `modelSettings` apply. Timeouts and retries are
+   * `connection` on the provider's registration.
    */
-  readonly session?: (ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
-  /** Default working directory for new sessions. Defaults to `process.cwd()`. */
-  readonly workDir?: string;
+  readonly modelSettings?: ModelSettings;
   /**
-   * Cap on subagents running concurrently from one session's root frame. Defaults to the same
-   * bound the `Workflow` tool uses, so a batch of `Agent` spawns cannot fan out further than a
-   * workflow would. Nested spawns are exempt by design (they would deadlock a shared pool).
+   * The agent for new sessions. Provide a complete `Agent`, or omit it to run the builtin default
+   * profile (`DEFAULT_AGENT_PROFILES.agent`) rendered as an agent — there is no piecemeal middle
+   * ground.
    */
-  readonly maxConcurrentSubagents?: number;
-  /** Event durability policy. Defaults to `immediate` for low-latency local applications.
-   *  Managed servers override each opened session to `committed`. */
-  readonly eventPublication?: EventPublicationMode;
+  readonly agent?: Agent<TContext>;
   /**
-   * Product telemetry (docs/telemetry.md). Process-lifetime: create ONE service, attach the
-   * appenders once, pass the same instance to every harness. Absent = nothing is counted.
-   * The harness never shuts it down; the product does, before exit.
+   * Host application context for sessions. It is runtime-only: never serialized into the log or
+   * SessionStore, so a process reopening a session provides it again with
+   * `resumeSession(id, { context })`.
    */
-  readonly telemetry?: TelemetryService;
+  readonly context?: TContext;
+  /**
+   * Concrete tool palette the default profile's tool NAMES resolve against (and the subagent palette).
+   * Defaults to `filesystemTools()` plus `askUserQuestionTool`; capability tools (goal/plan/todo/…) are
+   * injected at runtime, so they need not appear here. Ignored when `agent` is given — a complete agent
+   * carries its own tools.
+   */
+  readonly tools?: readonly Tool[];
+  /**
+   * Extra guidance appended to the default agent's system prompt (the profile's `roleAdditional` slot,
+   * rendered after its own prompt). This LAYERS on the default profile — it does not replace it; for a
+   * wholly different prompt, pass a complete `agent`. Ignored when `agent` is given.
+   */
+  readonly appendSystemPrompt?: string;
+  /**
+   * Subagent fleet the `Agent` / `Workflow` tools spawn by type. Defaults to the builtin
+   * `coder` / `explore` / `plan` profiles (each inherits the session model; their tools resolve
+   * against the default agent's toolset), so orchestration works out of the box. Pass your own
+   * provider to override, or `null` to disable subagents entirely — which also hides the
+   * Agent/Workflow tools, since there is nothing for them to spawn.
+   */
+  readonly subagentProvider?: SubagentProvider<TContext> | null;
   /**
    * Extra subagent profiles merged into the builtin `coder`/`explore`/`plan` fleet. The SOURCE is
    * the composition root's concern — disk (`loadAgentProfiles`) locally, external on a server —
@@ -431,17 +449,69 @@ export interface HarnessOptions<TContext = unknown> {
    */
   readonly extraSubagentProfiles?: Record<string, ResolvedAgentProfile>;
   /**
-   * The agent for new sessions. Provide a complete `Agent`, or omit it to run the builtin default
-   * profile (`DEFAULT_AGENT_PROFILES.agent`) rendered as an agent — there is no piecemeal middle
-   * ground. Per-session overrides go through `createSession({ agent })`.
+   * Expose the builtin `Workflow` tool (default true).
+   *
+   * The narrow version of the switch above: use it when the host has its own
+   * workflow orchestration and two overlapping tools would leave the model
+   * guessing. Subagents and the `Agent` tool are unaffected — unlike
+   * `subagentProvider: null`, which necessarily takes both tools with it.
    */
-  readonly agent?: Agent<TContext>;
+  readonly workflowTool?: boolean;
   /**
-   * Default host application context for sessions. It is runtime-only: never serialized into
-   * the log or SessionStore. Override per session with `createSession({ context })` or provide it
-   * again when reopening a process with `resumeSession(id, { context })`.
+   * Cap on subagents running concurrently from one session's root frame. Defaults to the same
+   * bound the `Workflow` tool uses, so a batch of `Agent` spawns cannot fan out further than a
+   * workflow would. Nested spawns are exempt by design (they would deadlock a shared pool).
    */
-  readonly context?: TContext;
+  readonly maxConcurrentSubagents?: number;
+  /** Permission config. Defaults to `{ mode: "yolo" }`. */
+  readonly permission?: PermissionManagerOptions;
+  /** Event durability policy. Defaults to `immediate` for low-latency local applications.
+   *  Managed servers override each opened session to `committed`. */
+  readonly eventPublication?: EventPublicationMode;
+  /** Turn cap for each run. */
+  readonly maxTurns?: number;
+  /**
+   * Step-per-turn cap. Carried on the default agent (the Runner reads the agent's value first),
+   * so it is ignored when `agent` is given.
+   */
+  readonly maxStepsPerTurn?: number;
+}
+
+export interface HarnessOptions<TContext = unknown> extends SessionSettings<TContext> {
+  /** Model for sessions that name none: a `provider/model` id looked up in {@link modelManager}. */
+  readonly model: string;
+  /**
+   * The one model manager this harness runs on: what every string model id resolves against.
+   * Defaults to a fresh `createModelManager()`. Pass one only for what cannot be changed later,
+   * such as a custom credential store. Add providers in place: `harness.modelManager.register()` for
+   * plain configuration, `harness.modelManager.models.setProvider()` for one built with `createProvider`.
+   */
+  readonly modelManager?: ModelManager;
+  /**
+   * The process-lived infrastructure this harness runs on, built once. Everything a session needs
+   * that is NOT per-session lives here: the repository (disk locally, Pg/Redis on a server;
+   * in-memory when absent), the logger, the default environment, one set of MCP connections, one
+   * skill scan. Runs before the by-value extensions' `harness` halves, so they can consume what it
+   * returns.
+   *
+   * There is no tier between this and a session. A shared object is shared by the WHOLE process
+   * or it is built per session — nothing is shared by "the sessions in one directory".
+   */
+  readonly infrastructure?: () => HarnessInfrastructure | Promise<HarnessInfrastructure>;
+  /**
+   * Session-tier composition: called once per session being opened. Return its capabilities.
+   * Defaults to `defaultCapabilities()`. Always called fresh per session, so per-session state
+   * (goal/plan/todo/background/skills/mcp) is isolated by construction.
+   */
+  readonly sessionCapabilities?: (ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
+  /** Default working directory for new sessions. Defaults to `process.cwd()`. */
+  readonly workDir?: string;
+  /**
+   * Product telemetry (docs/telemetry.md). Process-lifetime: create ONE service, attach the
+   * appenders once, pass the same instance to every harness. Absent = nothing is counted.
+   * The harness never shuts it down; the product does, before exit.
+   */
+  readonly telemetry?: TelemetryService;
   /**
    * Process-level shared services BY NAME, registered into the harness scope at construction
    * (extension services are the one string-keyed corner: an extension is loaded by its id and
@@ -469,36 +539,6 @@ export interface HarnessOptions<TContext = unknown> {
    */
   readonly extensionDataDir?: string;
   /**
-   * Concrete tool palette the default profile's tool NAMES resolve against (and the subagent palette).
-   * Defaults to `filesystemTools()` plus `askUserQuestionTool`; capability tools (goal/plan/todo/…) are
-   * injected at runtime, so they need not appear here. Ignored when `agent` is given — a complete agent
-   * carries its own tools.
-   */
-  readonly tools?: readonly Tool[];
-  /**
-   * Extra guidance appended to the default agent's system prompt (the profile's `roleAdditional` slot,
-   * rendered after its own prompt). This LAYERS on the default profile — it does not replace it; for a
-   * wholly different prompt, pass a complete `agent`. Ignored when `agent` is given.
-   */
-  readonly appendSystemPrompt?: string;
-  /**
-   * Subagent fleet the `Agent` / `Workflow` tools spawn by type. Defaults to the builtin
-   * `coder` / `explore` / `plan` profiles (each inherits the session model; their tools resolve
-   * against the default agent's toolset), so orchestration works out of the box. Pass your own
-   * provider to override, or `null` to disable subagents entirely — which also hides the
-   * Agent/Workflow tools, since there is nothing for them to spawn.
-   */
-  readonly subagentProvider?: SubagentProvider<TContext> | null;
-  /**
-   * Expose the builtin `Workflow` tool (default true).
-   *
-   * The narrow version of the switch above: use it when the host has its own
-   * workflow orchestration and two overlapping tools would leave the model
-   * guessing. Subagents and the `Agent` tool are unaffected — unlike
-   * `subagentProvider: null`, which necessarily takes both tools with it.
-   */
-  readonly workflowTool?: boolean;
-  /**
    * Programmatic runtime extensions, registered once here — the by-value twin of `extensionDir`.
    * Every definition's `session` runs in every session; a session varies that with
    * `createSession({ params })` (a value configures, `false` skips). A definition with a
@@ -511,10 +551,6 @@ export interface HarnessOptions<TContext = unknown> {
    * are skills/MCP/hooks metadata, extensions are trusted host code.
    */
   readonly extensions?: readonly ExtensionDefinition[];
-  /** Permission config. Defaults to `{ mode: "yolo" }`. */
-  readonly permission?: PermissionManagerOptions;
-  readonly maxTurns?: number;
-  readonly maxStepsPerTurn?: number;
 }
 
 /**
@@ -554,13 +590,9 @@ export interface SessionCapabilityContext {
  * Each one is already a session-level input inside the engine; the harness was
  * simply passing its own value straight through.
  */
-interface OpenSessionOptionsBase<TContext = unknown> {
-  /** Override the agent for this session only. */
-  readonly agent?: Agent<TContext>;
+interface OpenSessionOptionsBase<TContext = unknown> extends SessionSettings<TContext> {
   /** Override the execution environment for this session only. Lifecycle remains host-owned. */
   readonly environment?: Environment | EnvironmentFactory;
-  /** Runtime-only application context for this session. Overrides `HarnessOptions.context`. */
-  readonly context?: TContext;
   /**
    * MCP servers scoped to this session, surfaced to the capability factory via
    * {@link SessionCapabilityContext}. Merge policy is the factory's call — the
@@ -587,24 +619,6 @@ interface OpenSessionOptionsBase<TContext = unknown> {
    * This is the per-session knob: definitions themselves are registered once, on the harness.
    */
   readonly params?: Record<string, unknown>;
-  /** Permission config for this session. Overrides `HarnessOptions.permission`. */
-  readonly permission?: PermissionManagerOptions;
-  /** Override this session's event durability policy. */
-  readonly eventPublication?: EventPublicationMode;
-  /**
-   * Extra system-prompt text for this session's default agent. Overrides
-   * `HarnessOptions.appendSystemPrompt`. Ignored when `agent` is given, since that
-   * replaces the default agent outright.
-   */
-  readonly appendSystemPrompt?: string;
-  /** Turn cap for this session's runs. Overrides `HarnessOptions.maxTurns`. */
-  readonly maxTurns?: number;
-  /**
-   * Step-per-turn cap for this session. Overrides `HarnessOptions.maxStepsPerTurn`.
-   * Carried on the session's default agent (the Runner reads the agent's value
-   * first), so it is ignored when `agent` is given.
-   */
-  readonly maxStepsPerTurn?: number;
 }
 
 export interface CreateSessionOptions<TContext = unknown> extends OpenSessionOptionsBase<TContext> {
@@ -702,8 +716,7 @@ export class HarnessSession<TContext = unknown> {
   });
   /** A wake is already scheduled on the microtask queue; more enqueues fold into it. */
   private wakeScheduled = false;
-  /** Per-session turn cap; the Runner's own config is the fallback. */
-  private readonly maxTurns: number | undefined;
+  private readonly runOverrides: SessionRunOverrides<TContext>;
   /** Builds the capability an extension attached to THIS session runs as — bound to the
    *  session's harness reach and its per-session params. */
   private readonly mountExtension: (definition: ExtensionDefinition) => Capability;
@@ -717,7 +730,7 @@ export class HarnessSession<TContext = unknown> {
     projection: SessionProjection;
     workDir: string;
     context?: TContext;
-    maxTurns?: number;
+    runOverrides: SessionRunOverrides<TContext>;
     interrupted?: boolean;
     mountExtension: (definition: ExtensionDefinition) => Capability;
     onClosed: (id: string) => void | Promise<void>;
@@ -731,7 +744,7 @@ export class HarnessSession<TContext = unknown> {
     this.events = args.events;
     this.responder = args.responder;
     this.runContext = args.context;
-    this.maxTurns = args.maxTurns;
+    this.runOverrides = args.runOverrides;
     this.lastRunInterrupted = args.interrupted ?? false;
     this.onClosed = args.onClosed;
     this.mountExtension = args.mountExtension;
@@ -788,11 +801,6 @@ export class HarnessSession<TContext = unknown> {
       await Promise.race([this.runGate.released, this.closingNotified]);
       if (this.closed) throw new Error(`session "${this.id}" is closed`);
     }
-  }
-
-  /** Run options every run on this session carries — currently the session's turn cap. */
-  private get runOverrides(): { maxTurns?: number } {
-    return this.maxTurns !== undefined ? { maxTurns: this.maxTurns } : {};
   }
 
   /** Current runtime-only application context supplied to Agent callbacks. */
@@ -1347,6 +1355,8 @@ export class Harness<TContext = unknown> {
   private readonly runner: Runner<TContext>;
   /** Concrete tools the default profile's tool NAMES resolve against (keyed by schema name). */
   private readonly toolPalette: Readonly<Record<string, Tool>>;
+  private readonly agentTools: readonly Tool[];
+  private readonly defaultSubagents: SubagentProvider<TContext>;
   private readonly activeSessions = new Map<string, HarnessSession<TContext>>();
   /** Opens in flight by session id (`resumeSession`): concurrent callers share ONE open — the
    *  whole of it, reconcile and failure cleanup included — instead of each building an instance. */
@@ -1354,8 +1364,11 @@ export class Harness<TContext = unknown> {
   /** The one close in flight (or finished): every `close()` call returns THIS promise. */
   private closing: Promise<void> | undefined;
 
-  /** The process-lived objects this harness runs on (`HarnessOptions.harness`), plus defaults. */
-  private parts: HarnessParts = {};
+  /** The one model manager of this harness. Edit its providers in place; it is never swapped. */
+  readonly modelManager: ModelManager;
+  private readonly resolveModel: (modelId: string) => ChatModel | Promise<ChatModel>;
+  /** The process-lived objects this harness runs on (`HarnessOptions.infrastructure`), plus defaults. */
+  private infrastructure: HarnessInfrastructure = {};
   /** Process-level extension services by name (a facade over `scope`). The host replaces
    *  providers here (`services.replace`); sessions only ever see handles (`ctx.shared`, `ctx.services`). */
   readonly services: ServiceRegistry;
@@ -1383,23 +1396,16 @@ export class Harness<TContext = unknown> {
 
   constructor(options: HarnessOptions<TContext>) {
     this.options = options;
+    this.modelManager = options.modelManager ?? createModelManager();
+    this.resolveModel = (id) => this.modelManager.resolve(id);
     this.services = new ServiceRegistry();
-    const agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
-    this.toolPalette = Object.fromEntries(agentTools.map((tool) => [tool.schema.name, tool]));
-    // The Agent/Workflow tools only appear when the run has subagents to spawn. Default the fleet
-    // to the builtin coder/explore/plan profiles so orchestration works out of the box; an explicit
-    // provider overrides it, and `null` opts out (hiding those tools).
-    const subagentProvider =
-      options.subagentProvider === null
-        ? undefined
-        : options.subagentProvider ?? defaultSubagentProvider<TContext>(agentTools, options.resolveModel, options.extraSubagentProfiles);
+    this.agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
+    this.toolPalette = toolPaletteOf(this.agentTools);
+    this.defaultSubagents = defaultSubagentProvider<TContext>(this.agentTools, this.resolveModel, options.extraSubagentProfiles);
     this.runner = new Runner<TContext>({
-      resolveModel: options.resolveModel,
-      subagentProvider,
-      ...(options.workflowTool !== undefined ? { workflowTool: options.workflowTool } : {}),
+      resolveModel: this.resolveModel,
       maxTurns: options.maxTurns,
       maxStepsPerTurn: options.maxStepsPerTurn,
-      ...(options.maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents: options.maxConcurrentSubagents } : {}),
     });
     this.dataRoot = options.extensionDataDir ?? (options.extensionDir !== undefined ? join(options.extensionDir, ".data") : undefined);
     this.extensions = options.extensionDir === undefined
@@ -1432,14 +1438,9 @@ export class Harness<TContext = unknown> {
     // The host's process-tier registrations come first (extension `harness` halves may consume
     // them); a synchronous hook keeps the whole chain synchronous, so a synchronous extension's
     // service exists the moment `createHarness` returns.
-    const composed = options.harness?.();
-    const absorb = (parts: HarnessParts | undefined): void => {
-      this.parts = {
-        ...(parts ?? {}),
-        // Explicit options win over what the preset built, and both win over the defaults below.
-        ...(options.telemetry !== undefined ? { telemetry: options.telemetry } : {}),
-        ...(options.eventPublication !== undefined ? { eventPublication: options.eventPublication } : {}),
-      };
+    const composed = options.infrastructure?.();
+    const absorb = (parts: HarnessInfrastructure | undefined): void => {
+      this.infrastructure = parts ?? {};
     };
     this.sharedReady = composed instanceof Promise
       ? composed.then((parts) => {
@@ -1452,24 +1453,24 @@ export class Harness<TContext = unknown> {
   }
 
   /**
-   * Which session-facing parts the `harness` hook built for the whole process — what a
+   * Which session-facing parts the `infrastructure` hook built for the whole process — what a
    * multi-tenant host must not have, since every session on the process would share them.
    * Infrastructure (repository, logger, model runtime) is not listed: sharing it is the point.
    */
   async processSharedParts(): Promise<readonly ("mcpServers" | "oauthService" | "skillRegistry")[]> {
     await this.sharedReady;
     const parts: ("mcpServers" | "oauthService" | "skillRegistry")[] = [];
-    if (this.parts.mcpServers !== undefined) parts.push("mcpServers");
-    if (this.parts.oauthService !== undefined) parts.push("oauthService");
-    if (this.parts.skillRegistry !== undefined) parts.push("skillRegistry");
+    if (this.infrastructure.mcpServers !== undefined) parts.push("mcpServers");
+    if (this.infrastructure.oauthService !== undefined) parts.push("oauthService");
+    if (this.infrastructure.skillRegistry !== undefined) parts.push("skillRegistry");
     return parts;
   }
 
-  /** The session repository, once the `harness` hook has had its say. */
+  /** The session repository, once the `infrastructure` hook has had its say. */
   private async repository(): Promise<SessionRepository> {
     await this.sharedReady;
     this.memoryRepository ??= new MemorySessionRepository();
-    return this.parts.sessionRepository ?? this.memoryRepository;
+    return this.infrastructure.sessionRepository ?? this.memoryRepository;
   }
   /** The fallback repository, built once so two opens share one in-memory store. */
   private memoryRepository: MemorySessionRepository | undefined;
@@ -1477,7 +1478,7 @@ export class Harness<TContext = unknown> {
   /** The harness logger: the preset's, else the `AGENTS_LOG` env logger, else silent. */
   private get logger(): Logger {
     this.defaultLogger ??= envLogger() ?? noopLogger;
-    return this.parts.logger ?? this.defaultLogger;
+    return this.infrastructure.logger ?? this.defaultLogger;
   }
   private defaultLogger: Logger | undefined;
 
@@ -1571,16 +1572,46 @@ export class Harness<TContext = unknown> {
    * resolves the current frame's environment + cwd through the Session cache, so root/subagent/worktree
    * prompts stay isolated without coupling Agent lifetime to environment lifetime.
    */
-  private buildDefaultAgent(appendSystemPrompt?: string, maxStepsPerTurn?: number): Promise<Agent<TContext>> {
-    const additional = appendSystemPrompt ?? this.options.appendSystemPrompt;
-    const steps = maxStepsPerTurn ?? this.options.maxStepsPerTurn;
+  private buildDefaultAgent(opts: SessionSettings<TContext>): Promise<Agent<TContext>> {
+    const additional = opts.appendSystemPrompt ?? this.options.appendSystemPrompt;
+    const steps = opts.maxStepsPerTurn ?? this.options.maxStepsPerTurn;
+    const modelSettings = opts.modelSettings ?? this.options.modelSettings;
     return buildAgentFromProfile<TContext>(DEFAULT_AGENT_PROFILES[DEFAULT_AGENT_PROFILE_NAME]!, {
-      tools: this.toolPalette,
+      tools: opts.tools === undefined ? this.toolPalette : toolPaletteOf(opts.tools),
       model: this.options.model,
       ...(additional !== undefined ? { roleAdditional: additional } : {}),
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
-      ...(this.options.resolveModel !== undefined ? { resolveModel: this.options.resolveModel } : {}),
+      ...(modelSettings !== undefined ? { modelSettings } : {}),
+      resolveModel: this.resolveModel,
     });
+  }
+
+  /**
+   * The Agent/Workflow tools only appear when a run has subagents to spawn. The fleet defaults to
+   * the builtin coder/explore/plan profiles so orchestration works out of the box; an explicit
+   * provider overrides it, and `null` opts out (hiding those tools).
+   */
+  private subagentProviderFor(opts: SessionSettings<TContext>): SubagentProvider<TContext> | null {
+    const chosen = opts.subagentProvider !== undefined ? opts.subagentProvider : this.options.subagentProvider;
+    if (chosen !== undefined) return chosen;
+    if (opts.tools === undefined && opts.extraSubagentProfiles === undefined) return this.defaultSubagents;
+    return defaultSubagentProvider<TContext>(
+      opts.tools ?? this.agentTools,
+      this.resolveModel,
+      opts.extraSubagentProfiles ?? this.options.extraSubagentProfiles,
+    );
+  }
+
+  private runOverridesFor(opts: SessionSettings<TContext>): SessionRunOverrides<TContext> {
+    const maxTurns = opts.maxTurns ?? this.options.maxTurns;
+    const workflowTool = opts.workflowTool ?? this.options.workflowTool;
+    const maxConcurrentSubagents = opts.maxConcurrentSubagents ?? this.options.maxConcurrentSubagents;
+    return {
+      subagentProvider: this.subagentProviderFor(opts),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(workflowTool !== undefined ? { workflowTool } : {}),
+      ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
+    };
   }
 
   get sessions(): ReadonlyMap<string, HarnessSession<TContext>> {
@@ -1761,7 +1792,7 @@ export class Harness<TContext = unknown> {
     // Last: the process-shared objects the preset opened (MCP connections, handles). Every
     // session is closed by now, so nothing is still reading them.
     try {
-      await this.parts.close?.();
+      await this.infrastructure.close?.();
     } catch (error) {
       this.logger.log("warn", "harness parts close failed", { error: error instanceof Error ? error.message : String(error) });
     }
@@ -1946,10 +1977,10 @@ export class Harness<TContext = unknown> {
   ): Promise<readonly Capability[]> {
     // A session on its own environment (a sandbox) does not get the process's MCP connections or
     // skill scan: both describe the HARNESS's machine, not the one this session's tools run on.
-    const base = this.options.session !== undefined
-      ? await this.options.session(ctx)
+    const base = this.options.sessionCapabilities !== undefined
+      ? await this.options.sessionCapabilities(ctx)
       : defaultCapabilities({
-        shared: this.parts,
+        shared: this.infrastructure,
         ownEnvironment: ctx.ownEnvironment,
         strictIsolation: ctx.strictIsolation,
         ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
@@ -1981,7 +2012,7 @@ export class Harness<TContext = unknown> {
    */
   private extensionHost(sessionId: string): ExtensionHost {
     const self = this;
-    const runtime = this.parts.modelRuntime;
+    const runtime = this.modelManager;
     return {
       sessionId,
       newSession: (options) => self.createSession({ ...(options?.title !== undefined ? { title: options.title } : {}) }),
@@ -1989,11 +2020,9 @@ export class Harness<TContext = unknown> {
       openSession: (id) => self.resumeSession(id),
       listSessions: () => self.listSessions(),
       registerProvider: (provider) => {
-        if (!runtime) throw new Error("registerProvider() requires the harness to be built with a `modelRuntime`");
         runtime.models.setProvider(provider);
       },
       unregisterProvider: (id) => {
-        if (!runtime) throw new Error("unregisterProvider() requires the harness to be built with a `modelRuntime`");
         runtime.models.deleteProvider(id);
       },
       services: {
@@ -2035,7 +2064,7 @@ export class Harness<TContext = unknown> {
       const responder = new MutableResponder();
       // Environment: this call's override → the harness's default → a LocalEnvironment at the
       // session's own workDir. The session only OPERATES a caller-supplied environment.
-      const environment = opts.environment ?? this.parts.environment ?? new LocalEnvironment(workDir);
+      const environment = opts.environment ?? this.infrastructure.environment ?? new LocalEnvironment(workDir);
       // ONE open-time log read, shared: every shard from its newest checkpoint on (each
       // checkpoint carries the history and lifecycle before it). The projection seeds from it,
       // and Session.open receives it as `preloadedLog` so its capability restore + context
@@ -2076,17 +2105,18 @@ export class Harness<TContext = unknown> {
         responder,
         environment,
         permissionOptions: opts.permission ?? this.options.permission ?? { mode: "yolo" },
-        ...(this.parts.logger !== undefined ? { logger: this.parts.logger } : {}),
-        ...(this.parts.tracing !== undefined ? { tracing: this.parts.tracing } : {}),
-        ...(this.parts.telemetry !== undefined ? { telemetry: this.parts.telemetry } : {}),
-        ...(opts.eventPublication ?? this.parts.eventPublication) !== undefined
-          ? { eventPublication: (opts.eventPublication ?? this.parts.eventPublication)! }
+        ...(this.infrastructure.logger !== undefined ? { logger: this.infrastructure.logger } : {}),
+        ...(this.infrastructure.tracing !== undefined ? { tracing: this.infrastructure.tracing } : {}),
+        ...(this.options.telemetry !== undefined ? { telemetry: this.options.telemetry } : {}),
+        ...(opts.eventPublication ?? this.options.eventPublication) !== undefined
+          ? { eventPublication: (opts.eventPublication ?? this.options.eventPublication)! }
           : {},
       });
       const agent =
         opts.agent ??
         this.options.agent ??
-        (await this.buildDefaultAgent(opts.appendSystemPrompt, opts.maxStepsPerTurn));
+        (await this.buildDefaultAgent(opts));
+      if (opts.model !== undefined) core.setModel(opts.model);
       const session = new HarnessSession<TContext>({
         core,
         // The two caps land in different places: maxStepsPerTurn is an Agent property
@@ -2098,9 +2128,7 @@ export class Harness<TContext = unknown> {
         projection,
         workDir,
         context: this.contextFor(opts),
-        ...(opts.maxTurns ?? this.options.maxTurns) !== undefined
-          ? { maxTurns: opts.maxTurns ?? this.options.maxTurns }
-          : {},
+        runOverrides: this.runOverridesFor(opts),
         interrupted,
         mountExtension: (definition) => {
           if (params?.[definition.id] === false) {
@@ -2135,7 +2163,7 @@ export class Harness<TContext = unknown> {
     built: { readonly projection?: SessionProjection; readonly core?: Session },
     cause: unknown,
   ): Promise<void> {
-    const logger = this.parts.logger;
+    const logger = this.infrastructure.logger;
     const attempt = async (step: string, run: () => void | Promise<void>): Promise<void> => {
       try {
         await run();

@@ -10,7 +10,8 @@
  * Exits 1 on any regression against a committed baseline, or on harness failures.
  */
 import { join } from "node:path";
-import { defineModel } from "../src/llm/define-model.ts";
+import type { ChatModel } from "../src/llm/define-model.ts";
+import { createModelManager } from "../src/llm/model-manager.ts";
 import { compareToBaseline, loadBaseline, printReport, writeBaseline, type SuiteReport, type RegressionRule } from "./harness.ts";
 import { COMPACTION_CASES } from "./compaction-dataset.ts";
 import { COMPACTION_RULES, runCompactionSuite } from "./compaction-suite.ts";
@@ -23,7 +24,7 @@ const BASELINE_DIR = join(import.meta.dirname, "baselines");
 interface SuiteDef {
   readonly name: string;
   readonly rules: readonly RegressionRule[];
-  readonly run: (model: ReturnType<typeof defineModel>) => Promise<SuiteReport>;
+  readonly run: (model: ChatModel) => Promise<SuiteReport>;
 }
 
 const SUITES: readonly SuiteDef[] = [
@@ -43,8 +44,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const [provider, ...rest] = (modelId ?? DEFAULT_MODEL).split("/");
-  const model = defineModel({ provider: provider!, model: rest.join("/") });
+  const model = createModelManager().resolve(modelId ?? DEFAULT_MODEL);
 
   let failed = false;
   for (const suite of selected) {

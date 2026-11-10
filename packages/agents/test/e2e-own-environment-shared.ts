@@ -25,10 +25,10 @@ async function main(): Promise<void> {
   const faux = registerFauxProvider();
   try {
     const harness = createHarness({
-      model: faux.getChatModel()!,
+      ...faux.harnessModel(),
       workDir: dir,
       permission: { mode: "yolo" },
-      harness: async () => {
+      infrastructure: async () => {
         const servers = createMcpServers(
           { ws: { transport: "http", url: "http://ws.example" } },
           {

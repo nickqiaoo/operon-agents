@@ -10,7 +10,7 @@
  * tool via SearchTool (a `tool_addition`) must keep reading the cached prefix.
  */
 import { z } from "zod";
-import { defineAgent, defineModel, type AssistantMessage, type ChatModel } from "../index.ts";
+import { createModelManager, defineAgent, type AssistantMessage, type ChatModel } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
 import type { Tool } from "../tool/types.ts";
@@ -63,7 +63,7 @@ async function runOnce(model: ChatModel, label: string): Promise<{ usage: Assist
 }
 
 async function native(): Promise<void> {
-  const model = defineModel({ provider: "openrouter", model: process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5", apiKey });
+  const model = createModelManager().resolve(`openrouter/${process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5"}`, { apiKey });
   check("native: model gets SearchTool deferral", model.supportsDeferredTools);
   const { usage, toolNames } = await runOnce(model, "native");
   check("native: searched, then called the loaded tool", toolNames.includes(SEARCH_TOOL_NAME) && toolNames.includes(weather.schema.name));

@@ -52,7 +52,7 @@ async function reshapeHappyPath(): Promise<void> {
   let v1Closed = false;
   const v1 = { render: () => "v1", close: () => { v1Closed = true; } };
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     services: { shape: { instance: v1, replaceable: true } },
     extensions: [consumer("old")],
@@ -114,7 +114,7 @@ async function reshapeTimeout(): Promise<void> {
   const faux = registerFauxProvider();
   const v1 = { render: () => "v1" };
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     services: { shape: { instance: v1, replaceable: true } },
     extensions: [consumer("old")],
@@ -156,7 +156,7 @@ async function reshapeTimeout(): Promise<void> {
 async function streamAndReopen(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     services: { shape: { instance: { render: () => "v1" }, replaceable: true } },
     extensions: [consumer("old")],
@@ -203,7 +203,7 @@ async function streamAndReopen(): Promise<void> {
 async function idleWakeStandDown(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     services: { shape: { instance: { render: () => "v1" }, replaceable: true } },
     extensions: [consumer("old")],

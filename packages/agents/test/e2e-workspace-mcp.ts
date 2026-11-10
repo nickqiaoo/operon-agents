@@ -78,11 +78,11 @@ async function main(): Promise<void> {
     const serversFor = (workDir: string) => dirServers[workDir === linkA ? projA : workDir] ?? {};
     let poolClosed = 0;
     const harness = createHarness({
-      model,
+      ...faux.harnessModel(),
       workDir: projA,
       permission: { mode: "yolo" },
-      harness: () => ({ close: async () => { poolClosed += 1; await pool.close(); } }),
-      session: (ctx) =>
+      infrastructure: () => ({ close: async () => { poolClosed += 1; await pool.close(); } }),
+      sessionCapabilities: (ctx) =>
         defaultCapabilities({
           workspaceMcp: { pool, workDir: ctx.workDir, servers: serversFor(ctx.workDir) },
           ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),

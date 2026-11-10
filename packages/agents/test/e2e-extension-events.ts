@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   let threwOnce = false;
 
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [
       {

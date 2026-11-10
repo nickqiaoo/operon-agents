@@ -14,7 +14,7 @@ import type { ConversationContext, HistoryChangeListener } from "../loop/context
 import { customMessage, DEFAULT_ADDRESS } from "../store/store.ts";
 import { systemReminder } from "../capabilities/injection.ts";
 import { estimateTokens } from "../capabilities/compaction/tokens.ts";
-import type { AgentRunContext } from "./agent.ts";
+import type { Agent, AgentRunContext } from "./agent.ts";
 import type { DeriveOptions, RunState, RunStatus } from "./runner.ts";
 import type { TurnStopReason } from "../loop/types.ts";
 
@@ -127,10 +127,16 @@ export function runCtxFor<TContext>(state: RunState<TContext>): AgentRunContext<
  * unless an override is given. This is the single place child frames are minted — the
  * subagent, Agent, and Workflow tools all go through it.
  */
-export function deriveChild<TContext>(parent: RunState<TContext>, opts: DeriveOptions): RunState<TContext> {
+export function deriveChild<TContext>(
+  parent: RunState<TContext>,
+  opts: DeriveOptions,
+  spawner: Pick<Agent<TContext>, "model">,
+): RunState<TContext> {
   const frame = opts.resumeFrame;
+  const inheritedModel = spawner.model ?? parent.inheritedModel;
   return {
     ...parent,
+    ...(inheritedModel !== undefined ? { inheritedModel } : {}),
     frameId: frame?.frameId ?? newInterruptionId("frame"),
     agentInstanceId: frame?.agentInstanceId ?? opts.agentInstanceId ?? addressTail(opts.address),
     parentFrameId: parent.frameId,

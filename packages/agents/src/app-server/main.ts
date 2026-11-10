@@ -9,7 +9,7 @@
  * redirect console.log/info/debug to stderr so a stray log can never corrupt the
  * protocol stream.
  */
-import { defineModel, DiskSessionRepository, type ChatModel } from "operon-agents-core";
+import { DiskSessionRepository } from "operon-agents-core";
 import { createHarness } from "../harness.ts";
 import { nodeStreamTransport } from "./codec.ts";
 import { AppServer } from "./server.ts";
@@ -49,15 +49,6 @@ function parseArgs(argv: readonly string[]): Args {
   return out;
 }
 
-/** Resolve a `provider/model` id into a ChatModel (API keys come from the env). */
-function resolveModel(id: string): ChatModel {
-  const slash = id.indexOf("/");
-  if (slash <= 0 || slash === id.length - 1) {
-    throw new Error(`invalid --model "${id}": expected "provider/model" (e.g. anthropic/claude-opus-4-...)`);
-  }
-  return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-}
-
 function redirectStdoutLogsToStderr(): void {
   const toStderr = (...parts: unknown[]): void => {
     process.stderr.write(`${parts.map((p) => (typeof p === "string" ? p : JSON.stringify(p))).join(" ")}\n`);
@@ -73,8 +64,7 @@ async function main(): Promise<void> {
 
   const harness = createHarness({
     model: args.model ?? "anthropic/claude-opus-4-8",
-    resolveModel,
-    ...(args.home !== undefined ? { harness: () => ({ sessionRepository: new DiskSessionRepository(args.home!) }) } : {}),
+    ...(args.home !== undefined ? { infrastructure: () => ({ sessionRepository: new DiskSessionRepository(args.home!) }) } : {}),
     ...(args.workdir !== undefined ? { workDir: args.workdir } : {}),
     permission: { mode: args.permission ?? "yolo" },
   });

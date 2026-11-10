@@ -221,7 +221,7 @@ handles a caller would go on to use, so a silent no-op would only move the failu
 harder to find.
 
 `registerProvider` is **harness-global**: one model runtime serves every session, so a
-registration is visible to all of them. It requires `createHarness({ modelRuntime })`.
+registration is visible to all of them.
 
 ## Registration
 

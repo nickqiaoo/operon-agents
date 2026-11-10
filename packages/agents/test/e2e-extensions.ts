@@ -467,8 +467,8 @@ async function hostReach(): Promise<void> {
   };
 
   const harness = createHarness({
-    model,
-    harness: () => ({ modelRuntime: faux.runtime }),
+    ...faux.harnessModel(),
+    modelManager: faux.runtime,
     workDir: process.cwd(),
     permission: { mode: "yolo" },
     extensions: [extension],

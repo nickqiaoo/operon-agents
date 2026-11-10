@@ -168,7 +168,7 @@ async function testExtensionSeams(): Promise<void> {
   const faux = registerFauxProvider();
   const clock = mutableClock(new Date(2026, 5, 10, 12, 0, 0, 0).getTime());
   const cronDef = () => cronExtension({ clocks: clock, pollIntervalMs: null, jitter: NO_JITTER });
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, extensions: [cronDef()] });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [cronDef()] });
   const session = await harness.createSession();
 
   const events: AgentEvent[] = [];
@@ -223,7 +223,7 @@ async function testExtensionSeams(): Promise<void> {
  *  command and exposed handle die with it, exactly like its tools and handlers. */
 async function testSeamTeardown(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   await session.attachExtension(cronExtension({ pollIntervalMs: null, jitter: NO_JITTER }));
   check("teardown: while attached, /cron resolves and the handle exists",

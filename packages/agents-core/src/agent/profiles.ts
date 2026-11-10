@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "pathe";
 import { z } from "zod";
 import type { ChatModel } from "../llm/define-model.ts";
+import type { ModelSettings } from "../llm/model.ts";
 import type { Tool } from "../tool/types.ts";
 import { Agent, defineAgent } from "./agent.ts";
 import { formatSystemPromptDate } from "./instruction-context.ts";
@@ -197,6 +198,8 @@ export interface BuildAgentOptions {
    *  `Agent.maxStepsPerTurn`. Lets a host vary the cap per agent (and so per session) without
    *  standing up a second Runner. */
   readonly maxStepsPerTurn?: number;
+  /** How the built agent's model should behave. See `Agent.modelSettings`. */
+  readonly modelSettings?: ModelSettings;
 }
 
 /** Turn a resolved profile into a runnable Agent whose system prompt renders from live context. */
@@ -233,6 +236,7 @@ export async function buildAgentFromProfile<TContext = unknown>(
     model,
     tools: toolset,
     ...(options.maxStepsPerTurn !== undefined ? { maxStepsPerTurn: options.maxStepsPerTurn } : {}),
+    ...(options.modelSettings !== undefined ? { modelSettings: options.modelSettings } : {}),
     handoffDescription: profile.whenToUse ?? profile.description,
   });
 }

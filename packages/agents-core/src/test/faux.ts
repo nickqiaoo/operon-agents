@@ -15,9 +15,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { defineModel, type ChatModel } from "../llm/define-model.ts";
 import {
-  createModelRuntime,
-  type ModelRuntime,
-} from "../llm/runtime.ts";
+  createModelManager,
+  type ModelManager,
+} from "../llm/model-manager.ts";
 
 export {
   createAssistantMessageEventStream,
@@ -29,7 +29,7 @@ export {
 export type { Api, Context, FauxResponseStep, Model, ToolCall };
 
 export interface FauxChatProvider extends FauxProviderHandle {
-  readonly runtime: ModelRuntime;
+  readonly runtime: ModelManager;
   getChatModel(): ChatModel;
   getChatModel(modelId: string): ChatModel | undefined;
   unregister(): void;
@@ -46,7 +46,7 @@ export function registerFauxProvider(
   options?: RegisterFauxProviderOptions,
 ): FauxChatProvider {
   const handle = fauxProvider(options);
-  const runtime = createModelRuntime({ builtins: false });
+  const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(handle.provider);
 
   function getChatModel(modelId?: string): ChatModel | undefined {
@@ -56,7 +56,7 @@ export function registerFauxProvider(
     return descriptor === undefined
       ? undefined
       : defineModel({
-          runtime,
+          manager: runtime,
           descriptor: descriptor as Model<Api>,
         });
   }

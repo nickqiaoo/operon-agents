@@ -1,7 +1,7 @@
 /**
  * Skills follow the EXECUTION environment, not the host's disk. The catalog the model sees is the
  * one whose scripts its Bash can reach: the harness scans through the environment its preset
- * named (`HarnessParts.environment`), and a session that brings its own environment scans through
+ * named (`HarnessInfrastructure.environment`), and a session that brings its own environment scans through
  * THAT instead of reading the process-wide registry.
  * "Remote" here is simply a LocalEnvironment rooted in a different directory.
  */
@@ -37,8 +37,7 @@ async function main(): Promise<void> {
   skillDir(remote, "remote-skill");
   try {
     const faux = registerFauxProvider();
-    const model = faux.getChatModel()!;
-    const base = { model, homeDir: home, workDir: local, permission: { mode: "yolo" as const }, loadDiskProfiles: false };
+    const base = { ...faux.harnessModel(), homeDir: home, workDir: local, permission: { mode: "yolo" as const }, loadDiskProfiles: false };
 
     // ── Plain local harness: the baseline, and sessions bringing their own environment ──
     {
@@ -67,7 +66,7 @@ async function main(): Promise<void> {
 
     // ── A "remote" harness: the preset says what environment everything executes on ──
     {
-      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: new LocalEnvironment(remote) }) });
+      const harness = await createLocalHarness({ ...base, infrastructure: () => ({ environment: new LocalEnvironment(remote) }) });
       const session = await harness.createSession();
       check("harness environment (instance): the scan ran through it, not the host's disk", names(session).join(",") === "remote-skill");
       await harness.close();
@@ -75,7 +74,7 @@ async function main(): Promise<void> {
     {
       // An environment FACTORY has no single filesystem to scan once, so each session scans
       // through the environment the factory gave it.
-      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: () => new LocalEnvironment(remote) }) });
+      const harness = await createLocalHarness({ ...base, infrastructure: () => ({ environment: () => new LocalEnvironment(remote) }) });
       const session = await harness.createSession();
       check("harness environment (factory): each session scans through the environment it was given", names(session).join(",") === "remote-skill");
       await harness.close();
@@ -84,7 +83,7 @@ async function main(): Promise<void> {
       // A session's own environment still wins over the harness's.
       const third = join(root, "third");
       skillDir(third, "third-skill");
-      const harness = await createLocalHarness({ ...base, harness: () => ({ environment: new LocalEnvironment(remote) }) });
+      const harness = await createLocalHarness({ ...base, infrastructure: () => ({ environment: new LocalEnvironment(remote) }) });
       const session = await harness.createSession({ environment: new LocalEnvironment(third) });
       check("precedence: the session's own environment wins over the harness's", names(session).join(",") === "third-skill");
       await harness.close();

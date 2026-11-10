@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { completeWithRetry, defineModel, streamWithRetry, type ChatModel, type ModelSpec } from "../llm/index.ts";
+import { completeWithRetry, createModelManager, streamWithRetry, type ChatModel, type ModelSpec } from "../llm/index.ts";
 import type { StepRetryingEvent } from "../llm/index.ts";
 import type { AssistantMessage, Message } from "../protocol/index.ts";
 
@@ -88,8 +88,14 @@ async function serve(steps: readonly Step[]): Promise<Harness> {
   };
 }
 
+function modelAt(id: string, baseUrl: string, connection?: ModelSpec["connection"]): ChatModel {
+  const manager = createModelManager();
+  manager.register({ id: id.slice(0, id.indexOf("/")), baseUrl, apiKey: "k" });
+  return manager.resolve(id, connection ? { connection } : {});
+}
+
 function mistralModel(baseUrl: string, connection?: ModelSpec["connection"]): ChatModel {
-  return defineModel({ provider: "mistral", model: "codestral-latest", baseUrl, apiKey: "k", ...(connection ? { connection } : {}) });
+  return modelAt("mistral/codestral-latest", baseUrl, connection);
 }
 
 function textOf(message: AssistantMessage): string {
@@ -125,7 +131,7 @@ async function withServer(steps: readonly Step[], run: (server: Harness) => Prom
 }
 
 function deepseekModel(baseUrl: string, connection: ModelSpec["connection"] = FAST): ChatModel {
-  return defineModel({ provider: "deepseek", model: "deepseek-v4-pro", baseUrl, apiKey: "k", connection });
+  return modelAt("deepseek/deepseek-v4-pro", baseUrl, connection);
 }
 
 const quotaExhausted: Step = status(429, {}, '{"error":{"message":"You exceeded your current quota","code":"insufficient_quota"}}');

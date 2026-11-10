@@ -7,10 +7,9 @@ import type {
 import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Model, PiTool, Provider, ProviderHeaders, ToolSchema, Transport } from "../protocol/index.ts";
 import { emptyUsage } from "../loop/usage.ts";
 import {
-  createModelRuntime,
   forceRefreshOAuth,
-  type ModelRuntime,
-} from "./runtime.ts";
+  type ModelManager,
+} from "./model-manager.ts";
 import type { CallOptions, HttpExchange, LlmRequest } from "./model.ts";
 import { DEFAULT_REQUEST_RETRY_POLICY, type RequestRetryPolicy } from "./request-retry.ts";
 
@@ -45,7 +44,8 @@ type Attempt = { readonly resolved: true } | { readonly resolved: false; readonl
  * silent precedence rule between them. Anything absent from this interface is deliberate — add
  * a field when a knob earns one, instead of reopening the bag.
  *
- * This is for callers building a `ChatModel` directly.
+ * Set it for a whole provider with `ModelManager.register`, for one model with
+ * `ModelManager.resolve`, or on a `ChatModel` built directly.
  */
 export interface ModelConnection {
   /** Merged over provider and model defaults. A `null` value deletes a header pi would send. */
@@ -83,15 +83,17 @@ export interface ModelConnection {
   readonly websocketConnectTimeoutMs?: number;
 }
 
-interface ModelSpecBase {
-  readonly runtime?: ModelRuntime;
+export interface ModelSpec {
+  /** Owns the provider `descriptor` belongs to; every request goes through it. */
+  readonly manager: ModelManager;
+  readonly descriptor: Model<Api>;
   /** Transport-tier settings applied to every request this model makes. */
   readonly connection?: ModelConnection;
   /**
    * Credential for this model, for the common case of holding a key in code or config rather
    * than in a `CredentialStore`.
    *
-   * This OVERRIDES whatever the runtime's credential store resolves for the provider,
+   * This OVERRIDES whatever the manager's credential store resolves for the provider,
    * including a freshly refreshed OAuth token — passing it opts out of `forceRefreshOAuth`
    * recovery for this model. Leave it unset to use ambient credentials (`ANTHROPIC_API_KEY`
    * and friends) or a stored credential, which is what OAuth-based providers want.
@@ -103,17 +105,6 @@ interface ModelSpecBase {
   readonly apiKey?: string;
 }
 
-export type ModelSpec =
-  | (ModelSpecBase & {
-      readonly provider: string;
-      readonly model: string;
-      readonly baseUrl?: string;
-    })
-  | (ModelSpecBase & {
-      readonly descriptor: Model<Api>;
-      /** A descriptor needs the Models collection that owns its provider. */
-      readonly runtime: ModelRuntime;
-    });
 
 export class ChatModel {
   readonly id: string;
@@ -127,7 +118,7 @@ export class ChatModel {
   /** Loading a deferred tool mid-conversation keeps the request prefix: SearchTool mode. */
   readonly supportsDeferredTools: boolean;
   private readonly piModel: Model<Api>;
-  private readonly runtime: ModelRuntime;
+  private readonly manager: ModelManager;
   /** Build-time settings (`apiKey` + `connection`) flattened once into pi's option shape.
    *  Every request starts from these; `params` and `providerOptions` layer on top. */
   private readonly requestDefaults: Omit<ModelsSimpleStreamOptions, "signal">;
@@ -135,8 +126,8 @@ export class ChatModel {
   readonly requestRetry: RequestRetryPolicy;
 
   constructor(spec: ModelSpec) {
-    this.runtime = spec.runtime ?? createModelRuntime();
-    this.piModel = withAnthropicToolChanges(resolvePiModel(spec, this.runtime));
+    this.manager = spec.manager;
+    this.piModel = withAnthropicToolChanges(spec.descriptor);
     const { maxRetries, maxRetryDelayMs, ...transport } = spec.connection ?? {};
     this.requestRetry = {
       ...DEFAULT_REQUEST_RETRY_POLICY,
@@ -169,7 +160,7 @@ export class ChatModel {
     const ctx = toContext(req);
     let first: AssistantMessage;
     try {
-      first = await this.runtime.models.completeSimple(
+      first = await this.manager.models.completeSimple(
         this.piModel,
         ctx,
         this.options(req, call),
@@ -181,8 +172,8 @@ export class ChatModel {
       return first;
     }
     try {
-      if (!(await forceRefreshOAuth(this.runtime, this.provider, call?.signal))) return first;
-      return await this.runtime.models.completeSimple(
+      if (!(await forceRefreshOAuth(this.manager, this.provider, call?.signal))) return first;
+      return await this.manager.models.completeSimple(
         this.piModel,
         ctx,
         this.options(req, call),
@@ -211,7 +202,7 @@ export class ChatModel {
     // revoked-token recovery: one forced refresh after a clean pre-content 401.
     if (isAuthError(first.errorMessage)) {
       try {
-        if (!(await forceRefreshOAuth(this.runtime, this.provider, call?.signal))) {
+        if (!(await forceRefreshOAuth(this.manager, this.provider, call?.signal))) {
           out.push(first.terminal);
           return;
         }
@@ -237,7 +228,7 @@ export class ChatModel {
     let streamedContent = false;
     let terminal: AssistantMessageEvent | undefined;
     try {
-      for await (const event of this.runtime.models.streamSimple(
+      for await (const event of this.manager.models.streamSimple(
         this.piModel,
         ctx,
         this.options(req, call),
@@ -335,21 +326,6 @@ function isAuthError(message: string): boolean {
 
 export function defineModel(spec: ModelSpec): ChatModel {
   return new ChatModel(spec);
-}
-
-function resolvePiModel(spec: ModelSpec, runtime: ModelRuntime): Model<Api> {
-  if ("descriptor" in spec) return spec.descriptor;
-  const model = tryGetPiModel(spec.provider, spec.model, runtime);
-  if (!model) throw new Error(`unknown model: ${spec.provider}/${spec.model}`);
-  return spec.baseUrl ? { ...model, baseUrl: spec.baseUrl } : model;
-}
-
-export function tryGetPiModel(
-  provider: string,
-  model: string,
-  runtime: ModelRuntime = createModelRuntime(),
-): Model<Api> | undefined {
-  return runtime.models.getModel(provider, model);
 }
 
 /**

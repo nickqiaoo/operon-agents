@@ -23,7 +23,7 @@ import {
   askUserQuestionTool,
   compactionCapability,
   createHarness,
-  createModelRuntime,
+  createModelManager,
   defineAgent,
   defineModel,
   DiskSessionRepository,
@@ -54,11 +54,11 @@ function check(label: string, ok: boolean, detail?: unknown): void {
 const home = mkdtempSync(join(tmpdir(), "chat-sdk-home-"));
 const work = mkdtempSync(join(tmpdir(), "chat-sdk-work-"));
 const faux = fauxProvider();
-const runtime = createModelRuntime({ builtins: false });
+const runtime = createModelManager({ builtins: false });
 runtime.models.setProvider(faux.provider);
 const descriptor = faux.getModel();
 if (descriptor === undefined) throw new Error("faux model unavailable");
-const model = defineModel({ runtime, descriptor });
+const model = defineModel({ manager: runtime, descriptor });
 
 const searched: string[] = [];
 const cannedSearch: WebSearchProvider = {
@@ -71,13 +71,14 @@ const cannedSearch: WebSearchProvider = {
 const tools = [webSearchTool(cannedSearch), askUserQuestionTool];
 const repository = new DiskSessionRepository(home);
 const harness = createHarness({
-  model,
-  harness: () => ({ sessionRepository: repository }),
+  model: `${descriptor.provider}/${descriptor.id}`,
+  modelManager: runtime,
+  infrastructure: () => ({ sessionRepository: repository }),
   agent: defineAgent({ name: "analyst", model, instructions: "You are a research analyst.", tools }),
   tools,
   subagentProvider: null,
   workflowTool: false,
-  session: () => [compactionCapability({ maxContextTokens: 200_000 })],
+  sessionCapabilities: () => [compactionCapability({ maxContextTokens: 200_000 })],
   workDir: work,
   permission: { mode: "workspace" },
 });

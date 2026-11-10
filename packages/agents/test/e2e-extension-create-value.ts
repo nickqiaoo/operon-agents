@@ -65,11 +65,10 @@ const shapes = (version: string): ExtensionDefinition<Shape, { suffix?: string }
 
 async function main(): Promise<void> {
   const faux = registerFauxProvider();
-  const model = faux.getChatModel()!;
 
   // ── Sync create: registered before createHarness returns; params reach session() ──
   {
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [shapes("v1"), consumer] });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [shapes("v1"), consumer] });
     check("sync: the service is registered the moment createHarness returns", harness.services.has("shapes"));
     check("host: the host consumes it through the same handle sessions use", harness.services.handle<Shape>("shapes").render() === "v1");
     let replaced = "";
@@ -122,7 +121,7 @@ async function main(): Promise<void> {
       harness() { order.push("after"); return { ok: () => true }; },
       session() {},
     };
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [slow, after] });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [slow, after] });
     check("async: nothing from an async harness() is visible synchronously", !harness.services.has("slow") && !harness.services.has("after"));
     await harness.createSession();
     check("async: a session waits until every harness() has run", harness.services.has("slow") && harness.services.has("after"));
@@ -135,10 +134,10 @@ async function main(): Promise<void> {
     let seen: string | undefined;
     const keeper: ExtensionDefinition = { id: "keeper", harness(host) { seen = host.dataDir; return {}; }, session() {} };
     const root = await mkdtemp(join(tmpdir(), "ext-data-"));
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensionDataDir: root, extensions: [keeper] });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensionDataDir: root, extensions: [keeper] });
     check("dataDir: by value, host.dataDir is <extensionDataDir>/<id>, created before harness() runs", seen === join(root, "keeper") && existsSync(join(root, "keeper")));
     await harness.close();
-    const bare = createHarness({ model, permission: { mode: "yolo" }, extensions: [{ id: "bare", harness(host) { seen = host.dataDir; return {}; }, session() {} }] });
+    const bare = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [{ id: "bare", harness(host) { seen = host.dataDir; return {}; }, session() {} }] });
     check("dataDir: without a data root it is undefined", seen === undefined);
     await bare.close();
   }
@@ -149,7 +148,7 @@ async function main(): Promise<void> {
     // with no provider at all) fails createHarness itself, naming the service.
     let unordered = "";
     try {
-      createHarness({ model, permission: { mode: "yolo" }, extensions: [consumer, shapes("v1")] });
+      createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [consumer, shapes("v1")] });
     } catch (error) {
       unordered = String(error);
     }
@@ -161,7 +160,7 @@ async function main(): Promise<void> {
       async harness() { throw new Error("boom"); },
       session() {},
     };
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [broken] });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [broken] });
     let failed = "";
     await harness.createSession().catch((error) => { failed = String(error); });
     check("failure: the harness() error surfaces where a session is opened", failed.includes("boom"));
@@ -175,7 +174,7 @@ async function main(): Promise<void> {
       async harness(host) { await host.createSession().catch((error) => { captured = String(error); }); return {}; },
       session() {},
     };
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensions: [eager] });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensions: [eager] });
     await harness.createSession();
     check("failure: opening a session from inside harness() is refused, not deadlocked", captured.includes("inside create()"));
     await harness.close();

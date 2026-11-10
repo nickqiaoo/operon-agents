@@ -13,9 +13,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   createLocalHarness,
-  defineModel,
   type AgentEvent,
-  type ChatModel,
 } from "operon-agents";
 
 const MODEL = process.env.MODEL ?? "anthropic/claude-opus-4-8";
@@ -33,7 +31,7 @@ mkdirSync(WORK, { recursive: true });
 // auto-approves tool use as long as it stays inside the workspace — safe for running
 // on your own environment.
 const harness = await createLocalHarness({
-  model: resolveModel(MODEL),
+  model: MODEL,
   homeDir: HOME,
   workDir: WORK,
   permission: { mode: "workspace" },
@@ -71,11 +69,6 @@ function render(ev: AgentEvent): void {
   }
 }
 
-function resolveModel(id: string): ChatModel {
-  const slash = id.indexOf("/");
-  if (slash <= 0) throw new Error(`MODEL must be "provider/model", got "${id}"`);
-  return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-}
 
 function preview(args: unknown): string {
   const s = JSON.stringify(args);

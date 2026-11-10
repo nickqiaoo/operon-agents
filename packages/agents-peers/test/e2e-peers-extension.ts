@@ -92,12 +92,11 @@ async function exercise(harness: Harness, faux: Faux, label: string) {
 
 async function main(): Promise<void> {
   const faux = registerFauxProvider();
-  const model = faux.getChatModel()!;
 
   // ── (a) By value: the server form ──
   {
     const harness = createHarness({
-      model,
+      ...faux.harnessModel(),
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, teammates: { member: { title: "teammate" } } })],
     });
@@ -115,7 +114,7 @@ async function main(): Promise<void> {
     await writeFile(join(bundleDir, "manifest.json"), JSON.stringify({ id: "peers", entry: "index.ts" }));
     await writeFile(join(bundleDir, "index.ts"), bundleSource);
 
-    const harness = createHarness({ model, permission: { mode: "yolo" }, extensionDir: dir });
+    const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensionDir: dir });
     check("file: nothing is registered before the host loads the bundle", !harness.services.has(PEERS_SERVICE));
     await harness.extensions!.load("peers");
     check("file: loading declared the peers service", harness.services.has(PEERS_SERVICE));

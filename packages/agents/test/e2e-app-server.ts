@@ -39,7 +39,7 @@ async function pairedHalf(): Promise<void> {
   ]);
 
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     workDir: work,
     permission: { mode: "manual" }, // so a Bash call triggers a reverse approval
   });
@@ -207,7 +207,7 @@ async function durableHitlHalf(): Promise<void> {
     fauxAssistantMessage("all done", { stopReason: "stop" }),
   ]);
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     workDir: work,
     permission: { mode: "manual" },
   });

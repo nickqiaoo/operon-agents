@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   /** A "process": one harness over the given repo. */
   const boot = (repo: PeerRepo) => {
     const harness = createHarness({
-      model: faux.getChatModel()!,
+      ...faux.harnessModel(),
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, repo })],
     });

@@ -28,9 +28,9 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
   const harness = createHarness({
-    model,
+    ...faux.harnessModel(),
     workDir: home,
-    harness: () => ({ sessionRepository: new DiskSessionRepository(join(home, "sessions")) }),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(join(home, "sessions")) }),
     permission: { mode: "yolo" },
   });
   let onResumed: (() => void) | undefined;
@@ -161,7 +161,7 @@ async function main(): Promise<void> {
 
   try {
     // ── Process 1: the tool suspends for input; the run interrupts durably ──
-    const harness1 = createHarness({ model, harness: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
+    const harness1 = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
     const session1 = await harness1.createSession({ agent: picker });
     const sessionId = session1.id;
 
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
     await harness1.close();
 
     // ── Process 2: a fresh harness answers the INPUT suspension via resume ──
-    const harness2 = createHarness({ model, harness: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
+    const harness2 = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
     const session2 = await harness2.resumeSession(sessionId, { agent: picker });
     check("input-resume: reopened durable pause reports interrupted", session2.status.state === "interrupted");
     check("input-resume: reopened pause exposes pending input", (await session2.pendingInterruptions())[0]?.kind === "input");

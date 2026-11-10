@@ -25,7 +25,7 @@ async function attachLifecycle(): Promise<void> {
     fauxAssistantMessage("used tool", { stopReason: "stop" }),
     fauxAssistantMessage("gone", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -95,7 +95,7 @@ async function midRunDeferred(): Promise<void> {
   const gateEntered = new Promise<void>((resolve) => { enteredGate = resolve; });
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{
       id: "gate",
@@ -147,7 +147,7 @@ async function midRunDeferred(): Promise<void> {
 async function errorPaths(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -185,7 +185,7 @@ async function registryStability(): Promise<void> {
   ]);
   const perRunToolLists: string[] = [];
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{
       id: "stability-probe",
@@ -215,7 +215,7 @@ async function oneCapabilityPerExtension(): Promise<void> {
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
   const handle = { ping: () => "pong" };
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [
       { id: "ext-one", session: (api) => void api.expose(handle) },
@@ -239,7 +239,7 @@ async function oneCapabilityPerExtension(): Promise<void> {
   await harness.close();
 
   const clashing = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{ id: "goal", session: () => undefined }],
   });

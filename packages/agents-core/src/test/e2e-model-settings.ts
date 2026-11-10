@@ -153,7 +153,7 @@ async function testApiKeyOnTheModelSpec(environment: LocalEnvironment): Promise<
     },
   ]);
   const descriptor = faux.getModel();
-  const model = defineModel({ descriptor, runtime: faux.runtime, apiKey: "sk-from-code" });
+  const model = defineModel({ descriptor, manager: faux.runtime, apiKey: "sk-from-code" });
   const agent = defineAgent({ name: "a", model, instructions: "x" });
 
   const runner = testRunner({ environment, permission: { mode: "yolo" } });
@@ -190,7 +190,7 @@ async function testConnectionSettings(environment: LocalEnvironment): Promise<vo
   ]);
   const model = defineModel({
     descriptor: faux.getModel(),
-    runtime: faux.runtime,
+    manager: faux.runtime,
     connection: {
       headers: { "x-team": "operon", "x-drop-me": null },
       timeoutMs: 12_345,
@@ -229,7 +229,7 @@ async function testConnectionIsOverridablePerRequest(environment: LocalEnvironme
   ]);
   const model = defineModel({
     descriptor: faux.getModel(),
-    runtime: faux.runtime,
+    manager: faux.runtime,
     connection: { timeoutMs: 1_000 },
   });
 

@@ -10,7 +10,7 @@
  * `evals:selftest`.
  */
 import { join } from "node:path";
-import { defineModel } from "operon-agents-core";
+import { createModelManager } from "operon-agents-core";
 import { compareToBaseline, loadBaseline, printReport, writeBaseline } from "../../agents-core/evals/harness.ts";
 import { CODE_MODE_CASES } from "./dataset.ts";
 import { CODE_MODE_RULES, runCodeModeSuite } from "./suite.ts";
@@ -23,8 +23,7 @@ async function main(): Promise<void> {
   const updateBaseline = argv.includes("--update-baseline");
   const modelFlag = argv.indexOf("--model");
   const modelId = modelFlag >= 0 ? argv[modelFlag + 1] : (process.env["EVALS_MODEL"] ?? DEFAULT_MODEL);
-  const [provider, ...rest] = (modelId ?? DEFAULT_MODEL).split("/");
-  const model = defineModel({ provider: provider!, model: rest.join("/") });
+  const model = createModelManager().resolve(modelId ?? DEFAULT_MODEL);
 
   console.log(`\n▶ code-mode (${modelId})`);
   const report = await runCodeModeSuite(model, CODE_MODE_CASES);

@@ -35,7 +35,7 @@ import type {
   LlmRequest,
   Environment,
   Message,
-  ModelRuntime,
+  ModelManager,
   RunResult,
   SessionSummary,
   PendingApprovalInterrupt,
@@ -92,11 +92,11 @@ export interface ExtensionState {
 // ============================================================================
 
 /**
- * A model provider runtime object, as the registry accepts it. Derived from `ModelRuntime`
+ * A model provider runtime object, as the registry accepts it. Derived from `ModelManager`
  * rather than imported by name: core's public `Provider` is the provider-ID STRING (a historical
  * name), while the registry wants pi's provider object.
  */
-export type ModelProvider = Parameters<ModelRuntime["models"]["setProvider"]>[0];
+export type ModelProvider = Parameters<ModelManager["models"]["setProvider"]>[0];
 
 /**
  * Operations that exist above the agent loop: other sessions, and the model provider registry.
@@ -119,8 +119,7 @@ export interface ExtensionHost {
   listSessions(): Promise<readonly SessionSummary[]>;
   /**
    * Register (or replace) a model provider. HARNESS-GLOBAL: the model runtime is shared by
-   * every session on this harness, so this affects them all. No-op + warning when the host
-   * was built without a `modelRuntime`.
+   * every session on this harness, so this affects them all.
    */
   registerProvider(provider: ModelProvider): void;
   unregisterProvider(id: string): void;

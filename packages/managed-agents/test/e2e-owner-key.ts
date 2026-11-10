@@ -13,7 +13,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, createModelRuntime, defineModel, DiskSessionRepository } from "operon-agents";
+import { createHarness, createModelManager, defineModel, DiskSessionRepository } from "operon-agents";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import {
   DiskManagedSessionMetadataStore,
@@ -31,17 +31,17 @@ function check(label: string, ok: boolean): void {
 async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "managed-owner-key-"));
   const provider = fauxProvider();
-  const runtime = createModelRuntime({ builtins: false });
+  const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(provider.provider);
   const descriptor = provider.getModel();
   if (descriptor === undefined) throw new Error("faux model unavailable");
-  const model = defineModel({ runtime, descriptor });
+  const model = defineModel({ manager: runtime, descriptor });
 
   try {
     // One Harness, one repository — shared by every tenant, exactly as a runtime node would.
     const repository = new DiskSessionRepository(join(root, "home"));
     const harness = createHarness({
-      harness: () => ({ sessionRepository: repository }),
+      infrastructure: () => ({ sessionRepository: repository }),
       model,
       permission: { mode: "yolo" },
     });

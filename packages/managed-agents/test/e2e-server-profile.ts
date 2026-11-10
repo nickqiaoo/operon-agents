@@ -22,7 +22,7 @@ import {
   LocalEnvironment,
   type AgentEvent,
   type Capability,
-  type HarnessParts,
+  type HarnessInfrastructure,
   type McpServerConfig,
 } from "operon-agents";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
@@ -41,7 +41,7 @@ function check(label: string, ok: boolean): void {
 interface FixtureOptions {
   /** Return a per-session environment from the registry (the multi-tenant requirement). */
   readonly perSessionEnvironment?: boolean;
-  readonly parts?: Omit<HarnessParts, "sessionRepository">;
+  readonly parts?: Omit<HarnessInfrastructure, "sessionRepository">;
   readonly mcpServers?: Record<string, McpServerConfig>;
   /** A custom capability factory — one that may ignore `strictIsolation`. */
   readonly session?: () => Capability[];
@@ -72,8 +72,8 @@ async function scenario(name: string, options: FixtureOptions) {
     },
   };
   const harness = createHarness({
-    harness: () => ({ sessionRepository: repository, ...(options.parts ?? {}) }),
-    ...(options.session !== undefined ? { session: options.session } : {}),
+    infrastructure: () => ({ sessionRepository: repository, ...(options.parts ?? {}) }),
+    ...(options.session !== undefined ? { sessionCapabilities: options.session } : {}),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

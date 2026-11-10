@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   const metadataStore = new MemoryManagedSessionMetadataStore();
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const harness = createHarness({
-    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
+    infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

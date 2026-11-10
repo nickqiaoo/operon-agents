@@ -73,10 +73,10 @@ pnpm build
 ## Quickstart
 
 ```ts
-import { createLocalHarness, defineModel, type AgentEvent } from "operon-agents";
+import { createLocalHarness, type AgentEvent } from "operon-agents";
 
 const harness = await createLocalHarness({
-  model: defineModel({ provider: "anthropic", model: "claude-opus-4-8" }),
+  model: "anthropic/claude-opus-4-8",
   homeDir: ".agent-home",   // sessions persist here — resumable
   workDir: "workspace",     // the agent's scope on disk
   permission: { mode: "workspace" },  // auto-approve tools that stay inside workDir
@@ -107,6 +107,47 @@ An endpoint the engine does not ship with — a local server, a gateway, a proxy
 `<homeDir>/providers.toml` as an address plus how to authenticate. `createLocalHarness` reads the
 file and asks each endpoint which models it serves, so those models are then nameable exactly like
 built-in ones.
+
+From code, add a provider to `harness.modelManager`. `register()` takes plain configuration and can
+accept model ids it has never seen, which suits settings a user typed in. `models.setProvider()`
+takes a provider built with `createProvider`, for when you want to state each model's facts yourself.
+
+```ts
+harness.modelManager.register({
+  id: "corp",
+  api: "openai-completions",
+  baseUrl: "https://llm.corp.internal/v1",
+  apiKey: process.env.CORP_API_KEY,
+  allowUnlisted: true,
+});
+
+harness.modelManager.models.setProvider(createProvider({
+  id: "lab",
+  auth: { apiKey: envApiKeyAuth("Lab API key", ["LAB_API_KEY"]) },
+  models: [endpointModel({
+    id: "my-model",
+    provider: "lab",
+    api: "openai-completions",
+    baseUrl: "https://llm.lab.internal/v1",
+    contextWindow: 256_000,
+  })],
+  api: dialectStreams("openai-completions"),
+}));
+```
+
+Either way the model is then named as `provider/model`, for example `session.setModel("lab/my-model")`.
+
+Model configuration comes in two kinds. How the model should behave (`maxTokens`, `temperature`,
+`reasoning`) is `modelSettings`, on `createHarness` for the default agent or on an agent of your own.
+How to reach the endpoint (timeouts, retries, headers) is `connection`, on a `register()` entry for
+the whole provider or on one `resolve()` for a single model.
+
+Most options on `createHarness` are defaults a session can replace: pass the same field to
+`createSession` or `resumeSession` and it replaces the harness's value whole, with nothing merged.
+That covers `model`, `modelSettings`, `agent`, `tools`, `appendSystemPrompt`, `permission`, the
+subagent settings and the turn limits. A model named in the session, or by a Workflow's
+`agent(prompt, { model })`, reaches subagents in this order: `agent(prompt, { model })`, the model a
+subagent declares, the session's model, then the harness's.
 
 ## Examples
 
@@ -140,9 +181,8 @@ ANTHROPIC_API_KEY=sk-ant-... pnpm start
 | `operon-sandbox` | Host-side sandbox lifecycle (E2B, Cloudflare), handing the framework a vendor-driven `Environment`. |
 | `operon-os-sandbox` | OS-level command sandboxing for the local environment, degrading to a plain local environment where unsupported. |
 
-Two more packages are private, not published: `operon-agents-tui` (the terminal client — see its
-[README](./packages/agents-tui/README.md)) and `operon-pi-tui` (the terminal rendering layer it is
-built on, vendored from a fork of `@earendil-works/pi-tui`).
+`operon-pi-tui` is private and not published. `packages/agents-tui`, the terminal client built on it, is
+no longer maintained and is excluded from the workspace build.
 
 ## Architecture
 

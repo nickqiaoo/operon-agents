@@ -4,7 +4,7 @@ import type {
   ClassifierModel,
   ClassifierResult,
 } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "./runtime.ts";
+import type { ModelManager } from "./model-manager.ts";
 
 /**
  * A structured decision model (Jev, Clef, OpenAI Decisions…): it answers fixed questions about a
@@ -12,12 +12,14 @@ import type { ModelRuntime } from "./runtime.ts";
  * sibling of `ChatModel`, not a kind of it.
  */
 export class DecisionModel {
-  private readonly runtime: ModelRuntime;
+  private readonly manager: ModelManager;
   private readonly descriptor: ClassifierModel<ClassifierApi>;
+  private readonly apiKey: string | undefined;
 
-  constructor(spec: { readonly runtime: ModelRuntime; readonly descriptor: ClassifierModel<ClassifierApi> }) {
-    this.runtime = spec.runtime;
+  constructor(spec: { readonly manager: ModelManager; readonly descriptor: ClassifierModel<ClassifierApi>; readonly apiKey?: string }) {
+    this.manager = spec.manager;
     this.descriptor = spec.descriptor;
+    this.apiKey = spec.apiKey;
   }
 
   get id(): string {
@@ -26,6 +28,9 @@ export class DecisionModel {
 
   /** Never rejects: a failed request comes back with `stopReason: "error"`. */
   classify(context: ClassifierContext, call?: { readonly signal?: AbortSignal }): Promise<ClassifierResult> {
-    return this.runtime.models.classify(this.descriptor, context, call);
+    return this.manager.models.classify(this.descriptor, context, {
+      ...call,
+      ...(this.apiKey !== undefined ? { apiKey: this.apiKey } : {}),
+    });
   }
 }

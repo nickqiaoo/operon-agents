@@ -7,6 +7,9 @@
  * fetched, or both) and the wire dialect it speaks; `MutableModels.setProvider` registers it on a
  * runtime, and everything downstream — `defineModel`, `Models.getAvailable`, the harness's
  * `registerProvider` — treats it exactly like a built-in one.
+ *
+ * Use this to state each model's facts yourself. `ModelManager.register` is the shorter path for
+ * plain configuration: an address, a key, and model ids that may not be known in advance.
  */
 
 export { createProvider, createModels } from "@earendil-works/pi-ai";

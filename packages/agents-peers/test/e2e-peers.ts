@@ -27,7 +27,7 @@ async function settle(): Promise<void> {
 async function main(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [peers({ visibility: sharedLabelVisibility, limits: { maxOutboundPerTurn: 2 } })],
   });

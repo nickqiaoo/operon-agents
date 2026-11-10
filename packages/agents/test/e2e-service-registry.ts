@@ -183,7 +183,7 @@ async function ctxIntegration(): Promise<void> {
     fauxAssistantMessage("two", { stopReason: "stop" }),
   ]);
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     services: {
       greeter: { instance: { greet: (name: string) => `hi ${name} v1` }, replaceable: true },

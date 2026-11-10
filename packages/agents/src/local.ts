@@ -4,7 +4,7 @@
  * file log, file-backed MCP credentials, disk-discovered agent profiles, and the cron extension.
  *
  * It is a PRESET: pure data in (`LocalDeploymentOptions`), the three composition hooks out.
- * The `harness` hook registers the process-lived objects on the harness scope; the `session`
+ * The `harness` hook registers the process-lived objects on the harness scope; the `sessionCapabilities`
  * hook builds each session's capability set. A hosted deployment writes its own preset the same
  * way (see `examples/managed-agents`) — there is still no "mode" inside the engine
  * (Architecture Invariant 7): this file only picks backends, and returns plain `HarnessOptions`
@@ -12,8 +12,8 @@
  */
 import { homedir } from "node:os";
 import { cronExtension } from "./cron/index.ts";
-import { createModelRuntimeFromConfig } from "./providers.ts";
-import type { ModelRuntime } from "operon-agents-core";
+import { createModelManagerFromConfig } from "./providers.ts";
+import type { ModelManager } from "operon-agents-core";
 import { join, resolve } from "node:path";
 import {
   type HookDef,
@@ -37,19 +37,19 @@ import {
   defaultCapabilities,
   type Harness,
   type HarnessOptions,
-  type HarnessParts,
+  type HarnessInfrastructure,
 } from "./harness.ts";
 
 export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptions<TContext> {
   /**
    * App home root — sessions (`<homeDir>/sessions`), MCP creds, logs, and disk-discovered agent
    * profiles all live under it. Defaults to `~/.agents`. (`homeDir` is a local-deployment concept;
-   * the harness itself only knows `HarnessParts.sessionRepository`.)
+   * the harness itself only knows `HarnessInfrastructure.sessionRepository`.)
    */
   readonly homeDir?: string;
   /** MCP servers to expose, shared by every session of the harness. */
   readonly mcpServers?: Record<string, McpServerConfig>;
-  /** Installed-plugin manager, if any. Loaded once here, then handed out as `HarnessParts.pluginManager`. */
+  /** Installed-plugin manager, if any. Loaded once here, then handed out as `HarnessInfrastructure.pluginManager`. */
   readonly pluginManager?: PluginManager;
   /** Shell hooks from config (`config.hooks`), projected as HookDefs. */
   readonly hooks?: readonly HookDef[];
@@ -59,14 +59,9 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
   readonly logger?: Logger;
   /** Context budget for the default compaction capability. */
   readonly maxContextTokens?: number;
-  /**
-   * The model runtime this harness resolves providers through. Pass the same one the host used to
-   * build its `ChatModel` (see `createModelRuntimeFromConfig`) when a model lives on a configured
-   * endpoint — otherwise the two registries disagree about what exists. Omitted, the harness builds
-   * one from `<homeDir>/providers.toml` itself.
-   */
-  readonly modelRuntime?: ModelRuntime;
-  /** Skip reading `<homeDir>/providers.toml` entirely. Ignored when `modelRuntime` is given. */
+  /** {@link HarnessOptions.modelManager}. Omitted, it is built from `<homeDir>/providers.toml`. */
+  readonly modelManager?: ModelManager;
+  /** Skip reading `<homeDir>/providers.toml` entirely. Ignored when `modelManager` is given. */
   readonly loadConfiguredProviders?: boolean;
 }
 
@@ -74,9 +69,9 @@ export interface LocalDeploymentOptions<TContext = unknown> extends HarnessOptio
 export async function localHarnessOptions<TContext>(
   options: LocalDeploymentOptions<TContext>,
 ): Promise<HarnessOptions<TContext>> {
-  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelRuntime, loadConfiguredProviders, harness, session, extensions, ...engine } = options;
-  // Filled by the `harness` half below, read by the `session` half — one process, one set.
-  let sharedParts: HarnessParts = {};
+  const { homeDir: home, mcpServers, pluginManager, hooks, loadDiskProfiles, logger, maxContextTokens, modelManager, loadConfiguredProviders, infrastructure, sessionCapabilities, extensions, ...engine } = options;
+  // Filled by the `infrastructure` half below, read by the `sessionCapabilities` half — one process, one set.
+  let sharedParts: HarnessInfrastructure = {};
   // Set when the shared skill scan ran through a LocalEnvironment at the default workDir (the host
   // named no environment): that catalog only describes sessions rooted there.
   let sharedSkillsWorkDir: string | undefined;
@@ -93,15 +88,16 @@ export async function localHarnessOptions<TContext>(
   // Configured endpoints are resolved once per harness, not per session: the registry is a
   // harness-tier object, and a session only ever reads it.
   const runtime =
-    modelRuntime ??
+    modelManager ??
     ((loadConfiguredProviders ?? true)
-      ? await createModelRuntimeFromConfig({ homeDir })
+      ? await createModelManagerFromConfig({ homeDir })
       : undefined);
 
   return {
     ...engine,
     ...(extraSubagentProfiles !== undefined ? { extraSubagentProfiles } : {}),
-    harness: async () => {
+    ...(runtime !== undefined ? { modelManager: runtime } : {}),
+    infrastructure: async () => {
       // Disk sessions under <homeDir>/sessions; diagnostics roll on disk under <homeDir>/logs.
       // The MCP connections, the skill scan and the OAuth store are process-wide: one set for
       // every session this harness opens, built once, here.
@@ -114,7 +110,7 @@ export async function localHarnessOptions<TContext>(
         // `onStatusChange`, which each session subscribes to when it views it.
         await servers.connect({ sessionId: "" });
       }
-      const fromHost = await harness?.();
+      const fromHost = await infrastructure?.();
       // Skills follow the EXECUTION environment, not the host's disk: the catalog the model sees
       // must be the one whose scripts its Bash can reach. A host that named an environment above
       // is scanned through it; an environment FACTORY (one per session) has no single filesystem
@@ -142,8 +138,6 @@ export async function localHarnessOptions<TContext>(
         ...(servers !== undefined ? { mcpServers: servers } : {}),
         ...(skillRegistry !== undefined ? { skillRegistry } : {}),
         ...(pluginManager !== undefined ? { pluginManager } : {}),
-        // What `ExtensionHost.registerProvider` mutates, and where a session's model is looked up.
-        ...(runtime !== undefined ? { modelRuntime: runtime } : {}),
         ...fromHost,
         close: async () => {
           await fromHost?.close?.();
@@ -152,8 +146,8 @@ export async function localHarnessOptions<TContext>(
       };
       return sharedParts;
     },
-    session:
-      session ??
+    sessionCapabilities:
+      sessionCapabilities ??
       ((ctx) =>
         defaultCapabilities({
           shared: sessionSharedParts(sharedParts, sharedSkillsWorkDir, ctx.workDir),
@@ -182,7 +176,7 @@ export async function createLocalHarness<TContext = unknown>(
 }
 
 /** The shared parts a session may reuse: all of them, less a skill catalog scanned for another workDir. */
-function sessionSharedParts(parts: HarnessParts, skillsWorkDir: string | undefined, workDir: string): HarnessParts {
+function sessionSharedParts(parts: HarnessInfrastructure, skillsWorkDir: string | undefined, workDir: string): HarnessInfrastructure {
   if (skillsWorkDir === undefined || resolve(workDir) === skillsWorkDir) return parts;
   const { skillRegistry: _skillRegistry, ...rest } = parts;
   return rest;

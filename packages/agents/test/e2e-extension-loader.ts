@@ -70,7 +70,7 @@ faux.setResponses([
   fauxAssistantMessage(fauxToolCall("PluginEcho", { value: "hi" }), { stopReason: "toolUse" }),
   fauxAssistantMessage("v2 done", { stopReason: "stop" }),
 ]);
-const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
 const session = await harness.createSession();
 {
   const definition = await loader.load("echo-plugin");

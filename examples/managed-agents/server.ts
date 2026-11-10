@@ -8,7 +8,6 @@ import {
   ConsoleSink,
   createHarness,
   defaultCapabilities,
-  defineModel,
   DiskSessionRepository,
   LocalEnvironment,
   McpOAuthService,
@@ -41,14 +40,9 @@ mkdirSync(WORK, { recursive: true });
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
   model: MODEL,
-  resolveModel(id) {
-    const slash = id.indexOf("/");
-    if (slash <= 0) throw new Error(`invalid model "${id}": expected provider/model`);
-    return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-  },
   // The process-lived parts: the store, the default environment, and the logger (stdout for the
   // platform's log collector, not a local rotating file).
-  harness: () => ({
+  infrastructure: () => ({
     sessionRepository: repository,
     environment: new LocalEnvironment(WORK),
     logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
@@ -56,7 +50,7 @@ const harness = createHarness({
   // Built per session, so the OAuth service (and its credential store) is never shared
   // across sessions — the reason the old preset's shared instance was a problem. A custom
   // factory passes the session's isolation through: the worker opens every session strict.
-  session: (ctx) =>
+  sessionCapabilities: (ctx) =>
     defaultCapabilities({
       oauthService: new McpOAuthService({ store: new MemoryMcpCredentialStore() }),
       ownEnvironment: ctx.ownEnvironment,

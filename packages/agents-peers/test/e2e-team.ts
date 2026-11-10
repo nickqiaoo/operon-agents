@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const model = faux.getChatModel()!;
 
   const harness = createHarness({
-    model,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [
       peers({

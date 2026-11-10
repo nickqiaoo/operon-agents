@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { InMemorySpanExporter, SimpleSpanProcessor, type ReadableSpan } from "@opentelemetry/sdk-trace-node";
-import { createModelRuntime, defineModel } from "operon-agents";
+import { createModelManager } from "operon-agents";
 import { LANGFUSE_DEFAULT_BASE_URL, langfuseAttributes, langfuseExporter, langfuseFromEnv, otelTracing } from "../server/langfuse.ts";
 import type { GitHubApi, PullRequest } from "../server/github.ts";
 import { PR_TOOL } from "../server/agent-config.ts";
@@ -82,11 +82,11 @@ const github: GitHubApi = {
 
 // ── The engineer server, faux edition ───────────────────────────────────────────────────────
 const faux = fauxProvider();
-const runtime = createModelRuntime({ builtins: false });
+const runtime = createModelManager({ builtins: false });
 runtime.models.setProvider(faux.provider);
 const descriptor = faux.getModel();
 if (descriptor === undefined) throw new Error("faux model unavailable");
-const model = defineModel({ runtime, descriptor });
+const model = `${descriptor.provider}/${descriptor.id}`;
 
 const { composeServer } = await import("../server/compose.ts");
 const home = join(scratch, "home");
@@ -102,6 +102,7 @@ const tracing = otelTracing([langfuseAttributes(), new SimpleSpanProcessor(spans
 if (langfuse !== undefined) console.log(`tracing: also exporting to Langfuse at ${langfuse.baseUrl ?? LANGFUSE_DEFAULT_BASE_URL}`);
 const { managed } = await composeServer({
   model,
+  modelManager: runtime,
   github,
   home,
   work,

@@ -7,6 +7,23 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.30] — 2026-11-10
+
+### Changed
+
+- Each harness exposes a `ModelManager` for registering providers and resolving chat and
+  decision models. Sessions can select models by `provider/model` ID and resolve them at
+  runtime, including after a provider registration changes.
+- Session options can replace harness defaults for the model, settings, tools, prompts,
+  permissions, and subagents. Workflow calls can also name a model for a child agent.
+- The unmaintained terminal client is excluded from workspace builds.
+
+### Removed
+
+- `ModelManager` replaces `ModelRuntime`, `createModelRuntime`, `resolveChatModel`,
+  and `resolveDecisionModel`. A model descriptor passed to `defineModel` now takes
+  a `manager`.
+
 ## [0.1.0-alpha.29] — 2026-11-10
 
 ### Changed

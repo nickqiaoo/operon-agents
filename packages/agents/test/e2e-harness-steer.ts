@@ -30,8 +30,8 @@ async function skillReceiptsTrackConsumption(): Promise<void> {
   const release = Promise.withResolvers<void>();
   let holdModel = false;
   const harness = createHarness({
-    model: faux.getChatModel()!,
-    session: () => [skillsCapability({ registry, scan: false })],
+    ...faux.harnessModel(),
+    sessionCapabilities: () => [skillsCapability({ registry, scan: false })],
     extensions: [{
       id: "skill-receipt-gate",
       session(api) {
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
   const gateEntered = new Promise<void>((resolve) => { enteredGate = resolve; });
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{
       id: "steer-gate",

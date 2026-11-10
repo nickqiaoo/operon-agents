@@ -170,6 +170,12 @@ export interface RunOptions<TContext = unknown> {
   readonly session?: Session;
   /** Structured provenance for fresh input. Omit for an ordinary user prompt. */
   readonly inputOrigin?: PromptOrigin;
+  /** Replaces `RunnerConfig.subagentProvider` for this run. `null` means no runtime subagents. */
+  readonly subagentProvider?: SubagentProvider<TContext> | null;
+  /** Replaces `RunnerConfig.maxConcurrentSubagents` for this run. */
+  readonly maxConcurrentSubagents?: number;
+  /** Replaces `RunnerConfig.workflowTool` for this run. */
+  readonly workflowTool?: boolean;
 }
 
 /**
@@ -213,6 +219,8 @@ export interface RunState<TContext> {
   currentTurnId?: string;
   /** Tool call that spawned this (sub-)agent; surfaced on `agent_start`. Unset for root. */
   readonly parentToolCallId?: string;
+  /** The model of the agent that spawned this frame, for a child that declares none. Unset for root. */
+  readonly inheritedModel?: string | ChatModel;
 }
 
 /** Overrides applied when forking a child runtime frame from a parent (see `deriveChild`). */
@@ -787,6 +795,7 @@ export class Runner<TContext = unknown> {
       throw error;
     }
     const permission = session.permission;
+    const maxConcurrentSubagents = opts?.maxConcurrentSubagents ?? this.config.maxConcurrentSubagents;
     const state: RunState<TContext> = {
       runId: interruption?.runId ?? newInterruptionId("run"),
       frameId: frame?.frameId ?? newInterruptionId("frame"),
@@ -804,9 +813,9 @@ export class Runner<TContext = unknown> {
       store: session.store,
       responder: session.responder,
       background: session.background,
-      subagentProvider: this.config.subagentProvider,
-      ...(this.config.maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents: this.config.maxConcurrentSubagents } : {}),
-      workflowTool: this.config.workflowTool,
+      subagentProvider: opts?.subagentProvider === null ? undefined : opts?.subagentProvider ?? this.config.subagentProvider,
+      ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
+      workflowTool: opts?.workflowTool ?? this.config.workflowTool,
       permission,
       capabilities,
       steer: session.steer,
@@ -1141,8 +1150,14 @@ class Engine<TContext> {
     return false;
   }
 
+  /**
+   * The root frame runs on what the session was told to run on, else its agent's model. A child
+   * frame runs on the model it declares, else the session's, else its spawner's.
+   */
   private async resolveModelFor(agent: Agent<TContext>, state: RunState<TContext>): Promise<ChatModel> {
-    const model = state.session.modelSetting ?? agent.model;
+    const model = state.parentFrameId === undefined
+      ? state.session.modelSetting ?? agent.model
+      : agent.model ?? state.session.modelSetting ?? state.inheritedModel;
     if (!model) throw new Error(`Agent "${agent.name}" has no model.`);
     if (typeof model !== "string") return model;
     if (!this.config.resolveModel) {

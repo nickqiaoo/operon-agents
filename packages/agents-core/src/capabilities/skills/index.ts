@@ -49,7 +49,7 @@ export type {
 } from "./types.ts";
 
 export interface SkillsOptions {
-  /** A pre-built registry — e.g. the harness's shared one (`HarnessParts.skillRegistry`). */
+  /** A pre-built registry — e.g. the harness's shared one (`HarnessInfrastructure.skillRegistry`). */
   readonly registry?: SkillRegistry;
   /** `false` = the registry is already loaded (the harness scanned it once); skip the per-session
    *  scan and only bind this session to it. Default `true`. */

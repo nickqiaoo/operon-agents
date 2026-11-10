@@ -1,7 +1,7 @@
 import {
   applyDeclaredCapability,
   capabilityFromPiModel,
-  createModelRuntime,
+  createModelManager,
   UNKNOWN_CAPABILITY,
   type Api,
   type Model,
@@ -19,7 +19,7 @@ const VISION_PROVIDER = "openai";
 const VISION_MODEL = "gpt-4o";
 const THINKING_MODEL = "claude-haiku-4-5";
 
-const builtins = createModelRuntime();
+const builtins = createModelManager();
 
 function getBuiltinModel(provider: string, model: string): Model<Api> {
   const descriptor = builtins.models.getModel(provider, model);

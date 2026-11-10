@@ -18,11 +18,9 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   createLocalHarness,
-  defineModel,
   type AgentEvent,
   type ApprovalRequest,
   type ApprovalResponse,
-  type ChatModel,
 } from "operon-agents";
 
 const MODEL = process.env.MODEL ?? "anthropic/claude-opus-4-8";
@@ -36,7 +34,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 mkdirSync(WORK, { recursive: true });
 
 const harness = await createLocalHarness({
-  model: resolveModel(MODEL),
+  model: MODEL,
   homeDir: join(process.cwd(), ".agent-home"),
   workDir: WORK,
   permission: { mode: "manual" }, // every tool call routes to the approval handler
@@ -110,11 +108,6 @@ function render(ev: AgentEvent): void {
   }
 }
 
-function resolveModel(id: string): ChatModel {
-  const slash = id.indexOf("/");
-  if (slash <= 0) throw new Error(`MODEL must be "provider/model", got "${id}"`);
-  return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
-}
 
 function preview(args: unknown): string {
   const s = JSON.stringify(args);

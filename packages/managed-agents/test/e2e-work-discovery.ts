@@ -39,7 +39,7 @@ function fixture(name: string, responses: number, options: { readonly ttlMs?: nu
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const sessionWork = new MemorySessionWork({ repository, ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}) });
   const harness = createHarness({
-    harness: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
+    infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     model: faux.getChatModel(),
     permission: { mode: "yolo" },
   });

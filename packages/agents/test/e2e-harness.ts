@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const model = faux.getChatModel()!;
 
   try {
-    const harness = createHarness({ model, harness: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
+    const harness = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
 
     const session = await harness.createSession();
     check("harness: createSession returns a session with an id", typeof session.id === "string" && session.id.length > 0);

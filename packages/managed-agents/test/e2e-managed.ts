@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createHarness,
-  createModelRuntime,
+  createModelManager,
   defineModel,
   DiskSessionRepository,
   SessionProjection,
@@ -41,13 +41,13 @@ function textOf(message: { content: unknown }): string {
 
 function createFauxModel() {
   const provider = fauxProvider();
-  const runtime = createModelRuntime({ builtins: false });
+  const runtime = createModelManager({ builtins: false });
   runtime.models.setProvider(provider.provider);
   const descriptor = provider.getModel();
   if (descriptor === undefined) throw new Error("faux model unavailable");
   return {
     provider,
-    model: defineModel({ runtime, descriptor }),
+    model: defineModel({ manager: runtime, descriptor }),
     close: () => runtime.models.deleteProvider(provider.provider.id),
   };
 }
@@ -59,7 +59,7 @@ async function start(
 ) {
   const repository = new DiskSessionRepository(home);
   const harness = createHarness({
-    harness: () => ({ sessionRepository: repository }),
+    infrastructure: () => ({ sessionRepository: repository }),
     model,
     permission: { mode: "yolo" },
   });

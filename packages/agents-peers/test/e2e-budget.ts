@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   /** One harness per scenario, the network reached through its handle like any host would. */
   const open = (options: Omit<PeerOptions, "visibility">) => {
     const harness = createHarness({
-      model: faux.getChatModel()!,
+      ...faux.harnessModel(),
       permission: { mode: "yolo" },
       extensions: [peers({ visibility: sharedLabelVisibility, ...options })],
     });

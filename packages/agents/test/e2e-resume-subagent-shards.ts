@@ -49,7 +49,7 @@ async function resumeKeepsOnlyMainShard(): Promise<void> {
     },
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" }, harness: () => ({ sessionRepository: repo }) });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
   const session = await harness.createSession();
   await session.prompt("hello");
   const sessionId = session.id;

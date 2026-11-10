@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     check("tail projection: the steer queued before the checkpoint is still pending", b?.pendingSteers.length === 1 && a?.pendingSteers.length === 1);
 
     // ── the harness reopens from tails and closes the orphan ──
-    const harness = createHarness({ harness: () => ({ sessionRepository: repository }), model: faux.getChatModel()!, permission: { mode: "yolo" } });
+    const harness = createHarness({ infrastructure: () => ({ sessionRepository: repository }), ...faux.harnessModel(), permission: { mode: "yolo" } });
     const recovered = await harness.resumeSession(handle.id);
     const main = recovered.snapshot().agents.find((entry) => entry.address === "main");
     check("harness reopen: the orphan turn is closed", main?.turn === undefined && main.live === false);

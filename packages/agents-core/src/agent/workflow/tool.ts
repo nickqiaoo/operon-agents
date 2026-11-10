@@ -30,6 +30,7 @@ import {
   makeStructuredOutputTool,
   cloneAgentWithTool,
   validateValue,
+  cloneAgentWithModel,
   structuredInstruction,
   WORKFLOW_AGENT_TIMEOUT_MS,
   type WorkflowHostHooks,
@@ -70,11 +71,12 @@ export function buildWorkflowTool<TContext>(
       budget: { total: tokenBudget, getTurnSpent: () => baseline },
       resolveWorkflowScript: (name) => readNamedWorkflow(parent.environment, name),
       emitProgress,
-      runAgent: async ({ prompt, agentType, schema, isolation, signal, onStart }) => {
-        const sub = await spawner.resolve(agentType ?? spawner.defaultType);
-        if (sub === undefined) {
+      runAgent: async ({ prompt, agentType, model, schema, isolation, signal, onStart }) => {
+        const found = await spawner.resolve(agentType ?? spawner.defaultType);
+        if (found === undefined) {
           throw new Error(`unknown agentType "${agentType ?? spawner.defaultType}". Available: ${spawner.available.map((a) => a.name).join(", ")}`);
         }
+        const sub = model === undefined ? found : cloneAgentWithModel(found, model);
         const agentId = newAgentId(sub.name);
         const address = joinAddress(parent.address, agentId);
         // Publish + journal the stable identity before any work runs, so the orchestration

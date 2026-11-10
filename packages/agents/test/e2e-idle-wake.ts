@@ -36,7 +36,7 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
     fauxAssistantMessage("started the helper", { stopReason: "stop" }),
     fauxAssistantMessage("acknowledged the helper's result", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -88,7 +88,7 @@ async function concurrentSettlesFoldIntoOneTurn(): Promise<void> {
     fauxAssistantMessage("started both", { stopReason: "stop" }),
     fauxAssistantMessage("saw both results", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -126,7 +126,7 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
   let gateActive = false;
 
   const harness = createHarness({
-    model: faux.getChatModel()!,
+    ...faux.harnessModel(),
     permission: { mode: "yolo" },
     extensions: [{
       id: "run-gate",
@@ -167,7 +167,7 @@ async function steerToIdleGoesThroughTheBus(): Promise<void> {
     fauxAssistantMessage("first", { stopReason: "stop" }),
     fauxAssistantMessage("answered the peer", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ model: faux.getChatModel()!, permission: { mode: "yolo" } });
+  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));

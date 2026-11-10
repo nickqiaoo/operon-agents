@@ -1,14 +1,14 @@
 import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
 import { DecisionAutoApprover, DecisionModel, LlmAutoApprover, createAutoApprover } from "../index.ts";
-import type { AutoApprovalInput, AutoApprovalReport, ModelRuntime } from "../index.ts";
+import type { AutoApprovalInput, AutoApprovalReport, ModelManager } from "../index.ts";
 
 function decisionModel(respond: (context: ClassifierContext) => Partial<ClassifierResult>): DecisionModel {
   const runtime = {
     models: {
       classify: async (_model: unknown, context: ClassifierContext) => ({ stopReason: "stop", answers: {}, ...respond(context) }),
     },
-  } as unknown as ModelRuntime;
-  return new DecisionModel({ runtime, descriptor: { id: "jev" } as never });
+  } as unknown as ModelManager;
+  return new DecisionModel({ manager: runtime, descriptor: { id: "jev" } as never });
 }
 
 /** A request that never comes back until its signal aborts. */
@@ -18,8 +18,8 @@ function hungModel(): DecisionModel {
       classify: (_m: unknown, _c: unknown, call: { signal: AbortSignal }) =>
         new Promise((resolve) => call.signal.addEventListener("abort", () => resolve({ stopReason: "aborted", answers: {} }))),
     },
-  } as unknown as ModelRuntime;
-  return new DecisionModel({ runtime, descriptor: { id: "hung" } as never });
+  } as unknown as ModelManager;
+  return new DecisionModel({ manager: runtime, descriptor: { id: "hung" } as never });
 }
 
 const yes = (probability: number): Partial<ClassifierResult> => ({ answers: { safe: { type: "bool", probability } } });

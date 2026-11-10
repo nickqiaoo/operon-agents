@@ -153,7 +153,7 @@ function makeSpawner<TContext>(
     resolve: async (type) =>
       subagents.find((sub) => sub.name === type) ?? (await parent.subagentProvider?.get(type)),
     resolveInGraph: (root, key) => findAgentByName(root, key),
-    derive: (opts) => deriveChild(parent, opts),
+    derive: (opts) => deriveChild(parent, opts, active),
     run: runAgent,
     ctxFor: (childState) => runCtxFor(childState),
   };

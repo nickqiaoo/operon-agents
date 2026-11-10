@@ -14,11 +14,9 @@ import {
   INTERRUPTION_STATE_KEY,
   createLocalHarness,
   defineAgent,
-  defineModel,
   parseInterruptionState,
   writeTool,
   type ApprovalResponse,
-  type ChatModel,
   type InterruptionState,
   type RunResult,
 } from "operon-agents";
@@ -39,7 +37,7 @@ interface AppContext {
   readonly audit: (event: string) => void;
 }
 
-const model = resolveModel(MODEL);
+const model = MODEL;
 const writer = defineAgent<AppContext>({
   name: "writer",
   model,
@@ -146,10 +144,4 @@ function printFrameTree(state: InterruptionState, frameId: string, depth = 0): v
     console.log(`${indent}  child of ${toolCallId}:`);
     printFrameTree(state, childFrameId, depth + 2);
   }
-}
-
-function resolveModel(id: string): ChatModel {
-  const slash = id.indexOf("/");
-  if (slash <= 0) throw new Error(`MODEL must be "provider/model", got "${id}"`);
-  return defineModel({ provider: id.slice(0, slash), model: id.slice(slash + 1) });
 }

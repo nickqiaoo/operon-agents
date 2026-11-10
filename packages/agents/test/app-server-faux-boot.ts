@@ -21,7 +21,7 @@ const faux = registerFauxProvider();
 faux.setResponses([fauxAssistantMessage("hello from subprocess", { stopReason: "stop" })]);
 
 const harness = createHarness({
-  model: faux.getChatModel()!,
+  ...faux.harnessModel(),
   workDir: process.cwd(),
   permission: { mode: "yolo" },
 });
