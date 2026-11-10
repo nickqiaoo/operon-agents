@@ -22,10 +22,6 @@ function mergeRecord<T>(base: Record<string, T>, over: Record<string, T> | undef
 
 function mergeOne(base: AgentFrameworkConfig, layer: PartialConfig): AgentFrameworkConfig {
   return {
-    providers: mergeRecord(base.providers, layer.providers),
-    models: mergeRecord(base.models, layer.models),
-    defaultModel: layer.defaultModel ?? base.defaultModel,
-    modelCredentials: layer.modelCredentials ?? base.modelCredentials,
     permission: {
       mode: layer.permission?.mode ?? base.permission.mode,
       // Concatenate rules across layers — scope encodes the originating tier.
@@ -48,8 +44,6 @@ function dedupe(values: readonly string[]): string[] {
 }
 
 const EMPTY: AgentFrameworkConfig = {
-  providers: {},
-  models: {},
   permission: { rules: [] },
   loopControl: {},
   mcpServers: {},

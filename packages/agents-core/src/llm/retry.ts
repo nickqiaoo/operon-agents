@@ -71,7 +71,7 @@ export async function streamWithRetry(input: StreamWithRetryInput): Promise<Stre
     const mode: AttemptResult["mode"] = useCompleteFallback ? "complete" : "stream";
     logger.log("debug", "llm request", logDataPolicy.dontLogModelData
       ? { model: model.id, attempt, mode, messages: request.messages.length, tools: request.tools?.length ?? 0 }
-      : { model: model.id, attempt, mode, system: request.system, messages: request.messages, tools: request.tools?.map((t) => t.name), params: request.params });
+      : { model: model.id, attempt, mode, system: request.systemPrompt, messages: request.messages, tools: request.tools?.map((t) => t.name), params: request.params });
 
     let exchange: HttpExchange | undefined;
     const observe = (seen: HttpExchange): void => {

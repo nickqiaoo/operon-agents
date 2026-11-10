@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { AssistantMessage, JsonObject, JsonValue, ToolCall, ToolResultMessage } from "../protocol/index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import type { NestedCallResult, NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
@@ -245,6 +246,9 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
   } catch (error) {
     if (isToolSuspendSignal(error)) {
       return { kind: "result", call, result: errorResult("suspend() is only available during tool execution (plan.run), not resolve().") };
+    }
+    if (error instanceof z.ZodError) {
+      return { kind: "result", call, result: errorResult(`Invalid arguments for ${call.name}: ${describeIssues(error.issues).join("; ")}`) };
     }
     return { kind: "result", call, result: errorResult(messageOf(error)) };
   }
@@ -554,6 +558,18 @@ function toResultMessage(call: ToolCall, result: ToolResult): ToolResultMessage 
     isError: result.isError ?? false,
     timestamp: Date.now(),
   };
+}
+
+/** One `field: problem` line per issue; a union reports what its branches wanted, not "Invalid input". */
+function describeIssues(issues: readonly z.core.$ZodIssue[], parentPath: readonly PropertyKey[] = []): string[] {
+  return issues.flatMap((issue) => {
+    const path = [...parentPath, ...issue.path];
+    if (issue.code === "invalid_union" && issue.errors.length > 0) {
+      const branches = issue.errors.map((branch) => describeIssues(branch, path).join(", "));
+      return [[...new Set(branches)].join(" OR ")];
+    }
+    return [`${path.map(String).join(".") || "arguments"}: ${issue.message}`];
+  });
 }
 
 function messageOf(error: unknown): string {

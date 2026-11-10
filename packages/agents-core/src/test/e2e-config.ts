@@ -10,8 +10,6 @@ import {
   LocalEnvironment,
   parseConfig,
   mergeConfigs,
-  ModelCatalog,
-  UNKNOWN_CAPABILITY,
   Flags,
   toCoreOptions,
   layeredResolver,
@@ -28,29 +26,12 @@ function check(label: string, ok: boolean): void {
 
 function testLayeredMerge(): void {
   const merged = mergeConfigs(
-    { defaultModel: "a", permission: { rules: [{ decision: "allow", scope: "user", pattern: "Read" }] }, flags: { x: true } },
-    { defaultModel: "b", permission: { rules: [{ decision: "deny", scope: "project", pattern: "Bash" }] }, flags: { y: true } },
+    { loopControl: { maxTurns: 1 }, permission: { rules: [{ decision: "allow", scope: "user", pattern: "Read" }] }, flags: { x: true } },
+    { loopControl: { maxTurns: 2 }, permission: { rules: [{ decision: "deny", scope: "project", pattern: "Bash" }] }, flags: { y: true } },
   );
-  check("merge: later layer overrides scalar", merged.defaultModel === "b");
+  check("merge: later layer overrides scalar", merged.loopControl.maxTurns === 2);
   check("merge: permission rules concatenate across layers", merged.permission.rules.length === 2);
   check("merge: flags deep-merge", merged.flags.x === true && merged.flags.y === true);
-}
-
-function testModelCatalog(): void {
-  const config = parseConfig({
-    models: { fast: { provider: "anthropic", model: "claude-x", maxContextSize: 200000, capabilities: ["vision"] } },
-  });
-  const cat = new ModelCatalog(config.models);
-  check("catalog: maxContextSize lookup", cat.maxContextSize("fast") === 200000);
-  check("catalog: capability tag lookup", cat.has("fast", "vision") && !cat.has("fast", "video"));
-  check("catalog: lookup by provider/model", cat.maxContextSize("anthropic/claude-x") === 200000);
-  const fast = cat.info("fast");
-  check(
-    "catalog: declared tags → structured capability",
-    fast.capability.image_in === true && fast.capability.video_in === false && fast.capability.max_context_tokens === 200000,
-  );
-  const unknown = cat.info("nope");
-  check("catalog: unknown → UNKNOWN_CAPABILITY, not a throw", !unknown.known && unknown.capability === UNKNOWN_CAPABILITY);
 }
 
 function testFlags(): void {
@@ -112,7 +93,6 @@ async function main(): Promise<void> {
   const environment = new LocalEnvironment(dir);
   try {
     testLayeredMerge();
-    testModelCatalog();
     testFlags();
     await testConfigDrivenRun(dir, environment);
   } finally {
@@ -123,7 +103,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ CONFIG E2E PASS — layered merge + model catalog (#9) + flags + config-driven run");
+    console.log("✅ CONFIG E2E PASS — layered merge + flags + config-driven run");
   } else {
     console.log("❌ CONFIG E2E FAIL");
     process.exit(1);

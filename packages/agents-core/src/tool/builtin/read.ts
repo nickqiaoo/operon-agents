@@ -39,8 +39,22 @@ export const MAX_UNPAGED_FILE_BYTES = 256 * 1024;
 const MAX_IMAGE_MEGABYTES = 100;
 const MAX_IMAGE_BYTES = MAX_IMAGE_MEGABYTES * 1024 * 1024;
 
-const PositiveLineOffset = z.number().int().min(1);
-const TailLineOffset = z.number().int().min(-MAX_LINES).max(-1);
+/** Some models stringify integer arguments (`"line_offset": "80"`); the intent is unambiguous, so honor it. */
+function numberFromIntegerString(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return /^[+-]?\d+$/.test(trimmed) ? Number(trimmed) : value;
+}
+
+/**
+ * One `integer` rather than a union of the positive and tail ranges: the union renders as `anyOf`,
+ * and weaker models answered that shape with a string while filling the plain integer beside it correctly.
+ */
+const LineOffset = z
+  .number()
+  .int()
+  .min(-MAX_LINES)
+  .refine((offset) => offset !== 0, { error: "line_offset must not be 0: line numbers start at 1" });
 
 const ReadInput = z.object({
   path: z
@@ -49,16 +63,13 @@ const ReadInput = z.object({
       "Path to a text or image file. Relative paths resolve against the working directory; a path outside the working directory must be absolute. Directories are not supported; use `ls` via Bash for a known directory, or Glob for pattern search.",
     ),
   line_offset: z
-    .union([PositiveLineOffset, TailLineOffset])
+    .preprocess(numberFromIntegerString, LineOffset)
     .optional()
     .describe(
       `The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file; the absolute value cannot exceed ${String(MAX_LINES)}.`,
     ),
   n_lines: z
-    .number()
-    .int()
-    .positive()
-    .max(MAX_LINES)
+    .preprocess(numberFromIntegerString, z.number().int().positive().max(MAX_LINES))
     .optional()
     .describe(
       `The number of lines to read, at most ${String(MAX_LINES)}. Omit to read to the end of the file.`,

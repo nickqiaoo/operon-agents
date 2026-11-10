@@ -111,7 +111,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
     activeTools.map((tool) => [tool.schema.name, tool]),
   );
   let request: LlmRequest = {
-    system,
+    systemPrompt: system,
     messages: prepared.deferEnabled
       ? withToolLoads(deps.context, new Set(toolSchemas.map((schema) => schema.name)))
       : messages,
@@ -158,7 +158,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
     turnId,
     step: currentStep,
     stepId,
-    ...(request.system !== undefined ? { system: request.system } : {}),
+    ...(request.systemPrompt !== undefined ? { system: request.systemPrompt } : {}),
     messages: [...request.messages],
     toolNames: (request.tools ?? []).map((tool) => tool.name),
     ...(request.params !== undefined ? { params: request.params } : {}),

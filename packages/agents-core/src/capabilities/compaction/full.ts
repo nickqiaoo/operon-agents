@@ -140,14 +140,14 @@ async function summarize(deps: FullCompactionDeps, initialCount: number): Promis
     deps.signal.throwIfAborted();
     const prefix = deps.messages.slice(0, count);
     const request = {
-      system: deps.system,
+      systemPrompt: deps.system,
       messages: [...prefix, instructionUserMessage(instruction)],
       tools: undefined,
     };
 
     logger.log("debug", "compaction llm request", logDataPolicy.dontLogModelData
       ? { model: deps.model.id, attempt, count, messages: request.messages.length }
-      : { model: deps.model.id, attempt, count, system: request.system, messages: request.messages });
+      : { model: deps.model.id, attempt, count, system: request.systemPrompt, messages: request.messages });
 
     let summaryText = "";
     let truncatedOrError = false;

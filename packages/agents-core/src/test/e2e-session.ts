@@ -357,7 +357,7 @@ async function testRuntimeModelAndThinking(environment: LocalEnvironment): Promi
     await testRunner({ environment }).run(agent, "go", { session });
     faux.unregister();
     await session.close();
-    check("setThinking: thinking reached request.params", rec.lastReq()?.params?.thinking === "high");
+    check("setThinking: thinking reached request.params", rec.lastReq()?.params?.reasoning === "high");
   }
 }
 

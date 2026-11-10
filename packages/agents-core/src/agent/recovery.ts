@@ -83,9 +83,9 @@ export async function withToolCallRecoveryContext<TContext>(
   const reminder = lines.join("\n");
   return {
     ...request,
-    system: request.system === undefined || request.system.length === 0
+    systemPrompt: request.systemPrompt === undefined || request.systemPrompt.length === 0
       ? reminder
-      : `${request.system}\n\n${reminder}`,
+      : `${request.systemPrompt}\n\n${reminder}`,
   };
 }
 

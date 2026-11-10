@@ -1,5 +1,5 @@
 import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
-import { ChatModel, DecisionAutoApprover, DecisionModel, LlmAutoApprover, ProviderManager, createAutoApprover } from "../index.ts";
+import { DecisionAutoApprover, DecisionModel, LlmAutoApprover, createAutoApprover } from "../index.ts";
 import type { AutoApprovalInput, AutoApprovalReport, ModelRuntime } from "../index.ts";
 
 function decisionModel(respond: (context: ClassifierContext) => Partial<ClassifierResult>): DecisionModel {
@@ -105,22 +105,6 @@ async function main(): Promise<void> {
       createAutoApprover({ model: decisionModel(() => yes(1)) }) instanceof DecisionAutoApprover &&
         createAutoApprover() instanceof LlmAutoApprover,
     ]);
-  }
-
-  {
-    const manager = new ProviderManager({
-      config: { providers: { "vercel-ai-gateway": { type: "openai", apiKey: "test-key" }, openai: { type: "openai", apiKey: "test-key" } }, models: {} },
-    });
-    const custom = new ProviderManager({
-      config: { providers: { "vercel-ai-gateway": { type: "openai", apiKey: "test-key", baseUrl: "https://proxy.example/v1" } }, models: {} },
-    });
-    checks.push(["Jev is recognised as a decision model", manager.resolveDecisionModel("vercel-ai-gateway/typesafe-ai/jev") instanceof DecisionModel]);
-    checks.push(["an LLM is not", manager.resolveDecisionModel("vercel-ai-gateway/nvidia/nemotron-3.5-lightning-free") === undefined]);
-    checks.push(["an id catalogued as both counts as an LLM", manager.resolveDecisionModel("openai/gpt-6-luna") === undefined]);
-    checks.push(["an unknown id counts as an LLM", manager.resolveDecisionModel("vercel-ai-gateway/no/such-model") === undefined]);
-    checks.push(["a custom endpoint exposes no catalog decision models", custom.resolveDecisionModel("vercel-ai-gateway/typesafe-ai/jev") === undefined]);
-    checks.push(["one reference resolves to a decision model", (await manager.resolveReviewModel("vercel-ai-gateway/typesafe-ai/jev")) instanceof DecisionModel]);
-    checks.push(["one reference resolves to a chat model", (await manager.resolveReviewModel("openai/gpt-6-luna")) instanceof ChatModel]);
   }
 
   const ok = checks.every(([, pass]) => pass);

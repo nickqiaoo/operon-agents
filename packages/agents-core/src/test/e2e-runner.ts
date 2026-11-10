@@ -119,7 +119,7 @@ async function testDurableHandoffContinuation(dir: string, environment: LocalEnv
   const model = Object.create(base) as ChatModel;
   const stream = base.stream.bind(base);
   model.stream = (req, call) => {
-    systems.push(req.system);
+    systems.push(req.systemPrompt);
     return stream(req, call);
   };
 
@@ -212,7 +212,7 @@ async function testHandoffResumeIgnoresDecoy(dir: string, environment: LocalEnvi
   const model = Object.create(base) as ChatModel;
   const stream = base.stream.bind(base);
   model.stream = (req, call) => {
-    systems.push(req.system);
+    systems.push(req.systemPrompt);
     return stream(req, call);
   };
 

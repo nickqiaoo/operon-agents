@@ -191,7 +191,7 @@ export class LlmAutoApprover implements AutoApprover {
   /** Run one classifier stage and return its text content. Throws on a stream error. */
   private async runStage(model: ChatModel, userText: string, maxTokens: number, signal: AbortSignal): Promise<string> {
     const request: LlmRequest = {
-      system: this.system(),
+      systemPrompt: this.system(),
       messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
       // No thinking, so tokens aren't spent reasoning. No temperature either: providers disagree
       // on what they accept (Mistral rejects 0 without top_p 1), and a request refused here

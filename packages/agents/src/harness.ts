@@ -7,9 +7,9 @@
  * control plane (goals, plan mode, compaction, skills, plugins, …) delegated to
  * the core `Session`.
  *
- * It is a pure composition of core primitives — no new engine behavior. For the
- * low-level "assemble it yourself / stateless server" path, import from
- * `operon-agents/core` instead.
+ * It is a pure composition of core primitives — no new engine behavior. The low-level
+ * primitives for the "assemble it yourself / stateless server" path are exported from
+ * `operon-agents` too.
  */
 import {
   type AgentEvent,

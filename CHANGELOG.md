@@ -7,6 +7,21 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.29] — 2026-11-10
+
+### Changed
+
+- Applications use the `operon-agents` entry point and resolve configured models with
+  `resolveChatModel` and `resolveDecisionModel`. The `operon-agents/core` entry point
+  and the core `ProviderManager` configuration API were removed.
+- Model requests use pi's `systemPrompt` and `reasoning` fields and support per-request tool choice,
+  sampling parameters, cache retention, and metadata.
+
+### Fixed
+
+- `Read` accepts integer strings for line offsets and counts. Tool validation errors now
+  identify the invalid fields and describe union alternatives.
+
 ## [0.1.0-alpha.28] — 2026-11-10
 
 ### Added

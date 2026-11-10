@@ -1,50 +1,5 @@
 import { z } from "zod";
 
-export const ProviderTypeSchema = z.enum([
-  "anthropic",
-  "openai",
-  "kimi",
-  "google-genai",
-  "openai_responses",
-  "vertexai",
-]);
-
-export const ProviderOAuthSchema = z.object({
-  storage: z.enum(["file", "keyring"]),
-  key: z.string(),
-  oauthHost: z.string().optional(),
-});
-
-export const ProviderConfigSchema = z.object({
-  type: ProviderTypeSchema,
-  apiKey: z.string().optional(),
-  baseUrl: z.string().optional(),
-  defaultModel: z.string().optional(),
-  oauth: ProviderOAuthSchema.optional(),
-  env: z.record(z.string(), z.string()).optional(),
-  customHeaders: z.record(z.string(), z.string()).optional(),
-});
-
-export const ModelAliasSchema = z.object({
-  provider: z.string(),
-  model: z.string(),
-  maxContextSize: z.number().int().positive(),
-  maxOutputSize: z.number().int().positive().optional(),
-  capabilities: z.array(z.string()).optional(),
-  displayName: z.string().optional(),
-  reasoningKey: z.string().optional(),
-  adaptiveThinking: z.boolean().optional(),
-});
-
-/**
- * Persistent model-provider credentials. A configured path selects Operon's
- * FileCredentialStore; deployments may still inject a different store
- * directly into ProviderManager.
- */
-export const ModelCredentialsSchema = z.object({
-  path: z.string().trim().min(1),
-});
-
 export const PermissionRuleScopeSchema = z.enum(["turn-override", "session-runtime", "project", "user"]);
 
 export const PermissionRuleConfigSchema = z.object({
@@ -187,10 +142,6 @@ export const PluginRefSchema = z.object({
 });
 
 export const AgentFrameworkConfigSchema = z.object({
-  providers: z.record(z.string(), ProviderConfigSchema).default({}),
-  models: z.record(z.string(), ModelAliasSchema).default({}),
-  defaultModel: z.string().optional(),
-  modelCredentials: ModelCredentialsSchema.optional(),
   permission: PermissionConfigSchema.default({ rules: [] }),
   loopControl: LoopControlSchema.default({}),
   thinking: ThinkingConfigSchema.optional(),
@@ -203,10 +154,6 @@ export const AgentFrameworkConfigSchema = z.object({
   flags: z.record(z.string(), z.boolean()).default({}),
 });
 
-export type ProviderType = z.infer<typeof ProviderTypeSchema>;
-export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
-export type ModelAlias = z.infer<typeof ModelAliasSchema>;
-export type ModelCredentialsConfig = z.infer<typeof ModelCredentialsSchema>;
 export type PermissionRuleScope = z.infer<typeof PermissionRuleScopeSchema>;
 export type PermissionRuleConfig = z.infer<typeof PermissionRuleConfigSchema>;
 export type PermissionConfig = z.infer<typeof PermissionConfigSchema>;

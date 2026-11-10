@@ -10,7 +10,7 @@
  * tool via SearchTool (a `tool_addition`) must keep reading the cached prefix.
  */
 import { z } from "zod";
-import { defineAgent, ProviderManager, type AssistantMessage, type ChatModel } from "../index.ts";
+import { defineAgent, defineModel, type AssistantMessage, type ChatModel } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
 import { tool } from "../tool/define.ts";
 import type { Tool } from "../tool/types.ts";
@@ -47,16 +47,6 @@ const filler: Tool[] = Array.from({ length: 30 }, (_, i) => tool({
   execute: () => "ok",
 }));
 
-async function resolve(alias: string, model: string): Promise<ChatModel> {
-  const manager = new ProviderManager({
-    config: {
-      providers: { or: { type: "anthropic", baseUrl: "https://openrouter.ai/api", apiKey } },
-      models: { [alias]: { provider: "or", model, maxContextSize: 200_000, maxOutputSize: 2_000 } },
-    },
-  });
-  return (await manager.resolveModel(alias)).model;
-}
-
 function usages(messages: readonly { role: string }[]): AssistantMessage["usage"][] {
   return messages.filter((m): m is AssistantMessage => m.role === "assistant").map((m) => m.usage);
 }
@@ -73,7 +63,7 @@ async function runOnce(model: ChatModel, label: string): Promise<{ usage: Assist
 }
 
 async function native(): Promise<void> {
-  const model = await resolve("native", process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5");
+  const model = defineModel({ provider: "openrouter", model: process.env.LIVE_NATIVE_MODEL ?? "anthropic/claude-opus-5.5", apiKey });
   check("native: model gets SearchTool deferral", model.supportsDeferredTools);
   const { usage, toolNames } = await runOnce(model, "native");
   check("native: searched, then called the loaded tool", toolNames.includes(SEARCH_TOOL_NAME) && toolNames.includes(weather.schema.name));

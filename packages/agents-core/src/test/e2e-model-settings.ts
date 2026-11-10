@@ -79,18 +79,25 @@ async function testAgentSettingsReachTheProvider(environment: LocalEnvironment):
   const options = await captureOptions(environment, {
     temperature: 0.25,
     maxTokens: 4096,
-    thinking: "low",
+    reasoning: "low",
+    toolChoice: "none",
+    samplingParams: { top_p: 0.9 },
+    cacheRetention: "long",
+    metadata: { user_id: "u1" },
   });
 
   check("modelSettings.temperature reaches the provider", options?.temperature === 0.25);
   check("modelSettings.maxTokens reaches the provider", options?.maxTokens === 4096);
-  // pi's simple surface names the thinking knob `reasoning`; `toOptions` does that mapping.
-  check("modelSettings.thinking maps to the provider's `reasoning`", options?.reasoning === "low");
+  check("modelSettings.reasoning reaches the provider", options?.reasoning === "low");
+  check("modelSettings.toolChoice reaches the provider", options?.toolChoice === "none");
+  check("modelSettings.samplingParams reaches the provider", (options?.samplingParams as { top_p?: number } | undefined)?.top_p === 0.9);
+  check("modelSettings.cacheRetention reaches the provider", options?.cacheRetention === "long");
+  check("modelSettings.metadata reaches the provider", (options?.metadata as { user_id?: string } | undefined)?.user_id === "u1");
 }
 
 async function testThinkingBudgetsReachTheProvider(environment: LocalEnvironment): Promise<void> {
   const options = await captureOptions(environment, {
-    thinking: "medium",
+    reasoning: "medium",
     thinkingBudgets: { medium: 4321 },
   });
 
@@ -99,7 +106,7 @@ async function testThinkingBudgetsReachTheProvider(environment: LocalEnvironment
 }
 
 async function testSessionThinkingOutranksTheProfile(environment: LocalEnvironment): Promise<void> {
-  const options = await captureOptions(environment, { temperature: 0.7, thinking: "low" }, "high");
+  const options = await captureOptions(environment, { temperature: 0.7, reasoning: "low" }, "high");
 
   check(
     "session setThinking() overrides the agent profile's thinking level",
@@ -245,19 +252,19 @@ function testResolveModelParams(): void {
   );
   check(
     "resolveModelParams: session thinking alone still produces params",
-    resolveModelParams(undefined, "high")?.thinking === "high",
+    resolveModelParams(undefined, "high")?.reasoning === "high",
   );
   check(
     "resolveModelParams: profile thinking applies when the session has no override",
-    resolveModelParams({ thinking: "low" }, undefined)?.thinking === "low",
+    resolveModelParams({ reasoning: "low" }, undefined)?.reasoning === "low",
   );
   check(
     "resolveModelParams: session thinking wins over the profile's",
-    resolveModelParams({ thinking: "low" }, "high")?.thinking === "high",
+    resolveModelParams({ reasoning: "low" }, "high")?.reasoning === "high",
   );
   check(
     "resolveModelParams: a profile with only temperature does not invent a thinking level",
-    resolveModelParams({ temperature: 0 }, undefined)?.thinking === undefined,
+    resolveModelParams({ temperature: 0 }, undefined)?.reasoning === undefined,
   );
   check(
     "resolveModelParams: temperature 0 survives (not treated as absent)",

@@ -233,7 +233,7 @@ async function runTierHooks(): Promise<void> {
       }));
       api.on("step.start", () => ({ system: "SYSTEM_FROM_EXTENSION" }));
       api.on("model.request", ({ request }) => {
-        observedSystem = request.system;
+        observedSystem = request.systemPrompt;
         return undefined;
       });
     },

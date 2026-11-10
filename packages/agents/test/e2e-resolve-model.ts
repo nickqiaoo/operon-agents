@@ -1,0 +1,139 @@
+/**
+ * `resolveChatModel` / `resolveDecisionModel`: what a host's picked model actually sends. The HTTP
+ * layer is stubbed; the URLs, auth headers and dialects are the real ones pi produces.
+ */
+import { DecisionModel, resolveChatModel, resolveDecisionModel, type ChatModel, type ChatModelConfig } from "../src/index.ts";
+
+const checks: Array<[string, boolean]> = [];
+function check(label: string, ok: boolean): void {
+  checks.push([label, ok]);
+  console.log(ok ? `✅ ${label}` : `❌ ${label}`);
+}
+
+/** The first request a model sends, against a stub that rejects it. */
+async function firstRequest(model: ChatModel, thinking?: "high"): Promise<{ url: string; auth: string | null; body: string }> {
+  const seen: Request[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    seen.push(new Request(input, init));
+    return new Response('{"error":{"message":"stub"}}', { status: 400, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await model.complete({
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 }],
+      ...(thinking !== undefined ? { params: { reasoning: thinking } } : {}),
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const request = seen[0];
+  if (request === undefined) throw new Error("the model sent no request");
+  // Anthropic Messages authenticates with x-api-key, the other dialects with a bearer token.
+  const auth = request.headers.get("x-api-key") ?? request.headers.get("authorization");
+  return { url: request.url, auth, body: await request.text() };
+}
+
+const config = (fields: Omit<ChatModelConfig, "apiKey">): ChatModelConfig => ({ apiKey: "k", ...fields });
+
+async function testCatalogProviders(): Promise<void> {
+  const claude = resolveChatModel(config({ provider: "openrouter", model: "anthropic/claude-opus-5.5" }));
+  const sent = await firstRequest(claude);
+  check("catalog: Claude on OpenRouter uses pi's Messages endpoint", claude.api === "anthropic-messages" && /^https:\/\/openrouter\.ai\/api\/v1\/messages(\?|$)/.test(sent.url));
+  check("catalog: the configured key authenticates it", sent.auth === "k");
+  check("catalog: Claude gets native deferred tools", claude.supportsDeferredTools);
+  check("catalog: Haiku gets them on a gateway too", resolveChatModel(config({ provider: "openrouter", model: "anthropic/claude-haiku-5.5" })).supportsDeferredTools);
+  check("catalog: a model pi's direct catalog doesn't flag does not", !resolveChatModel(config({ provider: "openrouter", model: "anthropic/claude-sonnet-5" })).supportsDeferredTools);
+
+  const glm = resolveChatModel(config({ provider: "openrouter", model: "z-ai/glm-4.6" }));
+  check("catalog: other OpenRouter models use Chat Completions", glm.api === "openai-completions" && (await firstRequest(glm)).url === "https://openrouter.ai/api/v1/chat/completions");
+
+  const batch = resolveChatModel(config({ provider: "openrouter", model: "anthropic/claude-opus-5.5:batch" }));
+  check("catalog: a variant pi catalogs on another API stays there", batch.api === "openai-completions");
+
+  const vercel = resolveChatModel(config({ provider: "vercel-ai-gateway", model: "zai/glm-5", contextWindow: 1 }));
+  check("catalog: Vercel runs every model the way pi catalogs it", vercel.api === "anthropic-messages" && /^https:\/\/ai-gateway\.vercel\.sh\/v1\/messages(\?|$)/.test((await firstRequest(vercel)).url));
+  check("catalog: a catalogued model keeps its own limits", vercel.contextWindow === 202_800);
+
+  const moved = resolveChatModel(config({ provider: "moonshotai", model: "kimi-k3", baseUrl: "https://api.moonshot.cn/v1" }));
+  check("catalog: a baseUrl is used as given", (await firstRequest(moved)).url === "https://api.moonshot.cn/v1/chat/completions");
+}
+
+async function testModelsNewerThanCatalog(): Promise<void> {
+  const openrouter = resolveChatModel(config({ provider: "openrouter", model: "anthropic/claude-opus-9", contextWindow: 123_000, maxTokens: 9_000 }));
+  check("new id: runs on the API of the provider's default endpoint", openrouter.api === "openai-completions" && (await firstRequest(openrouter)).url === "https://openrouter.ai/api/v1/chat/completions");
+  check("new id: the config limits describe it", openrouter.contextWindow === 123_000 && openrouter.maxOutputTokens === 9_000);
+
+  const vercel = resolveChatModel(config({ provider: "vercel-ai-gateway", model: "acme/model-1" }));
+  check("new id: Vercel's default endpoint is Messages", vercel.api === "anthropic-messages");
+
+  let threw = false;
+  try {
+    resolveChatModel(config({ provider: "no-such-provider", model: "m" }));
+  } catch {
+    threw = true;
+  }
+  check("catalog: an unknown provider without api is a clear error", threw);
+}
+
+async function testMistral(): Promise<void> {
+  const mistralUrl = "https://api.mistral.ai/v1/chat/completions";
+  const known = resolveChatModel(config({ provider: "mistral", model: "mistral-large-4" }));
+  const sent = await firstRequest(known);
+  check("mistral: runs on pi's own dialect", known.api === "mistral-conversations" && sent.url === mistralUrl);
+  check("mistral: the configured key authenticates it", sent.auth === "Bearer k");
+  check("mistral: no effort is sent unless chosen", (JSON.parse(sent.body) as { reasoning_effort?: string }).reasoning_effort === undefined);
+  check("mistral: a chosen effort is sent", (JSON.parse((await firstRequest(known, "high")).body) as { reasoning_effort?: string }).reasoning_effort === "high");
+  const unknown = resolveChatModel(config({ provider: "mistral", model: "mistral-not-in-the-catalog" }));
+  check("mistral: an id newer than the catalog uses the dialect", unknown.api === "mistral-conversations" && (await firstRequest(unknown)).url === mistralUrl);
+}
+
+async function testCustomEndpoints(): Promise<void> {
+  const chat = resolveChatModel(config({ provider: "my-llm", model: "qwen", api: "openai-completions", baseUrl: "https://llm.example.com/v1", contextWindow: 32_000, input: ["text", "image"] }));
+  const sent = await firstRequest(chat);
+  check("custom: api and baseUrl decide the request", sent.url === "https://llm.example.com/v1/chat/completions" && sent.auth === "Bearer k");
+  check("custom: limits come from the config", chat.contextWindow === 32_000);
+
+  const messages = resolveChatModel(config({ provider: "proxy", model: "claude-opus-5-5", api: "anthropic-messages", baseUrl: "http://localhost:1235" }));
+  check("custom: a Claude on Messages gets native tool changes by id", messages.supportsDeferredTools);
+
+  const keyless = resolveChatModel({ provider: "local", model: "m", api: "openai-completions", baseUrl: "http://localhost:1234/v1" });
+  check("custom: a server with no key still gets a bearer value", (await firstRequest(keyless)).auth === "Bearer unused");
+
+  let threw = false;
+  try {
+    resolveChatModel(config({ provider: "my-llm", model: "m", api: "openai-completions" }));
+  } catch {
+    threw = true;
+  }
+  check("custom: a custom endpoint without baseUrl is a clear error", threw);
+}
+
+async function testDecisionModels(): Promise<void> {
+  const decision = { provider: "vercel-ai-gateway", apiKey: "k" };
+  check("decision: Jev is recognised", (await resolveDecisionModel({ ...decision, model: "typesafe-ai/jev" })) instanceof DecisionModel);
+  check("decision: an LLM is not", (await resolveDecisionModel({ ...decision, model: "nvidia/nemotron-3.5-lightning-free" })) === undefined);
+  check("decision: an id catalogued as both counts as an LLM", (await resolveDecisionModel({ provider: "openai", apiKey: "k", model: "gpt-6-luna" })) === undefined);
+  check("decision: an unknown id counts as an LLM", (await resolveDecisionModel({ ...decision, model: "no/such-model" })) === undefined);
+}
+
+async function main(): Promise<void> {
+  await testCatalogProviders();
+  await testModelsNewerThanCatalog();
+  await testMistral();
+  await testCustomEndpoints();
+  await testDecisionModels();
+
+  const passed = checks.filter(([, ok]) => ok).length;
+  console.log(`\n${passed}/${checks.length} checks passed`);
+  if (passed === checks.length) {
+    console.log("✅ RESOLVE-MODEL E2E PASS — catalog providers + new ids + Mistral + custom endpoints + decision models");
+  } else {
+    console.log("❌ RESOLVE-MODEL E2E FAIL");
+    process.exit(1);
+  }
+}
+
+main().catch((error) => {
+  console.error("❌ RESOLVE-MODEL E2E ERROR:", error);
+  process.exit(1);
+});

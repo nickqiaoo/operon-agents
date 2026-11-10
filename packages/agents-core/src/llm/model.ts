@@ -7,33 +7,38 @@ import type {
   ThinkingLevel,
   ToolSchema,
 } from "../protocol/index.ts";
+import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 export type { ThinkingBudgets, ThinkingLevel };
 
 /**
  * How the model should behave for one request — the knobs that legitimately vary per agent
- * and per turn. Deliberately NOT pi's `SimpleStreamOptions`: connection-tier settings
- * (transport/timeouts/retries/headers) are not part of an agent's configuration surface, and
- * reach the wire through `providerOptions` if something genuinely needs them.
+ * and per turn. A subset of pi's `SimpleStreamOptions`, under pi's names: connection-tier
+ * settings (transport/timeouts/retries/headers) are not part of an agent's configuration
+ * surface, and `deferred` returns a handle the turn loop can't stream. Anything else reaches the
+ * wire through `providerOptions` if something genuinely needs it.
  *
  * One type serves both `AgentConfig.modelSettings` and `LlmRequest.params` on purpose. They
  * used to be separate look-alike shapes, and the loop forwarded only `thinking` — so a
  * `temperature` set on an agent was silently dropped. Sharing the type makes that class of
  * drift a compile error instead of a silent no-op.
  */
-export interface ModelSettings {
-  readonly temperature?: number;
-  readonly maxTokens?: number;
-  readonly thinking?: ThinkingLevel;
-  /**
-   * Per-level thinking budgets, for models that take a token budget rather than an effort
-   * level. Adaptive-thinking models ignore it. Only consulted when `thinking` is set.
-   */
-  readonly thinkingBudgets?: ThinkingBudgets;
-}
+export type ModelSettings = Readonly<
+  Pick<
+    SimpleStreamOptions,
+    | "temperature"
+    | "maxTokens"
+    | "reasoning"
+    | "thinkingBudgets"
+    | "toolChoice"
+    | "samplingParams"
+    | "cacheRetention"
+    | "metadata"
+  >
+>;
 
 export interface LlmRequest {
-  readonly system?: string;
+  readonly systemPrompt?: string;
   readonly messages: readonly Message[];
   /** Top-level tools. Tools that become available later in the conversation are declared
    *  by `system` messages in `messages` (pi's `toolsAdded`). */

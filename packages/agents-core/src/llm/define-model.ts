@@ -1,4 +1,5 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import type {
   Context,
   ModelsSimpleStreamOptions,
@@ -44,9 +45,7 @@ type Attempt = { readonly resolved: true } | { readonly resolved: false; readonl
  * silent precedence rule between them. Anything absent from this interface is deliberate — add
  * a field when a knob earns one, instead of reopening the bag.
  *
- * The config-file path (`ProviderConfigSchema` → `ProviderManager`) reaches the same wire
- * settings through provider and model descriptor headers; this is the programmatic equivalent
- * for callers building a `ChatModel` directly.
+ * This is for callers building a `ChatModel` directly.
  */
 export interface ModelConnection {
   /** Merged over provider and model defaults. A `null` value deletes a header pi would send. */
@@ -385,10 +384,10 @@ function supportsNativeDeferredTools(model: Model<Api>): boolean {
 }
 
 /**
- * Anthropic accepts mid-conversation `tool_addition` blocks from Opus 4.8 on, Sonnet 5
- * excepted (the API's own rejection text; Sonnet 5.5 verified through OpenRouter). pi's
- * catalog flags only the models it verified and none reached through other gateways, so
- * fill in the Anthropic-wire models it leaves unset. An explicit flag always wins.
+ * pi's catalog flags mid-conversation `tool_addition` support only on direct Anthropic models,
+ * though the same model takes them through a gateway or proxy on the Anthropic wire (Sonnet 5.5
+ * verified through OpenRouter). Carry that flag over to the models it leaves unset. An explicit
+ * flag always wins.
  */
 function withAnthropicToolChanges(model: Model<Api>): Model<Api> {
   if (model.api !== "anthropic-messages") return model;
@@ -406,24 +405,19 @@ function withAnthropicToolChanges(model: Model<Api>): Model<Api> {
   } as Model<Api>;
 }
 
-/** `claude-opus-4-8`, `anthropic/claude-sonnet-5.5`, `claude-fable-5-20260101`, ... */
+/**
+ * Whether pi's direct Anthropic catalog flags this model, however the id is spelled:
+ * `claude-opus-4-8`, `anthropic/claude-sonnet-5.5`, `claude-fable-5-20260101`, ...
+ */
 export function acceptsMidConvoToolChanges(modelId: string): boolean {
-  const match = modelId
-    .replace(/^.*\//, "")
-    .replace(/\./g, "-")
-    .match(/^claude-(opus|sonnet|fable)-(\d+)(?:-(\d{1,2}))?(?:-|$)/);
-  if (match === null) return false;
-  const family = match[1]!;
-  const major = Number(match[2]);
-  const minor = match[3] === undefined ? 0 : Number(match[3]);
-  if (family === "fable") return true;
-  if (family === "sonnet" && major === 5 && minor === 0) return false;
-  return major > 4 || (major === 4 && minor >= 8);
+  const directId = modelId.replace(/^.*\//, "").replace(/\./g, "-").replace(/-\d{8}$/, "");
+  const direct = (ANTHROPIC_MODELS as Readonly<Record<string, Model<Api> | undefined>>)[directId];
+  return (direct?.compat as { readonly supportsMidConvoToolChanges?: boolean } | undefined)?.supportsMidConvoToolChanges === true;
 }
 
 function toContext(req: LlmRequest): Context {
   return {
-    systemPrompt: req.system,
+    systemPrompt: req.systemPrompt,
     messages: [...req.messages],
     tools: req.tools?.map(toPiTool),
   };
@@ -454,20 +448,7 @@ function toOptions(
 ): ModelsSimpleStreamOptions {
   return {
     ...defaults,
-    ...(req.params?.thinking !== undefined
-      ? { reasoning: req.params.thinking }
-      : {}),
-    // Only meaningful alongside `reasoning`: pi reads it from `adjustMaxTokensForThinking`,
-    // which `streamSimple` skips entirely when no reasoning level was requested.
-    ...(req.params?.thinkingBudgets !== undefined
-      ? { thinkingBudgets: req.params.thinkingBudgets }
-      : {}),
-    ...(req.params?.temperature !== undefined
-      ? { temperature: req.params.temperature }
-      : {}),
-    ...(req.params?.maxTokens !== undefined
-      ? { maxTokens: req.params.maxTokens }
-      : {}),
+    ...req.params,
     ...(call?.signal !== undefined ? { signal: call.signal } : {}),
     ...req.providerOptions,
   };

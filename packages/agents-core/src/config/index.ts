@@ -1,10 +1,7 @@
 export {
   AgentFrameworkConfigSchema,
-  ModelCredentialsSchema,
-  ModelAliasSchema,
   McpServerConfigSchema,
   PermissionRuleConfigSchema,
-  ProviderConfigSchema,
   parseConfig,
 } from "./schema.ts";
 export type {
@@ -13,27 +10,13 @@ export type {
   LoopControl,
   McpServerConfig,
   McpOAuthClientConfig,
-  ModelAlias,
-  ModelCredentialsConfig,
   PermissionConfig,
   PermissionRuleConfig,
   PluginRef,
-  ProviderConfig,
-  ProviderType,
   ThinkingConfig,
 } from "./schema.ts";
 
 export { mergeConfigs } from "./merge.ts";
-export { ModelCatalog } from "./model-catalog.ts";
-export type { ModelCapabilityInfo } from "./model-catalog.ts";
-export { ProviderManager } from "./provider-manager.ts";
-export type {
-  ResolvedModel,
-  ResolvableAlias,
-  ApiKeyResolver,
-  ProviderManagerConfig,
-  ProviderManagerOptions,
-} from "./provider-manager.ts";
 export { Flags, FLAG_DEFINITIONS } from "./flags.ts";
 export type { FlagDefinition } from "./flags.ts";
 export {

@@ -2,7 +2,6 @@ import type { HookDef } from "../capabilities/user-hooks/types.ts";
 import type { PermissionMode, PermissionRule } from "../permission/types.ts";
 import { hookDefsFromConfig } from "../plugins/hooks.ts";
 import { mergeConfigs } from "./merge.ts";
-import { ModelCatalog } from "./model-catalog.ts";
 import { Flags } from "./flags.ts";
 import { type AgentFrameworkConfig, parseConfig, type ThinkingConfig } from "./schema.ts";
 
@@ -36,9 +35,7 @@ export interface CoreOptions {
     readonly maxRetriesPerStep?: number;
     readonly maxTurns?: number;
   };
-  readonly catalog: ModelCatalog;
   readonly flags: Flags;
-  readonly defaultModel?: string;
   readonly thinking?: ThinkingConfig;
   /** Plugin marketplace registry locations (URLs / paths) the product may browse. */
   readonly pluginMarketplaces: readonly string[];
@@ -75,9 +72,7 @@ export function toCoreOptions(config: AgentFrameworkConfig): CoreOptions {
       maxRetriesPerStep: config.loopControl.maxRetriesPerStep,
       maxTurns: config.loopControl.maxTurns,
     },
-    catalog: new ModelCatalog(config.models),
     flags: new Flags(config.flags),
-    defaultModel: config.defaultModel,
     thinking: config.thinking,
     pluginMarketplaces: config.pluginMarketplaces,
     hooks: hookDefsFromConfig(config.hooks),

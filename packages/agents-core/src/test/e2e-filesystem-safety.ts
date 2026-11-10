@@ -69,6 +69,19 @@ async function main(): Promise<void> {
     check("read: partial output", text(partial).includes("1\talpha") && !text(partial).includes("2\tbeta"));
     check("read: partial read not full", ledger.get(notes)?.fullRead === false);
 
+    const lineOffsetSchema = (readTool.schema.parameters as { properties: Record<string, Record<string, unknown>> }).properties.line_offset;
+    check("read: line_offset is one integer, not anyOf", lineOffsetSchema?.type === "integer" && lineOffsetSchema.anyOf === undefined);
+    const stringified = await runTool(readTool, { path: notes, line_offset: "2", n_lines: "1" }, ctx);
+    check("read: integer strings are accepted", text(stringified).includes("2\tbeta") && !text(stringified).includes("3\tgamma"));
+    const stringTail = await runTool(readTool, { path: notes, line_offset: "-1" }, ctx);
+    check("read: a negative integer string reads the tail", text(stringTail).includes("3\tgamma") && !text(stringTail).includes("2\tbeta"));
+    const rejected = await Promise.all(
+      [{ line_offset: 0 }, { line_offset: "abc" }, { line_offset: "1.5" }, { n_lines: "0" }, { line_offset: -2001 }].map((bad) =>
+        runTool(readTool, { path: notes, ...bad }, ctx).then(() => false, () => true),
+      ),
+    );
+    check("read: invalid line ranges are still refused", rejected.every(Boolean));
+
     await runTool(readTool, { path: notes }, ctx);
     const dedup = await runTool(readTool, { path: notes }, ctx);
     check("read: unchanged repeat returns stub", text(dedup).includes("File unchanged since last read"));

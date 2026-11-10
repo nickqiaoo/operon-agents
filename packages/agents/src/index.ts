@@ -9,7 +9,8 @@
  * machinery, capability assembly, …) is NOT here — it lives on `operon-agents/internal`
  * (≡ `operon-agents-core/internal`) for advanced embedders.
  *
- * For the low-level "assemble it yourself" path, import from `operon-agents/core`.
+ * This is the only entry point for applications. `operon-agents-core` is for the framework's own
+ * packages, and everything its root exports is public here.
  */
 
 export * from "./harness.ts";
@@ -25,8 +26,7 @@ export * from "./local.ts";
 // Per-directory MCP sharing for hosts that open many sessions in one folder (a desktop app).
 export * from "./workspace-mcp.ts";
 
-// The curated core engine, re-exported for convenience; `operon-agents/core` is the dedicated
-// primitives entrypoint.
+// The curated core engine, including the low-level primitives for assembling an agent by hand.
 export * from "operon-agents-core";
 
 export * as llm from "operon-agents-core/llm";

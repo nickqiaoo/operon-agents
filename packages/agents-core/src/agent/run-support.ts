@@ -104,13 +104,8 @@ export function resolveModelParams(
   settings: ModelSettings | undefined,
   sessionThinking: ThinkingLevel | undefined,
 ): ModelSettings | undefined {
-  const thinking = sessionThinking ?? settings?.thinking;
-  const params: ModelSettings = {
-    ...(settings?.temperature !== undefined ? { temperature: settings.temperature } : {}),
-    ...(settings?.maxTokens !== undefined ? { maxTokens: settings.maxTokens } : {}),
-    ...(thinking !== undefined ? { thinking } : {}),
-    ...(settings?.thinkingBudgets !== undefined ? { thinkingBudgets: settings.thinkingBudgets } : {}),
-  };
+  const reasoning = sessionThinking ?? settings?.reasoning;
+  const params: ModelSettings = { ...settings, ...(reasoning !== undefined ? { reasoning } : {}) };
   return Object.keys(params).length > 0 ? params : undefined;
 }
 

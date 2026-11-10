@@ -964,7 +964,7 @@ class Engine<TContext> {
           deferEnabled: toolset.deferEnabled,
           onToolsPrepared: (tools) => { permissionTools = tools; },
           onRequestPrepared: (request) => stampBreakdown({
-            system: request.system,
+            system: request.systemPrompt,
             tools: (request.tools ?? []).map((schema) => ({ schema })),
             messages: request.messages,
           }),

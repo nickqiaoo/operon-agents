@@ -96,6 +96,30 @@ async function main(): Promise<void> {
     return { batch, events, result: batch.results[0] };
   };
 
+  // ── arguments the tool's schema refuses ──
+  {
+    const strict = tool({
+      name: "Strict",
+      description: "strict",
+      parameters: z.object({ count: z.number(), either: z.union([z.number(), z.boolean()]).optional() }),
+      execute: () => "ran",
+    });
+    const step: ToolCallStepContext = {
+      turnId: "t1",
+      stepNumber: 1,
+      signal: new AbortController().signal,
+      model: faux.getChatModel(),
+      environment: new NullEnvironment(),
+      tools: new Map([["Strict", strict]]),
+    };
+    const batch = await runCalls(step, [{ type: "toolCall", id: "call_bad", name: "Strict", arguments: { count: "1", either: "x" } }]);
+    const refused = batch.results[0];
+    const message = refused === undefined ? "" : text(refused);
+    check("a schema refusal is an error result naming the tool", refused?.isError === true && message.startsWith("Invalid arguments for Strict: "));
+    check("a schema refusal names the field and problem on one line", message.includes("count: Invalid input: expected number, received string") && !message.includes("\n"));
+    check("a union refusal reports what its branches wanted", message.includes("either: Invalid input: expected number, received string OR either: Invalid input: expected boolean, received string"));
+  }
+
   // ── the happy path ──
   {
     const { batch, events, result } = await run([{ name: "Inner", args: { x: 7 } }]);

@@ -213,7 +213,7 @@ export class OTelTracingProcessor implements TracingProcessor {
           ...(data.toolNames === undefined ? {} : { "operon_agents.generation.tools": [...data.toolNames] }),
           ...(data.params?.temperature === undefined ? {} : { "gen_ai.request.temperature": data.params.temperature }),
           ...(data.params?.maxTokens === undefined ? {} : { "gen_ai.request.max_tokens": data.params.maxTokens }),
-          ...(data.params?.thinking === undefined ? {} : { "operon_agents.generation.thinking": String(data.params.thinking) }),
+          ...(data.params?.reasoning === undefined ? {} : { "operon_agents.generation.thinking": String(data.params.reasoning) }),
         };
       case "tool":
         return {

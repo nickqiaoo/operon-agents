@@ -177,10 +177,10 @@ function testLoadProjection(): void {
 }
 
 function testNativeGate(): void {
-  const accepts = ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "anthropic/claude-sonnet-5.5", "claude-opus-5-20260101"];
-  const rejects = ["claude-sonnet-5", "claude-sonnet-4-5", "claude-opus-4-7", "claude-haiku-4-5", "gpt-5.5"];
-  check("gate: Anthropic mid-conversation tool changes from Opus 4.8 on", accepts.every(acceptsMidConvoToolChanges));
-  check("gate: Sonnet 5, older Claude and non-Claude are excluded", !rejects.some(acceptsMidConvoToolChanges));
+  const accepts = ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5", "anthropic/claude-sonnet-5.5", "anthropic/claude-haiku-5.5", "claude-opus-5-20260101"];
+  const rejects = ["claude-sonnet-5", "claude-sonnet-4-5", "claude-opus-4-7", "claude-haiku-4-5", "claude-opus-9", "gpt-5.5"];
+  check("gate: models pi's direct catalog flags, however the id is spelled", accepts.every(acceptsMidConvoToolChanges));
+  check("gate: unflagged, uncatalogued and non-Claude models are excluded", !rejects.some(acceptsMidConvoToolChanges));
 }
 
 async function testFrameworkFlow(): Promise<void> {
