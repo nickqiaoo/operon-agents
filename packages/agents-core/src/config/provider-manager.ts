@@ -6,6 +6,8 @@ import {
   type ApiKeyAuth,
   type AuthContext,
   type AuthResult,
+  type ClassifierApi,
+  type ClassifierModel,
   type CredentialStore,
   type Model,
   type ModelsStore,
@@ -21,6 +23,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import {
   ChatModel,
+  DecisionModel,
   FileCredentialStore,
   UNKNOWN_CAPABILITY,
   applyDeclaredCapability,
@@ -155,6 +158,24 @@ export class ProviderManager {
     };
   }
 
+  /**
+   * The decision model `modelRef` names, or undefined when it is an LLM. An id catalogued as both
+   * (OpenAI's `gpt-6-luna`) counts as an LLM, and an id the catalog doesn't know can only be one.
+   */
+  resolveDecisionModel(modelRef: string): DecisionModel | undefined {
+    const config = this.config;
+    this.syncConfiguredProviders(config);
+    const alias = this.resolveAlias(modelRef, config);
+    if (this.runtime.models.getModel(alias.provider, alias.model) !== undefined) return undefined;
+    const descriptor = this.runtime.models.getModelOfType("classifier", alias.provider, alias.model);
+    return descriptor === undefined ? undefined : new DecisionModel({ runtime: this.runtime, descriptor });
+  }
+
+  /** One model reference, whichever kind it is — what `createAutoApprover` takes. */
+  async resolveReviewModel(modelRef: string): Promise<ChatModel | DecisionModel> {
+    return this.resolveDecisionModel(modelRef) ?? (await this.resolveModel(modelRef)).model;
+  }
+
   modelResolver(): (modelId: string) => Promise<ChatModel> {
     return async (id) => (await this.resolveModel(id)).model;
   }
@@ -211,6 +232,9 @@ export class ProviderManager {
   ): Provider {
     const base = this.baseProviderFor(providerId, config.type);
     const models = configuredModels(providerId, config, aliases, base);
+    // A custom baseUrl is a different service: the catalog's decision endpoints don't apply to it,
+    // and its key must not be sent to them.
+    const decision = config.baseUrl ? undefined : catalogDecisionModels(this.baseProviders.get(providerId));
     return createProvider({
       id: providerId,
       name: base?.name ?? providerId,
@@ -222,8 +246,9 @@ export class ProviderManager {
         base?.auth,
         this.options.resolveApiKey,
       ),
-      models,
+      models: decision ? [...models, ...decision.models] : models,
       api: API_IMPLEMENTATIONS,
+      ...(decision ? { classifiers: decision.classifiers } : {}),
     });
   }
 
@@ -258,6 +283,16 @@ function resolveCredentialPath(configuredPath: string): string {
         ? join(homedir(), configuredPath.slice(2))
         : configuredPath;
   return resolvePath(expanded);
+}
+
+/** A catalog provider's decision models and the code that calls them, to carry onto its overlay. */
+function catalogDecisionModels(base: Provider | undefined) {
+  const models = (base?.getAllModels?.() ?? []).filter(
+    (model): model is ClassifierModel<ClassifierApi> => model.type === "classifier",
+  );
+  if (base?.classify === undefined || models.length === 0) return undefined;
+  const classifier = { classify: base.classify.bind(base) };
+  return { models, classifiers: Object.fromEntries(models.map((model) => [model.api, classifier])) };
 }
 
 function configuredModels(

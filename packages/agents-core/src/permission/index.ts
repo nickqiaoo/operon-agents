@@ -28,12 +28,16 @@ export { parsePattern, matchPermissionRule, permissionPatternError } from "./mat
 export { createPolicies } from "./policies.ts";
 export {
   LlmAutoApprover,
+  DecisionAutoApprover,
+  createAutoApprover,
   buildClassifierSystemPrompt,
   CLASSIFIER_BASE_PROMPT,
   CLASSIFIER_PERMISSIONS_TEMPLATE,
   type AutoApprovalOutcome,
   type AutoApprovalReport,
   type ClassifierRules,
+  type CreateAutoApproverOptions,
+  type DecisionAutoApproverOptions,
   type LlmAutoApproverOptions,
   type TwoStageMode,
 } from "./auto-approver/index.ts";

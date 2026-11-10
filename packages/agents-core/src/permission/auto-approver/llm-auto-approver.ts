@@ -21,7 +21,7 @@ export type AutoApprovalOutcome =
 export interface AutoApprovalReport {
   readonly outcome: AutoApprovalOutcome;
   readonly toolName: string;
-  readonly stage?: "fast" | "thinking";
+  readonly stage?: "fast" | "thinking" | "decision";
   readonly reason?: string;
   readonly durationMs: number;
 }

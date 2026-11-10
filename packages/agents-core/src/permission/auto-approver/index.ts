@@ -6,6 +6,12 @@ export {
   type TwoStageMode,
 } from "./llm-auto-approver.ts";
 export {
+  DecisionAutoApprover,
+  createAutoApprover,
+  type CreateAutoApproverOptions,
+  type DecisionAutoApproverOptions,
+} from "./decision-auto-approver.ts";
+export {
   buildClassifierSystemPrompt,
   CLASSIFIER_BASE_PROMPT,
   CLASSIFIER_PERMISSIONS_TEMPLATE,
