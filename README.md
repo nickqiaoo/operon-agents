@@ -223,6 +223,14 @@ restores: they cannot be applied to an instance that exists, so it throws
 that lands during a load cancels it — waiters get `SessionClosedError`, never a closed handle.
 `getSession(id)` only looks in memory.
 
+`harness.readSessionMessages(id, { limit?, before?, address? })` reads a session's transcript
+**without opening it**: a closed session stays closed — no instance, no capabilities, no recovery,
+no open listener — so a sidebar can show a parked conversation without waking it. It returns what
+happened, including messages a compaction has since summarized away (each message once, the
+compaction as a marker), as pages newest first: pass the returned `next` as `before` for the page
+above. An open session is read through its own store, so the reply of the run that just finished is
+on the page; text still streaming is not — follow that live with `observeProjection`.
+
 A restore never quietly substitutes a default for something the session was created on. A session
 opened on a sandbox and reopened without one throws `SessionDependencyMissingError` instead of
 running on the harness's own filesystem; the same holds for a fork, and for a session an extension

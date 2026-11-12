@@ -14,7 +14,8 @@
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { closeDeadlines } from "./harness-test-hooks.ts";
-import { type AgentEvent, type AgentRecord, type EventPublicationMode, type TelemetryService, type AgentEventListener, type AgentInput, readSessionTails, SessionProjection, type SessionSnapshot, type SnapshotOptions, type DirectoryEntry, type ProjectionObservation, type ProjectionListener, type ApprovalRequest, type ApprovalResponse, type Capability, type InterruptAnswer, type ChatModel, type ModelSettings, type RunOptions, ListenerSink, type AutoApprover, type PermissionMode, type PermissionRule, type PendingRunInterrupt, type QuestionRequest, type QuestionResult, type Responder, type RunHandle, type RunResult, type SessionStore, type SessionHandle, type SessionSummary, type ListSessionsFilter, type CreateSessionInput, type OpenSessionOptions, type DeleteSessionOptions, type ThinkingLevel, type Tool, type PromptOrigin, type SteerMessage, type SteerOptions, type SteerOrigin, type SteerReceipt, Agent, buildAgentFromProfile, INTERRUPTION_STATE_KEY, flattenPendingInterrupts, parseInterruptionState, Runner, Session, emptyUsage, isGuardrailTripwireError, type GuardrailTripwireError, askUserQuestionTool, createAutoApprover, createModelManager, backgroundCapability, compactionCapability, filesystemTools, goalCapability, LocalEnvironment, McpOAuthService, MemorySessionRepository, SessionRepositoryNotFoundError, SessionBusyError, SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError, isAbortError, planCapability, skillsCapability, SkillRegistry, mcpServersCapability, pluginsCapability, userHooksCapability, type HookDef, type McpServerConfig, type McpTransportKind, type McpCredentialProvider, type PluginManager, type ApprovalRequestOptions, type Environment, type EnvironmentFactory, type ActivateSkillRequest, type SessionRepository, type ResolvedAgentProfile, taskCapability, workflowCapability, DEFAULT_AGENT_PROFILES, DEFAULT_AGENT_PROFILE_NAME, DEFAULT_SUBAGENT_NAMES, profileSubagentProvider, type SubagentProvider, DEFAULT_ADDRESS, envLogger, noopLogger, parseSessionConfig, resolveSessionConfig, inlineMcpSecretPaths, sessionPolicyViolation, hookDefsFromConfig, SessionPolicySchema, SESSION_MODEL_KEY, SESSION_PERMISSION_KEY, SESSION_THINKING_KEY, type SessionConfig, type HarnessConfig, type SessionPolicy, type SessionMcpConfig, type SkillsConfig } from "operon-agents-core";
+import { readTranscriptPage, type TranscriptPage, type TranscriptPageOptions } from "operon-agents-core";
+import { type AgentEvent, type AgentRecord,type EventPublicationMode, type TelemetryService, type AgentEventListener, type AgentInput, readSessionTails, SessionProjection, type SessionSnapshot, type SnapshotOptions, type DirectoryEntry, type ProjectionObservation, type ProjectionListener, type ApprovalRequest, type ApprovalResponse, type Capability, type InterruptAnswer, type ChatModel, type ModelSettings, type RunOptions, ListenerSink, type AutoApprover, type PermissionMode, type PermissionRule, type PendingRunInterrupt, type QuestionRequest, type QuestionResult, type Responder, type RunHandle, type RunResult, type SessionStore, type SessionHandle, type SessionSummary, type ListSessionsFilter, type CreateSessionInput, type OpenSessionOptions, type DeleteSessionOptions, type ThinkingLevel, type Tool, type PromptOrigin, type SteerMessage, type SteerOptions, type SteerOrigin, type SteerReceipt, Agent, buildAgentFromProfile, INTERRUPTION_STATE_KEY, flattenPendingInterrupts, parseInterruptionState, Runner, Session, emptyUsage, isGuardrailTripwireError, type GuardrailTripwireError, askUserQuestionTool, createAutoApprover, createModelManager, backgroundCapability, compactionCapability, filesystemTools, goalCapability, LocalEnvironment, McpOAuthService, MemorySessionRepository, SessionRepositoryNotFoundError, SessionBusyError, SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError, isAbortError, planCapability, skillsCapability, SkillRegistry, mcpServersCapability, pluginsCapability, userHooksCapability, type HookDef, type McpServerConfig, type McpTransportKind, type McpCredentialProvider, type PluginManager, type ApprovalRequestOptions, type Environment, type EnvironmentFactory, type ActivateSkillRequest, type SessionRepository, type ResolvedAgentProfile, taskCapability, workflowCapability, DEFAULT_AGENT_PROFILES, DEFAULT_AGENT_PROFILE_NAME, DEFAULT_SUBAGENT_NAMES, profileSubagentProvider, type SubagentProvider, DEFAULT_ADDRESS, envLogger, noopLogger, parseSessionConfig, resolveSessionConfig, inlineMcpSecretPaths, sessionPolicyViolation, hookDefsFromConfig, SessionPolicySchema, SESSION_MODEL_KEY, SESSION_PERMISSION_KEY, SESSION_THINKING_KEY, type SessionConfig, type HarnessConfig, type SessionPolicy, type SessionMcpConfig, type SkillsConfig } from "operon-agents-core";
 import { recoverOrphanedTurns } from "operon-agents-core/internal";
 import type {
   TodoStore,
@@ -1712,6 +1713,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
             services: this.services,
             resumeSession: (id, extensionId) => this.resumeFrom(id, undefined, { kind: "extension", extensionId }),
             createSession: (sessionOptions, extensionId) => this.createFromExtension(sessionOptions, extensionId),
+            readSessionMessages: (id, pageOptions) => this.readSessionMessages(id, pageOptions),
             sessions: () => [...this.activeSessions.values()],
             withBarrier: (extensionIds, timeoutMs, fn) => this.withBarrier(extensionIds, timeoutMs, fn),
             warn: (message) => console.warn(`[extensions] ${message}`),
@@ -1810,6 +1812,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
           return this.createFromExtension(sessionOptions, definition.id);
         },
         resumeSession: (id) => this.resumeFrom(id, undefined, { kind: "extension", extensionId: definition.id }),
+        readSessionMessages: (id, pageOptions) => this.readSessionMessages(id, pageOptions),
         service: (name) => this.services.handle(name),
         warn: (message) => console.warn(`[extensions] ${message}`),
       });
@@ -2153,6 +2156,31 @@ export class Harness<TContext = unknown, TOutput = unknown> {
    *  Soft-deleted sessions resolve only with `{ includeDeleted: true }` — audit/purge tooling. */
   async inspectSession(id: string, options?: OpenSessionOptions): Promise<SessionHandle | undefined> {
     return (await this.repository()).open(id, options);
+  }
+
+  /**
+   * One page of a session's transcript, newest page first — open or closed alike, and NEVER by
+   * opening it: a closed session stays closed (no Session built, no capabilities, no recovery).
+   * What happened, including messages a compaction has since summarized away; see
+   * `readTranscriptPage` for exactly what is read. Page backwards with the returned `next`.
+   *
+   * An open session is read through its own store after its pending appends have landed, so a
+   * message appended a moment ago is already on the page. Only durable records are read: text
+   * still streaming is not on any page — follow it live with `observeProjection`.
+   * Soft-deleted and unknown ids throw `SessionRepositoryNotFoundError`.
+   */
+  async readSessionMessages(id: string, options?: TranscriptPageOptions): Promise<TranscriptPage> {
+    const live = this.getSession(id);
+    const liveStore = live?.core.store;
+    if (live !== undefined && liveStore !== undefined) {
+      await live.core.flushEvents();
+      return readTranscriptPage(liveStore, options);
+    }
+    const handle = await this.inspectSession(id);
+    if (handle === undefined) throw new SessionRepositoryNotFoundError(id);
+    // Not closed on purpose: a read holds nothing, and some repositories hand back the very
+    // store a later open will use (the in-memory one) — closing it here would close that.
+    return readTranscriptPage(handle.store, options);
   }
 
   /** Read one catalog row without the O(N) `listSessions()` scan. */

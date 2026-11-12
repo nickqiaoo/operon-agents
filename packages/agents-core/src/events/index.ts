@@ -15,6 +15,14 @@ export type { WorkflowRecordProjection } from "./publisher.ts";
 export type { EventPublicationMode } from "./publisher.ts";
 export { RedactingSink } from "./redacting-sink.ts";
 export { SessionProjection, readSessionTails } from "./projection.ts";
+export { readTranscriptPage } from "./transcript.ts";
+export type {
+  TranscriptCompactionItem,
+  TranscriptItem,
+  TranscriptMessageItem,
+  TranscriptPage,
+  TranscriptPageOptions,
+} from "./transcript.ts";
 export type { WorkflowProgressEvent, WorkflowAgentRecord } from "./events.ts";
 export type {
   AgentSnapshot,

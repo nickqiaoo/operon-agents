@@ -78,6 +78,34 @@ await harness.extensions!.reload("peers");
 
 `reload` is one coordinated act: every session holding the peers half meets at its next run boundary, the half is swapped, the service is replaced (the old network's `close()` runs), and everyone resumes. No session is reopened and no conversation is interrupted; the repo in the extension's data dir carries the roster and mailbox across, so the same lead reaches the same teammate afterwards. Nothing watches the directory — a changed bundle loads only through an explicit `reload`, so an agent with write access cannot plant code that runs on next open. Two rules the bundle keeps: import the framework as types only (it belongs to the host — this package value-imports nothing from it, which is what keeps the bundle free of the core's native transitive deps), and keep state in the repo under `host.dataDir` (the instance is replaceable; a memory repo is wiped by reload). To ship it, `pnpm release` in `examples/peers-extension` produces the zip, its sha256 and an index entry for a download site.
 
+### Options from the host
+
+When what a teammate IS depends on the host — teammate types the user configured in a settings
+screen, a budget read from a file — pass the options as a function of the extension's host, and
+name the host services it reads in `uses`. A reload re-runs the function, so re-reading the
+settings is the config update; sessions already open keep running.
+
+```ts
+export default peers(async (host) => {
+  const settings = host.services["my-app-teams"];        // registered with createHarness({ services })
+  const config = await settings.config();
+  return {
+    visibility: sharedLabelVisibility,
+    repo: createFilePeerRepo(host.dataDir!),
+    budget: config.budget,
+    team: { type: "lead" },
+    teammates: Object.fromEntries(Object.keys(config.types).map((type) => [type, (request) => settings.teammateOptions(request)])),
+    onTeammateCreated: (sessionId, member) => settings.onTeammateCreated(sessionId, member),
+  };
+}, { uses: ["my-app-teams"] });
+```
+
+`onTeammateCreated(sessionId, member)` runs once a spawned teammate's session exists and holds its
+seat, **before** its assignment is routed — where a host makes its own record of the conversation,
+picks a model, or subscribes, so all of it is in place for the teammate's first turn. A hook that
+throws aborts the spawn rather than leave a half-made teammate running: the session is closed, the
+seat leaves the roster (the name is free for a retry), and `Team spawn` reports the error.
+
 ## Pre-arranged teams
 
 A host can stand up a team with no model-driven spawn at all — with `peers()` in `extensions`, hand each session its member identity as a param:
@@ -108,7 +136,23 @@ otherwise the spawn is refused rather than run on the harness's machine. A `team
 data: `{ title?, workDir?, ownerKey?, config? }`.
 
 A standalone `createPeerNetwork` still requires its `resumeSession` function, which a custom
-extension supplies as `(id) => host.resumeSession(id)`.
+extension supplies as `(id) => host.resumeSession(id)`. Its `readSessionMessages` is optional —
+pass `(id, options) => host.readSessionMessages(id, options)` to enable `getMemberHistory`.
+
+## Reading a teammate's history
+
+```ts
+const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
+const page = await net.getMemberHistory(agentId, { limit: 50 });
+// page.items: oldest first — { kind: "message", message, origin, cursor, … } | { kind: "compaction", … }
+const older = page.next ? await net.getMemberHistory(agentId, { before: page.next }) : undefined;
+```
+
+By roster id, for any agent on the roster — a member, or the lead. A parked teammate **stays
+parked**: the transcript is read where its session is stored, no session is resumed, no turn
+starts and no wake is counted. It is `harness.readSessionMessages` underneath, so it reads what
+happened (compacted messages included) in pages newest first. A peer delivery carries its
+`external` origin, which tells it apart from what a user typed.
 
 **State a `type` and `description`.** They are what makes the roster useful: without them every teammate lists as an anonymous `member` and a model has no way to tell who to ask. The `name` is what teammates address it by — unique within `team` (its roster id is `<team>/<name>`).
 
@@ -119,6 +163,7 @@ extension supplies as `(id) => host.resumeSession(id)`.
 | `api.onEvent` | root-frame lifecycle — who is awake, asleep, gone |
 | `api.registerTool` | the `Team` tool (creators) and the `Hub` tool (members) |
 | host `resumeSession(id)` | get a session, loading it if needed — the harness joins concurrent loads and asks the host's `resolveSession` for what cannot be stored |
+| host `readSessionMessages(id)` | read a member's transcript without loading its session — what `getMemberHistory` rests on |
 | `handle.steerTo(address, …)` | hand a message to one specific frame |
 | `harness` half / `ctx.shared` | the extension's `harness` publishes one network per process; `session` reaches it through a method-only handle that outlives any one instance — what makes `reload` and `services.replace` land without touching a session |
 

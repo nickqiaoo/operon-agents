@@ -35,6 +35,7 @@ export interface ExtensionHostBridge {
   /** `extensionId` is who asks: the host's `resolveSession` is told an extension did. */
   resumeSession(id: string, extensionId: string): ReturnType<ExtensionHostContext["resumeSession"]>;
   createSession(options: Parameters<ExtensionHostContext["createSession"]>[0], extensionId: string): Promise<{ readonly id: string }>;
+  readSessionMessages: ExtensionHostContext["readSessionMessages"];
   sessions(): readonly HeldSession[];
   /** Rendezvous every session holding one of `extensionIds` at its run boundary, run `fn` in
    *  the quiet moment (held() reads live — sessions born gated during the barrier appear). */
@@ -65,6 +66,7 @@ export interface StagingOptions {
   readonly dataDir?: string;
   createSession: ExtensionHostContext["createSession"];
   resumeSession: ExtensionHostContext["resumeSession"];
+  readSessionMessages: ExtensionHostContext["readSessionMessages"];
   /** Resolve one of the definition's `uses` names to its service handle. */
   service(name: string): unknown;
   warn(message: string): void;
@@ -89,6 +91,7 @@ export function stageDefinition(
   const host: ExtensionHostContext = {
     createSession: (sessionOptions) => options.createSession(sessionOptions),
     resumeSession: (id) => options.resumeSession(id),
+    readSessionMessages: (id, pageOptions) => options.readSessionMessages(id, pageOptions),
     services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, options.service(name)]))),
     ...(options.dir !== undefined ? { dir: options.dir } : {}),
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
@@ -235,6 +238,7 @@ export class HarnessExtensionManager {
       dataDir,
       createSession: (sessionOptions) => this.bridge.createSession(sessionOptions, definition.id),
       resumeSession: (id) => this.bridge.resumeSession(id, definition.id),
+      readSessionMessages: (id, pageOptions) => this.bridge.readSessionMessages(id, pageOptions),
       service: (name) => this.bridge.services.handle(name),
       warn: (message) => this.bridge.warn(message),
     });

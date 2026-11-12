@@ -25,6 +25,7 @@
  */
 export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, memberAgentId, LEAD_ALIAS, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";
 export type { PeerNetworkHandle } from "./network.ts";
+export type { PeerDefinitionOptions, PeerOptionsSource } from "./network.ts";
 export type {
   PeerExtensionOptions,
   PeerMemberOptions,

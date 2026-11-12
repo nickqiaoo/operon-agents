@@ -7,6 +7,27 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `harness.readSessionMessages(id, { limit?, before?, address? })` reads a session's transcript
+  without opening it: a closed session stays closed (no instance, no capabilities, no recovery, no
+  open listener). It reads what happened — messages a compaction summarized away included, each
+  message once, the compaction as a marker — in pages newest first, chained by `next`. An open
+  session is read through its own store after pending appends land. The page reader is
+  `readTranscriptPage(store, options)` in `operon-agents-core`, with the `Transcript*` types.
+- The harness half of an extension gets `host.readSessionMessages`, the same read.
+- `PeerNetwork.getMemberHistory(agentId, options?)` reads a roster agent's transcript by roster id
+  without waking it (`operon-agents-peers`). A custom extension enables it by passing
+  `readSessionMessages` to `createPeerNetwork`; `peers()` wires it.
+- `peers(options, { uses })` takes its options as a function of the extension's host as well as a
+  constant, so a bundle can read teammate types, budget and the rest from a host service named in
+  `uses`; a reload re-runs it (`operon-agents-peers`).
+- `onTeammateCreated(sessionId, member)` on `peers()` / `createPeerNetwork`: runs once a spawned
+  teammate exists and holds its seat, before its assignment is routed. Throwing aborts the spawn —
+  the session is closed, the seat is freed and `Team spawn` reports the error.
+
 ## [0.1.0-alpha.31] — 2026-11-12
 
 ### Added

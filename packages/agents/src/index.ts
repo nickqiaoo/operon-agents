@@ -76,6 +76,15 @@ export type {
   StoppedRunResult,
 } from "operon-agents-core";
 
+// Reading a session's transcript without opening it (`harness.readSessionMessages`).
+export type {
+  TranscriptCompactionItem,
+  TranscriptItem,
+  TranscriptMessageItem,
+  TranscriptPage,
+  TranscriptPageOptions,
+} from "operon-agents-core";
+
 // Errors a caller can branch on.
 export {
   GuardrailTripwireError,

@@ -48,6 +48,8 @@ import type {
   StepStopReason,
   TerminalStepStopReason,
   ThinkingLevel,
+  TranscriptPage,
+  TranscriptPageOptions,
   Tool,
   ToolPlan,
   ToolResult,
@@ -641,6 +643,9 @@ export interface ExtensionHostContext<
 > {
   /** Get a session by id, loading it if it is not loaded — `harness.resumeSession(id)`. */
   resumeSession(id: string): Promise<HarnessSessionHandle>;
+  /** One page of a session's transcript WITHOUT loading it — `harness.readSessionMessages(id)`.
+   *  A parked session stays parked: reading never resumes it. */
+  readSessionMessages(id: string, options?: TranscriptPageOptions): Promise<TranscriptPage>;
   /**
    * Open a brand-new session on this harness — what a spawn factory calls. The options are
    * `harness.createSession`'s own (`title`, `workDir`, `ownerKey`, `config`, …); a key the harness
