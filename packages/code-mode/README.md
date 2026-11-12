@@ -12,10 +12,10 @@ import { codeMode } from "operon-code-mode";
 
 // Default (`hide: "catalog"`): a large MCP catalog stays out of the context of any model that
 // cannot defer tools natively; programs reach it instead. Does nothing where nothing needs hiding.
-createHarness({ model, extensions: [codeMode()] });
+createHarness({ config: { defaults: { model } }, extensions: [codeMode()] });
 
 // Orchestration (`hide: "none"`): RunCode beside every tool, for work that takes many calls.
-createHarness({ model, extensions: [codeMode({ hide: "none" })] });
+createHarness({ config: { defaults: { model } }, extensions: [codeMode({ hide: "none" })] });
 ```
 
 For orchestration: instead of `Read a.ts` → `Read b.ts` → `Read c.ts` → `Grep …`, four round-trips each dragging its
@@ -114,7 +114,7 @@ nested call's tool, approval rule and position in the program (`RunCodeApprovalR
 with an approval response:
 
 ```ts
-await session.resume({ [pending.approvalId]: { kind: "input", data: { decision: "approved" } } });
+await session.respond({ [pending.approvalId]: { kind: "input", data: { decision: "approved" } } });
 ```
 
 The program then runs again from the top — possibly in another process — with calls found in the

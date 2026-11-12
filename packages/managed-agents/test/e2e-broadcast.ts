@@ -1,31 +1,29 @@
 /**
- * The live path, and specifically the two things the store alone cannot do.
+ * The live path: worker → broadcast → API → SSE → client.
  *
- *  1. Carry an event that is never written down. Token deltas and warnings exist only while a
- *     turn is running; a subscriber reading the log will never see them, however long it waits.
- *  2. Hand over from backfill to live without a gap. The subscription is opened before the log
- *     is read, so an event produced during the read lands in the buffer rather than in neither.
- *
- * The seam is the part worth testing: an event can legitimately arrive from both sides, and a
- * client that sees it twice is as broken as one that never sees it.
+ *  1. Cross-process. The worker publishing and the API subscribing are NOT the same object: two
+ *     independent `RedisEventBroadcaster`s share only a (fake) pub/sub bus, as a worker node and
+ *     an API replica would. A client streaming through the API sees what the worker emitted, in
+ *     the managed vocabulary, with nothing of the runtime's leaking through.
+ *  2. Live-only, and the client fills the gap. The stream carries only what is emitted after it
+ *     opens; a dropped connection loses events, and the client recovers them from the history,
+ *     delivering each exactly once.
  */
-import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "operon-agents";
-import {
-  createHarness,
-  DiskSessionRepository,
-  LocalEnvironment,
-} from "operon-agents";
+import { createHarness, LocalEnvironment } from "operon-agents";
+import { DiskSessionRepository } from "operon-agents/advanced";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
+import { ManagedAgentsClient, ManagedSessionEventStream } from "../src/client/client.ts";
+import type { SseFrame } from "../src/protocol/sse.ts";
+import type { ListSessionEventsResponse, ManagedEventResource } from "../src/protocol/types.ts";
+import { RedisEventBroadcaster } from "../src/server/broadcast.ts";
+import { allowAllRequests, createManagedHttpServer } from "../src/server/http-server.ts";
+import { MemoryManagedSessionMetadataStore } from "../src/server/metadata.ts";
+import { SessionService } from "../src/server/session-service.ts";
 import { SessionWorker } from "../src/server/session-worker.ts";
 import { MemorySessionWork } from "../src/server/work-memory.ts";
-import { SessionService } from "../src/server/session-service.ts";
-import { MemoryEventBroadcaster, RedisEventBroadcaster } from "../src/server/broadcast.ts";
-import { MemoryManagedSessionMetadataStore } from "../src/server/metadata.ts";
-import type { ManagedEnvironmentRegistry } from "../src/server/registries.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -33,165 +31,10 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-function liveOnly(sessionId: string, id: string, message: string): AgentEvent {
-  // `warning` has no record type — it exists on the live stream and nowhere else.
-  return { type: "warning", message, address: "main", sessionId, eventId: id } as unknown as AgentEvent;
-}
-
-async function main(): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "broadcast-"));
-  const repository = new DiskSessionRepository(root);
-  const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: join(root, "work") }) };
-  const broadcaster = new MemoryEventBroadcaster();
-  const service = new SessionService({
-    repository,
-    work: new MemorySessionWork({ repository }),
-    environments,
-    metadataStore: new MemoryManagedSessionMetadataStore(),
-    broadcaster,
-  });
-
-  const session = await service.create({ agent: "default", environment: "default" });
-  // One persisted event exists before anyone subscribes, so the backfill has something to do.
-  await service.appendEvent(session.id, { input: "first" });
-
-  // ── live-only events reach a subscriber ───────────────────────────────────────
-  const seen: AgentEvent[] = [];
-  const controller = new AbortController();
-  const consuming = (async () => {
-    for await (const event of service.watchEvents(session.id, { signal: controller.signal })) {
-      seen.push(event);
-      if (seen.length === 3) controller.abort();
-    }
-  })();
-
-  // Give the backfill a moment, then emit something that is never written to the log.
-  await new Promise((r) => setTimeout(r, 40));
-  broadcaster.publish(session.id, liveOnly(session.id, "evt_live_1", "token delta"));
-  broadcaster.publish(session.id, liveOnly(session.id, "evt_live_2", "another delta"));
-  await consuming;
-
-  check("backfill delivered the persisted event", seen[0]?.type === "steer.queued");
-  const live = seen.filter((e) => e.type === "warning");
-  check("live-only events reached the subscriber", live.length === 2);
-  check(
-    "and in order",
-    (live[0] as { message: string }).message === "token delta" &&
-      (live[1] as { message: string }).message === "another delta",
-  );
-
-  // ── the seam does not duplicate ───────────────────────────────────────────────
-  // Publish the SAME persisted event the backfill will also produce. A naive implementation
-  // yields it twice; this must yield it once.
-  const events = await service.listEvents(session.id, { limit: 10 });
-  const persisted = events.data.find((e) => e.type === "steer.queued")!;
-
-  const seen2: AgentEvent[] = [];
-  const controller2 = new AbortController();
-  const consuming2 = (async () => {
-    for await (const event of service.watchEvents(session.id, { signal: controller2.signal })) {
-      seen2.push(event);
-      if (seen2.length === 2) controller2.abort();
-    }
-  })();
-  await new Promise((r) => setTimeout(r, 40));
-  broadcaster.publish(session.id, persisted); // the duplicate
-  broadcaster.publish(session.id, liveOnly(session.id, "evt_live_3", "after the seam"));
-  await consuming2;
-
-  const acceptedCount = seen2.filter((e) => e.eventId === persisted.eventId).length;
-  check("an event arriving from both sides is delivered once", acceptedCount === 1);
-  check("and the stream continues past the seam", seen2.some((e) => e.eventId === "evt_live_3"));
-
-  // ── without a broadcaster, the stream still works (just thinner) ───────────────
-  const plain = new SessionService({
-    repository,
-    work: new MemorySessionWork({ repository }),
-    environments,
-    metadataStore: new MemoryManagedSessionMetadataStore(),
-  });
-  const plainSession = await plain.create({ agent: "default", environment: "default" });
-  await plain.appendEvent(plainSession.id, { input: "hello" });
-  const controller3 = new AbortController();
-  const seen3: AgentEvent[] = [];
-  for await (const event of plain.watchEvents(plainSession.id, { signal: controller3.signal })) {
-    seen3.push(event);
-    controller3.abort();
-  }
-  check("no broadcaster: persisted events still stream", seen3[0]?.type === "steer.queued");
-
-  // ── the real thing: deltas produced by an actual turn ─────────────────────────
-  // Everything above uses hand-published events to pin the seam logic. This runs a turn and
-  // asserts that what the engine emits mid-flight — token deltas, which are never written to
-  // the log — actually reaches a subscriber. Without this the channel could be plumbed
-  // correctly and still carry nothing worth having.
-  await realTurnProducesDeltas();
-  await crossProcessBroadcast();
-  await strandedSessionIsReported();
-
-  rmSync(root, { recursive: true, force: true });
-  const passed = checks.filter(([, ok]) => ok).length;
-  console.log(`\n${passed}/${checks.length} checks passed`);
-  assert.equal(passed, checks.length);
-  console.log("✅ BROADCAST E2E PASS");
-}
-
-async function realTurnProducesDeltas(): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "broadcast-live-"));
-  const work = join(root, "work");
-  const faux = registerFauxProvider();
-  faux.setResponses([fauxAssistantMessage("a streamed answer", { stopReason: "stop" })]);
-
-  const repository = new DiskSessionRepository(root);
-  const metadataStore = new MemoryManagedSessionMetadataStore();
-  const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
-  const broadcaster = new MemoryEventBroadcaster();
-  const harness = createHarness({
-    infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
-    ...faux.harnessModel(),
-    permission: { mode: "yolo" },
-  });
-  const sessionWork = new MemorySessionWork({ repository });
-  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork, broadcaster });
-  const service = new SessionService({ repository, work: sessionWork, metadataStore, environments, broadcaster });
-
-  const session = await service.create({ agent: "default", environment: "default" });
-  const live: AgentEvent[] = [];
-  const unsubscribe = broadcaster.subscribe(session.id, (event) => live.push(event));
-  await service.appendEvent(session.id, { input: "say something" });
-  await worker.drain(session.id);
-  unsubscribe();
-
-  const deltas = live.filter((e) => e.type === "assistant.delta");
-  check("a real turn emits token deltas onto the channel", deltas.length > 0);
-
-  // And they are genuinely absent from the log — otherwise this proves nothing about the
-  // channel, only that events exist.
-  const persisted = await service.listEvents(session.id, { limit: 200 });
-  check(
-    "those deltas are nowhere in the persisted stream",
-    !persisted.data.some((e) => e.type === "assistant.delta"),
-  );
-  check(
-    "while the persisted stream does carry the finished message",
-    persisted.data.some((e) => e.type === "message.appended"),
-  );
-
-  await harness.close();
-  faux.unregister();
-  rmSync(root, { recursive: true, force: true });
-}
-
-/**
- * The cross-process case, which is the one the architecture actually runs in: the worker
- * publishing and the subscriber listening are NOT the same object. A fake Redis stands in for
- * the wire — what it verifies is that this broadcaster keeps no local state that delivery
- * depends on, so two independent instances still talk.
- */
-async function crossProcessBroadcast(): Promise<void> {
-  // A pub/sub bus that two unrelated clients connect to, like a real server.
+/** A pub/sub bus that unrelated clients connect to, like a real Redis server. */
+function fakeRedis() {
   const bus = new Map<string, Set<(channel: string, message: string) => void>>();
-  const makeSubscriber = () => {
+  const subscriber = () => {
     let handler: ((channel: string, message: string) => void) | undefined;
     const channels = new Set<string>();
     return {
@@ -211,101 +54,99 @@ async function crossProcessBroadcast(): Promise<void> {
       return 1;
     },
   };
-
-  // Two separate instances — as if one lived in a worker and one in an API replica.
-  const workerSide = new RedisEventBroadcaster({ publisher, subscriber: makeSubscriber() });
-  const apiSide = new RedisEventBroadcaster({ publisher, subscriber: makeSubscriber() });
-
-  const received: AgentEvent[] = [];
-  apiSide.subscribe("s-cross", (event) => received.push(event));
-  await new Promise((r) => setTimeout(r, 10));
-
-  workerSide.publish("s-cross", liveOnly("s-cross", "evt_x1", "delta from another process"));
-  await new Promise((r) => setTimeout(r, 20));
-
-  check("cross-process: a subscriber elsewhere receives the event", received.length === 1);
-  check(
-    "cross-process: the payload survives the wire intact",
-    (received[0] as { message?: string } | undefined)?.message === "delta from another process",
-  );
-
-  // And an event for a session nobody subscribed to must not leak into this listener.
-  workerSide.publish("s-other", liveOnly("s-other", "evt_x2", "not yours"));
-  await new Promise((r) => setTimeout(r, 20));
-  check("cross-process: events are scoped per session", received.length === 1);
+  return { subscriber, publisher };
 }
 
-/**
- * A worker dying mid-turn is invisible to a subscriber — the stream is attached to the service,
- * not the worker, so it does not break, it just goes quiet. Quiet is also what a model thinking
- * looks like, so the stream must say which one this is.
- *
- * The check requires BOTH unprocessed input and no holder. Each case below exists because one
- * condition alone would misreport it.
- */
-async function strandedSessionIsReported(): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "stranded-"));
-  const repository = new DiskSessionRepository(root);
-  const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: join(root, "work") }) };
-  const work = new MemorySessionWork({ repository });
-  const service = new SessionService({
-    repository,
-    work,
-    environments,
-    metadataStore: new MemoryManagedSessionMetadataStore(),
-    broadcaster: new MemoryEventBroadcaster(),
-    stallCheckMs: 30,
+async function crossProcess(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "broadcast-"));
+  const workDir = join(root, "work");
+  mkdirSync(workDir);
+  const faux = registerFauxProvider();
+  faux.setResponses([fauxAssistantMessage("hello from the worker", { stopReason: "stop" })]);
+  const redis = fakeRedis();
+  // Shared durable state, as Postgres would be.
+  const work = new MemorySessionWork();
+  const metadataStore = new MemoryManagedSessionMetadataStore();
+  // The API replica: its own broadcaster instance, no worker, no harness.
+  const service = new SessionService({ work, metadataStore, broadcaster: new RedisEventBroadcaster({ publisher: redis.publisher, subscriber: redis.subscriber() }) });
+  const http = createManagedHttpServer({ service, authorize: allowAllRequests });
+  await http.listen(0, "127.0.0.1");
+  // The worker node: a different broadcaster instance on the same bus.
+  const repository = new DiskSessionRepository(join(root, "sessions"));
+  const harness = createHarness({
+    infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(workDir) }),
+    ...faux.harnessModel(),
+    config: { eventPublication: "committed", defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
-
-  // Idle session, nothing pending: silence here is normal and must NOT be reported.
-  const idle = await service.create({ agent: "default", environment: "default" });
-  const idleController = new AbortController();
-  const idleSeen: AgentEvent[] = [];
-  const idleWatch = (async () => {
-    for await (const event of service.watchEvents(idle.id, { signal: idleController.signal })) {
-      idleSeen.push(event);
-    }
-  })();
-  await new Promise((r) => setTimeout(r, 120));
-  idleController.abort();
-  await idleWatch;
-  check("an idle session with no pending work is not reported as stranded",
-    !idleSeen.some((e) => e.type === "warning"));
-
-  // Pending input and nobody holding it: this is the real thing.
-  const stuck = await service.create({ agent: "default", environment: "default" });
-  await service.appendEvent(stuck.id, { input: "nobody will run this" });
-  const stuckController = new AbortController();
-  const stuckSeen: AgentEvent[] = [];
-  const stuckWatch = (async () => {
-    for await (const event of service.watchEvents(stuck.id, { signal: stuckController.signal })) {
-      stuckSeen.push(event);
-      if (event.type === "warning") stuckController.abort();
-    }
-  })();
-  await new Promise((r) => setTimeout(r, 200));
-  stuckController.abort();
-  await stuckWatch;
-  check("pending input with no runner is reported", stuckSeen.some((e) => e.type === "warning"));
-
-  // Same session, but now held: a worker IS on it, so silence is expected again.
-  const held = await service.create({ agent: "default", environment: "default" });
-  await service.appendEvent(held.id, { input: "someone is working" });
-  const lease = await work.acquire(held.id);
-  const heldController = new AbortController();
-  const heldSeen: AgentEvent[] = [];
-  const heldWatch = (async () => {
-    for await (const event of service.watchEvents(held.id, { signal: heldController.signal })) {
-      heldSeen.push(event);
-    }
-  })();
-  await new Promise((r) => setTimeout(r, 150));
-  heldController.abort();
-  await heldWatch;
-  await lease!.release();
-  check("pending input WITH a live lease is not reported", !heldSeen.some((e) => e.type === "warning"));
-
-  rmSync(root, { recursive: true, force: true });
+  const worker = new SessionWorker({
+    profile: "single-tenant", harness, repository, metadataStore, environments: { resolve: () => ({ workDir }) }, work,
+    broadcaster: new RedisEventBroadcaster({ publisher: redis.publisher, subscriber: redis.subscriber() }),
+    claimIntervalMs: 20, inputPollIntervalMs: 20,
+  });
+  worker.start();
+  const address = http.server.address();
+  const client = new ManagedAgentsClient({ baseUrl: `http://127.0.0.1:${String(typeof address === "object" && address !== null ? address.port : 0)}/v1` });
+  try {
+    const session = await client.sessions.create({ agent: "default", environment_id: "default" });
+    const controller = new AbortController();
+    const stream = await client.sessions.events.stream(session.id, { signal: controller.signal });
+    const sent = await client.sessions.events.send(session.id, { events: [{ type: "user.message", content: [{ type: "text", text: "hi" }] }] });
+    const seen: ManagedEventResource[] = [];
+    const timeout = setTimeout(() => controller.abort(), 8_000);
+    try {
+      for await (const event of stream) {
+        seen.push(event);
+        if (event.type === "session.status_idle") break;
+      }
+    } catch { /* aborted */ }
+    clearTimeout(timeout);
+    controller.abort();
+    const types = seen.map((e) => e.type);
+    check("cross-process: the client saw the worker's events through the API", types.includes("agent.message") && types.at(-1) === "session.status_idle");
+    check("cross-process: its own message echoed back processed", seen.some((e) => e.id === sent.data[0]!.id && e.processed_at !== null));
+    check("cross-process: only managed vocabulary on the wire", seen.every((e) => /^(user|agent|session|span)\./.test(e.type)));
+    const history = (await client.sessions.events.list(session.id)).data.map((e) => e.id);
+    check("cross-process: every streamed event is in the history", seen.every((e) => history.includes(e.id)));
+  } finally {
+    await http.close();
+    await worker.stop();
+    faux.unregister();
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
-await main();
+async function reconnectFillsTheGap(): Promise<void> {
+  const event = (id: string, type = "agent.message"): ManagedEventResource =>
+    ({ type, id, processed_at: "2026-01-01T00:00:00.000Z", content: [{ type: "text", text: id }] }) as ManagedEventResource;
+  const frames = (events: readonly ManagedEventResource[]): AsyncIterator<SseFrame> =>
+    (async function* () { for (const e of events) yield { event: e.type, id: e.id, data: e }; })();
+  // History, newest first, as the client asks for it. e0 predates the stream.
+  const all = ["e0", "e1", "e2", "e3", "e4", "e5"].map((id) => event(id));
+  const history = async (): Promise<ListSessionEventsResponse> => ({ data: [...all].reverse(), next_page: null });
+  let connections = 0;
+  // The first connection drops after e2; e3 and e4 are emitted while it is down; the second
+  // connection opens in time for e5 and then e6.
+  const connect = async (): Promise<AsyncIterator<SseFrame>> => {
+    connections += 1;
+    return frames([event("e5"), event("e6")]);
+  };
+  const stream = new ManagedSessionEventStream(connect, history, frames([event("e1"), event("e2")]), "e0", { reconnect: true });
+  const delivered: string[] = [];
+  const iterator = stream[Symbol.asyncIterator]();
+  for (let i = 0; i < 6; i += 1) {
+    const next = await iterator.next();
+    if (next.done) break;
+    delivered.push(next.value.id);
+  }
+  check("reconnect: the stream reopened after the drop", connections === 1);
+  check("reconnect: the gap came from the history, each event once, in order", delivered.join() === "e1,e2,e3,e4,e5,e6");
+  check("reconnect: nothing from before the stream opened", !delivered.includes("e0"));
+  await iterator.return?.();
+}
+
+await crossProcess();
+await reconnectFillsTheGap();
+const passed = checks.filter(([, ok]) => ok).length;
+console.log(`\n${passed}/${checks.length} checks passed`);
+if (passed !== checks.length) process.exit(1);
+console.log("✅ BROADCAST E2E PASS");

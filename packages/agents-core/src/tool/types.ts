@@ -3,7 +3,6 @@ import type { ApprovalResponse } from "../permission/types.ts";
 import type { ToolAccesses } from "./access.ts";
 import type { Environment } from "./environment.ts";
 import type { BackgroundSpawner } from "./background.ts";
-import type { FileFreshnessLedger } from "./file-freshness.ts";
 import type { QuestionResponder } from "./questions.ts";
 
 export type { ToolAccesses, ToolResourceAccess, ToolFileAccess } from "./access.ts";
@@ -81,13 +80,6 @@ export interface ToolContextBase<TContext = unknown> {
    * which one it is running inside.
    */
   readonly address?: string;
-  /**
-   * Session-scoped file freshness ledger (read-before-write / staleness checks); at
-   * resolve time it supports pre-approval validation. The runner always provides it;
-   * tools that depend on it must fail closed when absent (a hand-built context without
-   * one), never skip the check silently.
-   */
-  readonly fileLedger?: FileFreshnessLedger;
 }
 
 /**

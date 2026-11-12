@@ -9,21 +9,9 @@
  * and synthesis; it does not need a shell.
  */
 import { mkdirSync } from "node:fs";
-import {
-  compactionCapability,
-  ConsoleSink,
-  createHarness,
-  defineAgent,
-  DirectFetchProvider,
-  DiskSessionRepository,
-  fetchUrlTool,
-  FirecrawlProvider,
-  LocalEnvironment,
-  sinkLogger,
-  TavilySearchProvider,
-  webSearchTool,
-  type Tool,
-} from "operon-agents";
+import { compactionCapability, ConsoleSink, DiskSessionRepository, sinkLogger } from "operon-agents/advanced";
+import { createHarness, defineAgent, LocalEnvironment, type Tool } from "operon-agents";
+import { DirectFetchProvider, fetchUrlTool, FirecrawlProvider, TavilySearchProvider, webSearchTool } from "operon-agents/tools";
 import {
   allowAllRequests,
   createManagedHttpServer,
@@ -54,28 +42,19 @@ const tools: Tool[] = [...(search ? [webSearchTool(search)] : []), fetchUrlTool(
 
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
-  model: MODEL,
-  infrastructure: () => {
-    return {
-      sessionRepository: repository,
-      logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
-    };
+  config: {
+    workDir: WORK,
+    policy: { strictIsolation: true },
+    eventPublication: "committed",
+    // `agent` names the one registered below; a session's configuration is data, the agent is code.
+    defaults: { model: MODEL, agent: "default", subagents: false, permission: { mode: "workspace" } },
   },
-  // The agent IS the configuration: a custom Agent replaces the builtin coding profile (and
-  // its filesystem-shaped prompt) wholesale, so the analyst never hears about files or shells.
-  agent: defineAgent({ name: AGENT_ID, model: MODEL, instructions: SYSTEM_PROMPT, tools }),
-  tools,
-  // No Agent/Workflow tools: a brief is one agent's work.
-  subagentProvider: null,
-  workflowTool: false,
-  // Only what a long chat needs. The task/background/skills capabilities would add tools this
-  // agent has no use for.
+  registry: { agents: { default: defineAgent({ name: AGENT_ID, model: MODEL, instructions: SYSTEM_PROMPT, tools }) } },
+  infrastructure: () => ({
+    sessionRepository: repository,
+    logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
+  }),
   sessionCapabilities: () => [compactionCapability({ maxContextTokens: 200_000 })],
-  workDir: WORK,
-  // Web tools are always allowed by policy; nothing else exists to ask about. If you re-enable
-  // a tool that prompts (Bash, Edit), the chat has no approval surface: the session will park
-  // on the question and the bridge will tell the user so.
-  permission: { mode: "workspace" },
 });
 
 const metadataStore = new DiskManagedSessionMetadataStore(new URL("../.agent-home/managed/", import.meta.url).pathname);
@@ -92,7 +71,7 @@ const environments = new StaticEnvironmentRegistry({
 // One process runs both the API and the worker, so in-memory fan-out and work table are right;
 // see ../../managed-agents/server.ts for what changes across nodes (Redis broadcaster, Pg work).
 const broadcaster = new MemoryEventBroadcaster();
-const work = new MemorySessionWork({ repository });
+const work = new MemorySessionWork();
 const worker = new SessionWorker({
   harness,
   repository,
@@ -103,10 +82,9 @@ const worker = new SessionWorker({
   defaultAgentId: AGENT_ID,
 });
 worker.start();
-const service = new SessionService({ repository, work, metadataStore, environments, broadcaster });
+const service = new SessionService({ work, metadataStore, broadcaster });
 const managed = createManagedHttpServer({
   service,
-  worker,
   authorize:
     API_KEY === undefined
       ? allowAllRequests

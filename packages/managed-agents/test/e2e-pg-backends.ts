@@ -4,17 +4,18 @@
  *
  * The fake implements the specific conditional behaviour each statement depends on — a claim
  * that takes only a woken or abandoned row whose lease is free or expired, a DO UPDATE that
- * fires only when the lease is free or expired, a renew that reads `woken` before clearing it
- * and fails when the fence moved, a fence that advances on every take. Those conditions are the
+ * fires only when the lease is free or expired, a renew that fails when the fence moved, a
+ * clearWake only the current holder can make, a fence that advances on every take. Those are the
  * whole mechanism: if the WHERE clause on the claim were wrong, two nodes would hold one session
  * and no amount of testing the surrounding code would show it.
  *
  * This is not a substitute for running against a real server — it cannot catch a syntax error —
- * but it pins the logic that makes the table a queue and a lock at once.
+ * but it pins the logic that makes the table a queue and a lock at once. `e2e-pg-real.ts` runs
+ * every statement, the event log included, against a real Postgres when one is configured.
  */
 import { strict as assert } from "node:assert";
-import type { AgentRecord, PgSessionRepository, PgTransaction, SessionStore } from "operon-agents";
 import { PgSessionWork } from "../src/server/work-pg.ts";
+import type { InboxEntry } from "../src/server/inbox.ts";
 import { PgManagedSessionMetadataStore } from "../src/server/metadata-pg.ts";
 
 interface WorkRow {
@@ -35,8 +36,10 @@ class FakeExecutor {
     const sql = text.replace(/\s+/g, " ").trim();
     const expired = (row: WorkRow): boolean => row.lease_until === null || row.lease_until < this.now;
 
-    // append: wake the row, creating it if absent.
-    if (sql.startsWith("INSERT INTO session_work (session_id, woken) VALUES ($1, true)")) {
+    // append (events + wake in one statement) and wake: wake the row, creating it if absent.
+    // The event rows are not modelled here; e2e-pg-real.ts runs those statements for real.
+    if (sql.startsWith("WITH wake AS ( INSERT INTO session_work (session_id, woken) VALUES ($1, true)")
+      || sql.startsWith("INSERT INTO session_work (session_id, woken) VALUES ($1, true)")) {
       const [id] = params as [string];
       const row = this.work.get(id);
       if (row === undefined) this.work.set(id, { session_id: id, woken: true, lease_owner: null, lease_until: null, fence: 0 });
@@ -74,15 +77,21 @@ class FakeExecutor {
       return { rows: [{ fence: next.fence }] };
     }
 
-    // renew: extend and clear `woken`, returning what it was — only at this owner and fence.
-    if (sql.startsWith("UPDATE session_work AS w SET lease_until")) {
+    // renew: extend — only at this owner and fence, and only while unexpired. `woken` is untouched.
+    if (sql.startsWith("UPDATE session_work SET lease_until = now() + make_interval(secs => $3)")) {
       const [id, owner, secs, fence] = params as [string, string, number, number];
       const row = this.work.get(id);
-      if (row === undefined || row.lease_owner !== owner || row.fence !== Number(fence)) return { rows: [] };
-      const woken = row.woken;
+      if (row === undefined || row.lease_owner !== owner || row.fence !== Number(fence) || expired(row)) return { rows: [] };
       row.lease_until = this.now + secs * 1000;
-      row.woken = false;
-      return { rows: [{ woken }] };
+      return { rows: [{ "?column?": 1 }] };
+    }
+
+    // clearWake: the holder clears the wake before its last look.
+    if (sql.startsWith("UPDATE session_work SET woken = false WHERE session_id = $1 AND lease_owner = $2 AND fence = $3")) {
+      const [id, owner, fence] = params as [string, string, number];
+      const row = this.work.get(id);
+      if (row !== undefined && row.lease_owner === owner && row.fence === Number(fence)) row.woken = false;
+      return { rows: [] };
     }
 
     // release: clear the hold — only our own, at our fence. `woken` is left alone.
@@ -140,33 +149,16 @@ function check(label: string, ok: boolean): void {
 async function main(): Promise<void> {
   const pool = new FakeExecutor();
 
-  // The repository's part in `append` is the transaction: the record and the wake go through
-  // the same executor, inside one `transaction` call. The log itself is out of scope here.
-  const appended: Array<{ readonly id: string; readonly record: AgentRecord; readonly inTx: boolean }> = [];
-  let inTx = false;
-  const repository = {
-    transaction: async <T,>(fn: (tx: PgTransaction) => Promise<T>): Promise<T> => {
-      inTx = true;
-      try {
-        return await fn({
-          exec: pool,
-          store: (id) => ({
-            appendRecord: async (record: AgentRecord) => { appended.push({ id, record, inTx }); return "1"; },
-          }) as unknown as SessionStore,
-        });
-      } finally {
-        inTx = false;
-      }
-    },
-  } as unknown as PgSessionRepository;
-  const alpha = new PgSessionWork({ pool, repository, ownerId: "node-alpha" });
-  const beta = new PgSessionWork({ pool, repository, ownerId: "node-beta" });
-  const record: AgentRecord = { type: "custom", name: "test.record", address: "main", data: { hi: true } };
+  const alpha = new PgSessionWork({ pool, ownerId: "node-alpha" });
+  const beta = new PgSessionWork({ pool, ownerId: "node-beta" });
+  const entry = (): InboxEntry => ({
+    event: { type: "user.message", content: [{ type: "text", text: "hi" }], id: `sevt_${crypto.randomUUID()}`, processed_at: null },
+    acceptedAt: Date.now(),
+  });
 
   // ── append wakes; claim takes ─────────────────────────────────────────────────
   check("claim: an empty table offers nothing", (await alpha.claim()) === undefined);
-  await alpha.append("s1", record);
-  check("append: the record was written inside the transaction", appended.length === 1 && appended[0]!.id === "s1" && appended[0]!.inTx);
+  await alpha.append("s1", [entry()]);
   check("append: the row is woken", pool.work.get("s1")?.woken === true);
   const held = await alpha.claim();
   check("claim: a woken session is offered, and taking it is the lease", held?.sessionId === "s1" && held.fence === 1);
@@ -175,37 +167,45 @@ async function main(): Promise<void> {
   check("acquire: a live lease blocks another node", (await beta.acquire("s1")) === undefined);
   check("peek: a live lease is visible", await beta.peek("s1"));
 
-  // ── the heartbeat carries the wake ────────────────────────────────────────────
-  check("renew: nothing new is quiet", (await held!.renew()) === "quiet");
-  await beta.append("s1", record);
+  // ── the heartbeat only extends; the wake stays until the holder clears it ───
+  check("renew: the holder renews", await held!.renew());
+  await beta.append("s1", [entry()]);
   check("append: a held session can still be woken", pool.work.get("s1")?.woken === true);
-  check("renew: reports the wake to the holder", (await held!.renew()) === "woken");
-  check("renew: and clears it, so the next one is quiet", (await held!.renew()) === "quiet");
+  await held!.renew();
+  check("renew: does not consume the wake", pool.work.get("s1")?.woken === true);
   check("claim: a woken-but-held session is still not offered", (await beta.claim()) === undefined);
+  await held!.clearWake();
+  check("clearWake: the holder clears it before its last look", pool.work.get("s1")?.woken === false);
 
   // ── the frozen-node case: the TTL lapses, another node legitimately takes over ─
   pool.now += 60_000;
   const takenOver = await beta.claim();
   check("claim: an abandoned session is offered even though nothing woke it", takenOver?.sessionId === "s1");
   check("claim: takeover advances the fence", (takenOver?.fence ?? 0) > (held?.fence ?? 0));
-  check("renew: a superseded holder learns the lease is lost", (await held!.renew()) === "lost");
+  check("renew: a superseded holder learns the lease is lost", (await held!.renew()) === false);
   check("renew: losing the lease aborts the holder's signal", held!.signal.aborted);
   await held!.release();
   check("release: a superseded release does not free the new holder's row", (await alpha.acquire("s1")) === undefined);
-  check("renew: the current holder can renew", (await takenOver!.renew()) === "quiet");
+  await held!.clearWake();
+  await beta.append("s1", [entry()]);
+  await held!.clearWake();
+  check("clearWake: a superseded holder cannot clear the new holder's wake", pool.work.get("s1")?.woken === true);
+  await takenOver!.clearWake();
+  check("renew: the current holder can renew", await takenOver!.renew());
   await takenOver!.release();
   check("release: frees the row", !(await alpha.peek("s1")));
   check("claim: a released, unwoken session is not offered", (await alpha.claim()) === undefined);
 
   // ── a wake that lands during a hold survives the release ──────────────────────
   const again = (await alpha.acquire("s1"))!;
-  await beta.append("s1", record);
+  await again.clearWake();
+  await beta.append("s1", [entry()]);
   await again.release();
-  check("release: a wake that arrived while held is still there for the next claim", (await beta.claim())?.sessionId === "s1");
+  check("release: a wake that arrived after the last look is still there for the next claim", (await beta.claim())?.sessionId === "s1");
 
   // ── several in line; each offered once ────────────────────────────────────────
-  await alpha.append("s2", record);
-  await alpha.append("s3", record);
+  await alpha.append("s2", [entry()]);
+  await alpha.append("s3", [entry()]);
   const first = await alpha.claim();
   const second = await beta.claim();
   const ids = new Set([first?.sessionId, second?.sessionId]);

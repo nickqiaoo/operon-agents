@@ -20,7 +20,7 @@ import {
   wrapTextWithAnsi,
   type Component,
 } from 'operon-pi-tui';
-import type { GoalSnapshot, GoalStatus } from 'operon-agents';
+import type { GoalSnapshot, GoalStatus } from 'operon-agents/advanced';
 
 import { MESSAGE_INDENT } from '../../constant/rendering.ts';
 import { STATUS_BULLET } from '../../constant/symbols.ts';

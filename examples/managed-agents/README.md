@@ -21,14 +21,12 @@ pnpm client "inspect the workspace and create a short report"
 Set `MANAGED_API_KEY` in both terminals when binding the server beyond localhost. The example
 server enables bearer authentication whenever that variable is present.
 
-The client performs three independent operations:
+The client performs three independent operations, as with Claude Managed Agents:
 
-1. `sessions.create()` creates a durable managed Session.
-2. `sessions.events.stream()` opens the long-lived Session SSE connection.
-3. `sessions.messages.create()` submits work and immediately returns a delivery receipt.
-
-Because observation is no longer tied to the prompt request, the same stream also receives
-background task completion, workflow/subagent activity, injected steer messages and idle wakes.
+1. `sessions.create()` creates a managed Session. Nothing runs yet.
+2. `sessions.events.stream()` opens the live Session SSE connection — before sending, since the
+   stream carries only what is emitted after it opens.
+3. `sessions.events.send()` sends a `user.message`; the worker pulls it and the agent runs.
 
 ## Raw HTTP
 
@@ -36,20 +34,18 @@ background task completion, workflow/subagent activity, injected steer messages 
 SESSION=$(curl -s localhost:8088/v1/sessions \
   -H "authorization: Bearer $MANAGED_API_KEY" \
   -H 'content-type: application/json' \
-  -d '{"agent":"default","environment":"workspace"}' \
+  -d '{"agent":"default","environment_id":"workspace"}' \
   | node -e 'process.stdin.on("data",b=>console.log(JSON.parse(b).id))')
 
 curl -N "localhost:8088/v1/sessions/$SESSION/events/stream" \
   -H "authorization: Bearer $MANAGED_API_KEY"
 
-curl -s "localhost:8088/v1/sessions/$SESSION/messages" \
+curl -s "localhost:8088/v1/sessions/$SESSION/events" \
   -H "authorization: Bearer $MANAGED_API_KEY" \
   -H 'content-type: application/json' \
-  -d '{"input":"inspect the workspace"}'
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"inspect the workspace"}]}]}'
 ```
 
-`GET /events/stream` carries `AgentEvent` objects directly, while `GET /events` is opaque-cursor
-persisted history. Durable events keep one `eventId` across both APIs, so reconnecting clients
-can start consuming the stream, page history, and deduplicate the overlap. For a state-shaped
-view, fold those `AgentEvent`s through `SessionProjection`; managed HTTP intentionally has no
-separate snapshot endpoint.
+`GET /events/stream` carries managed session events (`agent.message`, `agent.tool_use`,
+`session.status_idle`, …) live, while `GET /events` pages the persisted history under the same
+ids, sent events included.

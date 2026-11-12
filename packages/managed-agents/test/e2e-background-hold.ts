@@ -11,12 +11,8 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createHarness,
-  DiskSessionRepository,
-  LocalEnvironment,
-  type AgentEvent,
-} from "operon-agents";
+import { createHarness, LocalEnvironment } from "operon-agents";
+import { DiskSessionRepository } from "operon-agents/advanced";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { SessionService } from "../src/server/session-service.ts";
 import { SessionWorker } from "../src/server/session-worker.ts";
@@ -30,40 +26,47 @@ function check(label: string, ok: boolean): void {
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
 }
 
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.filter((p) => (p as { type?: string }).type === "text").map((p) => (p as { text: string }).text).join("");
-}
-
 async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "background-hold-"));
   const work = join(root, "work");
   mkdirSync(work);
   const faux = registerFauxProvider();
-  const repository = new DiskSessionRepository(root);
+  const repository = new DiskSessionRepository(join(root, "sessions"));
   const metadataStore = new MemoryManagedSessionMetadataStore();
   const environments: ManagedEnvironmentRegistry = { resolve: () => ({ workDir: work }) };
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, environment: new LocalEnvironment(work) }),
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
+    config: { eventPublication: "committed", defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
-  const sessionWork = new MemorySessionWork({ repository });
-  const service = new SessionService({ repository, metadataStore, environments, work: sessionWork });
-  const worker = new SessionWorker({ profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork, renewIntervalMs: 30 });
-  const events = async (id: string): Promise<readonly AgentEvent[]> => (await service.listEvents(id, { limit: 500 })).data;
-  const assistants = async (id: string): Promise<string[]> =>
-    (await events(id))
-      .filter((e) => e.type === "message.appended" && e.message.role === "assistant")
-      .map((e) => (e.type === "message.appended" ? textOf(e.message.content) : ""));
-  // Background settles reach the model as queued steers; those are durable, the live
-  // `background.task.terminated` events are not.
-  const notices = async (id: string): Promise<string[]> =>
-    (await events(id))
-      .filter((e) => e.type === "steer.queued")
-      .map((e) => textOf((e as { message?: { content?: unknown } }).message?.content))
-      .filter((text) => text.includes("<background-task-done"));
+  const sessionWork = new MemorySessionWork();
+  const service = new SessionService({ metadataStore, work: sessionWork });
+  const worker = new SessionWorker({
+    profile: "single-tenant", harness, repository, metadataStore, environments, work: sessionWork,
+    renewIntervalMs: 30, claimIntervalMs: 20, inputPollIntervalMs: 20,
+  });
+  const answers = async (id: string): Promise<string[]> =>
+    (await service.listEvents(id, { limit: 500 })).data.flatMap((e) => e.type === "agent.message" ? [e.content.map((b) => b.text).join("")] : []);
+  // Background settles reach the model as queued steers in the runtime's own journal; they are
+  // the runtime's business, so the check reads that journal directly.
+  const notices = async (id: string): Promise<string[]> => {
+    const handle = await repository.open(id);
+    if (handle === undefined) return [];
+    try {
+      const page = await handle.store.readRecordPage({ limit: 1000 });
+      return page.data.map((r) => JSON.stringify(r.record)).filter((text) => text.includes("background-task-done"));
+    } finally {
+      await handle.store.close?.();
+    }
+  };
+  const until = async (condition: () => Promise<boolean>, ms = 8_000): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await condition()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    return condition();
+  };
 
   try {
     faux.setResponses([
@@ -72,20 +75,21 @@ async function main(): Promise<void> {
       fauxAssistantMessage("saw it finish", { stopReason: "stop" }),
       fauxAssistantMessage("next answer", { stopReason: "stop" }),
     ]);
-    const session = await service.create({ agent: "default", environment: "default" });
-    await service.appendEvent(session.id, { input: "run it in the background" });
-    await worker.drain(session.id);
-
+    worker.start();
+    const session = await service.create({
+      agent: "default", environment_id: "default",
+      initial_events: [{ type: "user.message", content: [{ type: "text", text: "run it in the background" }] }],
+    });
+    check("hold: its completion reached the model in a follow-up run", await until(async () => (await answers(session.id)).includes("saw it finish")));
     const settled = await notices(session.id);
-    check("hold: the background task completed while the worker held the session", settled.length === 1 && settled[0]!.includes("completed"));
-    check("hold: its completion reached the model in a follow-up run", (await assistants(session.id)).includes("saw it finish"));
+    check("hold: the background task completed while the worker held the session", settled.length > 0 && settled.some((t) => t.includes("completed")));
 
-    await service.appendEvent(session.id, { input: "and now?" });
-    await worker.drain(session.id);
-    check("reopen: the next message ran", (await assistants(session.id)).includes("next answer"));
+    await until(async () => (await service.retrieve(session.id)).status === "idle" && !(await sessionWork.peek(session.id)));
+    await service.sendEvents(session.id, { events: [{ type: "user.message", content: [{ type: "text", text: "and now?" }] }] });
+    check("reopen: the next message ran", await until(async () => (await answers(session.id)).includes("next answer")));
     check("reopen: nothing was marked lost", !(await notices(session.id)).some((text) => text.includes("marked lost")));
   } finally {
-    await harness.close();
+    await worker.stop();
     faux.unregister();
     rmSync(root, { recursive: true, force: true });
   }

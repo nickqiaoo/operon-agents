@@ -28,7 +28,7 @@ export {
 export type { Api, Context, FauxResponseStep, Model, ToolCall };
 
 export interface FauxChatProvider extends FauxProviderHandle {
-  harnessModel(): { readonly model: string; readonly modelManager: ModelManager };
+  harnessModel(): { readonly config: { readonly defaults: { readonly model: string } }; readonly modelManager: ModelManager };
   unregister(): void;
 }
 
@@ -42,7 +42,7 @@ export function registerFauxProvider(
 
   return {
     ...handle,
-    harnessModel: () => ({ model: `${handle.provider.id}/${handle.getModel().id}`, modelManager: runtime }),
+    harnessModel: () => ({ config: { defaults: { model: `${handle.provider.id}/${handle.getModel().id}` } }, modelManager: runtime }),
     unregister(): void {
       runtime.models.deleteProvider(handle.provider.id);
     },

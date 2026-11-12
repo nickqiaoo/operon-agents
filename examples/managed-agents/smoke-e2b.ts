@@ -33,8 +33,8 @@ async function main(): Promise<void> {
     // `run()` is the intent-shaped entry point: it carries the timeout, the output cap and
     // the kill that a bare exec on this backend could not.
     await probe("run (echo)", async () => (await environment.run(["echo", "hello-from-e2b"])).stdout.trim());
-    await probe("writeText+readBytes roundtrip", async () => {
-      await environment.writeText("note.txt", "hi e2b 🚀");
+    await probe("writeBytes+readBytes roundtrip", async () => {
+      await environment.writeBytes("note.txt", Buffer.from("hi e2b 🚀", "utf8"));
       const back = (await environment.readBytes("note.txt")).toString("utf8");
       return back === "hi e2b 🚀" ? "match" : `MISMATCH: ${back}`;
     });

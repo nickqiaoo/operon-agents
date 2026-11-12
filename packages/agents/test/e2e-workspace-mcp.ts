@@ -2,8 +2,9 @@
  * Per-directory MCP sharing (`WorkspaceMcpPool` + `defaultCapabilities({ workspaceMcp })`).
  *
  * The desktop shape: one harness, many sessions, several of them in one folder. Sessions in the
- * same directory (by real path) run ONE set of connections; another directory runs its own; a
- * session's own `mcpServers` stay private and shadow by name. The set outlives its last session by
+ * same directory (by real path) run ONE set of connections; another directory runs its own. A
+ * session whose configuration names its servers sees exactly those: the ones that ARE the
+ * directory's are borrowed from its set, the rest are connected for it alone. The set outlives its last session by
  * `idleMs` so the next chat reuses it, a changed configuration gets a new generation without
  * disturbing sessions on the old one, and a detach or a closed harness gives everything back.
  */
@@ -11,14 +12,8 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider, type Context, offeredToolNames } from "./faux.ts";
-import {
-  createHarness,
-  defaultCapabilities,
-  McpTransportNotPermittedError,
-  WorkspaceMcpPool,
-  workspaceMcpCapability,
-  type McpServerConfig,
-} from "../src/index.ts";
+import { createHarness, type McpServerConfig } from "../src/index.ts";
+import { defaultCapabilities, McpTransportNotPermittedError, WorkspaceMcpPool, workspaceMcpCapability } from "../src/advanced.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -78,16 +73,12 @@ async function main(): Promise<void> {
     const serversFor = (workDir: string) => dirServers[workDir === linkA ? projA : workDir] ?? {};
     let poolClosed = 0;
     const harness = createHarness({
-      ...faux.harnessModel(),
-      workDir: projA,
-      permission: { mode: "yolo" },
-      infrastructure: () => ({ close: async () => { poolClosed += 1; await pool.close(); } }),
-      sessionCapabilities: (ctx) =>
-        defaultCapabilities({
-          workspaceMcp: { pool, workDir: ctx.workDir, servers: serversFor(ctx.workDir) },
-          ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
-        }),
-    });
+    ...faux.harnessModel(),
+    infrastructure: () => ({ close: async () => { poolClosed += 1; await pool.close(); } }),
+    sessionCapabilities: (ctx) =>
+        defaultCapabilities({ session: ctx, workspaceMcp: { pool, workDir: ctx.workDir, servers: serversFor(ctx.workDir) } }),
+    config: { workDir: projA, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
 
     // ── two sessions, one directory: one connection ──
     const s1 = await harness.createSession({ workDir: projA });
@@ -108,17 +99,25 @@ async function main(): Promise<void> {
     check("isolate: another directory connects its own servers", count(connects, "http://wsb.example") === 1 && pool.size === 2);
     check("isolate: and sees only those", (b1.mcp?.list() ?? []).length === 1 && (await b1.mcp?.listTools("ws") ?? []).some((t) => t.name === "wsb_tool"));
 
-    // ── a session's own servers stay private, and shadow by name ──
+    // ── a session that names its servers sees exactly those ──
+    // Its own server runs on the real transport (`defaultCapabilities` injects none), against a
+    // port that refuses at once: what matters is where it is listed, not that it connects.
+    const ownServer = { transport: "http" as const, url: "http://127.0.0.1:1/own" };
     const own = await harness.createSession({
       workDir: projA,
-      mcpServers: { own: { transport: "http", url: "http://127.0.0.1:1/own" } },
+      config: { mcp: { servers: { ws: { transport: "http", url: "http://ws.example" }, own: ownServer } } },
     });
-    // The overlay runs on the real transport (`defaultCapabilities` injects none), against a port
-    // that refuses at once: what matters is that it is listed here, and only here.
-    check("overlay: the session lists shared + own", (own.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "own,ws");
-    check("overlay: other sessions in the directory never see it", (s1.mcp?.list() ?? []).map((v) => v.name).join(",") === "ws");
-    check("overlay: the shared set was not reconnected for it", count(connects, "http://ws.example") === 1);
+    check("complete set: the session lists the directory's server and its own", (own.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "own,ws");
+    check("complete set: other sessions in the directory never see its own", (s1.mcp?.list() ?? []).map((v) => v.name).join(",") === "ws");
+    check("complete set: the directory's server was borrowed, not connected again", count(connects, "http://ws.example") === 1);
+    const only = await harness.createSession({ workDir: projA, config: { mcp: { servers: { own: ownServer } } } });
+    check("complete set: naming only its own leaves the directory's out", (only.mcp?.list() ?? []).map((v) => v.name).join(",") === "own");
+    const none = await harness.createSession({ workDir: projA, config: { mcp: false } });
+    check("complete set: `mcp: false` gives the session no MCP at all", none.mcp === undefined);
+    check("complete set: neither touched the directory's set", count(connects, "http://ws.example") === 1 && pool.size === 2);
     await own.close();
+    await only.close();
+    await none.close();
 
     // ── closing sessions: the set stays while held, then idles, then closes ──
     await s1.close();
@@ -140,7 +139,9 @@ async function main(): Promise<void> {
     check("generation: a new config builds a new set for the new session", count(connects, "http://extra.example") === 1 && (edited.mcp?.list() ?? []).length === 2);
     check("generation: the session on the old config keeps its set", (fresh.mcp?.list() ?? []).length === 1 && count(closes, "http://ws.example") === 1);
     await fresh.close();
-    check("generation: the retired set closes when its last holder leaves — no grace", count(closes, "http://ws.example") === 2);
+    check("generation: each fingerprint keeps its own idle grace", count(closes, "http://ws.example") === 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    check("generation: the unused fingerprint expires independently", count(closes, "http://ws.example") === 2);
     check("generation: the current one is untouched", count(closes, "http://extra.example") === 0);
 
     // ── detaching the capability gives the lease back like a close does ──

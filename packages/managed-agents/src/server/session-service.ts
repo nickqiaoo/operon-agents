@@ -1,678 +1,376 @@
 /**
- * The managed API surface: reads and writes of session state.
+ * The managed API surface: session resources, and the events sent to and emitted by them.
  *
- * Every method here is a store operation. Nothing opens a session, assembles capabilities,
- * connects an MCP server or boots a sandbox — that is what running a turn does, and running is
- * the worker's job (`SessionWorker`), reached by writing to the log rather than by calling in.
+ * Nothing here touches the framework. A session is a managed record (`metadata`) plus its
+ * managed event log (`work`); creating one writes the record, sending events writes the inbox,
+ * and reading history reads the log. The runtime session behind it is created by the first
+ * worker that claims it, opened by every later one, and never by this object.
  *
  * The practical consequence is that this object is stateless and horizontally scalable: any
- * replica can serve any request for any session, because the session is not "somewhere" — it is
- * in the store. A gateway in front of it needs no lease lookup and no owner affinity; it is a
- * plain reverse proxy.
- *
- * What this deliberately does NOT have is an `open()`. A resource API that can only be reached
- * by first reviving a runtime makes every read a potential sandbox wake-up, which is how a
- * simple event-stream subscription ends up billing for compute.
+ * replica serves any request for any session, it holds no reference to a worker, and it does
+ * not know or care whether a worker runs in the same process. Work reaches a worker the same
+ * way in every deployment: persisted here, pulled there.
  */
-import {
-  agentEventFromRecord,
-  buildSteerMessage,
-  INTERRUPTION_STATE_KEY,
-  newAgentEventId,
-  flattenPendingInterrupts,
-  parseInterruptionState,
-  steerQueuedRecord,
-  watchRecordsByPolling,
-  SessionRepositoryConflictError,
-  type AgentEvent,
-  type AgentRecord,
-  type DeleteSessionOptions,
-  type InterruptAnswer,
-  type PendingRunInterrupt,
-  type SessionRepository,
-  type SessionStore,
-  type SessionSummary,
-  type SteerOrigin,
-} from "operon-agents";
+import { randomUUID } from "node:crypto";
 import type {
-  ControlReceiptResource,
-  CreateManagedMessageRequest,
+  AgentRef,
   CreateManagedSessionRequest,
-  ManagedSession,
-  MessageReceiptResource,
+  EnvironmentRef,
+  ListManagedSessionsOptions,
+  ListManagedSessionsResponse,
+  ListSessionEventsOptions,
+  ListSessionEventsResponse,
+  ManagedEventResource,
+  ManagedInputResource,
+  ManagedPreviewableEventType,
+  ManagedSessionResource,
+  ManagedSessionStatus,
+  SendManagedEventsRequest,
+  ManagedStreamEvent,
+  SendManagedEventsResponse,
   UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
-import { CONTROL_RECORD_NAME, hasUnprocessedInbox, type ControlCommand } from "./inbox.ts";
+import type { EventBroadcaster } from "./broadcast.ts";
+import { ManagedConflictError, ManagedInvalidRequestError, ManagedSessionNotFoundError } from "./errors.ts";
 import {
-  CreateMessageRequestSchema,
-  CreateSessionRequestSchema,
-  InterruptAnswersSchema,
-  UpdateSessionRequestSchema,
-  parseRequest,
-} from "./request-schemas.ts";
-import type { SessionWork } from "./work.ts";
+  MemoryManagedDeliveryIdempotencyStore,
+  type ManagedDeliveryIdempotencyStore,
+} from "./idempotency.ts";
 import {
   MemoryManagedSessionMetadataStore,
   type ManagedSessionMetadata,
   type ManagedSessionMetadataStore,
 } from "./metadata.ts";
-import type { ManagedEnvironmentRegistry } from "./registries.ts";
-import type { EventBroadcaster } from "./broadcast.ts";
 import {
-  MemoryManagedDeliveryIdempotencyStore,
-  type ManagedDeliveryIdempotencyStore,
-} from "./idempotency.ts";
-import { ManagedConflictError, ManagedInvalidRequestError, ManagedSessionNotFoundError } from "./errors.ts";
+  CreateSessionRequestSchema,
+  SendEventsRequestSchema,
+  UpdateSessionRequestSchema,
+  parseRequest,
+} from "./request-schemas.ts";
+import type { SessionWork } from "./work.ts";
 
 export interface SessionServiceOptions {
-  readonly repository: SessionRepository;
   /**
-   * Where inputs and commands are written. Every accepted input goes through `work.append`,
-   * which puts it in the session's log and wakes the session for a worker as one step — so
-   * "accepted" means "will be claimed", not "is on disk somewhere a worker might look". MUST be
-   * the same table the workers claim from.
+   * The managed event log and work table. Every accepted event goes through `work.append`,
+   * which persists it and wakes the session in one step — so "accepted" means "a worker will
+   * pull it", not "a worker was told". MUST be the table the workers claim from.
    */
   readonly work: SessionWork;
-  /** Resolves an environment to the durable `workDir` a session is created under. The environment
-   *  half of a resolution belongs to the worker; nothing here executes. */
-  readonly environments: ManagedEnvironmentRegistry;
   readonly metadataStore?: ManagedSessionMetadataStore;
   /**
    * Partition every session this service creates, and every session `list()` returns, under one
    * owner. A multi-tenant deployment builds one service per tenant so `list()` cannot reach
-   * across tenants.
-   *
-   * Partition, not permission: `get`/`appendEvent` still resolve any id the repository holds.
-   * Enforcing who may address a session stays with the authorization hook.
+   * across tenants. Partition, not permission: addressing a session by id is still the
+   * authorization hook's decision.
    */
   readonly ownerKey?: string;
-  /** Collapses retried deliveries carrying the same key. Defaults to an in-process store, which
-   *  is only correct for a single node — a multi-node deployment must supply a shared one. */
+  /** Collapses retried sends carrying the same key. Defaults to an in-process store, which is
+   *  only correct for a single node — a multi-node deployment must supply a shared one. */
   readonly idempotencyStore?: ManagedDeliveryIdempotencyStore;
-  /**
-   * Low-latency delivery for `watchEvents`. Without one, the stream polls the store and carries
-   * only what was persisted — correct, but a poll interval behind and missing live-only events
-   * such as token deltas. With one, the store is used to backfill and the broadcast carries the
-   * live tail.
-   */
+  /** Where workers publish live events. Required for `stream`; history works without it. */
   readonly broadcaster?: EventBroadcaster;
   /**
-   * How long a stream may be silent before the stall check runs.
-   *
-   * With the live channel, a worker dying mid-turn is invisible to a subscriber: the stream is
-   * attached to this service, not to the worker, so it does not break — it simply goes quiet,
-   * which is indistinguishable from a model thinking. The work table's lease (`work.peek`) is
-   * what tells the two apart.
+   * Refuse a session before it is recorded — an agent or environment id this deployment does not
+   * have, a client that may not use it. Throw a `ManagedServerError` (e.g. `ManagedInvalidRequestError`)
+   * to refuse with that status. A catalog check only: resolving an environment, booting anything
+   * or opening the runtime belongs to the worker.
    */
-  readonly stallCheckMs?: number;
+  readonly validateCreate?: (request: CreateValidationContext) => void | Promise<void>;
 }
 
-export interface ListPersistedEventsOptions {
-  readonly limit: number;
-  readonly after?: string;
-  readonly order?: "asc" | "desc";
-  readonly address?: string;
+export interface CreateValidationContext {
+  readonly sessionId: string;
+  readonly agent: AgentRef;
+  readonly environment: EnvironmentRef;
+  readonly ownerKey?: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-export interface PersistedEventPage {
-  readonly data: readonly AgentEvent[];
-  readonly next?: string;
-}
-
-export interface WatchEventsOptions {
-  /**
-   * Resume after the event with this id — the public cursor, the one an SSE `id:` line carries.
-   * Only durable events are valid here (see `isDurableAgentEvent`); an id the log does not
-   * contain replays from the beginning, because guessing a position is worse than a duplicate
-   * the client can dedupe.
-   */
-  readonly after?: string;
-  readonly address?: string;
-  readonly signal?: AbortSignal;
+export interface StreamEventsOptions {
+  /** Event types to preview on this connection (the stream's `event_deltas[]`). */
+  readonly eventDeltas?: readonly ManagedPreviewableEventType[];
 }
 
 export class SessionService {
-  private readonly repository: SessionRepository;
-  private readonly environments: ManagedEnvironmentRegistry;
+  private readonly work: SessionWork;
   private readonly metadata: ManagedSessionMetadataStore;
   private readonly ownerKey: string | undefined;
-  private readonly work: SessionWork;
   private readonly idempotency: ManagedDeliveryIdempotencyStore;
   private readonly broadcaster: EventBroadcaster | undefined;
-  private readonly stallCheckMs: number;
+  private readonly validateCreate: SessionServiceOptions["validateCreate"];
 
   constructor(options: SessionServiceOptions) {
-    this.repository = options.repository;
-    this.environments = options.environments;
+    this.work = options.work;
     this.metadata = options.metadataStore ?? new MemoryManagedSessionMetadataStore();
     this.ownerKey = options.ownerKey;
-    this.work = options.work;
     this.idempotency = options.idempotencyStore ?? new MemoryManagedDeliveryIdempotencyStore();
     this.broadcaster = options.broadcaster;
-    this.stallCheckMs = options.stallCheckMs ?? 20_000;
+    this.validateCreate = options.validateCreate;
   }
 
   /**
-   * Is this session waiting on work nobody is doing?
+   * Register a session. Without `initial_events` this starts no work and provisions nothing;
+   * with them, the messages are queued exactly as a later `sendEvents` would queue them.
    *
-   * BOTH conditions are required, and each alone is a false positive waiting to happen: an idle
-   * session has no holder and that is fine, and a session mid-turn has unprocessed input right
-   * up until the cursor advances. Only "there is work AND nobody holds it" is unambiguous.
-   *
-   * Undefined when it cannot be determined (the table cannot be asked), because reporting a
-   * problem on missing evidence is worse than reporting nothing.
+   * The agent and environment are recorded, not resolved — resolving them needs what a worker
+   * holds, and doing it here would make creation depend on execution being available.
    */
-  private async isStranded(id: string): Promise<boolean | undefined> {
-    try {
-      if (await this.work.peek(id)) return false;
-      // Waiting on a person is not waiting on a worker.
-      if ((await this.summary(id)).durableState === "interrupted") return false;
-      const store = await this.openStore(id);
-      try {
-        // Unprocessed INBOX, not "cursor behind the log head": every turn writes records after
-        // the input it answered, so the head is past the cursor on every session that has ever
-        // run. Only inputs and commands after the cursor mean there is work.
-        return await hasUnprocessedInbox(store);
-      } finally {
-        await store.close?.();
-      }
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Register a session. Creating it starts no work and provisions nothing: the record exists in
-   * the repository and a worker picks it up the first time there is something to process.
-   *
-   * The agent reference is recorded, not resolved — turning it into an `Agent` needs the model
-   * and tool configuration a worker holds, and doing it here would make creation depend on
-   * execution being available.
-   */
-  async create(request: CreateManagedSessionRequest): Promise<ManagedSession> {
+  async create(request: CreateManagedSessionRequest): Promise<ManagedSessionResource> {
     const input = parseRequest(CreateSessionRequestSchema, request);
-    const { agent, environment } = input;
-    const sessionId = input.id ?? managedSessionId();
-    const resolved = await this.environments.resolve(environment, {
+    const sessionId = input.id ?? `sesn_${randomUUID().replaceAll("-", "")}`;
+    await this.validateCreate?.({
       sessionId,
+      agent: input.agent,
+      environment: { id: input.environment_id },
       ...(this.ownerKey !== undefined ? { ownerKey: this.ownerKey } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     });
     const now = Date.now();
-    // Metadata is the write-ahead identity record: after the repository commits, a crash must
-    // never leave a durable session the managed layer cannot resolve on restart.
     const claimed = await this.metadata.create({
       version: 1,
       sessionId,
-      agent,
-      environment,
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      agent: input.agent,
+      environment: { id: input.environment_id },
       createdAt: now,
       updatedAt: now,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(this.ownerKey !== undefined ? { ownerKey: this.ownerKey } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     });
     if (!claimed) throw new ManagedConflictError(`session "${sessionId}" already exists`);
-    try {
-      const handle = await this.repository.create({
-        id: sessionId,
-        workDir: resolved.workDir,
-        ...(this.ownerKey !== undefined ? { ownerKey: this.ownerKey } : {}),
-        ...(input.title !== undefined ? { title: input.title } : {}),
-      });
-      await handle.store.close?.();
-    } catch (error) {
-      await this.metadata.delete(sessionId).catch(() => undefined);
-      if (error instanceof SessionRepositoryConflictError) throw new ManagedConflictError(error.message);
-      throw error;
+    if (input.initial_events !== undefined && input.initial_events.length > 0) {
+      await this.accept(sessionId, input.initial_events);
     }
+    return this.retrieve(sessionId);
+  }
+
+  async retrieve(id: string): Promise<ManagedSessionResource> {
+    return this.toResource(await this.requireMetadata(id));
+  }
+
+  async list(options: ListManagedSessionsOptions = {}): Promise<ListManagedSessionsResponse> {
+    const limit = options.limit ?? 20;
+    const descending = (options.order ?? "desc") === "desc";
+    const visible = (await this.metadata.list())
+      .filter((m) => m.deletedAt === undefined && (this.ownerKey === undefined || m.ownerKey === this.ownerKey))
+      .sort((a, b) => (a.createdAt - b.createdAt || a.sessionId.localeCompare(b.sessionId)) * (descending ? -1 : 1));
+    const after = options.page === undefined ? -1 : visible.findIndex((m) => m.sessionId === decodePage(options.page!));
+    if (options.page !== undefined && after < 0) throw new ManagedInvalidRequestError("page does not name a session in this listing");
+    const page = visible.slice(after + 1, after + 1 + limit);
+    const hasMore = after + 1 + limit < visible.length;
     return {
-      id: sessionId,
-      ...(input.title !== undefined ? { title: input.title } : {}),
-      agent,
-      environment,
-      createdAt: now,
-      updatedAt: now,
-      state: "idle",
-      activeTurnId: null,
-      hasQueuedMessages: false,
+      data: await Promise.all(page.map((m) => this.toResource(m))),
+      next_page: hasMore ? encodePage(page.at(-1)!.sessionId) : null,
     };
   }
 
-  async get(id: string): Promise<ManagedSession> {
-    const metadata = await this.requireMetadata(id);
-    const summary = await this.summary(id);
-    return this.toManagedSession(summary, metadata);
-  }
-
-  /**
-   * Rename a session. The title lives in the session's own `meta` state, so the write goes
-   * through the store — the same path `create` takes — and reaches the repository catalog via
-   * the store's observer before this resolves. Like `interruptions`, it opens the store beside
-   * whoever may be running the session: `meta` is written by nobody during a turn.
-   */
-  async update(id: string, request: UpdateManagedSessionRequest): Promise<ManagedSession> {
+  async update(id: string, request: UpdateManagedSessionRequest): Promise<ManagedSessionResource> {
     const input = parseRequest(UpdateSessionRequestSchema, request);
     const metadata = await this.requireMetadata(id);
-    await this.summary(id);
-    const handle = await this.repository.open(id);
-    if (handle === undefined) throw new ManagedSessionNotFoundError(id);
-    try {
-      const meta = await handle.store.getState("meta");
-      if (!isRecord(meta)) throw new Error(`session "${id}" has no meta state`);
-      await handle.store.putState("meta", { ...meta, title: input.title, updatedAt: Date.now() });
-    } finally {
-      await handle.store.close?.();
-    }
-    return this.toManagedSession(await this.summary(id), metadata);
+    const next: ManagedSessionMetadata = {
+      ...metadata,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      updatedAt: Date.now(),
+    };
+    await this.metadata.update(next);
+    return this.toResource(next);
   }
 
-  async list(): Promise<readonly ManagedSession[]> {
-    const summaries = await this.repository.list(
-      this.ownerKey !== undefined ? { ownerKey: this.ownerKey } : undefined,
-    );
-    const metadataById = await this.metadata.getMany(summaries.map((summary) => summary.id));
-    const result: ManagedSession[] = [];
-    for (const summary of summaries) {
-      const metadata = metadataById.get(summary.id);
-      if (metadata === undefined) continue;
-      result.push(this.toManagedSession(summary, metadata));
+  /** Stop accepting events. A running session must be interrupted and idle first. */
+  async archive(id: string): Promise<ManagedSessionResource> {
+    const metadata = await this.requireMetadata(id);
+    if (metadata.archivedAt !== undefined) return this.toResource(metadata);
+    if ((await this.status(id)) === "running") {
+      throw new ManagedConflictError(`session "${id}" is running; interrupt it and wait for idle before archiving`);
     }
-    return result;
-  }
-
-  async listEvents(id: string, options: ListPersistedEventsOptions): Promise<PersistedEventPage> {
-    await this.requireMetadata(id);
-    const store = await this.openStore(id);
-    try {
-      let cursor = options.after;
-      // Read ahead until one extra PROJECTABLE event is found. Records such as metadata,
-      // permission and config are intentionally absent from AgentEvent; they must not create a
-      // second managed-only event vocabulary merely to make pages look full.
-      const wanted = options.limit + 1;
-      const events: { readonly sequence: string; readonly event: AgentEvent }[] = [];
-      let exhausted = false;
-      while (events.length < wanted && !exhausted) {
-        const page = await store.readRecordPage({
-          limit: Math.max(64, wanted - events.length),
-          ...(cursor !== undefined ? { after: cursor } : {}),
-          ...(options.order !== undefined ? { order: options.order } : {}),
-          ...(options.address !== undefined ? { address: options.address } : {}),
-        });
-        for (const stored of page.data) {
-          cursor = stored.sequence;
-          const event = agentEventFromRecord(stored.record, id);
-          if (event !== undefined) events.push({ sequence: stored.sequence, event });
-          if (events.length === wanted) break;
-        }
-        if (events.length === wanted) break;
-        if (page.next === undefined) exhausted = true;
-        else cursor = page.next;
-      }
-      const pageItems = events.slice(0, options.limit);
-      return {
-        data: pageItems.map((item) => item.event),
-        ...(events.length > options.limit && pageItems.length > 0
-          ? { next: pageItems[pageItems.length - 1]!.sequence }
-          : {}),
-      };
-    } finally {
-      await store.close?.();
-    }
+    const now = Date.now();
+    const next = { ...metadata, archivedAt: now, updatedAt: now };
+    await this.metadata.update(next);
+    return this.toResource(next);
   }
 
   /**
-   * Follow a session's events from a cursor.
+   * Delete a session: gone from the API at once, history included. A running session must be
+   * interrupted and idle first.
    *
-   * Order of operations matters and is the whole reason this is not two loops glued together:
-   * the broadcast subscription is opened FIRST and buffered, the store is read second, and only
-   * then does the buffer drain. Reading first and subscribing after leaves a window in which
-   * events land in neither — the exact race a client cannot detect, because the stream simply
-   * appears to skip.
-   *
-   * Duplicates across the seam are removed by event id: an event may legitimately arrive from
-   * both sides when it was persisted just as the backfill was catching up.
-   *
-   * Without a broadcaster this degrades to polling the store, which carries only persisted
-   * events. That is correct, just later and thinner.
+   * The runtime session behind it is the worker's to remove, not this object's — so the record
+   * stays as a tombstone and the session is woken; the worker that claims it deletes the
+   * runtime session and then the tombstone.
    */
-  async *watchEvents(id: string, options: WatchEventsOptions = {}): AsyncIterable<AgentEvent> {
-    await this.requireMetadata(id);
-    if (this.broadcaster === undefined) {
-      yield* this.watchStore(id, options);
-      return;
+  async delete(id: string): Promise<void> {
+    const metadata = await this.requireMetadata(id);
+    if ((await this.status(id)) === "running") {
+      throw new ManagedConflictError(`session "${id}" is running; interrupt it and wait for idle before deleting`);
     }
+    await this.metadata.update({ ...metadata, deletedAt: Date.now() });
+    await this.work.purge(id);
+    await this.work.wake(id);
+  }
 
+  /**
+   * Accept events for a session. The write is awaited, so the response means the events survive
+   * a crash — not that anything has acted on them yet. Each comes back with its id and
+   * `processed_at: null`; the history shows it processed once a worker has dealt with it.
+   */
+  async sendEvents(
+    id: string,
+    request: SendManagedEventsRequest,
+    idempotencyKey?: string,
+  ): Promise<SendManagedEventsResponse> {
+    const input = parseRequest(SendEventsRequestSchema, request);
+    const metadata = await this.requireMetadata(id);
+    if (metadata.archivedAt !== undefined) throw new ManagedConflictError(`session "${id}" is archived`);
+    const run = (): Promise<SendManagedEventsResponse> => this.accept(id, input.events);
+    return idempotencyKey === undefined ? run() : this.idempotency.run(id, idempotencyKey, run);
+  }
+
+  async listEvents(id: string, options: ListSessionEventsOptions = {}): Promise<ListSessionEventsResponse> {
+    await this.requireMetadata(id);
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new ManagedInvalidRequestError("limit must be an integer between 1 and 1000");
+    }
+    const order = options.order ?? "asc";
+    let cursor: string | undefined;
+    if (options.page !== undefined) {
+      const decoded = decodeEventPage(options.page);
+      if (decoded.order !== order) throw new ManagedInvalidRequestError("page was issued for a different order");
+      cursor = decoded.sequence;
+    }
+    const page = await this.work.listEvents(id, { limit, order, ...(cursor !== undefined ? { page: cursor } : {}) });
+    return {
+      data: page.data,
+      next_page: page.next === undefined ? null : encodeEventPage({ sequence: page.next, order }),
+    };
+  }
+
+  /**
+   * Follow a session's events from now on. Live-only, like Claude's stream: a client that needs
+   * what came before reads `listEvents`, and one that reconnects fills the gap the same way.
+   * The subscription is open when this resolves, so events sent after it are not missed.
+   * Previews (`event_start` / `event_delta`) are delivered only for `eventDeltas`.
+   */
+  async stream(id: string, signal: AbortSignal, options: StreamEventsOptions = {}): Promise<AsyncIterable<ManagedStreamEvent>> {
+    await this.requireMetadata(id);
+    if (this.broadcaster === undefined) throw new Error("event streaming requires an EventBroadcaster");
     const queue = new EventQueue();
-    const matches = (event: AgentEvent): boolean =>
-      options.address === undefined || event.address === options.address;
+    const gate = new PreviewGate(new Set(options.eventDeltas ?? []));
     const unsubscribe = this.broadcaster.subscribe(id, (event) => {
-      if (matches(event)) queue.push(event);
+      if (gate.admit(event, queue.backlog)) queue.push(event);
     });
-    const stopSubscription = (): void => {
+    const close = (): void => {
       unsubscribe();
       queue.close();
     };
-    options.signal?.addEventListener("abort", stopSubscription, { once: true });
-
-    try {
-      const seen = new Set<string>();
-      // Backfill. The subscription is already buffering everything produced meanwhile.
-      // Events from the live side that the backfill has not reached yet are the overlap; the
-      // cursor only bounds how far back the backfill starts, never what the live side carries.
-      const backfill = new AbortController();
-      const onAbort = (): void => backfill.abort();
-      options.signal?.addEventListener("abort", onAbort, { once: true });
-      try {
-        for await (const event of this.watchStore(id, {
-          ...options,
-          signal: backfill.signal,
-          untilCaughtUp: true,
-        })) {
-          seen.add(event.eventId);
-          yield event;
-        }
-      } finally {
-        options.signal?.removeEventListener("abort", onAbort);
-      }
-      if (options.signal?.aborted === true) return;
-
-      // Hand over to the live tail, dropping anything the backfill already produced.
-      let warnedStranded = false;
-      for await (const event of queue.withIdleTicks(this.stallCheckMs)) {
-        if (event === IDLE) {
-          // Silence is only meaningful if the session is supposed to be busy.
-          if (warnedStranded) continue;
-          const stranded = await this.isStranded(id);
-          if (stranded !== true) continue;
-          warnedStranded = true;
-          yield {
-            type: "warning",
-            message:
-              "This session has unprocessed input but no runner holds it — it is waiting to be " +
-              "picked up. Work resumes automatically once a worker claims it.",
-            address: options.address ?? "main",
-            sessionId: id,
-            eventId: `evt_stalled_${String(Date.now())}`,
-          } as unknown as AgentEvent;
-          continue;
-        }
-        warnedStranded = false;
-        if (seen.size > 0 && seen.has(event.eventId)) continue;
-        // The overlap window closes once the first non-duplicate arrives; keeping the set around
-        // after that would grow without bound for the life of the connection.
-        if (seen.size > 0) seen.clear();
-        yield event;
-      }
-    } finally {
-      options.signal?.removeEventListener("abort", stopSubscription);
-      stopSubscription();
-    }
+    if (signal.aborted) close();
+    else signal.addEventListener("abort", close, { once: true });
+    return {
+      [Symbol.asyncIterator]: () => {
+        const inner = queue[Symbol.asyncIterator]();
+        return {
+          next: () => inner.next(),
+          return: async () => {
+            signal.removeEventListener("abort", close);
+            close();
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
   }
 
-  /** Read the log, either to the current head (`untilCaughtUp`) or indefinitely. */
-  private async *watchStore(
-    id: string,
-    options: WatchEventsOptions & { readonly untilCaughtUp?: boolean },
-  ): AsyncIterable<AgentEvent> {
-    const store = await this.openStore(id);
-    try {
-      // The public cursor is an event id; the store's is a sequence. Translate once, up front.
-      let cursor = options.after === undefined
-        ? undefined
-        : await sequenceOfEvent(store, options.after, options.address);
-      if (options.untilCaughtUp === true) {
-        for (;;) {
-          if (options.signal?.aborted === true) return;
-          const page = await store.readRecordPage({
-            limit: 256,
-            ...(cursor !== undefined ? { after: cursor } : {}),
-            ...(options.address !== undefined ? { address: options.address } : {}),
-          });
-          for (const stored of page.data) {
-            cursor = stored.sequence;
-            const event = agentEventFromRecord(stored.record, id);
-            if (event !== undefined) yield event;
-          }
-          if (page.data.length < 256) return;
-        }
-      }
-      const watch = store.watch?.bind(store) ?? ((o: Parameters<typeof watchRecordsByPolling>[1]) =>
-        watchRecordsByPolling(store, o));
-      for await (const stored of watch({
-        ...(cursor !== undefined ? { after: cursor } : {}),
-        ...(options.address !== undefined ? { address: options.address } : {}),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      })) {
-        const event = agentEventFromRecord(stored.record, id);
-        if (event !== undefined) yield event;
-      }
-    } finally {
-      await store.close?.();
-    }
-  }
-
-  async interruptions(id: string): Promise<readonly PendingRunInterrupt[]> {
-    await this.requireMetadata(id);
-    const store = await this.openStore(id);
-    try {
-      const raw = await store.getState(INTERRUPTION_STATE_KEY);
-      return raw === null ? [] : flattenPendingInterrupts(parseInterruptionState(raw));
-    } finally {
-      await store.close?.();
-    }
-  }
-
-  /**
-   * Accept an input and return a receipt. The write is awaited, so the receipt means the input
-   * survives a crash — not merely that it reached a process.
-   *
-   * Acceptance is all this does, and it is the same acceptance a local steer has: the record
-   * written here is the `steer.queued` a session's own bus would journal, built by the same
-   * function, so the worker that later opens the session puts it back on the bus unchanged.
-   * Whether it then steers a turn already in flight or wakes an idle session is decided when a
-   * worker processes it, which can be an arbitrary moment later.
-   */
-  async appendEvent(
-    id: string,
-    input: CreateManagedMessageRequest,
-    idempotencyKey?: string,
-  ): Promise<MessageReceiptResource> {
-    const request = parseRequest(CreateMessageRequestSchema, input);
-    if (idempotencyKey !== undefined) {
-      return this.idempotency.run(id, idempotencyKey, () => this.acceptEvent(id, request));
-    }
-    return this.acceptEvent(id, request);
-  }
-
-  private async acceptEvent(
-    id: string,
-    request: CreateManagedMessageRequest,
-  ): Promise<MessageReceiptResource> {
-    const summary = await this.summary(id);
-    await this.requireMetadata(id);
-    if (summary.durableState === "interrupted") {
-      throw new ManagedConflictError(`session "${id}" is interrupted; resume it before delivering new work`);
-    }
+  private async accept(id: string, events: readonly SendManagedEventsRequest["events"][number][]): Promise<SendManagedEventsResponse> {
     const acceptedAt = Date.now();
-    const channel = request.mode === "follow_up" ? "follow_up" : "steering";
-    // Whose words, not which transport: the caller is this session's user unless it says it is
-    // relaying someone else's. The bus files a user's words by kind — `user` steers, a
-    // `user_follow_up` queues behind the turn — and a relay by its declared channel.
-    const origin: SteerOrigin = request.origin === "external"
-      ? {
-          kind: "external",
-          source: request.source ?? "managed-api",
-          channel,
-          ...(request.actor !== undefined ? { actor: request.actor } : {}),
-          ...(request.metadata !== undefined ? { metadata: request.metadata } : {}),
-        }
-      : { kind: channel === "follow_up" ? "user_follow_up" : "user" };
-    const item = buildSteerMessage(request.input, origin, { now: () => acceptedAt });
-    await this.work.append(id, {
-      ...steerQueuedRecord(item, acceptedAt),
-      // Assigned here because this writes through a plain repository handle, not through a
-      // session's publishing store (which stamps one on the way past). Without it the record
-      // is unprojectable — invisible to `listEvents` and to every client, whose reconnect
-      // protocol dedupes on exactly this id.
-      eventId: newAgentEventId(),
-    } satisfies AgentRecord);
-    return { steerId: item.id, sessionId: id, acceptedAt, channel: item.channel };
+    const data: ManagedInputResource[] = events.map((event) => ({
+      ...event,
+      id: `sevt_${randomUUID().replaceAll("-", "")}`,
+      processed_at: null,
+    }));
+    await this.work.append(id, data.map((event) => ({ event, acceptedAt })));
+    return { data };
   }
 
   /**
-   * Ask whoever is running this session to stop, or — if nobody is — discard what is waiting.
+   * Read from the session's own events, not from who holds it: a worker keeps its lease for a
+   * moment after the turn ends, and that is not work.
    *
-   * Written to the log like an input, and for the same reason: the process running the turn
-   * may be anywhere, and the only address every node shares is the store. The holder learns of
-   * it from its next heartbeat and reads it; with no holder the next worker to claim the
-   * session reads it first and skips the inputs it precedes.
+   *  - `running`: something sent is still unprocessed (unless all of it waits on a confirmation
+   *    nobody gave), or the last status the session reported is running and a worker holds it.
+   *  - `rescheduling`: it reported running, but nobody holds it — its worker died mid-turn, and
+   *    the next claim will close or continue the turn.
+   *  - `idle` otherwise, including paused on `requires_action`.
    */
-  async requestCancel(id: string, options: { readonly actor?: string } = {}): Promise<ControlReceiptResource> {
-    return this.appendControl(id, {
-      kind: "cancel",
-      commandId: managedCommandId(),
-      requestedAt: Date.now(),
-      ...(options.actor !== undefined ? { actor: options.actor } : {}),
-    });
-  }
-
-  /**
-   * Answer a durable interruption. The answers are journaled with the command, so a worker
-   * that dies mid-continuation leaves nothing for the client to resend: the next holder reads
-   * the same record and continues from the last durable pause.
-   */
-  async answerInterruption(
-    id: string,
-    input: Readonly<Record<string, InterruptAnswer>>,
-    options: { readonly actor?: string } = {},
-  ): Promise<ControlReceiptResource> {
-    const answers = parseRequest(InterruptAnswersSchema, input);
-    if ((await this.summary(id)).durableState !== "interrupted") {
-      throw new ManagedConflictError(`session "${id}" has no interrupted run to resume`);
+  private async status(id: string): Promise<ManagedSessionStatus> {
+    const [pending, latest] = await Promise.all([this.work.pending(id), this.work.latestStatus(id)]);
+    const blocked = latest?.type === "session.status_idle" && latest.stop_reason.type === "requires_action";
+    const actionable = blocked
+      ? pending.some((entry) => entry.event.type !== "user.message")
+      : pending.length > 0;
+    if (actionable) return "running";
+    if (latest?.type === "session.status_running" || latest?.type === "session.status_rescheduled") {
+      return (await this.work.peek(id)) ? "running" : "rescheduling";
     }
-    return this.appendControl(id, {
-      kind: "resume",
-      commandId: managedCommandId(),
-      requestedAt: Date.now(),
-      answers,
-      ...(options.actor !== undefined ? { actor: options.actor } : {}),
-    });
+    return "idle";
   }
 
-  private async appendControl(id: string, command: ControlCommand): Promise<ControlReceiptResource> {
-    await this.requireMetadata(id);
-    await this.summary(id);
-    await this.work.append(id, {
-      type: "custom",
-      name: CONTROL_RECORD_NAME,
-      time: command.requestedAt,
-      address: "main",
-      data: command,
-    } satisfies AgentRecord);
-    return { accepted: true, commandId: command.commandId, sessionId: id, acceptedAt: command.requestedAt };
-  }
-
-  /**
-   * Soft by default: the durable record and its managed metadata are retained, and every route
-   * that resolves a session starts returning 404. `{ purge: true }` destroys both — deliberately
-   * not reachable over HTTP, so retention stays a decision the host makes on its own schedule.
-   */
-  async delete(id: string, options?: DeleteSessionOptions): Promise<void> {
-    await this.requireMetadata(id);
-    await this.repository.delete(id, options);
-    if (options?.purge === true) await this.metadata.delete(id);
-  }
-
-  /** Undo a soft delete. Throws when the session was purged (its metadata is gone). */
-  async restore(id: string): Promise<void> {
-    await this.requireMetadata(id);
-    await this.repository.restore(id);
-  }
-
-  private async openStore(id: string): Promise<SessionStore> {
-    const handle = await this.repository.open(id);
-    if (handle === undefined) throw new ManagedSessionNotFoundError(id);
-    return handle.store;
+  private async toResource(metadata: ManagedSessionMetadata): Promise<ManagedSessionResource> {
+    return {
+      type: "session",
+      id: metadata.sessionId,
+      title: metadata.title ?? null,
+      agent: { type: "agent", id: metadata.agent.id, ...(metadata.agent.version !== undefined ? { version: metadata.agent.version } : {}) },
+      environment_id: metadata.environment.id,
+      status: metadata.archivedAt !== undefined ? "terminated" : await this.status(metadata.sessionId),
+      metadata: metadata.metadata ?? {},
+      created_at: new Date(metadata.createdAt).toISOString(),
+      updated_at: new Date(metadata.updatedAt).toISOString(),
+      archived_at: metadata.archivedAt === undefined ? null : new Date(metadata.archivedAt).toISOString(),
+    };
   }
 
   private async requireMetadata(id: string): Promise<ManagedSessionMetadata> {
     const metadata = await this.metadata.get(id);
-    if (metadata === undefined) throw new ManagedSessionNotFoundError(id);
+    // A tombstone is gone as far as a client can tell; only the cleaning worker still reads it.
+    if (metadata === undefined || metadata.deletedAt !== undefined) throw new ManagedSessionNotFoundError(id);
     return metadata;
   }
-
-  private async summary(id: string): Promise<SessionSummary> {
-    const summary = await this.repository.get(id);
-    // `get` on the repository deliberately still returns a soft-deleted session — it is the
-    // audit read. The managed API is the other side of that line: to a client, deleted is gone.
-    if (summary === undefined || summary.deletedAt !== undefined) throw new ManagedSessionNotFoundError(id);
-    return summary;
-  }
-
-  private toManagedSession(summary: SessionSummary, metadata: ManagedSessionMetadata): ManagedSession {
-    return {
-      id: summary.id,
-      ...(summary.title !== undefined ? { title: summary.title } : {}),
-      agent: metadata.agent,
-      environment: metadata.environment,
-      createdAt: summary.createdAt,
-      updatedAt: summary.updatedAt,
-      state: summary.durableState === "interrupted" ? "interrupted" : "idle",
-      activeTurnId: null,
-      hasQueuedMessages: false,
-    };
-  }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function encodePage(sessionId: string): string {
+  return Buffer.from(sessionId, "utf8").toString("base64url");
 }
 
-let managedIdCounter = 0;
-function managedSessionId(): string {
-  managedIdCounter += 1;
-  return `ms_${Date.now().toString(36)}_${managedIdCounter.toString(36)}`;
+function decodePage(page: string): string {
+  return Buffer.from(page, "base64url").toString("utf8");
 }
 
-let commandCounter = 0;
-function managedCommandId(): string {
-  commandCounter += 1;
-  return `cmd_${Date.now().toString(36)}_${commandCounter.toString(36)}`;
+function encodeEventPage(cursor: { readonly sequence: string; readonly order: "asc" | "desc" }): string {
+  return Buffer.from(JSON.stringify({ v: 1, s: cursor.sequence, o: cursor.order }), "utf8").toString("base64url");
 }
 
-/**
- * Find the log position of a public event id, scanning backwards because a resume cursor is
- * almost always near the tail. Undefined when the log has no such event — a live-only id, or
- * one from a session this is not — in which case the caller replays from the start.
- */
-async function sequenceOfEvent(store: SessionStore, eventId: string, address?: string): Promise<string | undefined> {
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await store.readRecordPage({
-      limit: 256,
-      order: "desc",
-      ...(cursor !== undefined ? { after: cursor } : {}),
-      ...(address !== undefined ? { address } : {}),
-    });
-    for (const stored of page.data) {
-      if ((stored.record as AgentRecord).eventId === eventId) return stored.sequence;
+function decodeEventPage(page: string): { readonly sequence: string; readonly order: "asc" | "desc" } {
+  try {
+    const parsed = JSON.parse(Buffer.from(page, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (parsed["v"] === 1 && typeof parsed["s"] === "string" && /^\d+$/.test(parsed["s"]) && (parsed["o"] === "asc" || parsed["o"] === "desc")) {
+      return { sequence: parsed["s"], order: parsed["o"] };
     }
-    if (page.next === undefined) return undefined;
-    cursor = page.next;
+  } catch {
+    // Reported below.
   }
+  throw new ManagedInvalidRequestError("invalid page cursor");
 }
 
 /**
  * A bounded async queue bridging a push callback to a `for await` loop.
  *
  * Bounded on purpose: a subscriber that cannot keep up must not turn an unbounded buffer into
- * memory growth. Overflow drops the OLDEST events, because the newest are what a live view
- * needs — and anything dropped that was persisted is still recoverable from the log.
+ * memory growth. Overflow drops the OLDEST events — everything a worker publishes is also in
+ * the history, so a client that fell behind recovers it from there.
  */
-const IDLE = Symbol("idle");
-
-class EventQueue implements AsyncIterable<AgentEvent> {
-  private readonly items: AgentEvent[] = [];
-  private readonly waiters: Array<(result: IteratorResult<AgentEvent>) => void> = [];
+class EventQueue implements AsyncIterable<ManagedStreamEvent> {
+  private readonly items: ManagedStreamEvent[] = [];
+  private readonly waiters: Array<(result: IteratorResult<ManagedStreamEvent>) => void> = [];
   private closed = false;
   private readonly capacity: number;
 
@@ -680,7 +378,11 @@ class EventQueue implements AsyncIterable<AgentEvent> {
     this.capacity = capacity;
   }
 
-  push(event: AgentEvent): void {
+  get backlog(): number {
+    return this.items.length;
+  }
+
+  push(event: ManagedStreamEvent): void {
     if (this.closed) return;
     const waiter = this.waiters.shift();
     if (waiter !== undefined) {
@@ -696,44 +398,59 @@ class EventQueue implements AsyncIterable<AgentEvent> {
     for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
   }
 
-  /**
-   * The same stream, but yielding `IDLE` whenever nothing has arrived for `ms`.
-   *
-   * A quiet stream is ambiguous — the model may be thinking, or whoever was running may be gone.
-   * The tick is what gives a consumer a chance to find out; it carries no information itself.
-   */
-  async *withIdleTicks(ms: number): AsyncIterable<AgentEvent | typeof IDLE> {
-    for (;;) {
-      const next = this[Symbol.asyncIterator]().next();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const idle = new Promise<typeof IDLE>((resolve) => {
-        timer = setTimeout(() => resolve(IDLE), ms);
-        timer.unref?.();
-      });
-      const winner = await Promise.race([next, idle]);
-      if (winner === IDLE) {
-        yield IDLE;
-        // The pending `next` stays pending and resolves on the following loop's race.
-        continue;
-      }
-      if (timer !== undefined) clearTimeout(timer);
-      if (winner.done === true) return;
-      yield winner.value;
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+  [Symbol.asyncIterator](): AsyncIterator<ManagedStreamEvent> {
     return {
-      next: (): Promise<IteratorResult<AgentEvent>> => {
+      next: (): Promise<IteratorResult<ManagedStreamEvent>> => {
         const item = this.items.shift();
         if (item !== undefined) return Promise.resolve({ value: item, done: false });
         if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
         return new Promise((resolve) => this.waiters.push(resolve));
       },
-      return: (): Promise<IteratorResult<AgentEvent>> => {
-        this.close();
-        return Promise.resolve({ value: undefined as never, done: true });
-      },
     };
+  }
+}
+
+/** Past this many undelivered events, a connection sheds deltas rather than fall further behind. */
+const PREVIEW_SHED_BACKLOG = 256;
+/** Previews a connection tracks at once; a turn has one open at a time, so this is slack. */
+const MAX_OPEN_PREVIEWS = 64;
+
+/**
+ * Which previews one connection gets, per Claude's live-preview contract:
+ *  - only the types it asked for, and only previews it saw start — a connection opened while a
+ *    message is being generated gets no deltas for that message;
+ *  - best effort: behind by too much, it stops delivering an event's deltas for good, so what
+ *    it did deliver is still a prefix of the message's text.
+ */
+class PreviewGate {
+  private readonly wanted: ReadonlySet<ManagedPreviewableEventType>;
+  private readonly open = new Set<string>();
+
+  constructor(wanted: ReadonlySet<ManagedPreviewableEventType>) {
+    this.wanted = wanted;
+  }
+
+  admit(event: ManagedStreamEvent, backlog: number): boolean {
+    switch (event.type) {
+      case "event_start":
+        if (!this.wanted.has(event.event.type)) return false;
+        this.open.add(event.event.id);
+        if (this.open.size > MAX_OPEN_PREVIEWS) this.open.delete(this.open.values().next().value!);
+        return true;
+      case "event_delta":
+        if (!this.open.has(event.event_id)) return false;
+        if (backlog >= PREVIEW_SHED_BACKLOG) {
+          this.open.delete(event.event_id);
+          return false;
+        }
+        return true;
+      case "session.status_idle":
+        // The turn is over: a preview still open was discarded with its attempt.
+        this.open.clear();
+        return true;
+      default:
+        this.open.delete(event.id);
+        return true;
+    }
   }
 }

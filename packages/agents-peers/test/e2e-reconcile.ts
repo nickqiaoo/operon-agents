@@ -22,7 +22,7 @@ import { createHarness } from "operon-agents";
 import { createFilePeerRepo, PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle, type PeerRepo } from "../src/index.ts";
 
 /** Born a member: the per-session param `peers()` reads to mount the Hub with this identity. */
-const asMember = (member: PeerMemberOptions) => ({ params: { [PEERS_SERVICE]: { member } } });
+const asMember = (member: PeerMemberOptions) => ({ config: { extensions: { [PEERS_SERVICE]: { member } } } });
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -39,10 +39,10 @@ async function main(): Promise<void> {
   /** A "process": one harness over the given repo. */
   const boot = (repo: PeerRepo) => {
     const harness = createHarness({
-      ...faux.harnessModel(),
-      permission: { mode: "yolo" },
-      extensions: [peers({ visibility: sharedLabelVisibility, repo })],
-    });
+    ...faux.harnessModel(),
+    extensions: [peers({ visibility: sharedLabelVisibility, repo })],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     return { harness, net: harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE) };
   };
 
@@ -69,8 +69,9 @@ async function main(): Promise<void> {
 
     // ── "Restart": a fresh process over the same directory seeds the roster from the cards alone ──
     const restarted = boot(createFilePeerRepo(dir));
-    // The network is a WORKSPACE half: it exists once a session opens the workspace. An ordinary
-    // session (no member param, no team formed) composes it without touching the roster.
+    // The network is a HARNESS half: it exists as soon as the harness is built, before any
+    // session. An ordinary session (no member param, no team formed) composes the extension
+    // without touching the roster.
     await restarted.harness.createSession();
     // Through `list()`, the public entry point — it is what awaits seeding.
     const bobRef = (await restarted.net.list()).find((ref) => ref.name === "bob");

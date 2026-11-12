@@ -55,13 +55,9 @@ export async function measureRun(
       writeFileSync(join(work, path), content);
     }
     const harness = createHarness({
-      model,
-      workDir: work,
-      permission: { mode: "yolo" },
-      maxStepsPerTurn: options.maxStepsPerTurn ?? 12,
-      // Orchestration is what is measured: RunCode beside every tool, nothing hidden.
-      extensions: variant === "code" ? [codeMode({ hide: "none" })] : [],
-    });
+    extensions: variant === "code" ? [codeMode({ hide: "none" })] : [],
+    config: { workDir: work, defaults: { model: model, permission: { mode: "yolo" }, limits: { maxStepsPerTurn: options.maxStepsPerTurn ?? 12 } } }
+  });
     const session = await harness.createSession();
     let steps = 0;
     let tokens = 0;

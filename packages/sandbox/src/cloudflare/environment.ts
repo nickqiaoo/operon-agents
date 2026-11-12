@@ -286,7 +286,7 @@ export class CloudflareEnvironment extends SandboxEnvironment {
     return sliceRange(Buffer.from(content, "base64"), range);
   }
 
-  protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
+  async writeBytes(path: string, data: Buffer): Promise<void> {
     // base64 is the only binary-safe route on this transport (writeFileStream is RPC-only).
     await this.client.files.writeFile(this.resolve(path), data.toString("base64"), this.sessionId, {
       encoding: "base64",

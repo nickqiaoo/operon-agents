@@ -11,7 +11,8 @@
  * else. Take this extension away and the model is back to direct calls — a feature missing,
  * not an invariant broken.
  */
-import type { ExtensionDefinition, LlmRequest, ToolSchema } from "operon-agents";
+import type { ExtensionDefinition } from "operon-agents";
+import type { LlmRequest, ToolSchema } from "operon-agents/advanced";
 import { DEFAULT_CATALOG_BUDGET, renderToolCatalog, renderToolDeclarations } from "./declarations.ts";
 import { RUN_CODE_NAME, runCodeDescription } from "./prompt.ts";
 import { createRunCodeTool, DEFAULT_RUN_CODE_LIMITS, type RunCodeLimits } from "./run-code-tool.ts";

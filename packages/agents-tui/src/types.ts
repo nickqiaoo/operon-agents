@@ -1,11 +1,5 @@
-import type {
-  ApprovalResponse,
-  GoalSnapshot,
-  PermissionMode,
-  ThinkingLevel,
-  ToolDisplay,
-  Usage,
-} from 'operon-agents';
+import type { ApprovalResponse, PermissionMode, ThinkingLevel, Usage } from 'operon-agents';
+import type { GoalSnapshot, ToolDisplay } from 'operon-agents/advanced';
 
 import type { NotificationsConfig, StatusLineConfig } from './config.ts';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types.ts';

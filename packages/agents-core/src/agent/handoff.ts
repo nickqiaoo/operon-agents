@@ -85,7 +85,7 @@ export class Handoff<TContext = unknown> {
     return defineTool({
       name: toolName,
       description: this.toolDescription,
-      params,
+      parameters: params,
       resolve: (args) => ({
         approvalRule: toolName,
         accesses: ToolAccesses.none(),

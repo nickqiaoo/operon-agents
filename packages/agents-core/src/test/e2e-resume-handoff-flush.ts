@@ -77,7 +77,7 @@ function suspendOnceTool(fired: { value: boolean }) {
   return defineTool({
     name: "pause",
     description: "pause once",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "pause",
       run: async (ctx) => {

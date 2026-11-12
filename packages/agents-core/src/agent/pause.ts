@@ -57,11 +57,6 @@ export async function pauseRun<TContext>(
     // Snapshot — RunResult.messages must not alias the live context array (see Engine.finish).
     messages: [...messages],
     usage: state.usage,
-    interruption: {
-      id: interruption.interruptionId,
-      revision: interruption.revision,
-      pending: publicPending,
-    },
     interruptions: publicPending,
   };
   return attachInterruptionState(result, interruption);

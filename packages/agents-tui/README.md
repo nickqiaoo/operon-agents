@@ -1,5 +1,8 @@
 # operon-agents-tui
 
+> **Unmaintained.** Retained for reference and excluded from the pnpm workspace.
+> This client is not kept compatible with current framework APIs; the instructions below are historical.
+
 A terminal client for `operon-agents`. It talks to the engine only through the public Harness API
 — `HarnessSession.prompt` / `steer`, `onEvent`, the approval and question handlers, and the
 session's own control methods — so it is also the reference for what that API has to support.

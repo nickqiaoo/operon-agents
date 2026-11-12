@@ -37,7 +37,12 @@ async function main(): Promise<void> {
   skillDir(remote, "remote-skill");
   try {
     const faux = registerFauxProvider();
-    const base = { ...faux.harnessModel(), homeDir: home, workDir: local, permission: { mode: "yolo" as const }, loadDiskProfiles: false };
+    const base = {
+      modelManager: faux.harnessModel().modelManager,
+      homeDir: home,
+      loadDiskProfiles: false,
+      config: { workDir: local, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" as const } } },
+    };
 
     // ── Plain local harness: the baseline, and sessions bringing their own environment ──
     {
@@ -45,10 +50,14 @@ async function main(): Promise<void> {
       const plain = await harness.createSession();
       check("baseline: a session on the harness's environment sees the harness's skills", names(plain).join(",") === "local-skill");
 
-      const own = await harness.createSession({ environment: new LocalEnvironment(remote) });
+      const own = await harness.createSession({
+    bindings: { environment: new LocalEnvironment(remote) }
+  });
       check("own environment (instance): the catalog comes from THAT environment, not the host's disk", names(own).join(",") === "remote-skill");
 
-      const viaFactory = await harness.createSession({ environment: () => new LocalEnvironment(remote) });
+      const viaFactory = await harness.createSession({
+    bindings: { environment: () => new LocalEnvironment(remote) }
+  });
       check("own environment (factory): same — scanned through the session's environment", names(viaFactory).join(",") === "remote-skill");
       check("own environment: the shared registry the harness scanned is untouched", names(plain).join(",") === "local-skill");
 
@@ -84,7 +93,9 @@ async function main(): Promise<void> {
       const third = join(root, "third");
       skillDir(third, "third-skill");
       const harness = await createLocalHarness({ ...base, infrastructure: () => ({ environment: new LocalEnvironment(remote) }) });
-      const session = await harness.createSession({ environment: new LocalEnvironment(third) });
+      const session = await harness.createSession({
+    bindings: { environment: new LocalEnvironment(third) }
+  });
       check("precedence: the session's own environment wins over the harness's", names(session).join(",") === "third-skill");
       await harness.close();
     }

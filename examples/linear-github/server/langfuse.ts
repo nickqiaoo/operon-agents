@@ -8,7 +8,7 @@
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import type { Context } from "@opentelemetry/api";
 import { NodeTracerProvider, type Span, type SpanProcessor } from "@opentelemetry/sdk-trace-node";
-import { OTelTracingProcessor, type TracingContentMode } from "operon-agents";
+import { OTelTracingProcessor, type TracingContentMode } from "operon-agents/advanced";
 
 export interface LangfuseOptions {
   readonly publicKey: string;

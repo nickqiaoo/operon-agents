@@ -1,28 +1,8 @@
 import { testRunner, openTestSession } from "operon-agents-core/internal";
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import {
-  BoundaryInjector,
-  compactionCapability,
-  createHarness,
-  defineAgent,
-  extensionsCapability,
-  ListenerSink,
-  LocalEnvironment,
-  MemoryStore,
-  readAudit,
-  Runner,
-  Session,
-  tool,
-  type AgentEvent,
-  type AgentRecord,
-  type Capability,
-  type LlmRequest,
-  type ExtensionDefinition,
-  type InjectionContext,
-  type InjectionResult,
-  type Message,
-} from "../src/index.ts";
+import { BoundaryInjector, compactionCapability, extensionsCapability, ListenerSink, MemoryStore, readAudit, Runner, Session, type AgentRecord, type Capability, type LlmRequest, type InjectionContext, type InjectionResult } from "../src/advanced.ts";
+import { createHarness, defineAgent, LocalEnvironment, defineTool, type AgentEvent, type ExtensionDefinition, type Message } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -82,7 +62,7 @@ async function coreSurface(): Promise<void> {
   const extension: ExtensionDefinition = {
     id: "surface-extension",
     session(api) {
-      api.registerTool(tool({
+      api.registerTool(defineTool({
         name: "ExtensionEcho",
         description: "Echo a value.",
         parameters: z.object({ value: z.string() }),
@@ -179,7 +159,7 @@ async function interventions(): Promise<void> {
   const extension: ExtensionDefinition = {
     id: "intervention-extension",
     session(api) {
-      api.registerTool(tool({
+      api.registerTool(defineTool({
         name: "Guarded",
         description: "Should never run.",
         parameters: z.object({}),
@@ -262,7 +242,7 @@ async function runTierHooks(): Promise<void> {
   const terminating: ExtensionDefinition = {
     id: "terminate-extension",
     session(api) {
-      api.registerTool(tool({ name: "Stopper", description: "x", parameters: z.object({}), execute: () => "ran" }));
+      api.registerTool(defineTool({ name: "Stopper", description: "x", parameters: z.object({}), execute: () => "ran" }));
       api.on("tool.call", () => ({ block: true, reason: "halted", terminate: true }));
     },
   };
@@ -294,7 +274,7 @@ async function toolGating(): Promise<void> {
   const extension: ExtensionDefinition = {
     id: "gating-extension",
     session(api) {
-      api.registerTool(tool({ name: "Gated", description: "x", parameters: z.object({}), execute: () => "GATED_RAN" }));
+      api.registerTool(defineTool({ name: "Gated", description: "x", parameters: z.object({}), execute: () => "GATED_RAN" }));
       api.on("run.settled", ({ actions }) => {
         allToolsSeen = actions.getAllTools();
         // Withhold the tool for any subsequent turn.
@@ -345,7 +325,7 @@ async function abortControl(): Promise<void> {
   const extension: ExtensionDefinition = {
     id: "abort-extension",
     session(api) {
-      api.registerTool(tool({ name: "Trigger", description: "x", parameters: z.object({}), execute: () => "ran" }));
+      api.registerTool(defineTool({ name: "Trigger", description: "x", parameters: z.object({}), execute: () => "ran" }));
       api.on("tool.result", ({ actions }) => {
         if (aborts === 0) {
           aborts += 1;
@@ -404,12 +384,12 @@ async function collision(): Promise<void> {
     if (event.type === "warning") warnings.push(event.message);
   });
   const model = faux.getChatModel()!;
-  const ownTool = tool({ name: "Collision", description: "agent-owned", parameters: z.object({}), execute: () => "agent-tool" });
+  const ownTool = defineTool({ name: "Collision", description: "agent-owned", parameters: z.object({}), execute: () => "agent-tool" });
   const agent = defineAgent({ name: "collision", model, instructions: "x", tools: [ownTool] });
   const extension: ExtensionDefinition = {
     id: "collision-extension",
     session(api) {
-      api.registerTool(tool({ name: "Collision", description: "extension-owned", parameters: z.object({}), execute: () => "extension-tool" }));
+      api.registerTool(defineTool({ name: "Collision", description: "extension-owned", parameters: z.object({}), execute: () => "extension-tool" }));
     },
   };
   const result = await testRunner({
@@ -447,7 +427,7 @@ async function hostReach(): Promise<void> {
     session(api) {
       api.on("run.settled", async ({ actions }) => {
         idleDuringRun = actions.isIdle();
-        const forked = await actions.fork({ title: "forked-by-extension" });
+        const forked = await actions.forkSession({ title: "forked-by-extension" });
         forkedId = forked.id;
         const spawned = await forked.prompt("go");
         spawnedOutput = spawned.output;
@@ -469,9 +449,8 @@ async function hostReach(): Promise<void> {
   const harness = createHarness({
     ...faux.harnessModel(),
     modelManager: faux.runtime,
-    workDir: process.cwd(),
-    permission: { mode: "yolo" },
     extensions: [extension],
+    config: { workDir: process.cwd(), defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   hostSessionId = session.id;

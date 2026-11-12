@@ -1,4 +1,12 @@
-import type { AgentEvent, InterruptAnswer, PendingRunInterrupt } from "operon-agents";
+/**
+ * The managed wire protocol, shaped after Claude Managed Agents: a session is a resource, work
+ * enters it as user events (`POST /sessions/{id}/events`), and everything the agent does comes
+ * back as session events — listed from history (`GET /sessions/{id}/events`) or followed live
+ * (`GET /sessions/{id}/events/stream`, live-only).
+ *
+ * None of these types come from the framework. The worker translates runtime events into this
+ * vocabulary at the boundary (`server/wire-events.ts`); a client never sees a core record.
+ */
 
 export const MANAGED_API_VERSION = "v1" as const;
 
@@ -13,134 +21,220 @@ export interface EnvironmentRef {
   readonly id: string;
 }
 
-export interface ManagedSession {
+export type TextBlock = { readonly type: "text"; readonly text: string };
+
+export type ManagedSessionStatus = "idle" | "running" | "rescheduling" | "terminated";
+
+export interface ManagedSessionResource {
+  readonly type: "session";
   readonly id: string;
-  readonly title?: string;
-  readonly agent: AgentRef;
-  readonly environment: EnvironmentRef;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly state: "idle" | "running" | "interrupted" | "closed";
-  readonly activeTurnId: string | null;
-  readonly hasQueuedMessages: boolean;
+  readonly title: string | null;
+  readonly agent: { readonly type: "agent"; readonly id: string; readonly version?: string };
+  readonly environment_id: string;
+  readonly status: ManagedSessionStatus;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly archived_at: string | null;
 }
 
 export interface CreateManagedSessionRequest {
+  /** Host extension: choose the id instead of having one minted. Letters, digits, `_` and `-`. */
   readonly id?: string;
   readonly title?: string;
-  readonly agent: AgentRef | string;
-  readonly environment: EnvironmentRef | string;
+  /** An agent id, or `{ type: "agent", id, version? }` as a session resource names it. */
+  readonly agent: string | (AgentRef & { readonly type?: "agent" });
+  readonly environment_id: string;
+  /** Messages to queue as the session is created. Without them the session starts idle. */
+  readonly initial_events?: readonly UserMessageEvent[];
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-/** `PATCH /sessions/{id}`: rename a session. Only the title is client-writable after creation. */
 export interface UpdateManagedSessionRequest {
-  readonly title: string;
+  readonly title?: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface ListManagedSessionsOptions {
+  readonly limit?: number;
+  readonly page?: string;
+  readonly order?: "asc" | "desc";
 }
 
 export interface ListManagedSessionsResponse {
-  readonly data: readonly ManagedSession[];
+  readonly data: readonly ManagedSessionResource[];
+  readonly next_page: string | null;
 }
 
-export interface CreateManagedMessageRequest {
-  readonly input: string;
-  /**
-   * Whose words these are.
-   *
-   * `user` (default): the caller's own. The party holding a session's credential is its user —
-   * the same way a local session's stdin is — so the model sees the text bare, as a prompt.
-   *
-   * `external`: another party's words the caller is relaying (a peer, a webhook, another
-   * agent). The model sees them inside an `<external-message>` envelope stamped as NOT from the
-   * user. Declaring this lowers trust, so it needs no extra permission; the server's `authorize`
-   * hook receives the value and can require it for a credential that only ever relays.
-   */
-  readonly origin?: "user" | "external";
-  /** `external` only: what relayed the words (default `"managed-api"`). */
-  readonly source?: string;
-  /** `external` only: who said them. */
-  readonly actor?: string;
-  /** `external` only: attributes rendered onto the envelope. */
-  readonly metadata?: Readonly<Record<string, string | number | boolean | null>>;
-  /**
-   * Which queue the message is filed into (default `steer`). `steer`: taken at the running
-   * turn's next step boundary, or — with nothing running — as the next turn's prompt.
-   * `follow_up`: a prompt of its own, queued behind the turn in flight.
-   */
-  readonly mode?: "steer" | "follow_up";
+// ── Events a client sends ────────────────────────────────────────────────────────────────────
+
+export interface UserMessageEvent {
+  readonly type: "user.message";
+  readonly content: readonly TextBlock[];
 }
 
-/**
- * The receipt for an accepted message. It means the message's `steer.queued` record is durable
- * — a worker will take it — not that a turn has started: whoever holds the session decides that
- * later. `steerId` is the message's identity from here on: on the `steer.queued` event, and as
- * `origin.steerId` of the `message.appended` that shows the model saw it.
- */
-export interface MessageReceiptResource {
-  readonly steerId: string;
-  readonly sessionId: string;
-  readonly acceptedAt: number;
-  readonly channel: "steering" | "follow_up";
+export interface UserInterruptEvent {
+  readonly type: "user.interrupt";
 }
 
-export interface ListSessionEventsResponse {
-  /** Durable AgentEvents in store order. Store sequence remains inside the opaque page cursor;
-   *  `eventId` is the stable public identity shared with events.stream(). */
-  readonly data: readonly AgentEvent[];
-  readonly nextPage: string | null;
+/** Answers an `agent.tool_use` the session is blocked on (`tool_use_id` is that event's `id`). */
+export interface UserToolConfirmationEvent {
+  readonly type: "user.tool_confirmation";
+  readonly tool_use_id: string;
+  readonly result: "allow" | "deny";
+  readonly deny_message?: string;
 }
+
+/** Answers an `agent.custom_tool_use` (`custom_tool_use_id` is that event's `id`). */
+export interface UserCustomToolResultEvent {
+  readonly type: "user.custom_tool_result";
+  readonly custom_tool_use_id: string;
+  readonly content: readonly TextBlock[];
+  readonly is_error?: boolean;
+}
+
+export type ManagedInputEvent =
+  | UserMessageEvent
+  | UserInterruptEvent
+  | UserToolConfirmationEvent
+  | UserCustomToolResultEvent;
+
+/** A sent event as stored: `processed_at` stays null until a worker has dealt with it. */
+export type ManagedInputResource = ManagedInputEvent & {
+  readonly id: string;
+  readonly processed_at: string | null;
+};
+
+export interface SendManagedEventsRequest {
+  readonly events: readonly ManagedInputEvent[];
+}
+
+export interface SendManagedEventsResponse {
+  readonly data: readonly ManagedInputResource[];
+}
+
+// ── Events a session emits ───────────────────────────────────────────────────────────────────
+
+export type ManagedStopReason =
+  | { readonly type: "end_turn" }
+  | { readonly type: "requires_action"; readonly event_ids: readonly string[] };
+
+/** Tokens one model request used, as `span.model_request_end` reports them. */
+export interface ManagedModelUsage {
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+  readonly cache_read_input_tokens: number;
+  readonly cache_creation_input_tokens: number;
+}
+
+export type ManagedOutputEvent =
+  | { readonly type: "agent.message"; readonly content: readonly TextBlock[] }
+  | {
+      readonly type: "agent.tool_use";
+      readonly name: string;
+      readonly input: unknown;
+      /** `ask` when the session is blocked on a `user.tool_confirmation` for this call. */
+      readonly evaluated_permission?: "allow" | "ask";
+    }
+  | { readonly type: "agent.custom_tool_use"; readonly name: string; readonly input: unknown }
+  | {
+      readonly type: "agent.tool_result";
+      readonly tool_use_id: string;
+      readonly content: unknown;
+      readonly is_error: boolean;
+    }
+  | { readonly type: "span.model_request_start" }
+  | {
+      readonly type: "span.model_request_end";
+      /** The `span.model_request_start` this request began with. */
+      readonly model_request_start_id: string;
+      /**
+       * True when the request produced no message: it failed, was retried, was cut short, or
+       * the turn ended without it. A preview still open at this point will not be reconciled.
+       */
+      readonly is_error: boolean;
+      readonly model_usage: ManagedModelUsage | null;
+    }
+  | { readonly type: "session.status_running" }
+  | { readonly type: "session.status_idle"; readonly stop_reason: ManagedStopReason }
+  | { readonly type: "session.status_rescheduled" }
+  | { readonly type: "session.error"; readonly error: { readonly type: string; readonly message: string } };
+
+/** One entry of a session's event history: what was sent and what the session emitted. */
+export type ManagedEventResource = (ManagedInputEvent | ManagedOutputEvent) & {
+  readonly id: string;
+  readonly processed_at: string | null;
+};
 
 export interface ListSessionEventsOptions {
   readonly limit?: number;
   readonly page?: string;
   readonly order?: "asc" | "desc";
-  readonly address?: string;
+}
+
+export interface ListSessionEventsResponse {
+  readonly data: readonly ManagedEventResource[];
+  /** Pass back as `page` for the next page; null on the last one. */
+  readonly next_page: string | null;
+}
+
+// ── Live previews (stream-only) ──────────────────────────────────────────────────────────────
+
+/** Event types a stream connection may ask to preview with `event_deltas[]`. */
+export type ManagedPreviewableEventType = "agent.message" | "agent.thinking";
+
+/**
+ * A previewed event is about to be produced. `event.id` is the id the buffered event will carry
+ * when it arrives, so a client can match the preview to it.
+ */
+export interface ManagedEventStartPreview {
+  readonly type: "event_start";
+  readonly event: { readonly type: ManagedPreviewableEventType; readonly id: string };
+}
+
+/**
+ * Incremental text for the event `event_id` previews. Concatenated in arrival order per
+ * `(event_id, delta.index)`, the deltas form a prefix of that event's `content[index].text`.
+ */
+export interface ManagedEventDeltaPreview {
+  readonly type: "event_delta";
+  readonly event_id: string;
+  readonly delta: { readonly type: "content_delta"; readonly index: number; readonly content: TextBlock };
+}
+
+/**
+ * Stream-only, best-effort, never persisted: absent from the event history, not replayed on
+ * reconnect, and delivered only to connections that opted in. The buffered event they preview
+ * is always the authoritative record.
+ */
+export type ManagedPreviewEvent = ManagedEventStartPreview | ManagedEventDeltaPreview;
+
+/** What a stream connection carries: persisted events, plus previews when it opted in. */
+export type ManagedStreamEvent = ManagedEventResource | ManagedPreviewEvent;
+
+export function isManagedPreviewEvent(event: ManagedStreamEvent): event is ManagedPreviewEvent {
+  return event.type === "event_start" || event.type === "event_delta";
 }
 
 export interface StreamSessionEventsOptions {
   readonly signal?: AbortSignal;
-  /** Exact AgentEvent address filter, matching events.list({ address }). */
-  readonly address?: string;
   /**
-   * Resume after this event id. Omit to replay the session's history first, then follow live.
-   * The id to pass is the last one the previous stream delivered; see
-   * `ManagedSessionEventStream.lastEventId`.
+   * Preview these event types live as they are generated (`event_start` / `event_delta`).
+   * Only `agent.message` carries deltas; `agent.thinking` is accepted for compatibility and
+   * yields nothing here, since sessions do not emit `agent.thinking`.
    */
-  readonly after?: string;
+  readonly event_deltas?: readonly ManagedPreviewableEventType[];
   /**
-   * Reopen the stream on a dropped connection, resuming after the last durable event seen,
-   * with events already delivered filtered out. Default true. A client that wants to see the
-   * drop itself — to decide, log, or back off on its own terms — turns it off.
+   * Reopen a dropped connection, filling the gap from the event history and skipping events
+   * already delivered. Default true.
    */
   readonly reconnect?: boolean;
 }
 
 export interface ManagedApiError {
+  readonly type: "error";
   readonly error: {
-    readonly code: string;
+    readonly type: string;
     readonly message: string;
   };
-}
-
-export interface ResumeManagedSessionRequest {
-  readonly answers: Readonly<Record<string, InterruptAnswer>>;
-}
-
-/**
- * Receipt for a control command (cancel, resume). Like a delivery receipt it means the command
- * is durable, not that it has been carried out: whoever holds the session acts on it next, and
- * if nobody does, the next worker to claim the session will.
- */
-export interface ControlReceiptResource {
-  readonly accepted: true;
-  readonly commandId: string;
-  readonly sessionId: string;
-  readonly acceptedAt: number;
-}
-
-export type ResumeManagedSessionResponse = ControlReceiptResource;
-export type CancelManagedSessionResponse = ControlReceiptResource;
-
-export interface InterruptionsResponse {
-  readonly data: readonly PendingRunInterrupt[];
 }

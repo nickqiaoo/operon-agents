@@ -1,5 +1,6 @@
-import type { HarnessSession, PluginSummary } from 'operon-agents';
-import { ServiceUnavailableError } from 'operon-agents';
+import type { HarnessSession } from 'operon-agents';
+import type { PluginSummary } from 'operon-agents/advanced';
+import { ServiceUnavailableError } from 'operon-agents/advanced';
 
 import { PluginsSelectorComponent } from '../components/dialogs/plugins-selector.ts';
 import { formatErrorMessage } from '../utils/event-payload.ts';

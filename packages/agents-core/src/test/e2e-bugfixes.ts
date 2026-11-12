@@ -324,6 +324,22 @@ async function testOutputParseError(environment: LocalEnvironment): Promise<void
   );
 }
 
+// ── RunResult carries what each status means, and nothing from the others ───────────────
+
+async function testRunResultByStatus(environment: LocalEnvironment): Promise<void> {
+  const faux = registerFauxProvider();
+  faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "socket hang up" })]);
+  const model = faux.getChatModel()!;
+  const runner = testRunner({ environment, maxRetriesPerStep: 0 });
+  const failed = await runner.run(defineAgent({ name: "failing", model, instructions: "x" }), "go");
+  const typed = defineAgent({ name: "typed", model, instructions: "x", outputType: z.object({ answer: z.number() }) });
+  const cutShort = await runner.run(typed, [fauxAssistantMessage('{"answer": 42}', { stopReason: "stop" })], { maxTurns: 0 });
+  faux.unregister();
+
+  check("runResult: an error result says why", failed.status === "error" && failed.error.message === "socket hang up");
+  check("runResult: a run cut short is not held to the schema", cutShort.status === "max_turns" && !("outputParsed" in cutShort) && !("outputParseError" in cutShort));
+}
+
 // ── provider agents shadowed by static subagents warn (were silently dropped) ────────────
 
 async function testProviderShadowWarning(environment: LocalEnvironment): Promise<void> {
@@ -336,7 +352,7 @@ async function testProviderShadowWarning(environment: LocalEnvironment): Promise
   const echoTool = defineTool({
     name: "echo",
     description: "echo",
-    params: z.object({ text: z.string() }),
+    parameters: z.object({ text: z.string() }),
     resolve: (args) => ({ approvalRule: "echo", run: async () => ({ content: [{ type: "text" as const, text: args.text }] }) }),
   });
   const researcher = defineAgent({ name: "researcher", model, instructions: "static" });
@@ -375,6 +391,7 @@ async function main(): Promise<void> {
     await testDiskListStateKeys(dir);
     await testRewriteMetadataAddress();
     await testOutputParseError(environment);
+    await testRunResultByStatus(environment);
     await testProviderShadowWarning(environment);
   } finally {
     rmSync(dir, { recursive: true, force: true });

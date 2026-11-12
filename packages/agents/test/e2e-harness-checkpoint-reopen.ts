@@ -65,7 +65,7 @@ async function main(): Promise<void> {
     const work = defineTool({
       name: "work",
       description: "work",
-      params: z.object({ step: z.string() }),
+      parameters: z.object({ step: z.string() }),
       resolve: (args) => ({
         approvalRule: `work(${args.step})`,
         run: async () => {
@@ -105,7 +105,11 @@ async function main(): Promise<void> {
     check("tail projection: the steer queued before the checkpoint is still pending", b?.pendingSteers.length === 1 && a?.pendingSteers.length === 1);
 
     // ── the harness reopens from tails and closes the orphan ──
-    const harness = createHarness({ infrastructure: () => ({ sessionRepository: repository }), ...faux.harnessModel(), permission: { mode: "yolo" } });
+    const harness = createHarness({
+    infrastructure: () => ({ sessionRepository: repository }),
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     const recovered = await harness.resumeSession(handle.id);
     const main = recovered.snapshot().agents.find((entry) => entry.address === "main");
     check("harness reopen: the orphan turn is closed", main?.turn === undefined && main.live === false);

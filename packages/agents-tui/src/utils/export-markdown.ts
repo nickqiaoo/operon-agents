@@ -1,4 +1,5 @@
-import type { AgentRecord, Message, ToolCall } from 'operon-agents';
+import type { AgentRecord, ToolCall } from 'operon-agents/advanced';
+import type { Message } from 'operon-agents';
 
 import { toolResultText, userMessageText } from './event-payload.ts';
 

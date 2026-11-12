@@ -1,147 +1,181 @@
 # operon-managed-agents
 
-Managed HTTP/SSE server and TypeScript client for `operon-agents`. One package contains
-three public surfaces:
+Managed HTTP/SSE server and TypeScript client for `operon-agents`, with an API shaped after
+Claude Managed Agents. One package contains three public surfaces:
 
 - `operon-managed-agents/protocol` — wire/resource types and SSE codec
-- `operon-managed-agents/server` — Session host, registries and HTTP server
+- `operon-managed-agents/server` — session service, worker, work table and HTTP server
 - `operon-managed-agents/client` — typed client SDK
 
-The wire contract deliberately separates writes from observation. `messages.create()`
-returns an acceptance receipt immediately; `events.stream()` is a session-scoped stream
-that survives individual turns and therefore carries background completion and idle-wake
-events too.
+## The API
+
+| Route | Client |
+| --- | --- |
+| `POST /v1/sessions` | `sessions.create({ agent, environment_id, title?, metadata?, initial_events? })` |
+| `GET /v1/sessions` | `sessions.list({ limit?, page?, order? })` |
+| `GET /v1/sessions/{id}` | `sessions.retrieve(id)` |
+| `POST /v1/sessions/{id}` | `sessions.update(id, { title?, metadata? })` |
+| `POST /v1/sessions/{id}/archive` | `sessions.archive(id)` |
+| `DELETE /v1/sessions/{id}` | `sessions.delete(id)` |
+| `POST /v1/sessions/{id}/events` | `sessions.events.send(id, { events })` |
+| `GET /v1/sessions/{id}/events` | `sessions.events.list(id, { limit?, page?, order? })` |
+| `GET /v1/sessions/{id}/events/stream` | `sessions.events.stream(id, { event_deltas? })` |
+
+Work enters a session as **user events** — `user.message`, `user.interrupt`,
+`user.tool_confirmation`, `user.custom_tool_result` — and everything the agent does comes back
+as **session events**: `agent.message`, `agent.tool_use`, `agent.custom_tool_use`,
+`agent.tool_result`, `span.model_request_start` / `span.model_request_end` (one pair per model
+request, the end carrying `model_usage` and `is_error`), `session.status_running`,
+`session.status_idle` (with a `stop_reason` of
+`end_turn` or `requires_action`), `session.status_rescheduled` and `session.error`. Every
+event has an `id` and a `processed_at`: a sent event comes back with `processed_at: null` and
+shows a timestamp once a worker has dealt with it. Errors are Anthropic-shaped:
+`{ type: "error", error: { type, message } }`.
 
 ```ts
-const session = await client.sessions.create({
-  agent: "default",
-  environment: "workspace",
+const session = await client.sessions.create({ agent: "default", environment_id: "workspace" });
+
+// Live-only: open the stream before sending, or what happens in between is missed.
+const stream = await client.sessions.events.stream(session.id);
+await client.sessions.events.send(session.id, {
+  events: [{ type: "user.message", content: [{ type: "text", text: "inspect this repository" }] }],
 });
 
-const stream = await client.sessions.events.stream(session.id);
-await client.sessions.messages.create(session.id, { input: "inspect this repository" });
-
-for await (const event of stream) console.log(event);
+for await (const event of stream) console.log(event.type);
 ```
 
-The external observation API has two deliberately separate operations:
+Creating a session without `initial_events` starts nothing and provisions nothing. A
+`user.message` sent while the agent runs is taken at its next step boundary; one sent while
+the session waits on a confirmation is held until the confirmation is answered. A
+`requires_action` idle names the blocking `agent.tool_use` events in `stop_reason.event_ids`;
+answer each with `{ type: "user.tool_confirmation", tool_use_id, result: "allow" | "deny" }`,
+or an `agent.custom_tool_use` with `{ type: "user.custom_tool_result", custom_tool_use_id,
+content }`; when the paused call asked questions (`AskUserQuestion`), the text answers each of
+them as a freeform answer.
+`user.interrupt` stops the run, and what was sent before it but not yet taken is dropped.
 
-- `sessions.events.list()` pages persisted history as `AgentEvent[]`; `nextPage` is opaque.
-- `sessions.events.stream()` is a pure live `AsyncIterable<AgentEvent>` with no synthetic first event.
+`sessions.events.stream()` carries only what is emitted after it opens. On a dropped connection
+the client reconnects by itself, fills the gap from `sessions.events.list()` and skips what it
+already delivered; pass `reconnect: false` to see drops yourself.
 
-Every event has a stable `eventId`. Durable events keep that same identity in `list()` and
-`stream()`, so a reconnecting client can open the stream first, page history second, and
-deduplicate the overlap without a loss window. Low-frequency lifecycle events needed to
-rebuild state (`agent.*`, `turn.*`, pauses, messages and workflow journal progress) are
-persisted before publication in managed sessions. High-frequency deltas and progress are
-live-only: a client that joins midway reconstructs the committed structural state from
-`list()` and continues transient rendering from `stream()`.
+### Live previews
 
-`SessionProjection` remains the standard reducer from `AgentEvent` to state-shaped UI data.
-It is not exposed as a separate managed snapshot endpoint: fold the stream into a projection.
-
-The stream replays the session's durable history first and then follows live, so one
-subscription is the whole story. It carries a durable cursor — the SSE `id:` is stamped only
-on events the log can find again, never on a token delta — and the client reconnects on a
-dropped connection by itself, resuming after the last durable event it delivered and filtering
-the overlap by `eventId`. Pass `after` to start from a cursor you kept, or `reconnect: false`
-to see drops yourself.
+By default `agent.message` arrives whole, once the model has finished it. To render text as it is
+generated, opt in per connection with `event_deltas` (on the wire, `event_deltas[]=agent.message`,
+repeated per type), as in Claude Managed Agents:
 
 ```ts
-const stream = await client.sessions.events.stream(session.id);
-const projection = new SessionProjection(session.id);
-
+const stream = await client.sessions.events.stream(session.id, { event_deltas: ["agent.message"] });
+const previews = new Map<string, string[]>();
 for await (const event of stream) {
-  projection.apply(event);
-  render(projection.snapshot());
+  if (event.type === "event_start") previews.set(event.event.id, []);
+  else if (event.type === "event_delta") {
+    const blocks = previews.get(event.event_id);
+    if (blocks) blocks[event.delta.index] = (blocks[event.delta.index] ?? "") + event.delta.content.text;
+  } else if (event.type === "agent.message") previews.delete(event.id); // authoritative; render this
+  else if (event.type === "span.model_request_end" || event.type === "session.status_rescheduled") {
+    previews.clear(); // still open = never delivered: drop or mark it
+  }
 }
-// stream.lastEventId is the cursor to continue from elsewhere.
 ```
 
-`sessions.update(id, { title })` renames a session (`PATCH /v1/sessions/{id}`); the title is the
-only field a client can change after creation, and it is durable before the call resolves.
+`event_start` names the id the buffered `agent.message` will have, and every `event_delta`
+carries it; concatenated per `delta.index`, the deltas are a prefix of that block's text. Order
+on one connection is `session.status_running` → `span.model_request_start` → `event_start` →
+`event_delta`* → `agent.message` → `span.model_request_end`. Previews are best effort and live only: never in `events.list()`, never
+replayed on reconnect, not delivered for a message already in progress when the connection
+opened, and shed (the rest of that message's deltas) when a connection falls too far behind.
+A preview can outlive its message: the message is persisted only once the model has finished
+it, so a request that fails, is retried or is cut short after streaming leaves a preview that is
+never reconciled. Its `span.model_request_end` still arrives, with `is_error: true`, after any
+message the request did produce — so a preview still open at the end of its request is over.
+If the worker itself goes away mid-request, no end comes; `session.status_rescheduled` says the
+next worker starts the request over. Only `agent.message` and `agent.thinking` are accepted,
+at most 100 values, otherwise the stream answers 400; `agent.thinking` yields nothing, since
+sessions do not emit it. Previews reach other processes only through a cross-process
+broadcaster (`RedisEventBroadcaster`).
 
-`run()` sends one input and resolves when the turn that took **that** delivery ends — not the
-first `turn.ended` in the replay, which on a session with history belongs to an older turn.
+`run(client, sessionId, text)` sends one message and resolves when the agent is done with
+**that** message — not at the idle of a turn that was already running when it was sent — and
+answers `requires_action` through `onInterrupt`, or rejects at once without one.
 
-The server accepts an `authorize(request, { action, sessionId, origin })` hook. Configure it for any
-networked deployment; it can verify credentials and enforce per-session ownership. The
-bundled in-memory idempotency store is atomic within one process and bounded by TTL/capacity;
-distributed deployments should provide a database-backed `ManagedDeliveryIdempotencyStore`.
-
-The service and the workers share one **work table** (`SessionWork`): one row per session that
-has been appended to or is being run. `work.append` writes an input to the session's log and
-wakes its row as one step — in Postgres, one transaction — and a worker's claim loop
-(`worker.start()`) takes woken rows, one indexed statement per ask (`FOR UPDATE SKIP LOCKED`).
-Taking the row *is* the lease: one runtime owner per session, with a fencing token, and no
-dispatcher anywhere. Workers only make outbound calls; nothing needs to know which node holds
-a session.
-
-Cancel and resume are journaled commands written the same way. The holder learns of them from
-its heartbeat — every lease renew reports whether anything was appended since the last one —
-so a command accepted on any node reaches the turn running on any other within one renew
-interval (2s by default). With no holder, the next claim reads them first.
-
-An input is processed once it is in the conversation: the worker's cursor advances when the
-session's record holds the message, not when the turn that took it finishes. A turn that fails
-or dies halfway leaves the history intact up to where it stopped, and the next message
-continues from there; nothing is re-run and nothing runs twice. A worker that dies leaves its
-row held past the TTL; the claim loop takes such a row like any other, closes the turn it left
-open (`turn.ended`, reason `failed`) and broadcasts the close, so a client waiting on it learns
-within a TTL rather than whenever the next message happens to arrive.
-
-In one process, `MemorySessionWork` — the service and the worker must share the instance.
-Across nodes, `PgSessionWork` over the same Postgres the log lives in (run
-`sessionWorkTableDDL()` once); no queue, no broker, no other component. An accepted input is
-durable and woken before its 202; the in-process nudge after it is latency, not correctness.
-
-Pass an idempotency key when an HTTP retry must not inject the same user message twice:
+Pass an idempotency key when an HTTP retry must not send the same events twice:
 
 ```ts
-await client.sessions.messages.create(
-  session.id,
-  { input: "continue" },
-  { idempotencyKey: requestId },
-);
+await client.sessions.events.send(session.id, { events }, { idempotencyKey: requestId });
 ```
 
-Whose words a delivery is, the caller says. The party holding a session's credential is its
-user — the way a local session's stdin is — so by default `messages.create` delivers the
-caller's own words and the model sees them bare, as a prompt. A caller relaying someone else's
-words declares it:
+The server requires an `authorize(request, { action, sessionId })` hook. Configure it for any
+networked deployment; it can verify credentials and enforce per-session ownership.
+`SessionService({ validateCreate })` refuses an unknown agent or environment id before a
+session is recorded. The bundled in-memory idempotency store is atomic within one process;
+distributed deployments should provide a shared `ManagedDeliveryIdempotencyStore`.
 
-```ts
-await client.sessions.messages.create(session.id, {
-  input: "deploy finished: 3 warnings",
-  origin: "external",
-  source: "ci",
-  actor: "deploy-bot",
-});
-```
+## How work reaches a worker
 
-The model then sees the text inside an `<external-message>` envelope stamped as not from the
-user — not an approval, not an answer to anything it asked. `source`, `actor` and `metadata`
-describe the relay and are refused without the declaration. Declaring `external` lowers trust,
-so it needs no permission of its own; the `authorize` hook receives `origin` on
-`messages.create`, and a deployment that hands a credential to something that only relays (a
-webhook bridge, a teammate agent) can refuse it anything else.
+The API and the workers share exactly one thing: the **work table** (`SessionWork`). It holds
+each session's managed event log — what was sent and what the session emitted, in the managed
+vocabulary — and its lease. The API never writes into the framework's journal and never holds a
+reference to a worker, not even in one process.
+
+- **Accepting** an event persists it and wakes its session in one commit, before the response.
+- **Idle workers claim.** `worker.start()` runs a claim loop that takes woken sessions, one
+  indexed statement per ask (`FOR UPDATE SKIP LOCKED` in Postgres). Taking the row *is* the
+  lease: one runtime owner per session, with a fencing token, and no dispatcher.
+- **Holders pull.** A worker holding a session polls its pending events every
+  `inputPollIntervalMs` (500ms by default) while the agent runs, and hands them to the Harness
+  through its public interface: `steerTo` for a message, `cancel` for an interrupt, `respond`
+  for an answer. The first claim creates the runtime session; later ones reopen it.
+- **Output** is translated to managed events on the worker, recorded in the history under the
+  lease, and broadcast (`MemoryEventBroadcaster` in one process, `RedisEventBroadcaster` across
+  nodes) for the SSE endpoint to forward.
+
+A message is **processed** once it is in the conversation, not when it was pulled: a worker that
+dies holding it leaves it pending, and the next holder delivers it. One that dies after the
+conversation took it is recognised by the next holder in the transcript, marked, and not
+delivered twice; if the turn it started never finished, the next holder continues it
+(`session.status_rescheduled`). A worker that dies leaves its lease to lapse; the session reads
+`rescheduling` meanwhile, and the next claim tells watchers the turn stopped.
+
+In one process, `MemorySessionWork`. Across nodes, `PgSessionWork` (run `sessionWorkTableDDL()`
+once); no queue, no broker, no other component. `test/e2e-pg-real.ts` runs its statements
+against a real Postgres when `MANAGED_PG_URL` is set.
 
 A worker serves many tenants by default, and refuses what would leak between them or run outside
 the sandbox: a session whose environment does not come from the environment registry, a harness
 holding process-wide MCP connections or an OAuth service, MCP over stdio, and a token read from
-the process environment. A self-hosted, one-owner deployment says so —
+the process environment. Isolation is stated once, on the harness, not on each open: a
+multi-tenant worker requires `config.policy.strictIsolation: true` and
+`config.eventPublication: "committed"` and refuses to construct on a harness without them. It also
+refuses any session on that harness it did not open itself under a lease, so an extension cannot
+create or wake one behind its back. A self-hosted, one-owner deployment says so —
 `new SessionWorker({ profile: "single-tenant", … })` — and the worker logs that it did.
 
-What a host decides per tenant goes through the registries, which are told whose session they
-resolve for: `resolve(ref, { sessionId, ownerKey, metadata })`. `ownerKey` is stamped by the
-service and trustworthy; `metadata` came from the client. Per-user MCP credentials — a vault —
+```ts
+const harness = createHarness({
+  config: {
+    defaults: { model: "anthropic/claude-opus-4-8" },
+    policy: { strictIsolation: true },   // every session on its own environment, http-only MCP
+    eventPublication: "committed",       // an event is durable before anyone sees it
+  },
+  infrastructure: () => ({ sessionRepository }),
+});
+```
+
+What a host decides per tenant goes through the registries, which the worker asks on every open
+and which are told whose session they resolve for: `resolve(ref, { sessionId, ownerKey, metadata })`.
+The agent registry returns `{ config, bindings }` — the session's configuration as data, and the
+live objects it runs on — and the worker passes both on every open, the first included, so the
+configuration is the host's to keep: change what the registry returns and the next open runs on it.
+`ownerKey` is stamped by the service and trustworthy; `metadata` came from the client. Per-user MCP credentials — a vault —
 are a provider the agent registry hands out, asked on every connect:
 
 ```ts
 const agents: ManagedAgentRegistry = {
   resolve: (_ref, { ownerKey }) => ({
-    resumeOptions: {
-      mcpServers: { linear: { transport: "http", url: "https://mcp.linear.app/mcp" } },
+    // The complete set of MCP servers this session sees.
+    config: { mcp: { servers: { linear: { transport: "http", url: "https://mcp.linear.app/mcp" } } } },
+    bindings: {
       mcpCredentials: {
         credentialsFor: async ({ url }) => {
           const token = await vault.tokenFor(ownerKey!, url); // the host's store, refresh, lock

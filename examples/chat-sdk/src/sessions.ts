@@ -2,8 +2,7 @@
 // store. Listing, creating, and replaying a chat are all plain API calls against /v1/sessions
 // -- restart the chat server and every conversation is still here.
 
-import { SessionProjection, type AgentEvent, type Message, type PromptOrigin } from "operon-agents";
-import type { ManagedSession } from "operon-managed-agents/protocol";
+import type { ManagedEventResource, ManagedSessionResource } from "operon-managed-agents/protocol";
 import { cardFence, toolsFence, type ToolCall } from "./brief.ts";
 import {
   AGENT_ID,
@@ -14,7 +13,6 @@ import {
   rawTextOf,
   SEARCH_TOOL,
   toolCallOf,
-  steerOf,
   userTextOf,
 } from "./managed-agents.ts";
 
@@ -25,23 +23,22 @@ export type SessionSummary = {
   created_at: string;
 };
 
-function toSummary(session: ManagedSession): SessionSummary {
+function toSummary(session: ManagedSessionResource): SessionSummary {
   return {
     id: session.id,
     title: session.title || DEFAULT_SESSION_TITLE,
-    status: session.state,
-    created_at: new Date(session.createdAt).toISOString(),
+    status: session.status,
+    created_at: session.created_at,
   };
 }
 
-// Sessions for this app's agent only. The managed API lists every session on the server; the
-// agent filter is ours, and closed ones are left out because ownedSession would reject them
-// anyway -- a sidebar entry for one would just be a dead button.
+// Sessions for this app's agent only, newest first. The managed API lists every session on the
+// server; the agent filter is ours, and archived or terminated ones are left out because
+// ownedSession would reject them anyway -- a sidebar entry for one would just be a dead button.
 export async function listSessions(): Promise<SessionSummary[]> {
-  const { data } = await client.sessions.list();
+  const { data } = await client.sessions.list({ limit: 100, order: "desc" });
   return data
-    .filter((session) => session.agent.id === AGENT_ID && session.state !== "closed")
-    .sort((a, b) => b.createdAt - a.createdAt)
+    .filter((session) => session.agent.id === AGENT_ID && session.archived_at === null && session.status !== "terminated")
     .slice(0, 50)
     .map(toSummary);
 }
@@ -52,7 +49,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 export async function createSession(): Promise<SessionSummary> {
   const session = await client.sessions.create({
     agent: AGENT_ID,
-    environment: ENVIRONMENT_ID,
+    environment_id: ENVIRONMENT_ID,
     title: DEFAULT_SESSION_TITLE,
     metadata: { quickstart: "chat-sdk" },
   });
@@ -60,16 +57,16 @@ export async function createSession(): Promise<SessionSummary> {
   return toSummary(session);
 }
 
-// Every durable event of a session, oldest first. Persisted lifecycle events (turns, pauses)
-// and every journaled message are here; token deltas and tool progress are live-only and are
-// not (they fold into the messages).
-export async function eventsOf(sessionId: string): Promise<AgentEvent[]> {
-  const events: AgentEvent[] = [];
+// A session's event history, oldest first: every message sent and every event the session
+// emitted. Live previews (`event_start` / `event_delta`) are never in it -- they fold into the
+// agent.message each one previewed.
+export async function eventsOf(sessionId: string): Promise<ManagedEventResource[]> {
+  const events: ManagedEventResource[] = [];
   let page: string | undefined;
   do {
-    const result = await client.sessions.events.list(sessionId, { limit: 500, ...(page !== undefined ? { page } : {}) });
+    const result = await client.sessions.events.list(sessionId, { limit: 500, order: "asc", ...(page !== undefined ? { page } : {}) });
     events.push(...result.data);
-    page = result.nextPage ?? undefined;
+    page = result.next_page ?? undefined;
   } while (page !== undefined);
   return events;
 }
@@ -81,61 +78,33 @@ type UIMessageJSON = {
   parts: { type: "text"; text: string }[];
 };
 
-// Rebuild a conversation's transcript from the session's event log -- the single source of
-// truth. User and assistant messages become chat bubbles; each research turn's tool-call trace
-// and "brief ready" card are re-derived from the same log (tool calls sit inside the assistant
-// messages, timestamps on every message), so both survive a server restart without being
-// stored anywhere (the clean-turn gate is at closeTurn below).
+// Rebuild a conversation's transcript from the session's event history -- the single source of
+// truth. Each user.message and agent.message becomes a chat bubble; each research turn's
+// tool-call trace and "brief ready" card are re-derived from the same history (agent.tool_use /
+// agent.tool_result, and `processed_at` for the timing), so both survive a server restart
+// without being stored anywhere.
 //
-// The messages come out of `SessionProjection`, the engine's own reducer: history is not
-// append-only (compaction rewrites it), and the projection folds the log exactly as a reopened
-// session would. What the projection does not keep -- which turn each delivery started and how
-// that turn ended -- is a second pass over the same events.
+// A turn here is everything from one user.message to the next. It earns its trailing trace and
+// card only if it ended cleanly -- an end_turn idle with no session.error -- the same `finished`
+// gate the live bridge applies (src/managed-agents.ts), so live and replayed transcripts match.
 //
 // Callers must have passed the session through ownedSession() first.
 export async function historyOf(sessionId: string): Promise<UIMessageJSON[]> {
   const events = await eventsOf(sessionId);
-  const projection = new SessionProjection(sessionId);
-  // delivery id -> the turn it started; turn id -> how it ended. A turn with no end yet is
-  // still running, and a still-running final turn hasn't earned its trace or card. The log
-  // journals a delivered prompt ahead of its turn, so the pairing is by order: the next turn to
-  // start after an external message is that message's turn (the same rule the live bridge and
-  // the client's `run()` apply to the stream).
-  const turnOf = new Map<string, string>();
-  const endOf = new Map<string, "completed" | "cancelled" | "failed">();
-  let running: string | undefined;
-  let pendingDelivery: string | undefined;
-  for (const event of events) {
-    projection.apply(event);
-    if (event.address !== "main") continue;
-    if (event.type === "message.appended") {
-      if (event.message.role === "user") pendingDelivery = steerOf(event.origin) ?? pendingDelivery;
-    } else if (event.type === "turn.started") {
-      running = event.turnId;
-      const delivery = steerOf(event.origin) ?? pendingDelivery;
-      if (delivery !== undefined) turnOf.set(delivery, event.turnId);
-      pendingDelivery = undefined;
-    } else if (event.type === "turn.ended") {
-      endOf.set(event.turnId, event.reason);
-      if (running === event.turnId) running = undefined;
-    }
-  }
-  const main = projection.snapshot().agents.find((agent) => agent.address === "main");
   const messages: UIMessageJSON[] = [];
-  if (!main) return messages;
 
   let searches = 0;
   let tools: ToolCall[] = [];
   const openCalls = new Map<string, ToolCall>();
-  let turnId: string | undefined;
   let turnStartedAt = 0;
   let lastReplyAt = 0;
   let lastReplyId = "";
+  let ended = false;
+  let failed = false;
 
   const closeTurn = () => {
-    // Only a cleanly ended turn gets its trailing messages -- the same `finished` gate the live
-    // bridge applies (src/managed-agents.ts) -- and in the same order: trace, then card.
-    if (turnId === undefined || endOf.get(turnId) !== "completed" || !lastReplyId) return;
+    // Trace, then card -- the order the live bridge posts them in.
+    if (!ended || failed || !lastReplyId) return;
     if (tools.length > 0) {
       messages.push({ id: `${lastReplyId}-tools`, role: "assistant", parts: [{ type: "text", text: toolsFence(tools) }] });
     }
@@ -147,57 +116,59 @@ export async function historyOf(sessionId: string): Promise<UIMessageJSON[]> {
       parts: [{ type: "text", text: cardFence({ searches, seconds, sessionId }) }],
     });
   };
+  const at = (event: ManagedEventResource): number => (event.processed_at === null ? 0 : Date.parse(event.processed_at));
 
-  main.messages.forEach((message: Message, index: number) => {
-    const origin: PromptOrigin | undefined = main.origins[index];
-    const id = `m${index}`;
-    switch (message.role) {
-      case "user": {
-        // Only prompts that came through the chat are bubbles, and those are the ones that
-        // answer a delivery. Everything else the engine journals as a user-role message --
-        // compaction summaries, injected reminders -- is context for the model, not something
-        // the colleague said.
-        const delivery = steerOf(origin);
-        if (delivery === undefined) return;
+  for (const event of events) {
+    switch (event.type) {
+      case "user.message": {
         closeTurn();
         searches = 0;
         tools = [];
         openCalls.clear();
-        turnId = turnOf.get(delivery);
-        turnStartedAt = message.timestamp;
+        turnStartedAt = at(event);
         lastReplyId = "";
-        const text = userTextOf(message.content);
-        if (text) messages.push({ id, role: "user", parts: [{ type: "text", text }] });
-        return;
+        ended = false;
+        failed = false;
+        const text = userTextOf(event.content);
+        if (text) messages.push({ id: event.id, role: "user", parts: [{ type: "text", text }] });
+        break;
       }
-      case "assistant": {
+      case "agent.message": {
         // Raw (untrimmed), matching what the live bridge streams -- see rawTextOf.
-        const text = rawTextOf(message.content);
+        const text = rawTextOf(event.content);
         if (text.trim()) {
-          messages.push({ id, role: "assistant", parts: [{ type: "text", text }] });
-          lastReplyAt = message.timestamp;
-          lastReplyId = id;
+          messages.push({ id: event.id, role: "assistant", parts: [{ type: "text", text }] });
+          lastReplyAt = at(event);
+          lastReplyId = event.id;
         }
-        for (const part of message.content) {
-          if (part.type !== "toolCall") continue;
-          if (part.name === SEARCH_TOOL) searches++;
-          const call = toolCallOf(part.name, part.arguments);
-          tools.push(call);
-          openCalls.set(part.id, call);
-        }
-        return;
+        break;
       }
-      case "toolResult": {
-        const call = openCalls.get(message.toolCallId);
-        openCalls.delete(message.toolCallId);
-        if (message.isError && call) call.error = true;
-        return;
+      case "agent.tool_use": {
+        // Announced only to ask about it: the pause, not a call that ran (see the bridge).
+        if (event.evaluated_permission === "ask") break;
+        if (event.name === SEARCH_TOOL) searches++;
+        const call = toolCallOf(event.name, event.input);
+        tools.push(call);
+        openCalls.set(event.id, call);
+        break;
       }
+      case "agent.tool_result": {
+        const call = openCalls.get(event.tool_use_id);
+        openCalls.delete(event.tool_use_id);
+        if (event.is_error && call) call.error = true;
+        break;
+      }
+      case "session.error":
+        failed = true;
+        break;
+      case "session.status_idle":
+        if (event.stop_reason.type === "end_turn") ended = true;
+        break;
     }
-  });
-  // Earlier turns are closed by the next user message; a still-running final turn is held
-  // back by the log itself (its turn has no end, so closeTurn's gate refuses it).
-  if (running === undefined) closeTurn();
+  }
+  // Earlier turns are closed by the next user message; a still-running final turn has no idle
+  // yet, so closeTurn's gate refuses it.
+  closeTurn();
   return messages;
 }
 

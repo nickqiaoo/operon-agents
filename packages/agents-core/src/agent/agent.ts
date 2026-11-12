@@ -25,7 +25,15 @@ export interface AgentGuardrails<TContext = unknown> {
   readonly toolOutput?: readonly ToolOutputGuardrail<TContext>[];
 }
 
-export interface AgentConfig<TContext = unknown> {
+/**
+ * What `outputType` needs from a schema: a `parse` that returns the value or throws. A zod schema
+ * satisfies it, and is how `RunResult.outputParsed` gets its type.
+ */
+export interface OutputSchema<TOutput = unknown> {
+  parse(value: unknown): TOutput;
+}
+
+export interface AgentConfig<TContext = unknown, TOutput = unknown> {
   readonly name: string;
   readonly instructions?: string | ((ctx: AgentRunContext<TContext>) => string | Promise<string>);
   readonly handoffDescription?: string;
@@ -39,7 +47,7 @@ export interface AgentConfig<TContext = unknown> {
   readonly handoffs?: readonly Handoff<TContext>[];
   readonly subagents?: readonly Agent<TContext>[];
   readonly guardrails?: AgentGuardrails<TContext>;
-  readonly outputType?: unknown;
+  readonly outputType?: OutputSchema<TOutput>;
   readonly maxStepsPerTurn?: number;
   /**
    * Capability/MCP tools are discovered on demand through SearchTool; only loaded ones are
@@ -51,7 +59,7 @@ export interface AgentConfig<TContext = unknown> {
   readonly deferTools?: boolean;
 }
 
-export class Agent<TContext = unknown> {
+export class Agent<TContext = unknown, TOutput = unknown> {
   readonly name: string;
   readonly instructions?: AgentConfig<TContext>["instructions"];
   readonly handoffDescription?: string;
@@ -61,11 +69,11 @@ export class Agent<TContext = unknown> {
   readonly handoffs: readonly Handoff<TContext>[];
   readonly subagents: readonly Agent<TContext>[];
   readonly guardrails: AgentGuardrails<TContext>;
-  readonly outputType?: unknown;
+  readonly outputType?: OutputSchema<TOutput>;
   readonly maxStepsPerTurn?: number;
   readonly deferTools?: boolean;
 
-  constructor(config: AgentConfig<TContext>) {
+  constructor(config: AgentConfig<TContext, TOutput>) {
     if (!config.name) throw new Error("Agent requires a non-empty `name`.");
     this.name = config.name;
     this.instructions = config.instructions;
@@ -87,6 +95,14 @@ export class Agent<TContext = unknown> {
   }
 }
 
+/**
+ * Build an agent. `outputType` types `RunResult.outputParsed` — unless the agent has handoffs:
+ * another agent may then give the final answer, under its own schema, so the output is `unknown`.
+ */
+export function defineAgent<TContext = unknown, TOutput = unknown>(
+  config: AgentConfig<TContext, TOutput> & { readonly handoffs?: undefined | readonly [] },
+): Agent<TContext, TOutput>;
+export function defineAgent<TContext = unknown>(config: AgentConfig<TContext>): Agent<TContext>;
 export function defineAgent<TContext = unknown>(config: AgentConfig<TContext>): Agent<TContext> {
   return new Agent(config);
 }

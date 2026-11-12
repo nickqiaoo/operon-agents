@@ -3,7 +3,8 @@
 Public SDK entrypoint for building agents.
 
 ```ts
-import { Agent, Runner, Session, ChatModel, tool } from "operon-agents";
+import { Agent, ChatModel, defineTool } from "operon-agents";
+import { Runner, Session } from "operon-agents/advanced";
 ```
 
 Use `operon-agents` from applications. `operon-agents-core` is the lower-level
@@ -43,7 +44,7 @@ const provider = new NodeTracerProvider({
 const tracing = new OTelTracingProcessor({ tracer: provider.getTracer("my-agent"), tracerProvider: provider, content: "delta", shutdownProvider: true });
 
 const harness = await createLocalHarness({
-  model,
+  config: { defaults: { model } },
   infrastructure: () => ({ tracing }),
 });
 ```

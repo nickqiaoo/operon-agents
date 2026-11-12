@@ -4,7 +4,7 @@
 // isLiveApprover() === false, so an approval-gated tool call interrupts DURABLY instead of
 // auto-rejecting ("no live responder ⇒ durable"). The run pauses, persists interruption control state to the
 // session store, and returns `status:"interrupted"` with `interruptions`. A later
-// `session.resume(answers)` — even from a fresh process that reopens the session from the
+// `session.respond(answers)` — even from a fresh process that reopens the session from the
 // same durable store — applies the approvals and continues the run.
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,14 +47,20 @@ async function main(): Promise<void> {
   try {
     // ── Process 1: prompt pauses durably (manual mode, no approval handler) ──
     const initialContext: AppContext = { process: "initial", seenByAgent: [] };
-    const harness1 = createHarness<AppContext>({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "manual" } });
-    const session1 = await harness1.createSession({ agent: writer, context: initialContext });
+    const harness1 = createHarness<AppContext>({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "manual" } } }
+  });
+    const session1 = await harness1.createSession({
+    bindings: { agent: writer, context: initialContext }
+  });
     const sessionId = session1.id;
 
     const first = await session1.prompt("write the file");
     check("hitl-harness: prompt interrupts durably (no approval handler)", first.status === "interrupted");
     check("hitl-harness: interruptions surfaced the Write approval", first.interruptions?.[0]?.toolName === "Write");
-    check("hitl-harness: interruption id present on the result", typeof first.interruption?.id === "string");
+    check("hitl-harness: the pending approval is on the result", first.status === "interrupted" && first.interruptions.length === 1);
     check("hitl-harness: file not written before approval", !existsSync(file));
     check("hitl-harness: initial process context reached Agent instructions", initialContext.seenByAgent.join() === "initial");
     const toolCallId = first.interruptions![0]!.toolCallId;
@@ -65,8 +71,14 @@ async function main(): Promise<void> {
 
     // ── Process 2: a fresh harness reopens the session and resumes with answers ──
     const resumedContext: AppContext = { process: "resumed", seenByAgent: [] };
-    const harness2 = createHarness<AppContext>({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "manual" } });
-    const session2 = await harness2.resumeSession(sessionId, { agent: writer, context: resumedContext });
+    const harness2 = createHarness<AppContext>({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "manual" } } }
+  });
+    const session2 = await harness2.resumeSession(sessionId, {
+    bindings: { agent: writer, context: resumedContext }
+  });
     check("hitl-harness: reopened durable pause reports interrupted before resume", session2.status.state === "interrupted");
     check("hitl-harness: reopened pause exposes its pending approval", (await session2.pendingInterruptions())[0]?.toolCallId === toolCallId);
     check(
@@ -74,7 +86,7 @@ async function main(): Promise<void> {
       session2.snapshot().agents.find((entry) => entry.address === "main")?.turn?.paused?.[0]?.toolCallId === toolCallId,
     );
 
-    const second = await session2.resume({ [toolCallId]: { decision: "approved" } });
+    const second = await session2.respond({ [toolCallId]: { decision: "approved" } });
     check("hitl-harness: cross-process resume completes", second.status === "completed");
     check("hitl-harness: file written after approval", existsSync(file) && readFileSync(file, "utf8") === "written after approval\n");
     check("hitl-harness: final output surfaced", second.output.includes("wrote it"));
@@ -83,7 +95,7 @@ async function main(): Promise<void> {
     // Interruption state was consumed by resume → a second resume has nothing to continue.
     let threw = false;
     try {
-      await session2.resume({ [toolCallId]: { decision: "approved" } });
+      await session2.respond({ [toolCallId]: { decision: "approved" } });
     } catch {
       threw = true;
     }

@@ -24,7 +24,6 @@ import {
   type Environment,
   type FileInfo,
   type FileKind,
-  type FileVersion,
   type OsKind,
 } from "./environment.ts";
 import { BaseEnvironment, type SpawnedProcess } from "./environment-base.ts";
@@ -53,7 +52,7 @@ function isExistsError(error: unknown): boolean {
  * Write `payload` so a reader sees the old file or the new one, never a half-written one:
  * write a sibling temp file, then rename it over the target. This is what makes EVERY local
  * write all-or-nothing; remote backends write straight to the target instead, because there
- * the same staging costs round trips on every write (see Environment.writeText).
+ * the same staging costs round trips on every write (see Environment.writeBytes).
  *
  * Three details are load-bearing, all of them things a plain `writeFile` gets for free
  * and a rename does not:
@@ -217,19 +216,8 @@ export class LocalEnvironment extends BaseEnvironment {
     }
   }
 
-  protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
+  async writeBytes(path: string, data: Buffer): Promise<void> {
     await writeFileAtomic(this.abs(path), data);
-  }
-
-  /** One stat syscall, no round trip — so the ledger keeps its mtime fast path locally. */
-  protected override async versionAfterWrite(path: string): Promise<FileVersion | undefined> {
-    try {
-      const s = await fsStat(this.abs(path));
-      return s.mtimeMs === 0 ? {} : { mtimeMs: s.mtimeMs };
-    } catch {
-      // The write succeeded; failing to re-stat it only costs the fast path.
-      return undefined;
-    }
   }
 
   async mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void> {

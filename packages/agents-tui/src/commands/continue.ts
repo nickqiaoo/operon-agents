@@ -44,7 +44,7 @@ export async function handleContinueCommand(host: SlashCommandHost): Promise<voi
 
   host.beginSessionRequest();
   try {
-    await session.resume(answers);
+    await session.respond(answers);
   } catch (error) {
     host.failSessionRequest(`Failed to resume: ${formatErrorMessage(error)}`);
   }

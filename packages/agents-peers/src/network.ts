@@ -4,7 +4,7 @@
  * Nothing here is in the engine. The whole thing rests on four public seams:
  *   - `api.onEvent` — root-frame lifecycle says who is awake, asleep, or gone
  *   - `api.registerTool` — the `Team` tool (creators) and the `Hub` tool (members)
- *   - `actions.openSession` — reach another session (reopening it if it was closed)
+ *   - host `resumeSession` — get a session, loading it if needed (`harness.resumeSession(id)`)
  *   - `handle.steerTo(address, …)` — hand a message to one specific frame
  *
  * TWO ROLES, TWO TOOLS, both fixed at birth (a toolset never changes mid-conversation):
@@ -25,7 +25,8 @@
  * This does not belong in core; see the README for the reasoning and for how
  * this shape was reached.
  */
-import type { ExtensionAPI, ExtensionActions, ExtensionDefinition, ExtensionHostContext } from "operon-agents";
+import type { ExtensionAPI, ExtensionDefinition, SessionConfig } from "operon-agents";
+import type { ExtensionHostContext, HarnessSessionHandle } from "operon-agents/advanced";
 import type { AgentEvent, SteerOrigin } from "operon-agents-core";
 import {
   CardSyncedDirectory,
@@ -58,7 +59,7 @@ export interface PeerReceipt {
 }
 
 /** What `Team spawn` hands a teammate factory. The `peers()` extension's own factory creates the
- *  session tagged `params: { peers: { member } }`, so the member is born with its Hub and its
+ *  session tagged `config.extensions.peers = { member }`, so the member is born with its Hub and its
  *  roster identity — the host never wires this. */
 export interface TeammateSpawnRequest {
   readonly name: string;
@@ -66,6 +67,8 @@ export interface TeammateSpawnRequest {
   /** Full team label (`team:<creator>:<name>`). */
   readonly team: string;
   readonly creatorId: string;
+  /** The session the creator runs in — who the teammate is created on behalf of. */
+  readonly creatorSessionId: string;
 }
 
 export type TeammateFactory = (request: TeammateSpawnRequest) => Promise<{ readonly id: string }>;
@@ -92,6 +95,12 @@ export interface PeerNetworkOptions {
    * only picks a type and a name. Absent → the spawn op reports nothing is spawnable.
    */
   readonly spawnable?: Readonly<Record<string, TeammateFactory>>;
+  /** How a recipient that is not loaded is brought back: `host.resumeSession` in the extension,
+   *  i.e. `harness.resumeSession(id)` — a loaded session is returned as it is, a load in flight is
+   *  joined, a cold one is restored from what is stored with it and what the host's
+   *  `resolveSession` supplies. Required: peers selects no runtime configuration itself. */
+  readonly resumeSession: (sessionId: string) => Promise<HarnessSessionHandle>;
+
 }
 
 /** Options for the creator-side extension. No `labels`: an ordinary agent has no peer identity
@@ -207,8 +216,8 @@ export class PeerNetwork {
   private readonly visibility: Visibility;
   private readonly limits: PeerLimits | undefined;
   private readonly spawnable: Readonly<Record<string, TeammateFactory>> | undefined;
-  /** Any session's actions will do — `openSession` reaches every session on the harness. */
-  private actions: ExtensionActions | undefined;
+  private readonly resumeSession: PeerNetworkOptions["resumeSession"];
+  private closed = false;
   /** Per-turn outbound counters, keyed by "<agentId>:<turnId>" so they self-expire. */
   private readonly outbound = new Map<string, number>();
   private readonly budget: PeerBudget | undefined;
@@ -225,6 +234,7 @@ export class PeerNetwork {
   private readonly wokenBy = new Set<string>();
 
   constructor(options: PeerNetworkOptions) {
+    assertResumeSession(options);
     const repo = options.repo ?? createMemoryPeerRepo();
     const directory = new CardSyncedDirectory(new MemoryAgentDirectory(), repo.cards);
     this.directory = directory;
@@ -234,6 +244,7 @@ export class PeerNetwork {
     this.limits = options.limits;
     this.budget = options.budget;
     this.spawnable = options.spawnable;
+    this.resumeSession = options.resumeSession;
     this.ready = directory.seed().catch(() => undefined);
   }
 
@@ -242,14 +253,6 @@ export class PeerNetwork {
   async stats(): Promise<PeerFleetStats> {
     await this.ready;
     return this.statistics.snapshot();
-  }
-
-  /** Idempotent: the first session to mount wins — any session's actions reach every session
-   *  (`openSession` spans the harness). Mounts also re-arm this on every observed event, which
-   *  is what re-connects a REPLACEMENT instance (whose own `actions` starts empty) without any
-   *  session being touched. */
-  attachActions(actions: ExtensionActions): void {
-    this.actions ??= actions;
   }
 
   /** Roster lookup in method form — field access (`.directory`) does not survive a service
@@ -290,7 +293,7 @@ export class PeerNetwork {
    */
   async close(): Promise<void> {
     await this.ready;
-    this.actions = undefined;
+    this.closed = true;
     this.outbound.clear();
     this.wokenBy.clear();
   }
@@ -399,7 +402,7 @@ export class PeerNetwork {
 
   /**
    * Create one teammate: resolve the host's factory for `type`, let it build the session (which
-   * tags it `params: { peers: { member } }`, so identity + Hub arrive with birth), then hand the initial
+   * tags it `config.extensions.peers = { member }`, so identity + Hub arrive with birth), then hand the initial
    * prompt over as the first peer message — the write-ahead ledger covers the crash window
    * between session creation and the prompt entering its conversation.
    */
@@ -443,7 +446,7 @@ export class PeerNetwork {
 
     let session: { readonly id: string };
     try {
-      session = await factory({ name: args.name, type: args.type, team: label, creatorId });
+      session = await factory({ name: args.name, type: args.type, team: label, creatorId, creatorSessionId: creator.sessionId });
     } catch (error) {
       return { error: `Could not create teammate "${args.name}": ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -623,17 +626,19 @@ export class PeerNetwork {
     // be woken to see it.
     if (to.status !== "running") this.wokenBy.add(messageId);
     try {
-      if (this.actions === undefined) return fail("unreachable", "Peer networking is not attached to a harness.");
-      // Reopens the session when it was closed — which is what makes a parked teammate wakeable.
-      const handle = await this.actions.openSession(to.sessionId);
+      if (this.closed) return fail("unreachable", "Peer networking is closed.");
+      const handle = await this.resumeSession(to.sessionId);
       // NOTE: no `settle` on success. The ledger entry is cleared when the recipient's
       // `message.appended` shows the message actually entered its conversation (see `observe`) —
       // delivery here only means it reached an in-memory queue.
       // The ledger's message id doubles as the steer id, so the journal names the same thing.
-      if (handle.steerTo(to.address, content, origin, { id: messageId }) === undefined) {
-        // The session is open but no frame is running at that address. For a member session that
-        // cannot happen (its root frame revives on open); it happens for a subagent CREATOR whose
-        // delegation finished — continuing it is its parent's call, not a message.
+      handle.steerTo(to.address, content, origin, { id: messageId });
+    } catch (error) {
+      // Matched by name: this package value-imports nothing from the framework.
+      if (error instanceof Error && UNDELIVERABLE_ERRORS.has(error.name)) {
+        // The session is open but no frame can take it. For a member session that cannot happen
+        // (its root frame revives on open); it happens for a subagent CREATOR whose delegation
+        // finished — continuing it is its parent's call, not a message.
         await this.mailbox.settle(toId, messageId);
         return fail(
           "unreachable",
@@ -642,17 +647,15 @@ export class PeerNetwork {
             : `No frame is running at "${to.address}" in session "${to.sessionId}".`,
         );
       }
-    } catch (error) {
       return fail("unreachable", `Could not reach session "${to.sessionId}": ${error instanceof Error ? error.message : String(error)}`);
     }
     return { messageId, to: toId, status: "delivered" };
   }
 
   /**
-   * Redeliver everything the ledger still holds. Call once on startup, after at least one session
-   * with the extension is attached (that is what connects the network to a harness). Recipients
-   * themselves need not be open: a card-seeded parked teammate is found on the roster and delivery
-   * reopens its session.
+   * Redeliver everything the ledger still holds once the host restoration service is ready.
+   * Recipients need not be open: a card-seeded parked teammate is found on the roster and delivery
+   * uses the host resumeSession entry point to restore its session.
    *
    * The ledger only ever contains messages whose recipient never took them into its conversation
    * (entries clear on `message.appended`), so anything left after a restart was genuinely lost in
@@ -699,7 +702,6 @@ export class PeerNetwork {
  */
 export type PeerNetworkHandle = Pick<
   PeerNetwork,
-  | "attachActions"
   | "observe"
   | "parkAgent"
   | "registerMemberSession"
@@ -727,7 +729,6 @@ export const PEERS_SERVICE = "peers";
  *  ordinary session. */
 export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerExtensionOptions = {}): void {
   let sessionId: string | undefined;
-  network.attachActions(api.actions);
   api.on("session.start", (event) => {
     sessionId = event.sessionId;
   });
@@ -735,10 +736,6 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
     if (sessionId !== undefined) void network.parkAgent(sessionId);
   });
   api.onEvent((event) => {
-    // Re-arm on every event: through a handle this lands on the CURRENT instance, so a
-    // replacement network regains a route back into the harness without any session redoing
-    // session(). Idempotent and cheap on the live instance.
-    network.attachActions(api.actions);
     network.observe(event, sessionId);
   });
   api.registerTool(buildTeamTool(network, () => sessionId, options));
@@ -748,7 +745,6 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
  *  `peers().session` does for a teammate. */
 export function mountHub(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerMemberOptions): void {
   const selfId = memberAgentId(options.team, options.name);
-  network.attachActions(api.actions);
   api.on("session.start", (event) => {
     void network.registerMemberSession(options, event.sessionId);
   });
@@ -756,10 +752,15 @@ export function mountHub(network: PeerNetworkHandle, api: ExtensionAPI, options:
     void network.parkAgent(selfId);
   });
   api.onEvent((event) => {
-    network.attachActions(api.actions);
     network.observe(event, selfId);
   });
   api.registerTool(buildMemberTool(network, selfId, options.name));
+}
+
+function assertResumeSession(options: Pick<PeerNetworkOptions, "resumeSession">): void {
+  if (typeof options.resumeSession !== "function") {
+    throw new TypeError("peers requires a host resumeSession(sessionId) function");
+  }
 }
 
 export function createPeerNetwork(options: PeerNetworkOptions): PeerNetwork {
@@ -770,16 +771,26 @@ export function createPeerNetwork(options: PeerNetworkOptions): PeerNetwork {
 // The extension — one definition, both halves
 // ============================================================================
 
-/** What a teammate session is born as: the options `harness.createSession` takes. `peers`
- *  merges in the member's peer identity as `params.peers`, so the host never wires a mount. */
+/** Refusals from `steerTo`: the recipient exists, but this message has nowhere to go. */
+const UNDELIVERABLE_ERRORS = new Set(["SteerTargetNotFoundError", "SessionInterruptedError", "SessionClosedError"]);
+
+/**
+ * What a teammate session is born as: a title and its setup as data (`config` — model, tools,
+ * permission, MCP, other extensions' parameters), plus a directory or owner when it should not
+ * take its lead's. `peers` adds the member's peer identity to `config.extensions`, so the host
+ * never wires a mount. Live objects (a sandbox, credentials) are not given here: the host's
+ * `resolveSession` supplies them, told that the teammate is created from its lead.
+ */
 export type TeammateSessionOptions = {
   readonly title?: string;
-  readonly extensions?: readonly ExtensionDefinition[];
-  readonly params?: Record<string, unknown>;
+  readonly workDir?: string;
+  readonly ownerKey?: string;
+  readonly config?: SessionConfig;
+  /** Older spelling of `config.extensions`. */
 } & Record<string, unknown>;
 
 /**
- * The per-session argument to the `peers` extension (`createSession({ params: { peers } })`).
+ * The per-session argument to the `peers` extension (`createSession({ config: { extensions: { peers } } })`).
  *
  * - `member` present ⇒ this session is a teammate: it gets the member `Hub` with this identity,
  *   and NOT `Team` — a teammate is a member, it does not form teams of its own.
@@ -792,13 +803,12 @@ export interface PeerParams {
   readonly member?: PeerMemberOptions;
 }
 
-export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "repo"> {
+export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "repo" | "resumeSession"> {
   /**
-   * Where peer state lives: a factory given each workspace's host — the file form builds a file
-   * repo in `host.dataDir`, the workspace's own folder (outside the bundle, so an update keeps
-   * roster and mailbox) — or one repo instance, which every workspace then SHARES (a host's
-   * deliberate choice: one roster across working directories). Absent → in-memory per
-   * workspace (wiped by a reload).
+   * Where peer state lives: a factory given the extension's host — the file form builds a file
+   * repo in `host.dataDir`, the extension's own folder (outside the bundle, so an update keeps
+   * roster and mailbox) — or one repo instance the host supplies. Absent → in-memory (wiped by
+   * a reload).
    */
   readonly repo?: PeerRepo | ((host: ExtensionHostContext) => PeerRepo);
   /**
@@ -817,12 +827,12 @@ export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "rep
 /**
  * The peers extension — ONE definition, both halves:
  *
- * - `workspace` (the per-workspace half) runs once per workspace key — the working directory
- *   locally, a tenant on a server — and returns that workspace's `PeerNetwork`, which the
- *   framework registers as its `peers` service: one roster, mailbox and budget per workspace,
- *   disposed when its last session closes. Its spawn factory creates each teammate through
- *   `host.createSession`, which lands it in the SAME workspace as the lead, tagged
- *   `params: { peers: { member } }`.
+ * - `harness` (the process half) runs once per harness and returns its `PeerNetwork`, which the
+ *   framework registers as the `peers` service: one roster, mailbox and budget for the whole
+ *   process, taken down by `harness.close()`. Its spawn factory creates each teammate through
+ *   `host.createSession`, created from its lead (`from`) and tagged
+ *   `config.extensions.peers = { member }`: it takes the lead's workDir and owner unless the
+ *   teammate options say otherwise, and the host's `resolveSession` supplies its live objects.
  * - `session` (the per-session half) runs on every session: a teammate (has `params.member`) gets
  *   the member `Hub`; every other session gets the creator `Team`. It reaches the network only
  *   through the `shared` handle, so a reload swaps the network under live sessions.
@@ -834,6 +844,9 @@ export function peers(options: PeerOptions): ExtensionDefinition<PeerNetworkHand
   const { teammates, team = {}, repo, ...networkOptions } = options;
   return {
     id: PEERS_SERVICE,
+    // `member` is a seat on the roster: a fork of a teammate is an ordinary session, not a second
+    // holder of that seat.
+    forkParams: "drop",
     harness(host: ExtensionHostContext) {
       const resolvedRepo = typeof repo === "function" ? repo(host) : repo;
       const spawnable =
@@ -845,12 +858,20 @@ export function peers(options: PeerOptions): ExtensionDefinition<PeerNetworkHand
                 async (request) => {
                   const base = typeof sessionOptions === "function" ? await sessionOptions(request) : sessionOptions;
                   const member: PeerMemberOptions = { name: request.name, team: request.team, type: request.type };
-                  return host.createSession({ ...base, params: { ...(base.params ?? {}), [PEERS_SERVICE]: { member } } });
+                  const { config, ...rest } = base;
+                  // Born on behalf of its lead: the lead's directory and owner, and — where the
+                  // lead runs in a sandbox — one of its own, never the harness's machine.
+                  return host.createSession({
+                    ...rest,
+                    from: request.creatorSessionId,
+                    config: { ...(config ?? {}), extensions: { ...(config?.extensions ?? {}), [PEERS_SERVICE]: { member } } },
+                  });
                 },
               ]),
             );
       return createPeerNetwork({
         ...networkOptions,
+        resumeSession: (id) => host.resumeSession(id),
         ...(resolvedRepo !== undefined ? { repo: resolvedRepo } : {}),
         ...(spawnable !== undefined ? { spawnable } : {}),
       });

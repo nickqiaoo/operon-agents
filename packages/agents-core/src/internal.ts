@@ -30,14 +30,7 @@ export { sessionCatalogPath, appendSessionCatalogRecord, readSessionCatalog } fr
 export type { DiskSessionCatalogEntry, DiskSessionCatalogRecord } from "./store/session-catalog.ts";
 
 // ── tool: file-op and shell-rule helpers, SSH transport internals ────────────
-export {
-  readTextFile,
-  writeTextFile,
-  decodeText,
-  fileVersionFromInfo,
-  normalizeForCompare,
-  hashFileContent,
-} from "./tool/support/environment-ops.ts";
+export { decodeText } from "./tool/support/environment-ops.ts";
 export {
   matchesBashRule,
   matchWildcardPattern,
@@ -67,3 +60,7 @@ export {
   provisionCapability,
 } from "./testing.ts";
 export type { TestSessionWiring, TestRunnerOptions, TestSessionOptions, TestCapabilityHandle } from "./testing.ts";
+
+// ── recovery and redaction details ───────────────────────────────────────────
+export { closeOrphanedTurns, recoverOrphanedTurns } from "./agent/lifecycle-recovery.ts";
+export { REDACTED_EMAIL, REDACTED_URL, REDACTED_PATH } from "./telemetry/redact.ts";

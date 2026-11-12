@@ -63,7 +63,11 @@ async function confirmedSettleIsNotRedelivered(): Promise<void> {
     fauxAssistantMessage("nothing new", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: repo }),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -102,7 +106,11 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
     fauxAssistantMessage("acted on the recovered result", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: repo }),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -179,7 +187,11 @@ async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {
     fauxAssistantMessage("read the log", { stopReason: "stop" }),
   ]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: repo }),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;
@@ -225,7 +237,11 @@ async function unstampedRecordsAreLeftAlone(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("started", { stopReason: "stop" })]);
   const repo = new MemorySessionRepository();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: repo }),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   await session.prompt("start it");
   const sessionId = session.id;

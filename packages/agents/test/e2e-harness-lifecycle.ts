@@ -6,7 +6,8 @@
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { defineAgent, type Logger } from "operon-agents-core";
-import { createHarness, defaultCapabilities, tool } from "../src/index.ts";
+import { createHarness, defineTool, SessionAlreadyLoadingError } from "../src/index.ts";
+import { defaultCapabilities } from "../src/advanced.ts";
 import { setHarnessCloseTimeoutsForTest } from "../src/internal.ts";
 import { setSessionCloseTimeoutsForTest } from "operon-agents-core/internal";
 
@@ -28,7 +29,7 @@ function holdTool(log: string[]) {
   let entered!: () => void;
   const released = new Promise<void>((resolve) => { release = resolve; });
   const enteredFinally = new Promise<void>((resolve) => { entered = resolve; });
-  const t = tool({
+  const t = defineTool({
     name: "Hold",
     description: "Park until released.",
     parameters: z.object({}),
@@ -51,8 +52,13 @@ async function cancelCoversQueuedRuns(): Promise<void> {
   const log: string[] = [];
   const hold = holdTool(log);
   const model = faux.getChatModel()!;
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
-  const session = await harness.createSession({ agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+  const session = await harness.createSession({
+    bindings: { agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) }
+  });
   let started = 0;
   session.onEvent((event) => { if (event.type === "agent.started") started += 1; });
   faux.setResponses([
@@ -86,14 +92,17 @@ async function cancelCoversQueuedRuns(): Promise<void> {
 
 async function closedChecksOnEveryEntry(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   await session.close();
   let promptThrew = false;
   await session.prompt("x").catch(() => { promptThrew = true; });
   check("closed: prompt rejects", promptThrew);
   let resumeThrew = false;
-  await session.resume({}).catch((error: Error) => { resumeThrew = /closed/.test(error.message); });
+  await session.respond({}).catch((error: Error) => { resumeThrew = /closed/.test(error.message); });
   check("closed: resume rejects with the closed error (not 'no interrupted run')", resumeThrew);
   let streamThrew = false;
   try {
@@ -111,8 +120,13 @@ async function closeWaitsForRuns(): Promise<void> {
   const log: string[] = [];
   const hold = holdTool(log);
   const model = faux.getChatModel()!;
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
-  const session = await harness.createSession({ agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+  const session = await harness.createSession({
+    bindings: { agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) }
+  });
   let started = 0;
   session.onEvent((event) => { if (event.type === "agent.started") started += 1; });
   faux.setResponses([
@@ -153,8 +167,13 @@ async function closeGivesUpOnStuckRun(): Promise<void> {
   const log: string[] = [];
   const hold = holdTool(log); // never released until we are done: this run ignores its abort
   const model = faux.getChatModel()!;
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
-  const session = await harness.createSession({ agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+  const session = await harness.createSession({
+    bindings: { agent: defineAgent({ name: "holder", model, instructions: "x", tools: [hold.tool] }) }
+  });
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Hold", {}), { stopReason: "toolUse" }),
     fauxAssistantMessage("done", { stopReason: "stop" }),
@@ -180,13 +199,16 @@ async function closeGivesUpOnStuckRun(): Promise<void> {
 
 async function barrierWaitersFailOnClose(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   faux.setResponses([fauxAssistantMessage("never", { stopReason: "stop" }), fauxAssistantMessage("never", { stopReason: "stop" })]);
   const hold = session.holdAtBoundary();
   const parkedPrompt = session.prompt("parked");
   const parkedStream = session.promptStream("parked stream");
-  const parkedResume = session.resume({});
+  const parkedResume = session.respond({});
   check("gate+close: prompt parks at the gate", await pendingAfter(parkedPrompt, 40));
   check("gate+close: promptStream's completion parks at the gate", await pendingAfter(parkedStream.completed, 40));
   const closing = session.close();
@@ -213,7 +235,10 @@ async function idleCloseIsQuiet(): Promise<void> {
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
   process.on("unhandledRejection", onUnhandled);
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   await session.close();
   await harness.close();
@@ -229,7 +254,6 @@ async function openFailureRollsBack(): Promise<void> {
   let closed = 0;
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     sessionCapabilities: () => {
       if (failNext) {
         failNext = false;
@@ -237,6 +261,7 @@ async function openFailureRollsBack(): Promise<void> {
       }
       return [...defaultCapabilities(), { name: "probe", contract: "detachable" as const, service: {}, closeSession: () => void (closed += 1) }];
     },
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   let error: unknown;
   await harness.createSession({ id: "rollback-1" }).catch((e) => { error = e; });
@@ -250,14 +275,19 @@ async function openFailureRollsBack(): Promise<void> {
   faux.unregister();
 }
 
-async function concurrentResumeSharesOneOpen(): Promise<void> {
+async function concurrentResumeRejectsDuplicate(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const created = await harness.createSession();
   const id = created.id;
   await created.close();
-  const [a, b] = await Promise.all([harness.resumeSession(id), harness.resumeSession(id)]);
-  check("concurrent resume: both callers receive the same instance", a === b);
+  const first = harness.resumeSession(id);
+  const duplicate = await harness.resumeSession(id).then(() => undefined, (error: unknown) => error);
+  check("concurrent resume: duplicate construction is rejected", duplicate instanceof SessionAlreadyLoadingError);
+  const a = await first;
   check("concurrent resume: that instance is the registered one", harness.getSession(id) === a);
   await a.close();
   check("concurrent resume: closing it unregisters it", harness.getSession(id) === undefined);
@@ -291,11 +321,11 @@ async function harnessCloseDuringOpen(): Promise<void> {
   let slow = false;
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
-    sessionCapabilities: async (scope) => {
+    sessionCapabilities: async (ctx) => {
       if (slow) await hookGate;
-      return defaultCapabilities({ scope });
+      return defaultCapabilities({ session: ctx });
     },
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const created = await harness.createSession();
   const id = created.id;
@@ -319,7 +349,10 @@ async function harnessCloseDuringOpen(): Promise<void> {
 async function cancelRightAfterPrompt(): Promise<void> {
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   let started = 0;
   session.onEvent((event) => { if (event.type === "agent.started") started += 1; });
@@ -351,19 +384,18 @@ async function createRacesResume(): Promise<void> {
   let slow = true;
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
-    sessionCapabilities: async (scope) => {
+    sessionCapabilities: async (ctx) => {
       if (slow) { slow = false; await hookGate; }
-      return defaultCapabilities({ scope });
+      return defaultCapabilities({ session: ctx });
     },
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const creating = harness.createSession({ id: "race-create" });
   await sleep(20);
-  const resuming = harness.resumeSession("race-create");
-  check("create vs resume: the resume waits for the in-flight create", await pendingAfter(resuming, 40));
+  const error = await harness.resumeSession("race-create").then(() => undefined, (error: unknown) => error);
+  check("create vs resume: duplicate construction is rejected", error instanceof SessionAlreadyLoadingError);
   releaseHook();
-  const [created, resumed] = await Promise.all([creating, resuming]);
-  check("create vs resume: both receive the same instance (one store, one run lock)", created === resumed);
+  const created = await creating;
   check("create vs resume: it is the registered one", harness.getSession("race-create") === created);
   await harness.close();
   faux.unregister();
@@ -371,7 +403,10 @@ async function createRacesResume(): Promise<void> {
 
 async function streamSettlesQueuedInput(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   let started = 0;
   session.onEvent((event) => {
@@ -395,7 +430,10 @@ async function streamSettlesQueuedInput(): Promise<void> {
 async function concurrentStreamsStayApart(): Promise<void> {
   const faux = registerFauxProvider();
   const model = faux.getChatModel()!;
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   faux.setResponses([fauxAssistantMessage("answer one", { stopReason: "stop" }), fauxAssistantMessage("answer two", { stopReason: "stop" })]);
   const first = session.promptStream("prompt one");
@@ -438,9 +476,9 @@ async function scopeDisposeHasADeadline(): Promise<void> {
   };
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     infrastructure: () => ({ logger }),
     sessionCapabilities: () => [...defaultCapabilities(), hang],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   setSessionCloseTimeoutsForTest({ close: 80 });
@@ -461,7 +499,10 @@ async function scopeDisposeHasADeadline(): Promise<void> {
 
 async function closingHarnessRefusesOpens(): Promise<void> {
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const id = session.id;
   const closing = harness.close();
@@ -485,7 +526,7 @@ async function main(): Promise<void> {
   await streamSettlesQueuedInput();
   await concurrentStreamsStayApart();
   await openFailureRollsBack();
-  await concurrentResumeSharesOneOpen();
+  await concurrentResumeRejectsDuplicate();
   await harnessCloseDuringOpen();
   await cancelCoversQueuedRuns();
   await closedChecksOnEveryEntry();

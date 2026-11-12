@@ -1,6 +1,6 @@
 {
   "name": "operon-managed-agents",
-  "version": "0.1.0-alpha.30",
+  "version": "0.1.0-alpha.31",
   "description": "Managed server and TypeScript client for operon-agents.",
   "type": "module",
   "engines": {
@@ -55,6 +55,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "1.5.0",
-    "operon-agents-core": "workspace:*"
+    "operon-agents-core": "workspace:*",
+    "pg": "^8.21.0"
   }
 }

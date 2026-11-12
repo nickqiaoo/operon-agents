@@ -25,6 +25,7 @@ import type {
   QuestionRequest,
   QuestionResult,
   RunResult,
+  SessionConfig,
   SessionSnapshot,
   SessionSummary,
   ThinkingLevel,
@@ -152,8 +153,16 @@ export interface InitializeResult {
 export interface SessionNewParams {
   readonly workDir?: string;
   readonly title?: string;
-  /** Per-session model id (`provider/model`), applied via setModel after creation. */
+  /** Per-session model id (`provider/model`). Shorthand for `config.model`, which it overrides. */
   readonly model?: string;
+  /**
+   * The session's setup, as data: model, tool and agent NAMES registered on the server's harness,
+   * MCP servers, permission, extension parameters, limits. A field given replaces the server's
+   * default; a field left out inherits it. Stored with the session, so `session/resume` needs none
+   * of it repeated. It is checked against the server's policy like any other configuration — the
+   * wire is not a way around it.
+   */
+  readonly config?: SessionConfig;
 }
 
 export interface SessionRef {
@@ -168,6 +177,8 @@ export interface SessionInfo {
 export interface SessionResumeParams extends SessionRef {}
 export interface SessionForkParams extends SessionRef {
   readonly title?: string;
+  /** Adjustments to the source session's setup, field by field. See `SessionNewParams.config`. */
+  readonly config?: SessionConfig;
 }
 export interface SessionCloseParams extends SessionRef {}
 export type SessionListResult = readonly SessionSummary[];
@@ -224,9 +235,8 @@ export interface SessionFollowUpParams extends SessionRef {
   readonly text: string;
 }
 export interface SessionFollowUpResult {
-  /** False when the session has no active run; callers should use `session/prompt` instead. */
   readonly accepted: boolean;
-  /** Correlation id (see `SessionSteerResult.steerId`); absent when not accepted. */
+  /** Correlation id (see `SessionSteerResult.steerId`). */
   readonly steerId?: string;
 }
 

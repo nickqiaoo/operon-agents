@@ -14,13 +14,14 @@ import {
   parseProjectName,
   proxyEnv,
   sanitizeRemoteUrl,
+  readTextFile,
+  writeTextFile,
   type OsInfo,
-  type FileInfo,
   type SpawnedProcess,
   type RunCommandOptions,
   type RunCommandResult,
 } from "../index.ts";
-import { SshProcess, buildSshExecCommand, readTextFile, sshShellQuote } from "../internal.ts";
+import { SshProcess, buildSshExecCommand, sshShellQuote } from "../internal.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -360,11 +361,11 @@ async function main(): Promise<void> {
   const readA = await readTextFile(environment, "a.ts"); // relative → resolved against cwd (/work)
   check("ssh-environment: read resolves relative path", readA === "aaa");
 
-  const wrote = await environment.writeText("/work/new.txt", "fresh");
+  await writeTextFile(environment, "/work/new.txt", "fresh");
   const readNew = await readTextFile(environment, "/work/new.txt");
-  check("ssh-environment: write + read roundtrip", wrote.bytesWritten === 5 && readNew === "fresh");
+  check("ssh-environment: write + read roundtrip", readNew === "fresh");
 
-  await environment.writeText("/work/new.txt", "fresh+more");
+  await writeTextFile(environment, "/work/new.txt", "fresh+more");
   check("ssh-environment: overwrite", (await readTextFile(environment, "/work/new.txt")) === "fresh+more");
 
   const entries = [...(await environment.listDir("/work"))].toSorted((a, b) => a.name.localeCompare(b.name));
@@ -409,79 +410,59 @@ async function main(): Promise<void> {
 
   // ── readBytes: a real SFTP byte window (open + bounded read at an offset), not a
   //    whole-file transfer that gets sliced — same contract LocalEnvironment honours ──
-  await environment.writeText("/work/lines.txt", "l1\nl2\nl3\nl4\nl5\n");
+  await writeTextFile(environment, "/work/lines.txt", "l1\nl2\nl3\nl4\nl5\n");
   check("ssh-environment: readBytes({length}) reads a prefix", (await environment.readBytes("/work/lines.txt", { length: 5 })).toString("utf8") === "l1\nl2");
   check("ssh-environment: readBytes({offset,length}) reads a middle window", (await environment.readBytes("/work/lines.txt", { offset: 3, length: 2 })).toString("utf8") === "l2");
   check("ssh-environment: readBytes({offset}) reads to EOF", (await environment.readBytes("/work/lines.txt", { offset: 9 })).toString("utf8") === "l4\nl5\n");
   check("ssh-environment: readBytes() with no range reads the whole file", (await environment.readBytes("/work/lines.txt")).byteLength === 15);
 
-  // ── writeText: SFTP writes land straight on the target. There is no tmp staging
+  // ── writeBytes: SFTP writes land straight on the target. There is no tmp staging
   //    any more — the CAS that needed it is gone, and a swap costs round trips on
   //    every write to narrow a window the tool path does not rely on. ──
   {
     const wPath = "/work/write.txt";
     const noTmp = (): boolean => [...sftp._files.keys()].every((k) => !k.includes(".tmp-"));
 
-    const w1 = await environment.writeText(wPath, "v1");
-    check("ssh-write: creates the file", w1.bytesWritten === 2 && (await readTextFile(environment, wPath)) === "v1");
+    await writeTextFile(environment, wPath, "v1");
+    check("ssh-write: creates the file", (await readTextFile(environment, wPath)) === "v1");
     check("ssh-write: no temp file is staged beside the target", noTmp());
 
-    await environment.writeText(wPath, "v2");
+    await writeTextFile(environment, wPath, "v2");
     check("ssh-write: overwrites unconditionally", (await readTextFile(environment, wPath)) === "v2" && noTmp());
 
     // Writing INTO the existing file (rather than renaming a new inode over it) is
     // what keeps the target's permission bits without a setstat round trip.
     sftp._modes.set(wPath, S_IFREG | 0o600);
-    await environment.writeText(wPath, "v3");
+    await writeTextFile(environment, wPath, "v3");
     check("ssh-write: the target's mode survives a write", (sftp._modes.get(wPath)! & 0o7777) === 0o600 && (await readTextFile(environment, wPath)) === "v3");
 
     await environment.writeBytes("/work/raw.bin", Buffer.from([0x00, 0xff]));
     check("ssh-write: writeBytes is byte-exact", (await environment.readBytes("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
   }
 
-  // ── BaseEnvironment composition: writeText/writeBytes over the raw write primitive ──
+  // ── writeTextFile composition: text encoding over the one write primitive ──
   {
     class InMemEnvironment extends NullEnvironment {
       readonly files = new Map<string, Buffer>();
-      readonly mtimes = new Map<string, number>();
-      withMtime = true;
-      private clock = 1;
-      seed(p: string, content: string): void {
-        this.files.set(p, Buffer.from(content));
-        this.mtimes.set(p, ++this.clock);
-      }
-      override async fileInfo(p: string): Promise<FileInfo> {
-        await new Promise((r) => setImmediate(r));
-        const f = this.files.get(p);
-        if (f === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-        return { kind: "file", size: f.byteLength, ...(this.withMtime ? { mtimeMs: this.mtimes.get(p)! * 1000 } : {}) };
-      }
-      override async readBytes(p: string): Promise<Buffer> {
-        const f = this.files.get(p);
-        if (f === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-        return f;
-      }
-      protected override async writeBytesRaw(p: string, data: Buffer): Promise<void> {
+      override async writeBytes(p: string, data: Buffer): Promise<void> {
         await new Promise((r) => setImmediate(r));
         this.files.set(p, data);
-        this.mtimes.set(p, ++this.clock);
       }
     }
 
     const mem = new InMemEnvironment();
-    mem.seed("/f.txt", "seed");
-    const res = await mem.writeText("/f.txt", "a\nb\n", { lineEndings: "CRLF" });
-    check("base-write: the CRLF contract is applied by the composition", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n" && res.bytesWritten === 6);
+    await writeTextFile(mem, "/f.txt", "a\nb\n", { lineEndings: "CRLF" });
+    check("text-write: the CRLF contract is applied by the composition", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n");
+    await writeTextFile(mem, "/f.txt", "a\r\nb\n", { lineEndings: "CRLF" });
+    check("text-write: CRLF already present is not doubled", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n");
+    await writeTextFile(mem, "/f.txt", "héllo");
+    check("text-write: text is encoded as UTF-8", mem.files.get("/f.txt")!.equals(Buffer.from("héllo", "utf8")));
 
-    await mem.writeBytes("/f.txt", Buffer.from([0x01, 0x02]));
-    check("base-write: writeBytes reaches the primitive untouched", mem.files.get("/f.txt")!.equals(Buffer.from([0x01, 0x02])));
-
-    // No per-path lock any more: two writers of the same file both complete and the
-    // last one wins. Deliberate — conflicting tool calls are serialized a layer up by
-    // the tool scheduler (ToolAccesses.conflict), and the ledger, not the write member,
-    // is what tells an agent the file changed under it.
-    await Promise.all([mem.writeText("/h.txt", "AAAA"), mem.writeText("/h.txt", "BBBB")]);
-    check("base-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.files.get("/h.txt")!.toString()));
+    // No per-path lock: two writers of the same file both complete and the last one
+    // wins. Deliberate — conflicting tool calls are serialized a layer up by the tool
+    // scheduler (ToolAccesses.conflict).
+    await Promise.all([writeTextFile(mem, "/h.txt", "AAAA"), writeTextFile(mem, "/h.txt", "BBBB")]);
+    check("text-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.files.get("/h.txt")!.toString()));
   }
 
   // ── BaseEnvironment.realpath: a HUNG readlink times out (throws) instead of silently

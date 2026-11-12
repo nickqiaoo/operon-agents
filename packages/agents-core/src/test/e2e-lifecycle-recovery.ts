@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import {
-  MemoryStore, MemorySessionLock, SessionBusyError, Session, Runner,
-  closeOrphanedTurns, recoverOrphanedTurns, defineAgent,
-  INTERRUPTION_STATE_KEY, type AgentRecord, type AgentEvent,
-} from "../index.ts";
+import { MemoryStore, MemorySessionLock, SessionBusyError, Session, Runner, defineAgent, INTERRUPTION_STATE_KEY, type AgentRecord, type AgentEvent } from "../index.ts";
+import { closeOrphanedTurns, recoverOrphanedTurns } from "../internal.ts";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 
 async function seed(store: MemoryStore): Promise<void> {

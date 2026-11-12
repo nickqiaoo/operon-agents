@@ -55,6 +55,7 @@ export type {
   ExtensionProviderResponseEvent,
   ProviderHeaders,
   HarnessSessionHandle,
+  ExtensionSessionOptions,
   ModelProvider,
   SessionEndReason,
   SessionStartReason,

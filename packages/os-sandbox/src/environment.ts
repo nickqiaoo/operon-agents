@@ -27,7 +27,7 @@ let commandCounter = 0;
  * before it is spawned, and sandbox denials observed during the run are
  * annotated onto the result's stderr so callers see WHY a command failed.
  *
- * Only `run` changes. Direct file I/O (readBytes/writeText/…) is the
+ * Only `run` changes. Direct file I/O (readBytes/writeBytes/…) is the
  * framework's own code path, gated by its path-access policy — the sandbox
  * exists for arbitrary COMMANDS, which have no such gate.
  */

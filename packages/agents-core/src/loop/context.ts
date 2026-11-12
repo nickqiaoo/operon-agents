@@ -1,3 +1,6 @@
+import type { ChatModel } from "../llm/define-model.ts";
+import { estimateTokensForMessages } from "../capabilities/compaction/tokens.ts";
+import type { Usage } from "../protocol/index.ts";
 import type { Message } from "../protocol/index.ts";
 import type { PromptOrigin } from "../store/origin.ts";
 import {
@@ -48,6 +51,48 @@ export interface ConversationContextOptions {
 
 export class ConversationContext {
   private readonly _history: Message[];
+  private contextUsage?: {
+    readonly model: string;
+    readonly input: number;
+    readonly output: number;
+    readonly historyEstimate: number;
+  };
+
+  /** Capture the provider's per-request usage, never the session's cumulative billing total.
+   * Called after appending the response, before appending tool results. */
+  recordContextUsage(model: ChatModel, usage: Usage): void {
+    const counts = [usage.input, usage.cacheRead, usage.cacheWrite, usage.output];
+    const input = usage.input + usage.cacheRead + usage.cacheWrite;
+    if (!counts.every((value) => Number.isFinite(value) && value >= 0) || input <= 0) {
+      this.contextUsage = undefined;
+      return;
+    }
+    this.contextUsage = {
+      model: JSON.stringify([model.provider, model.api, model.id]),
+      input,
+      output: usage.output,
+      historyEstimate: estimateTokensForMessages(this.messages),
+    };
+  }
+
+  /** Exact input occupancy of the last measured request. Categories are estimated separately. */
+  observedInputTokens(model: ChatModel): number | undefined {
+    return this.usageFor(model)?.input;
+  }
+
+  /** For the next compaction decision only: measured input + output, then newly added history.
+   * History replacement/compaction invalidates this baseline instead of carrying old usage over. */
+  projectedContextTokens(model: ChatModel): number | undefined {
+    const usage = this.usageFor(model);
+    if (usage === undefined) return undefined;
+    return usage.input + usage.output + Math.max(0, estimateTokensForMessages(this.messages) - usage.historyEstimate);
+  }
+
+  private usageFor(model: ChatModel): typeof this.contextUsage {
+    return this.contextUsage?.model === JSON.stringify([model.provider, model.api, model.id])
+      ? this.contextUsage
+      : undefined;
+  }
   private readonly store?: SessionStore;
   private readonly onHistoryChange?: HistoryChangeListener;
   readonly address: string;
@@ -96,6 +141,7 @@ export class ConversationContext {
   applyCompaction(c: CompactionApply): void {
     // Deferred-tool definitions the removed prefix loaded for calls the tail keeps ride on the
     // summary's origin (see `CompactionSummaryOrigin.loadedTools`), computed before the splice.
+    this.contextUsage = undefined;
     const loadedTools = loadedToolsForCompaction(this, c.compactedCount);
     const summary = summaryMessage(c.summary);
     this._history.splice(0, c.compactedCount, summary);
@@ -119,6 +165,7 @@ export class ConversationContext {
   }
 
   replaceHistory(messages: readonly Message[]): void {
+    this.contextUsage = undefined;
     const origins = messages.map((message) => this.origins.get(message) ?? null);
     this._history.splice(0, this._history.length, ...messages);
     this.journal({
@@ -170,6 +217,7 @@ export class ConversationContext {
    * turns between main's tool calls and results.
    */
   loadFromRecords(records: readonly AgentRecord[]): void {
+    this.contextUsage = undefined;
     const own = records.filter((record) => (record.address ?? DEFAULT_ADDRESS) === this.address);
     const { messages, origins } = reduceHistory(own);
     this._history.splice(0, this._history.length, ...messages);

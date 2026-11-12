@@ -41,7 +41,10 @@ async function stringIdRunsOnTheManager(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("from manager", { stopReason: "stop" })]);
   const id = `${faux.provider.id}/${faux.getModel().id}`;
-  const harness = createHarness({ model: id, modelManager: faux.runtime, permission, workDir: process.cwd() });
+  const harness = createHarness({
+    modelManager: faux.runtime,
+    config: { workDir: process.cwd(), defaults: { model: id, permission: permission } }
+  });
   const session = await harness.createSession();
   const result = await session.prompt("hi");
   check("a string id runs on the harness manager", result.status === "completed" && result.output.includes("from manager"));
@@ -52,7 +55,9 @@ async function stringIdRunsOnTheManager(): Promise<void> {
 async function providersAreAddedInPlace(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("added later", { stopReason: "stop" })]);
-  const harness = createHarness({ model: `${faux.provider.id}/${faux.getModel().id}`, permission, workDir: process.cwd() });
+  const harness = createHarness({
+    config: { workDir: process.cwd(), defaults: { model: `${faux.provider.id}/${faux.getModel().id}`, permission: permission } }
+  });
   check("a harness gets its own manager by default", harness.modelManager !== faux.runtime);
   harness.modelManager.models.setProvider(faux.provider);
   const session = await harness.createSession();
@@ -127,7 +132,10 @@ async function harnessModelSettingsReachTheRequest(): Promise<void> {
     return new Response('{"error":{"message":"stub"}}', { status: 400, headers: { "content-type": "application/json" } });
   };
   try {
-    const harness = createHarness({ model: "corp/qwen", modelManager, modelSettings: { temperature: 0.2, maxTokens: 123 }, permission, workDir: process.cwd() });
+    const harness = createHarness({
+    modelManager,
+    config: { workDir: process.cwd(), defaults: { model: "corp/qwen", modelSettings: { temperature: 0.2, maxTokens: 123 }, permission: permission } }
+  });
     const session = await harness.createSession();
     await session.prompt("hi").catch(() => undefined);
     await harness.close();
@@ -140,7 +148,9 @@ async function harnessModelSettingsReachTheRequest(): Promise<void> {
 }
 
 async function badIdsFailClearly(): Promise<void> {
-  const harness = createHarness({ model: "no-slash", permission, workDir: process.cwd() });
+  const harness = createHarness({
+    config: { workDir: process.cwd(), defaults: { model: "no-slash", permission: permission } }
+  });
   const session = await harness.createSession();
   const message = await session.prompt("hi").then(() => "", (error: unknown) => String(error));
   check("a malformed id reports the expected form", message.includes("provider/model"));

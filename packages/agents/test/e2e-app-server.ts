@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 import { defineModel, type AgentEvent } from "operon-agents-core";
-import { createHarness } from "../src/index.ts";
+import { createHarness, type ExtensionDefinition } from "../src/index.ts";
 import { AppServer } from "../src/app-server/server.ts";
 import { AppServerClient } from "../src/app-server/client.ts";
 import { pairedTransports } from "../src/app-server/codec.ts";
@@ -40,8 +40,7 @@ async function pairedHalf(): Promise<void> {
 
   const harness = createHarness({
     ...faux.harnessModel(),
-    workDir: work,
-    permission: { mode: "manual" }, // so a Bash call triggers a reverse approval
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "manual" } } }
   });
   const [hostT, serverT] = pairedTransports();
   const server = new AppServer({ harness, transport: serverT });
@@ -65,9 +64,6 @@ async function pairedHalf(): Promise<void> {
     const { sessionId } = await client.newSession();
     check("session/new: returns a session id", typeof sessionId === "string" && sessionId.length > 0);
 
-    const idleFollowUp = await client.followUp(sessionId, "should not be stranded");
-    check("follow-up: rejected while the session is idle", idleFollowUp.accepted === false);
-
     const events: AgentEvent[] = [];
     client.onEvent((e) => events.push(e));
 
@@ -83,6 +79,9 @@ async function pairedHalf(): Promise<void> {
     let activeFollowUpAccepted = false;
     client.setApprovalHandler(async (req, sid) => {
       approvalAsked = req.toolName === "Bash" && sid === sessionId;
+      const running = harness.getSession(sessionId);
+      await client.resumeSession(sessionId);
+      check("resume: reconnect during approval keeps the running instance", harness.getSession(sessionId) === running && running?.status.state === "running");
       const queued = await client.followUp(sessionId, "after the command, confirm the follow-up");
       activeFollowUpAccepted = queued.accepted;
       return { decision: "approved" };
@@ -91,7 +90,11 @@ async function pairedHalf(): Promise<void> {
     check("prompt #2: reverse-RPC approval reached the host", approvalAsked);
     check("follow-up: accepted while a run is active", activeFollowUpAccepted);
     check("prompt #2: completes after approval", r2.status === "completed");
-    check("follow-up: runs as the next turn", r2.output.includes("handled the queued follow-up"));
+    check("follow-up: the run's own answer stays its own", r2.output.includes("ran the command"));
+    const followUpAnswered = (): boolean =>
+      events.some((e) => e.type === "message.appended" && e.message.role === "assistant" && JSON.stringify(e.message.content).includes("handled the queued follow-up"));
+    for (let i = 0; i < 100 && !followUpAnswered(); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    check("follow-up: runs as a run of its own", followUpAnswered());
     const bashResult = [...r2.messages].reverse().find((m) => m.role === "toolResult" && m.toolName === "Bash");
     const bashText =
       bashResult && bashResult.role === "toolResult" ? bashResult.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
@@ -199,6 +202,118 @@ async function subprocessHalf(): Promise<void> {
 // approval handler ⇒ an approval-gated tool interrupts durably instead of prompting. The run
 // returns `status:"interrupted"` with `interruptions`; `session/respond` supplies the answers
 // and continues it to completion.
+async function restoreHalf(): Promise<void> {
+  const faux = registerFauxProvider();
+  let restores = 0;
+  let failNext = false;
+  // What the host knows and the harness does not is supplied where the harness asks for it — the
+  // server keeps no restore hook of its own.
+  const harness = createHarness<string>({
+    ...faux.harnessModel(),
+    resolveSession: ({ operation }) => {
+      if (operation !== "restore") return;
+      restores++;
+      if (failNext) { failNext = false; throw new Error("assembly unavailable"); }
+      return { bindings: { context: "host context" } };
+    },
+    config: { defaults: { ...faux.harnessModel().config.defaults } }
+  });
+  const [hostT, serverT] = pairedTransports();
+  const server = new AppServer({ harness, transport: serverT });
+  const serving = server.serve();
+  const client = new AppServerClient(hostT);
+  try {
+    await client.initialize();
+    const { sessionId } = await client.newSession();
+    const original = harness.getSession(sessionId);
+    await client.resumeSession(sessionId);
+    check("resume: loaded instance reused without restoration", restores === 0 && harness.getSession(sessionId) === original);
+    await client.closeSession(sessionId);
+    const results = await Promise.all([client.resumeSession(sessionId), client.resumeSession(sessionId)]);
+    const restored = harness.getSession(sessionId);
+    check("resume: concurrent requests restore once", restores === 1 && results.every((r) => r.sessionId === sessionId));
+    check("resume: host configuration used", restored !== original && restored?.context === "host context");
+    await client.closeSession(sessionId);
+    failNext = true;
+    const failed = await client.resumeSession(sessionId).then(() => false, () => true);
+    check("resume: failed assembly creates no replacement", failed && harness.getSession(sessionId) === undefined);
+    await client.resumeSession(sessionId);
+    check("resume: failure does not block retry", harness.getSession(sessionId) !== undefined);
+    await client.closeSession(sessionId);
+    // A close that lands while the restore is in flight cancels it: the resume is refused rather
+    // than handed a session that is already closed.
+    const raced = await Promise.allSettled([client.resumeSession(sessionId), client.closeSession(sessionId)]);
+    check("resume/close: a close during restoration wins", raced[0].status === "rejected" && raced[1].status === "fulfilled" && harness.getSession(sessionId) === undefined);
+    await client.resumeSession(sessionId);
+    check("resume/close: the session restores afterwards", harness.getSession(sessionId) !== undefined);
+    await client.closeSession(sessionId);
+    const before = (await harness.listSessions()).length;
+    const missing = await client.resumeSession("missing").then(() => false, () => true);
+    check("resume: missing history never creates a conversation", missing && (await harness.listSessions()).length === before);
+  } finally {
+    client.close();
+    await serving;
+    faux.unregister();
+  }
+}
+
+// Wiring belongs to the session INSTANCE, and to every instance the harness opens: one closed
+// behind the server's back and reopened, and one an extension created that no client asked for.
+async function wiringHalf(): Promise<void> {
+  const faux = registerFauxProvider();
+  faux.setResponses([
+    fauxAssistantMessage("first", { stopReason: "stop" }),
+    fauxAssistantMessage("second", { stopReason: "stop" }),
+    fauxAssistantMessage("child", { stopReason: "stop" }),
+  ]);
+  const spawner: ExtensionDefinition = {
+    id: "spawner",
+    harness: (host) => ({ spawn: () => host.createSession({ title: "spawned" }) }),
+    session() {},
+  };
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    extensions: [spawner],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "manual" } } }
+  });
+  const [hostT, serverT] = pairedTransports();
+  const server = new AppServer({ harness, transport: serverT });
+  const serving = server.serve();
+  const client = new AppServerClient(hostT);
+  try {
+    await client.initialize({ approval: false, question: false });
+    const events: AgentEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    const { sessionId } = await client.newSession({ config: { permission: { mode: "yolo" }, limits: { maxTurns: 7 } } });
+    const created = harness.getSession(sessionId)!;
+    check("config: session/new carries the session's setup", created.permissionMode === "yolo" && created.config.limits?.maxTurns === 7);
+    const rejected = await client.newSession({ config: { nonsense: true } as never }).then(() => false, () => true);
+    check("config: an unknown key is refused, not dropped", rejected);
+    await client.prompt(sessionId, "one");
+    const firstRun = events.filter((event) => event.type === "agent.started").length;
+    // Closed by something other than `session/close` — an extension, the host — then reopened.
+    await harness.closeSession(sessionId);
+    await client.resumeSession(sessionId);
+    const reopened = harness.getSession(sessionId)!;
+    check("config: the setup is restored with the session", reopened !== created && reopened.permissionMode === "yolo" && reopened.config.limits?.maxTurns === 7);
+    await client.prompt(sessionId, "two");
+    check("wiring: a reopened session's events still reach the client", firstRun > 0 && events.filter((event) => event.type === "agent.started").length > firstRun);
+
+    const { id: childId } = await harness.services.handle<{ spawn(): Promise<{ id: string }> }>("spawner").spawn();
+    const seen = events.length;
+    await harness.getSession(childId)!.prompt("three");
+    check("wiring: a session an extension created is forwarded too", events.slice(seen).some((event) => event.type === "agent.started" && event.sessionId === childId));
+
+    const fork = await client.forkSession(sessionId, { config: { limits: { maxTurns: 3 } } });
+    const forked = harness.getSession(fork.sessionId)!;
+    check("config: session/fork adjusts the source's setup field by field", forked.config.limits?.maxTurns === 3 && forked.permissionMode === "yolo");
+  } finally {
+    client.close();
+    await serving;
+    faux.unregister();
+  }
+}
+
 async function durableHitlHalf(): Promise<void> {
   const work = mkdtempSync(join(tmpdir(), "af-appsrv-hitl-"));
   const faux = registerFauxProvider();
@@ -208,8 +323,7 @@ async function durableHitlHalf(): Promise<void> {
   ]);
   const harness = createHarness({
     ...faux.harnessModel(),
-    workDir: work,
-    permission: { mode: "manual" },
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "manual" } } }
   });
   const [hostT, serverT] = pairedTransports();
   const server = new AppServer({ harness, transport: serverT });
@@ -248,6 +362,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 async function main(): Promise<void> {
   await pairedHalf();
+  await restoreHalf();
+  await wiringHalf();
   await durableHitlHalf();
   await subprocessHalf();
 

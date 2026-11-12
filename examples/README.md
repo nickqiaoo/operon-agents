@@ -2,7 +2,7 @@
 
 Runnable examples for the framework, from the smallest possible local script up to a
 Managed-Agents-style HTTP control plane. Every example imports from the published
-**`operon-agents`** package (`import { … } from "operon-agents"`) — exactly what a real
+**`operon-agents`** package (`import { … } from "operon-agents/advanced"`) — exactly what a real
 consumer writes. In this monorepo the package is a `workspace:*` dependency, so build it
 once and the examples resolve it:
 

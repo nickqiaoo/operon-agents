@@ -61,7 +61,7 @@ export async function ensureCheckout(environment: Environment, root: string, ses
     await git(environment, ["config", "user.name", GIT_USER], { cwd: repoDir });
     await git(environment, ["config", "user.email", GIT_EMAIL], { cwd: repoDir });
     const marker: WorkspaceMarker = { sessionId, repo: formatRepo(repo), base };
-    await environment.writeText(join(root, MARKER_FILE), JSON.stringify(marker, null, 2));
+    await environment.writeBytes(join(root, MARKER_FILE), Buffer.from(JSON.stringify(marker, null, 2), "utf8"));
   }
   return environment.withCwd(repoDir);
 }

@@ -18,6 +18,7 @@ import {
   writeTool,
   type AgentEvent,
   type Message,
+  writeTextFile,
 } from "../index.ts";
 import { PlanModeInjector } from "../capabilities/plan/injector.ts";
 
@@ -69,7 +70,7 @@ async function testExitPlanReviewAsk(environment: LocalEnvironment): Promise<voi
   const planMode = new PlanMode();
   planMode.attachEnvironment(environment);
   await planMode.enter();
-  await environment.writeText(planMode.planFilePath!, "## Plan\n1. Do X\n2. Do Y\n");
+  await writeTextFile(environment, planMode.planFilePath!, "## Plan\n1. Do X\n2. Do Y\n");
 
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage(fauxToolCall("ExitPlanMode", {}), { stopReason: "toolUse" })]);
@@ -86,7 +87,7 @@ async function testExitPlanReviewAsk(environment: LocalEnvironment): Promise<voi
   faux.unregister();
 
   check("plan exit: review asks → interrupted", result.status === "interrupted");
-  check("plan exit: pending is ExitPlanMode", result.interruption?.pending[0]?.toolName === "ExitPlanMode");
+  check("plan exit: pending is ExitPlanMode", result.status === "interrupted" && result.interruptions[0]?.toolName === "ExitPlanMode");
   check("plan exit: plan mode still active (not exited on ask)", planMode.isActive);
 }
 

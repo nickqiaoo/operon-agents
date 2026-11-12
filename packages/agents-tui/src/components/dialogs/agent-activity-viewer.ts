@@ -23,7 +23,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from 'operon-pi-tui';
-import type { BackgroundTaskInfo } from 'operon-agents';
+import type { BackgroundTaskInfo } from 'operon-agents/advanced';
 
 import { MESSAGE_INDENT } from '../../constant/rendering.ts';
 import { STATUS_BULLET } from '../../constant/symbols.ts';

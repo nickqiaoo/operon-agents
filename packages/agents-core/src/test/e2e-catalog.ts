@@ -32,7 +32,7 @@ import {
   type ToolResultMessage,
 } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import { tool } from "../tool/define.ts";
+import { defineTool } from "../tool/define.ts";
 import type { Tool } from "../tool/types.ts";
 import { SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
 import { describeUnknownTool, loadedToolSchemas, prepareToolCatalog, withToolLoads, type PreparedToolCatalog } from "../tool/search/catalog.ts";
@@ -53,7 +53,7 @@ const SLACK_LIST = "mcp__slack__list_channels";
 const GITHUB_ISSUE = "mcp__github__create_issue";
 
 function mcpTool(name: string, description: string, reply: string): Tool {
-  return tool({
+  return defineTool({
     name,
     description,
     parameters: z.object({ text: z.string().optional() }),

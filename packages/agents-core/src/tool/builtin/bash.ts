@@ -9,6 +9,7 @@ import { extractBashPaths } from "../support/bash-paths.ts";
 import { destructiveWarning } from "../support/bash-destructive.ts";
 import { escapeRuleSubjectLiteral } from "../support/rule-match.ts";
 import type { Environment } from "../environment.ts";
+import { writeTextFile } from "../support/environment-ops.ts";
 import { nonInteractiveShellEnv } from "../shell-env.ts";
 import { runCommandInline, type AttachedOutcome, type AttachedRunOptions, type BackgroundSpawner, type CommandStarter } from "../background.ts";
 import type { ToolResult, ToolUpdate } from "../types.ts";
@@ -93,7 +94,7 @@ function normalizeTimeoutMs(timeout: number | undefined): number {
 export const bashTool = defineTool({
   name: "Bash",
   description: BASH_DESCRIPTION,
-  params: BashInput,
+  parameters: BashInput,
   // The command is the only security-relevant field; cwd/timeout/background don't change
   // what the action does — so the projection is just `input.command`.
   toAutoApprovalInput: (args) => args.command,
@@ -400,14 +401,14 @@ export async function prepareBackgroundLog(environment: Environment): Promise<st
     known.add(dir);
   }
   try {
-    await environment.writeText(logPath, "");
+    await writeTextFile(environment, logPath, "");
   } catch (error) {
     // The directory we believed in is gone (or was never writable). Re-create it and try once
     // more, so the cache can never turn a transient state into a hard failure.
     known.delete(dir);
     await environment.mkdir(dir, { parents: true });
     known.add(dir);
-    await environment.writeText(logPath, "").catch(() => {
+    await writeTextFile(environment, logPath, "").catch(() => {
       throw error;
     });
   }

@@ -22,10 +22,7 @@ import {
   visibleWidth,
   type Focusable,
 } from 'operon-pi-tui';
-import type {
-  BackgroundTaskInfo,
-  BackgroundTaskStatus,
-} from 'operon-agents';
+import type { BackgroundTaskInfo, BackgroundTaskStatus } from 'operon-agents/advanced';
 
 import { SELECT_POINTER } from '../../constant/symbols.ts';
 import { currentTheme } from '../../theme/index.ts';

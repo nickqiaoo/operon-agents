@@ -1,4 +1,5 @@
-import { createModelRuntime, type ModelRuntime, type ThinkingLevel } from 'operon-agents';
+import { createModelRuntime, type ModelRuntime } from 'operon-agents/advanced';
+import { type ThinkingLevel } from 'operon-agents';
 
 import { THINKING_LEVELS } from './thinking.ts';
 

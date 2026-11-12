@@ -25,7 +25,6 @@ async function main(): Promise<void> {
 
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [
       {
         id: "observer",
@@ -45,11 +44,14 @@ async function main(): Promise<void> {
         },
       },
     ],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
 
   const model = faux.getChatModel()!;
   const helper = defineAgent({ name: "helper", model, instructions: "Help." });
-  const session = await harness.createSession({ agent: defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [helper] }) });
+  const session = await harness.createSession({
+    bindings: { agent: defineAgent({ name: "main", model, instructions: "Coordinate.", subagents: [helper] }) }
+  });
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "helper", prompt: "look around", description: "look" }), { stopReason: "toolUse" }),
     fauxAssistantMessage("subagent report", { stopReason: "stop" }),

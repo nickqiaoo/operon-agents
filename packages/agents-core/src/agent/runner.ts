@@ -19,7 +19,7 @@ import {
 } from "../events/index.ts";
 import { DEFAULT_ADDRESS, SessionBusyError, type AgentRecord, type SessionStore } from "../store/index.ts";
 import type { PromptOrigin, SessionLease, SessionLock } from "../store/index.ts";
-import { SteerBus } from "../loop/steer.ts";
+import { SteerBus, type SteerMessage } from "../loop/steer.ts";
 import {
   INTERRUPTION_STATE_KEY,
   applyInterruptionAnswers,
@@ -41,6 +41,7 @@ import {
   type GuardrailStage,
 } from "./guardrail.ts";
 import { buildRunHooks } from "./compose-hooks.ts";
+import { SessionInterruptedError } from "./errors.ts";
 import { assertGraphUnambiguous, duplicateAgentNames, findAgentByName, findAgentsByName } from "./graph.ts";
 import { performHandoff } from "./handoff-executor.ts";
 import { pauseRun } from "./pause.ts";
@@ -113,12 +114,6 @@ export type AgentInput = string | Message[];
  */
 export type RunStatus = "completed" | "interrupted" | "max_turns" | "aborted" | "error" | "guardrail_blocked" | "skipped";
 
-export interface RunInterruption {
-  readonly id: string;
-  readonly revision: number;
-  readonly pending: readonly PendingRunInterrupt[];
-}
-
 /** Which guardrail aborted a `guardrail_blocked` run — the batteries-included facade (Harness)
  *  synthesizes this instead of throwing; the low-level `Runner.run` still throws (OpenAI parity). */
 export interface RunGuardrailBlock {
@@ -127,28 +122,58 @@ export interface RunGuardrailBlock {
   readonly agent?: string;
 }
 
-export interface RunResult {
-  readonly status: RunStatus;
+/** Why a run ended with `status: "error"`. */
+export interface RunError {
+  readonly message: string;
+}
+
+interface RunResultBase {
   /** Agent that owns the conversation after this run and should receive the next prompt. */
   readonly finalAgent: string;
   /** Root conversation shard owned by `finalAgent`. */
   readonly activeAddress: string;
   readonly output: string;
-  readonly outputParsed?: unknown;
+  readonly messages: Message[];
+  readonly usage: Usage;
+}
+
+export interface CompletedRunResult<TOutput = unknown> extends RunResultBase {
+  readonly status: "completed";
+  readonly outputParsed?: TOutput;
   /** Set when the agent's `outputType` schema rejected the final text — `outputParsed` is
    *  then absent. Distinguishes a parse failure from "no outputType configured" (both leave
    *  `outputParsed` undefined) and carries the schema's rejection reason. */
   readonly outputParseError?: string;
-  readonly messages: Message[];
-  readonly usage: Usage;
-  readonly interruption?: RunInterruption;
-  /** OpenAI-parity alias for `interruption.pending`: the approvals and tool input requests
-   *  awaiting an answer when `status === "interrupted"`. Feed the answers back through
-   *  `Runner.resume`. */
-  readonly interruptions?: readonly PendingRunInterrupt[];
-  /** Set only when `status === "guardrail_blocked"`. */
-  readonly guardrail?: RunGuardrailBlock;
 }
+
+export interface InterruptedRunResult extends RunResultBase {
+  readonly status: "interrupted";
+  /** The approvals and tool input requests awaiting an answer, flattened across every paused
+   *  frame. Feed the answers back through `Runner.resume`. */
+  readonly interruptions: readonly PendingRunInterrupt[];
+}
+
+export interface GuardrailBlockedRunResult extends RunResultBase {
+  readonly status: "guardrail_blocked";
+  readonly guardrail: RunGuardrailBlock;
+}
+
+export interface FailedRunResult extends RunResultBase {
+  readonly status: "error";
+  readonly error: RunError;
+}
+
+export interface StoppedRunResult extends RunResultBase {
+  readonly status: "max_turns" | "aborted" | "skipped";
+}
+
+/** How a run ended. Discriminated on `status`: narrow it to reach what that outcome carries. */
+export type RunResult<TOutput = unknown> =
+  | CompletedRunResult<TOutput>
+  | InterruptedRunResult
+  | GuardrailBlockedRunResult
+  | FailedRunResult
+  | StoppedRunResult;
 
 /** Input to `Runner.resume` — the paused run's control tree plus the caller's answers. */
 export interface ResumeInput {
@@ -279,11 +304,15 @@ export class Runner<TContext = unknown> {
     this.engine = new Engine(config);
   }
 
-  async run(
-    agent: Agent<TContext>,
+  async run<TOutput = unknown>(
+    agent: Agent<TContext, TOutput>,
     input: AgentInput,
     opts?: RunOptions<TContext>,
-  ): Promise<RunResult> {
+  ): Promise<RunResult<TOutput>> {
+    return this.runUntyped(agent, input, opts) as Promise<RunResult<TOutput>>;
+  }
+
+  private runUntyped(agent: Agent<TContext>, input: AgentInput, opts?: RunOptions<TContext>): Promise<RunResult> {
     return this.withLease(opts, async (lease) => {
       const { session, owned } = await this.acquireSession(opts, undefined, lease);
       try {
@@ -324,7 +353,11 @@ export class Runner<TContext = unknown> {
     }
   }
 
-  runStream(agent: Agent<TContext>, input: AgentInput, opts?: RunOptions<TContext>): RunHandle<RunResult> {
+  runStream<TOutput = unknown>(agent: Agent<TContext, TOutput>, input: AgentInput, opts?: RunOptions<TContext>): RunHandle<RunResult<TOutput>> {
+    return this.runStreamUntyped(agent, input, opts) as RunHandle<RunResult<TOutput>>;
+  }
+
+  private runStreamUntyped(agent: Agent<TContext>, input: AgentInput, opts?: RunOptions<TContext>): RunHandle<RunResult> {
     const pull = new IterableSink();
     const completed = this.withLease(opts, async (lease) => {
       // One-shot pull sessions emit straight to `pull` (the bus IS the iterable). For a
@@ -362,7 +395,15 @@ export class Runner<TContext = unknown> {
 
   /** Continue an interrupted run. Mirrors `run(agent, input, opts)`: the second argument is
    *  the resume input (paused control tree + answers) instead of a fresh prompt. */
-  async resume(
+  async resume<TOutput = unknown>(
+    rootAgent: Agent<TContext, TOutput>,
+    input: ResumeInput,
+    opts?: RunOptions<TContext>,
+  ): Promise<RunResult<TOutput>> {
+    return this.resumeUntyped(rootAgent, input, opts) as Promise<RunResult<TOutput>>;
+  }
+
+  private async resumeUntyped(
     rootAgent: Agent<TContext>,
     input: ResumeInput,
     opts?: RunOptions<TContext>,
@@ -585,7 +626,7 @@ export class Runner<TContext = unknown> {
     // inspects them so BackgroundOutput is given the truthful terminal `lost` status.
     await session.background?.reconcileSubagents() ?? [];
     if (session.store && (await session.store.getState(INTERRUPTION_STATE_KEY)) !== null) {
-      throw new Error("This session has an interrupted run. Resume or resolve it before starting a new prompt.");
+      throw new SessionInterruptedError(session.id);
     }
     await session.recoverLifecycle();
     const head = await this.resolveConversationHead(session, rootAgent);
@@ -877,6 +918,11 @@ class Engine<TContext> {
     // said — so it is appended here, ahead of the turn's boundary injections, exactly where a
     // prompt would go. Once only: later steers arrive mid-turn and are drained at step boundaries.
     let drainSteeringAtStart = drainQueuedAtStart === true;
+    // The queue a wake run was started for, users' follow-ups included. After that first drain,
+    // a user's follow-up belongs to the next run, so this run's answer stays its own.
+    let wakeDrainPending = drainQueuedAtStart === true;
+    // Only with a driver to start that next run; a bare Runner would strand the message.
+    const userFollowUpsGetOwnRun = state.parentFrameId === undefined && state.steer.wakesOnIdle;
     emitRunEvent(state, { type: "agent.started", agent: current.name, ...(state.parentToolCallId ? { parentToolCallId: state.parentToolCallId } : {}) });
 
     while (true) {
@@ -895,17 +941,26 @@ class Engine<TContext> {
       // whether to loop; this next iteration consumes the queued prompts as its new input.
       // Deliberately NOT reset on handoff: the pre-handoff agent's turn already ran, so the
       // target agent's first iteration draining a queued follow-up still honors this rule.
+      let queuedAtStart = 0;
+      let admittedAtStart = 0;
+      const appendQueued = async (queued: readonly SteerMessage[]): Promise<void> => {
+        queuedAtStart += queued.length;
+        for (const { message, origin } of await this.admitQueued(queued, current, context, state)) {
+          admittedAtStart += 1;
+          context.appendMessage(message, origin);
+        }
+      };
       if (drainSteeringAtStart) {
         drainSteeringAtStart = false;
-        for (const { message, origin } of state.steer.drainSteering()) {
-          context.appendMessage(message, origin);
-        }
+        await appendQueued(state.steer.drainSteering());
       }
       if (canDrainFollowUps) {
-        for (const { message, origin } of state.steer.drainFollowUps()) {
-          context.appendMessage(message, origin);
-        }
+        await appendQueued(userFollowUpsGetOwnRun && !wakeDrainPending ? state.steer.drainNonUserFollowUps() : state.steer.drainFollowUps());
       }
+      const wokeForNothing = wakeDrainPending && queuedAtStart > 0 && admittedAtStart === 0;
+      wakeDrainPending = false;
+      // Every message this run was woken for was refused, so the model has nothing new to answer.
+      if (wokeForNothing) return this.finish(state, "skipped", current, messages);
 
       // Fresh turns append durable reminders to the context tail. HITL resume continues the
       // already-framed model turn: injecting here would separate its assistant tool call from
@@ -935,18 +990,20 @@ class Engine<TContext> {
       // app-server RPC) can report where tokens go: here from the projection the first step will
       // send, then again from every step's final request — an extension's `model.request` hook may
       // rewrite it (Code Mode takes the MCP catalog out), and the report must show what was sent.
+      let lastRequestSnapshot: Pick<ComputeContextBreakdownInput, "system" | "tools" | "messages"> | undefined;
       const stampBreakdown = (snapshot: Pick<ComputeContextBreakdownInput, "system" | "tools" | "messages">): void =>
         state.session.recordContextBreakdown(
           computeContextBreakdown({
             model,
             ...snapshot,
             injectionTokens,
+            observedInputTokens: context.observedInputTokens(model),
             compactBufferTokens: state.session.compactionView?.reservedContextTokens ?? 0,
             capturedAt: Date.now(),
           }),
         );
       stampBreakdown({ system, tools: visibleTools, messages: context.messages });
-      const turnId = state.currentTurnId ?? `${state.sessionId}-t${state.turns}`;
+      const turnId = state.currentTurnId ?? state.session.nextTurnId(state.address);
       const outputGuardrails = current.guardrails.output ?? [];
 
       if (resume === undefined) emitRunEvent(state, { type: "turn.started", turnId });
@@ -962,9 +1019,6 @@ class Engine<TContext> {
           environment: state.environment,
           background: state.background,
           responder: state.responder,
-          // Per-address ledger: main agent and each subagent line keep independent
-          // read-before-write state that survives across turns and run() calls.
-          fileLedger: state.session.fileLedgerFor(state.address),
           hostContext: state.context,
           system,
           context,
@@ -972,11 +1026,17 @@ class Engine<TContext> {
           deferredToolNames: toolset.deferredToolNames,
           deferEnabled: toolset.deferEnabled,
           onToolsPrepared: (tools) => { permissionTools = tools; },
-          onRequestPrepared: (request) => stampBreakdown({
-            system: request.systemPrompt,
-            tools: (request.tools ?? []).map((schema) => ({ schema })),
-            messages: request.messages,
-          }),
+          onRequestPrepared: (request) => {
+            lastRequestSnapshot = {
+              system: request.systemPrompt,
+              tools: (request.tools ?? []).map((schema) => ({ schema })),
+              messages: [...request.messages],
+            };
+            stampBreakdown(lastRequestSnapshot);
+          },
+          onResponseReceived: () => {
+            if (lastRequestSnapshot !== undefined) stampBreakdown(lastRequestSnapshot);
+          },
           refreshTools: () => buildRunTools(
             current,
             state,
@@ -991,13 +1051,16 @@ class Engine<TContext> {
             : undefined,
           maxSteps: current.maxStepsPerTurn ?? this.config.maxStepsPerTurn,
           maxRetriesPerStep: this.config.maxRetriesPerStep,
-          drainSteering: () => state.steer.drainSteering().map((s) => ({ message: s.message, origin: s.origin })),
+          drainSteering: () => this.admitQueued(state.steer.drainSteering(), current, context, state),
           // One sink: the loop dispatches real AgentEvent bodies; we only add the envelope.
           dispatchEvent: (body) => emitRunEvent(state, body),
           logger: state.session.logger,
           resumeFrom: resume,
           resume: resume !== undefined ? frameResume(state) : undefined,
         });
+        if (context.observedInputTokens(model) === undefined) {
+          stampBreakdown({ system, tools: permissionTools, messages: context.messages });
+        }
       } catch (error) {
         // The turn we opened above must not end without a `turn.ended` — a streaming consumer
         // would otherwise see the event stream truncate with nothing to say it stopped, and a
@@ -1083,7 +1146,7 @@ class Engine<TContext> {
 
       if (r.stopReason === "handoff" && r.handoff) {
         const next = await performHandoff(current, context, r.handoff, state);
-        if (!next) return this.finish(state, "error", current, messages);
+        if (!next) return this.finish(state, "error", current, messages, `Unknown handoff target "${r.handoff.toolName}".`);
         current = next.agent;
         context = next.context;
         messages = context.messages;
@@ -1094,47 +1157,83 @@ class Engine<TContext> {
       if (r.stopReason === "end_turn") {
         // A follow-up that landed during this turn (a background task finished, a cron fired)
         // makes the agent run one more turn to consume it instead of stopping — the boundary
-        // drain above injects it. User steers can't reach here: runTurn keeps them in-turn.
+        // drain above injects it. A user's follow-up ends this run instead, and the idle wake
+        // starts its own. User steers can't reach here: runTurn keeps them in-turn.
+        if (userFollowUpsGetOwnRun && state.steer.hasUserFollowUps()) return this.finish(state, "completed", current, messages);
         if (state.steer.hasFollowUps()) continue;
         // wants another turn, loop (re-injecting at the boundary) instead of finishing.
-        if (await this.shouldContinueAtBoundary(state, model, r.usage)) continue;
+        if (await this.shouldContinueAtBoundary(state, turnId, model, r.usage)) continue;
       }
-      return this.finish(state, mapTerminalStatus(r.stopReason), current, messages);
+      return this.finish(state, mapTerminalStatus(r.stopReason), current, messages, r.errorMessage);
     }
   }
 
-  private finish(state: RunState<TContext>, status: RunStatus, agent: Agent<TContext>, history: readonly Message[]): RunResult {
+  private finish(
+    state: RunState<TContext>,
+    status: "completed" | "max_turns" | "aborted" | "error" | "skipped",
+    agent: Agent<TContext>,
+    history: readonly Message[],
+    errorMessage?: string,
+  ): RunResult {
     // Snapshot: RunResult.messages must not alias the LIVE context array, or a later turn
     // (or a caller mutating the result) would corrupt the other side.
     const messages = [...history];
     emitRunEvent(state, { type: "agent.ended", agent: agent.name });
     const output = finalText(messages);
-    let outputParsed: unknown;
-    let outputParseError: string | undefined;
-    if (agent.outputType && output) {
-      const parsed = tryParseOutput(agent.outputType, output);
-      outputParsed = parsed.value;
-      outputParseError = parsed.error;
-      if (parsed.error !== undefined) {
-        emitRunEvent(state, { type: "warning", message: `Agent "${agent.name}" outputType rejected the final output: ${parsed.error}` });
-      }
+    const base = { finalAgent: agent.name, activeAddress: state.address, output, messages, usage: state.usage };
+    if (status === "error") {
+      return { ...base, status, error: { message: errorMessage ?? lastAssistant(messages)?.errorMessage ?? "The run ended with an error." } };
     }
-    return {
-      status,
-      finalAgent: agent.name,
-      activeAddress: state.address,
-      output,
-      outputParsed,
-      ...(outputParseError !== undefined ? { outputParseError } : {}),
-      messages,
-      usage: state.usage,
-    };
+    if (status !== "completed") return { ...base, status };
+    // Only a finished answer is held to the schema: a run cut short has partial text at best.
+    if (!agent.outputType || !output) return { ...base, status };
+    const parsed = tryParseOutput(agent.outputType, output);
+    if (parsed.error !== undefined) {
+      emitRunEvent(state, { type: "warning", message: `Agent "${agent.name}" outputType rejected the final output: ${parsed.error}` });
+      return { ...base, status, outputParseError: parsed.error };
+    }
+    return { ...base, status, outputParsed: parsed.value };
   }
 
-  private async shouldContinueAtBoundary(state: RunState<TContext>, model: ChatModel, usage: Usage): Promise<boolean> {
+  /**
+   * Hold what users sent during a run to the same input guardrails as a prompt. A refused message
+   * is dropped and the run carries on: it was one message, not the task the run is doing.
+   */
+  private async admitQueued(
+    queued: readonly SteerMessage[],
+    agent: Agent<TContext>,
+    context: ConversationContext,
+    state: RunState<TContext>,
+  ): Promise<readonly SteerMessage[]> {
+    const guardrails = agent.guardrails.input ?? [];
+    if (guardrails.length === 0 || queued.length === 0) return queued;
+    const admitted: SteerMessage[] = [];
+    for (const item of queued) {
+      if (item.origin.kind !== "user" && item.origin.kind !== "user_follow_up") {
+        admitted.push(item);
+        continue;
+      }
+      try {
+        await runInputGuardrails(guardrails, { agent, input: [item.message], context: runCtxFor(state) });
+        admitted.push(item);
+      } catch (error) {
+        if (!isGuardrailTripwireError(error)) throw error;
+        if (error.usage !== undefined) {
+          state.usage = addUsage(state.usage, error.usage);
+          context.record({ type: "usage.record", usage: error.usage, total: state.usage });
+          countSessionUsage(state, error.usage);
+        }
+        context.record({ type: "guardrail.blocked", stage: error.stage, guardrail: error.guardrailName, message: error.message, input: [item.message] });
+        state.steer.discard(item, "guardrail");
+      }
+    }
+    return admitted;
+  }
+
+  private async shouldContinueAtBoundary(state: RunState<TContext>, turnId: string, model: ChatModel, usage: Usage): Promise<boolean> {
     for (const hook of state.capabilities.boundaryContinuations) {
       const result = await hook({
-        turnId: `${state.sessionId}-t${state.turns}`,
+        turnId,
         stepNumber: state.turns,
         address: state.address,
         usage,

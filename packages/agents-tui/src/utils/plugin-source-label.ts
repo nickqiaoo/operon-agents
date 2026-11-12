@@ -1,4 +1,4 @@
-import type { PluginSummary } from 'operon-agents';
+import type { PluginSummary } from 'operon-agents/advanced';
 
 /**
  * Human-readable provenance label for a plugin, suitable for inline display

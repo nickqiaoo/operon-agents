@@ -28,7 +28,7 @@ export function cronCreateTool(manager: CronManager): Tool {
     name: "CronCreate",
     description:
       'Schedule a prompt to be re-injected into this session at a future time. `cron` is a 5-field local-time expression ("M H DoM Mon DoW"). recurring=true (default) fires on every match until deleted or auto-expired after 7 days; recurring=false fires once then auto-deletes.',
-    params: z.object({
+    parameters: z.object({
       cron: z.string().describe('5-field cron expression in local time, e.g. "*/5 * * * *" (every 5 min) or "30 14 28 2 *".'),
       prompt: z.string().min(1).max(MAX_PROMPT_BYTES).describe("The prompt to enqueue at each fire time."),
       recurring: z.boolean().optional().default(true).describe("true = repeat until deleted/expired; false = fire once."),
@@ -96,7 +96,7 @@ export function cronDeleteTool(manager: CronManager): Tool {
   return defineTool({
     name: "CronDelete",
     description: "Cancel a scheduled cron job by its 8-hex id (from CronCreate / CronList).",
-    params: z.object({ id: z.string().describe("The 8-hex cron job id.") }),
+    parameters: z.object({ id: z.string().describe("The 8-hex cron job id.") }),
     resolve: (args) => {
       if (!ID_PATTERN.test(args.id)) {
         return errorPlan("CronDelete", `Invalid cron job id ${JSON.stringify(args.id)} — must be 8 lowercase hex characters.`);
@@ -127,7 +127,7 @@ export function cronListTool(manager: CronManager): Tool {
   return defineTool({
     name: "CronList",
     description: "List the cron jobs scheduled in this session (id, expression, human schedule, next fire, recurring, age, stale).",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       ...globApproval("CronList", "list"),
       accesses: ToolAccesses.none(),

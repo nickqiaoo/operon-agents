@@ -10,7 +10,7 @@ import { createHarness } from "operon-agents";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle, type PeerOptions } from "../src/index.ts";
 
 /** Born a member: the per-session param `peers()` reads to mount the Hub with this identity. */
-const asMember = (member: PeerMemberOptions) => ({ params: { [PEERS_SERVICE]: { member } } });
+const asMember = (member: PeerMemberOptions) => ({ config: { extensions: { [PEERS_SERVICE]: { member } } } });
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -27,10 +27,10 @@ async function main(): Promise<void> {
   /** One harness per scenario, the network reached through its handle like any host would. */
   const open = (options: Omit<PeerOptions, "visibility">) => {
     const harness = createHarness({
-      ...faux.harnessModel(),
-      permission: { mode: "yolo" },
-      extensions: [peers({ visibility: sharedLabelVisibility, ...options })],
-    });
+    ...faux.harnessModel(),
+    extensions: [peers({ visibility: sharedLabelVisibility, ...options })],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     return { harness, net: harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE) };
   };
 

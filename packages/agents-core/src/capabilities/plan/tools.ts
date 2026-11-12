@@ -19,7 +19,7 @@ export function enterPlanModeTool(planMode: PlanMode): Tool {
     name: "EnterPlanMode",
     description:
       "Enter plan mode: switch to read-only investigation and write a plan to the plan file before making changes. Exit with ExitPlanMode for user approval.",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "EnterPlanMode",
       accesses: ToolAccesses.none(),
@@ -49,7 +49,7 @@ export function exitPlanModeTool(planMode: PlanMode): Tool {
     name: "ExitPlanMode",
     description:
       "Present the finalized plan for user approval and exit plan mode. The plan must already be written to the plan file. Pass `options` when the plan contains multiple distinct approaches so the user can choose.",
-    params: z.object({
+    parameters: z.object({
       options: z
         .array(
           z.object({

@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalEnvironment } from "../index.ts";
+import { LocalEnvironment, writeTextFile } from "../index.ts";
 
 /** Processes whose command line carries `marker`, via pgrep; empty when none are left. */
 function processesMatching(marker: string): string {
@@ -122,29 +122,29 @@ async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "environment-local-e2e-"));
   const environment = new LocalEnvironment(root);
 
-  // ── writeText: line endings ──
+  // ── writeTextFile: line endings ──
   // `lineEndings: "CRLF"` used to join LF straight to CRLF, so text that already had `\r\n`
   // in it came out as `\r\r\n` — a corrupted file, and exactly the shape model output takes
   // after reading a CRLF file. The Edit path was safe (it goes through `materializeModelText`,
   // which normalizes first); the Environment contract was not, and now shares that implementation.
-  await environment.writeText("crlf-from-crlf.txt", "line one\r\nline two\r\n", { lineEndings: "CRLF" });
+  await writeTextFile(environment, "crlf-from-crlf.txt", "line one\r\nline two\r\n", { lineEndings: "CRLF" });
   check(
-    "writeText(CRLF): text that already has CRLF is not doubled",
+    "writeTextFile(CRLF): text that already has CRLF is not doubled",
     (await readFile(join(root, "crlf-from-crlf.txt"), "utf8")) === "line one\r\nline two\r\n",
   );
-  await environment.writeText("crlf-from-lf.txt", "x\ny\n", { lineEndings: "CRLF" });
+  await writeTextFile(environment, "crlf-from-lf.txt", "x\ny\n", { lineEndings: "CRLF" });
   check(
-    "writeText(CRLF): LF text is converted",
+    "writeTextFile(CRLF): LF text is converted",
     (await readFile(join(root, "crlf-from-lf.txt"), "utf8")) === "x\r\ny\r\n",
   );
-  await environment.writeText("crlf-mixed.txt", "a\r\nb\nc\r\n", { lineEndings: "CRLF" });
+  await writeTextFile(environment, "crlf-mixed.txt", "a\r\nb\nc\r\n", { lineEndings: "CRLF" });
   check(
-    "writeText(CRLF): mixed input lands uniformly CRLF",
+    "writeTextFile(CRLF): mixed input lands uniformly CRLF",
     (await readFile(join(root, "crlf-mixed.txt"), "utf8")) === "a\r\nb\r\nc\r\n",
   );
-  await environment.writeText("lf-default.txt", "a\r\nb\n");
+  await writeTextFile(environment, "lf-default.txt", "a\r\nb\n");
   check(
-    "writeText(): without the option nothing is rewritten",
+    "writeTextFile(): without the option nothing is rewritten",
     (await readFile(join(root, "lf-default.txt"), "utf8")) === "a\r\nb\n",
   );
 

@@ -41,7 +41,7 @@ function makePickTool(counters: { resolves: number; searches: number; books: num
   return defineTool({
     name: "pick",
     description: "search candidates, ask the user to pick one, then book it",
-    params: z.object({ topic: z.string() }),
+    parameters: z.object({ topic: z.string() }),
     resolve: (args) => {
       counters.resolves++;
       return {
@@ -99,7 +99,7 @@ async function testSuspendResume(environment: LocalEnvironment): Promise<void> {
 
   // getInterruptionState(result) is the ONLY public way to get a resume()-ready
   // InterruptionState straight off a RunResult — resume() requires the full state, but
-  // RunResult.interruption only carries the lightweight {id, revision, pending} projection.
+  // RunResult.interruptions only carries the flattened pending list.
   // Without this export, callers had no public path to build a valid resume() call at all.
   const fromResult = getInterruptionState(first);
   check("suspend: getInterruptionState(result) recovers a resume()-ready state from the RunResult", fromResult?.rootFrameId !== undefined);
@@ -140,7 +140,7 @@ async function testMixedBatchSiblingNotRerun(environment: LocalEnvironment): Pro
   const echoTool = defineTool({
     name: "echo",
     description: "echo",
-    params: z.object({ text: z.string() }),
+    parameters: z.object({ text: z.string() }),
     resolve: (args) => ({
       approvalRule: `echo(${args.text})`,
       run: async () => {
@@ -235,7 +235,7 @@ async function testMultiRoundSuspend(environment: LocalEnvironment): Promise<voi
   const wizardTool = defineTool({
     name: "wizard",
     description: "two-round wizard",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "wizard",
       run: async (ctx) => {
@@ -296,7 +296,7 @@ async function testSuspendMisuseAndBadState(environment: LocalEnvironment): Prom
   const badStateTool = defineTool({
     name: "bad_state",
     description: "suspends with unserializable state",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "bad_state",
       run: async (ctx) => {
@@ -310,7 +310,7 @@ async function testSuspendMisuseAndBadState(environment: LocalEnvironment): Prom
   const suspendInResolveTool = defineTool({
     name: "suspend_in_resolve",
     description: "throws the suspend signal during resolve",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => {
       throw new ToolSuspendSignal({ kind: "q" });
     },
@@ -391,7 +391,7 @@ async function testAskUserReentryGuard(environment: LocalEnvironment): Promise<v
   const doubleAsk = defineTool({
     name: "double_ask",
     description: "asks twice",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "double_ask",
       run: async (ctx) => {

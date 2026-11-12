@@ -1,4 +1,5 @@
-import type { HarnessSession, SkillSummary } from 'operon-agents';
+import type { HarnessSession } from 'operon-agents';
+import type { SkillSummary } from 'operon-agents/advanced';
 
 import type { TuiSlashCommand } from './types.ts';
 

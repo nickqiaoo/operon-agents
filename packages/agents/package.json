@@ -1,6 +1,6 @@
 {
   "name": "operon-agents",
-  "version": "0.1.0-alpha.30",
+  "version": "0.1.0-alpha.31",
   "description": "Public SDK entrypoint for building agents.",
   "type": "module",
   "engines": {
@@ -29,6 +29,10 @@
     "./app-server": {
       "types": "./dist/app-server/index.d.ts",
       "import": "./dist/app-server/index.js"
+    },
+    "./advanced": {
+      "types": "./dist/advanced.d.ts",
+      "import": "./dist/advanced.js"
     },
     "./internal": {
       "types": "./dist/internal.d.ts",

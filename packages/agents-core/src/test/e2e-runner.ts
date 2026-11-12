@@ -725,9 +725,9 @@ async function testHitlResume(dir: string, environment: LocalEnvironment): Promi
 
   const first = await runner.run(agent, "write the file");
   check("hitl: first run interrupts", first.status === "interrupted");
-  check("hitl: pending is the Write call", first.interruption?.pending[0]?.toolName === "Write");
+  check("hitl: pending is the Write call", first.status === "interrupted" && first.interruptions[0]?.toolName === "Write");
   check("hitl: file not written before approval", !existsSync(file));
-  check("hitl: public interruption carries stable id/revision", !!first.interruption?.id && first.interruption.revision > 0);
+  check("hitl: the control state stays off the public result", !("interruption" in first));
 
   const persisted = await store.getState(INTERRUPTION_STATE_KEY);
   check("hitl: interruption state persisted to store (durable)", persisted !== null);

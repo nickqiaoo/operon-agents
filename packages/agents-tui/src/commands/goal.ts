@@ -1,4 +1,5 @@
-import type { GoalSnapshot, HarnessSession } from 'operon-agents';
+import type { GoalSnapshot } from 'operon-agents/advanced';
+import type { HarnessSession } from 'operon-agents';
 
 import { GoalSetMessageComponent } from '../components/messages/goal-panel.ts';
 import { formatErrorMessage } from '../utils/event-payload.ts';

@@ -186,7 +186,7 @@ export function buildWorkflowTool<TContext>(
   return defineTool({
     name: "Workflow",
     description: workflowPrompt(spawner.available.map((a) => a.name)),
-    params: input,
+    parameters: input,
     resolve: (args) => ({
       approvalRule: "Workflow",
       accesses: ToolAccesses.all(),

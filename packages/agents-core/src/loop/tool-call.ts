@@ -6,7 +6,6 @@ import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
-import type { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import { type Logger, logDataPolicy, noopLogger } from "../logging/index.ts";
 import { ToolScheduler } from "./scheduler.ts";
@@ -44,8 +43,6 @@ export interface ToolCallStepContext {
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel, forwarded into the tool run context (AskUserQuestion). */
   readonly responder?: QuestionResponder;
-  /** Session-scoped file freshness ledger, forwarded into both tool contexts. */
-  readonly fileLedger?: FileFreshnessLedger;
   /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
   readonly hostContext?: unknown;
   /** Surfaces each tool result the moment it lands (the unified loop event out). */
@@ -240,7 +237,6 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       toolCallId: call.id,
       signal: step.signal,
       environment: step.environment,
-      ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
       ...(step.hostContext !== undefined ? { context: step.hostContext } : {}),
     });
   } catch (error) {
@@ -299,7 +295,6 @@ async function runAndFinalize(
         background: step.background,
         dispatch: createNestedDispatcher(step, call),
         responder: step.responder,
-        ...(step.fileLedger !== undefined ? { fileLedger: step.fileLedger } : {}),
         ...(step.hostContext !== undefined ? { context: step.hostContext } : {}),
         ...(detachSignal !== undefined ? { detachSignal } : {}),
         suspend: (request: ToolInputRequest, state?: unknown): never => {

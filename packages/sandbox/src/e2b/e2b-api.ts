@@ -71,7 +71,7 @@ export interface E2BFilesystemApi {
   /**
    * `data` is deliberately NOT `Uint8Array`: the SDK takes `string | ArrayBuffer | Blob |
    * ReadableStream`, so declaring the wider type here would let a `Buffer` typecheck against
-   * a signature that rejects it. See `writeBytesRaw` for the conversion.
+   * a signature that rejects it. See `E2BEnvironment.writeBytes` for the conversion.
    */
   write(path: string, data: string | ArrayBuffer, opts?: Record<string, unknown>): Promise<unknown>;
   /** Creates missing parents too. `false` = the path already existed (the SDK maps AlreadyExists). */

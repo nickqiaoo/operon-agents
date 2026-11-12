@@ -13,18 +13,21 @@
  * inside the capability's own open/close, a failed open undoes it like everything else the
  * session opened — no hold is taken anywhere the session cannot see.
  *
- * Lifetime of one directory's set, a "generation":
+ * One set of connections is a "generation": one directory, one configuration. Its lifetime:
  *  - built on the first borrow, connected once; concurrent borrows share that one connect;
  *  - kept while any session holds it, then for `idleMs` more, so closing the last chat and
  *    starting the next one does not respawn every server;
- *  - replaced, not mutated, when a borrow arrives with a different configuration (an edited
- *    `mcp.json`, a plugin enabled): new sessions get a new generation, the sessions already
- *    holding the old one keep it, and it closes when the last of them gives it back.
+ *  - never mutated. A borrow with a different configuration (an edited `mcp.json`, a plugin
+ *    enabled, a session that sees another set of servers) gets a generation of its own beside
+ *    it: two sessions in one directory that see different server sets each hold theirs, a third
+ *    borrowing either set joins the one already up, and neither evicts the other;
+ *  - each generation idles and closes on its own clock, `idleMs` after ITS last session leaves.
  *
- * Sharing is the point, so it is total: two sessions in one directory drive the SAME server.
- * One with state of its own (a browser) is therefore shared state between them; a reconnect or an
- * OAuth sign-in in one session is seen by all. A server that must be private belongs in the
- * session's own `mcpServers`, which are layered over the shared set and never pooled.
+ * Sharing is the point, so it is total: two sessions in one directory that borrow the same
+ * configuration drive the SAME server. One with state of its own (a browser) is therefore shared
+ * state between them; a reconnect or an OAuth sign-in in one session is seen by all. What a
+ * session sees is its configuration's to say (`SessionConfig.mcp`); a server the host did not
+ * declare shareable for the directory is connected for that session alone and never pooled.
  */
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -70,9 +73,9 @@ interface Generation {
 
 export class WorkspaceMcpPool {
   private readonly options: WorkspaceMcpPoolOptions;
-  /** The generation a NEW borrow in each directory gets. */
-  private readonly current = new Map<string, Generation>();
-  /** Every generation not yet shut down — current ones and retired ones still on loan. */
+  /** The generations a NEW borrow in each directory can join, by configuration fingerprint. */
+  private readonly current = new Map<string, Map<string, Generation>>();
+  /** Every generation not yet shut down — on loan, idling, or closing. */
   private readonly live = new Set<Generation>();
   private closing: Promise<void> | undefined;
 
@@ -96,19 +99,19 @@ export class WorkspaceMcpPool {
     const key = await canonicalDir(workDir);
     this.assertOpen();
     const fingerprint = fingerprintOf(configs);
-    let generation = this.current.get(key);
-    if (generation !== undefined && generation.fingerprint !== fingerprint) {
-      this.current.delete(key);
-      if (generation.leases === 0) void this.shutdown(generation);
-      generation = undefined;
+    let generations = this.current.get(key);
+    if (generations === undefined) {
+      generations = new Map();
+      this.current.set(key, generations);
     }
+    let generation = generations.get(fingerprint);
     if (generation === undefined) {
       const { idleMs: _idleMs, ...serverOptions } = this.options;
       const servers = createMcpServers(configs, serverOptions);
       // Pooled connections belong to no session: their failures reach each borrower through
       // `onStatusChange`, which the MCP capability subscribes to when it opens.
       generation = { key, fingerprint, servers, ready: servers.connect({ sessionId: "" }), leases: 0 };
-      this.current.set(key, generation);
+      generations.set(fingerprint, generation);
       this.live.add(generation);
     }
     const held = generation;
@@ -142,22 +145,37 @@ export class WorkspaceMcpPool {
     return this.closing;
   }
 
-  /** The last lease came back: close a retired generation now, a current one after the grace. */
+  /** The last lease came back: keep the generation for the grace period, then close it. One the
+   *  pool no longer lends (closed meanwhile) or a pool with no grace closes it now. */
   private async idle(generation: Generation): Promise<void> {
     const idleMs = this.options.idleMs ?? DEFAULT_WORKSPACE_MCP_IDLE_MS;
-    if (this.current.get(generation.key) !== generation || idleMs <= 0) {
-      if (this.current.get(generation.key) === generation) this.current.delete(generation.key);
+    if (!this.joinable(generation) || idleMs <= 0) {
+      this.forget(generation);
       await this.shutdown(generation);
       return;
     }
     generation.idle = setTimeout(() => {
       generation.idle = undefined;
-      if (generation.leases !== 0 || this.current.get(generation.key) !== generation) return;
-      this.current.delete(generation.key);
+      if (generation.leases !== 0 || !this.joinable(generation)) return;
+      this.forget(generation);
       void this.shutdown(generation);
     }, idleMs);
     // An idling set must not be what keeps the process alive.
     generation.idle.unref?.();
+  }
+
+  /** A new borrow with this generation's configuration would get this very generation. */
+  private joinable(generation: Generation): boolean {
+    return this.current.get(generation.key)?.get(generation.fingerprint) === generation;
+  }
+
+  private forget(generation: Generation): void {
+    const generations = this.current.get(generation.key);
+    if (generations?.get(generation.fingerprint) !== generation) return;
+    generations.delete(generation.fingerprint);
+    if (generations.size === 0) {
+      this.current.delete(generation.key);
+    }
   }
 
   private shutdown(generation: Generation): Promise<void> {
@@ -179,9 +197,9 @@ export interface WorkspaceMcpCapabilityOptions {
   readonly pool: WorkspaceMcpPool;
   /** The session's working directory — the key the connections are shared under. */
   readonly workDir: string;
-  /** The servers every session in `workDir` shares. */
+  /** The servers borrowed from the pool: shared with every session in `workDir` that borrows the same set. */
   readonly servers: Record<string, McpServerConfig>;
-  /** The session's own servers, layered over the shared ones (same name: the session's wins). */
+  /** Servers connected for this session alone, beside the borrowed ones (same name: these win). */
   readonly overlay?: Record<string, McpServerConfig>;
   /**
    * Options for the overlay's connections; the pooled ones were configured on the pool. Its

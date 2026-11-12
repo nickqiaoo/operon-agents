@@ -73,7 +73,7 @@ export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => str
   return defineTool({
     name: "Team",
     description,
-    params: teamInput,
+    parameters: teamInput,
     resolve: (args) => ({
       // `spawn` and `send` wake agents and spend budget; reads are cheap.
       approvalRule: `team.${args.op}`,

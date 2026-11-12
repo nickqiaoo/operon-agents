@@ -1,50 +1,12 @@
 /**
- * Shared building blocks for Environment implementations and their callers.
+ * Text on top of the Environment's byte I/O.
  *
- * The high-level operations (writeTextIfUnchanged / realpath) are mandatory
- * Environment members; their default compositions live in BaseEnvironment
- * (environment-base.ts). This module carries what both sides agree on: FileVersion
- * helpers, the decode contract, and the caller-side text-file helpers
- * (readTextFile / writeTextFile) composed from the core members.
+ * Environment speaks bytes only (`readBytes` / `writeBytes`); decoding, encoding and
+ * line endings are the same on every backend, so they live here once instead of in each
+ * backend.
  */
-import { createHash } from "node:crypto";
-import type {
-  DecodeErrors,
-  Environment,
-  FileInfo,
-  FileVersion,
-} from "../environment.ts";
-
-export function fileVersionFromInfo(info: FileInfo): FileVersion {
-  return info.mtimeMs === undefined ? {} : { mtimeMs: info.mtimeMs };
-}
-
-
-/** Strip a UTF BOM and normalize CRLF to LF — the form ledger content comparisons use. */
-export function normalizeForCompare(text: string): string {
-  const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  return stripped.replaceAll("\r\n", "\n");
-}
-
-/**
- * Digest of a `normalizeForCompare`d text — what the ledger retains and the CAS
- * compares instead of the text itself. Keeps a record's footprint constant no matter
- * how large the file is. It is a content-review key, never the freshness criterion:
- * the mtime still decides whenever both sides have one.
- */
-export function hashFileContent(normalizedText: string): string {
-  return createHash("sha256").update(normalizedText, "utf8").digest("base64url");
-}
-
-/**
- * Both sides must HAVE an mtime and agree on it. A missing mtime is never a match:
- * it is the absence of evidence, and the caller's next move is a content review,
- * not a pass.
- */
-export function fileVersionsMatch(expected: FileVersion, current: FileVersion): boolean {
-  return expected.mtimeMs !== undefined && current.mtimeMs !== undefined && expected.mtimeMs === current.mtimeMs;
-}
-
+import type { DecodeErrors, Environment } from "../environment.ts";
+import { materializeModelText } from "../builtin/line-endings.ts";
 
 /** Decode with the shared contract: strict UTF-8 throws on invalid bytes (binary detection). */
 export function decodeText(data: Buffer, options?: { encoding?: BufferEncoding; errors?: DecodeErrors }): string {
@@ -56,22 +18,34 @@ export function decodeText(data: Buffer, options?: { encoding?: BufferEncoding; 
   return data.toString(encoding);
 }
 
-/** Whole-file text read composed from the core members (readBytes + decode). */
+/** Whole-file text read: `readBytes` + {@link decodeText} (strict UTF-8 by default). */
 export async function readTextFile(
-  host: Pick<Environment, "readBytes">,
+  environment: Pick<Environment, "readBytes">,
   path: string,
   options?: { encoding?: BufferEncoding; errors?: DecodeErrors },
 ): Promise<string> {
-  return decodeText(await host.readBytes(path), options);
+  return decodeText(await environment.readBytes(path), options);
 }
 
-/** Unconditional whole-file text write — thin sugar over Environment.writeText. */
+export interface WriteTextFileOptions {
+  /**
+   * Line endings to write. Default `"LF"`: the text is written exactly as given.
+   *
+   * `"CRLF"` normalizes to LF first and then joins, so text that ALREADY contains `\r\n` —
+   * which model output routinely does, having just read a CRLF file — comes out with `\r\n`
+   * rather than `\r\r\n`. Same two-step as the Edit path, so the two never disagree about
+   * what "write this as CRLF" means.
+   */
+  readonly lineEndings?: "LF" | "CRLF";
+}
+
+/** Unconditional whole-file UTF-8 write: encode, then `writeBytes`. */
 export async function writeTextFile(
-  host: Pick<Environment, "writeText">,
+  environment: Pick<Environment, "writeBytes">,
   path: string,
-  data: string,
-  options?: { encoding?: BufferEncoding },
+  text: string,
+  options: WriteTextFileOptions = {},
 ): Promise<void> {
-  await host.writeText(path, data, options?.encoding !== undefined ? { encoding: options.encoding } : {});
+  const payload = options.lineEndings === "CRLF" ? materializeModelText(text, "crlf") : text;
+  await environment.writeBytes(path, Buffer.from(payload, "utf8"));
 }
-

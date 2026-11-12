@@ -7,7 +7,7 @@
  * output cap takes the `startProcess` + SSE-logs + `killProcess` path — where a timeout
  * really kills, a cap really stops the command, and an exit code admits when it is unknown.
  */
-import { materializeWorkspace } from "operon-agents-core";
+import { materializeWorkspace, writeTextFile } from "operon-agents-core";
 import { CloudflareEnvironment } from "../cloudflare/environment.ts";
 import { CloudflareWorkspace } from "../cloudflare/lifecycle.ts";
 import type {
@@ -223,7 +223,7 @@ async function testFilesAndListing(): Promise<void> {
   const read = await environment.readBytes("/workspace/blob.bin");
   check("files: binary survives the base64 round trip", read.equals(payload));
 
-  await environment.writeText("/workspace/note.txt", "hello");
+  await writeTextFile(environment, "/workspace/note.txt", "hello");
   check("files: text write lands in the sandbox", client.written.get("/workspace/note.txt")?.toString("utf8") === "hello");
 
   const entries = await environment.listDir("/workspace");

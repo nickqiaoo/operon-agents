@@ -25,6 +25,8 @@ export {
   readAudit,
   durableStateKey,
   SESSION_PERMISSION_KEY,
+  SESSION_MODEL_KEY,
+  SESSION_THINKING_KEY,
   SESSION_USAGE_KEY,
 } from "./store.ts";
 export { CheckpointingSessionStore } from "./checkpointing-store.ts";

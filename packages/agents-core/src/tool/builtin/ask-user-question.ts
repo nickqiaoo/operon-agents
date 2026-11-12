@@ -74,7 +74,7 @@ const ASK_USER_QUESTION_DESCRIPTION = [
 export const askUserQuestionTool = defineTool({
   name: "AskUserQuestion",
   description: ASK_USER_QUESTION_DESCRIPTION,
-  params: AskUserQuestionInput,
+  parameters: AskUserQuestionInput,
   resolve: (args) => ({
     approvalRule: "AskUserQuestion",
     accesses: ToolAccesses.none(),

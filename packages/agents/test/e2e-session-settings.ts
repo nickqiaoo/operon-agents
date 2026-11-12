@@ -5,7 +5,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, defineAgent, filesystemTools, type HarnessOptions } from "../src/index.ts";
+import { createHarness, defineAgent, type HarnessOptions } from "../src/index.ts";
+import { filesystemTools } from "../src/tools.ts";
 import { fauxAssistantMessage, fauxToolCall, offeredToolNames, registerFauxProvider, type Context } from "./faux.ts";
 
 let failed = 0;
@@ -50,7 +51,10 @@ function script(faux: Faux, messages: readonly Message[]): Seen[] {
 }
 
 function harnessOn(faux: Faux, options: Partial<HarnessOptions> = {}) {
-  return createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, workDir, ...options });
+  return createHarness({
+    ...faux.harnessModel(), ...options,
+    config: { workDir, ...options.config, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" }, ...options.config?.defaults } },
+  });
 }
 
 async function modelReplacesTheHarnessDefault(): Promise<void> {
@@ -61,16 +65,20 @@ async function modelReplacesTheHarnessDefault(): Promise<void> {
   await (await harness.createSession()).prompt("hi");
   check("model: a session that names none runs on the harness default", seen[0]?.model === "main", seen[0]?.model);
 
-  const named = await harness.createSession({ model: "faux/other" });
+  const named = await harness.createSession({
+    config: { model: "faux/other" }
+  });
   await named.prompt("hi");
   check("model: a session's id replaces the default", seen[1]?.model === "other", seen[1]?.model);
 
-  await (await harness.createSession({ model: faux.getChatModel("other")! })).prompt("hi");
+  await (await harness.createSession({
+    bindings: { model: faux.getChatModel("other")! }
+  })).prompt("hi");
   check("model: a session may bring a built ChatModel", seen[2]?.model === "other", seen[2]?.model);
 
   await named.close();
   await (await harness.resumeSession(named.id)).prompt("hi");
-  check("model: a resume that names none is back on the default", seen[3]?.model === "main", seen[3]?.model);
+  check("model: a resume that names none keeps the session's model", seen[3]?.model === "other", seen[3]?.model);
   await harness.close();
 }
 
@@ -78,16 +86,22 @@ async function settingsReplaceWholeNotMerge(): Promise<void> {
   const faux = provider();
   const seen = script(faux, [stop("a"), stop("b"), stop("c"), stop("d")]);
   const tools = filesystemTools({ mode: "readonly" });
-  const harness = harnessOn(faux, { modelSettings: { temperature: 0.1, maxTokens: 111 } });
+  const harness = harnessOn(faux, {
+    config: { defaults: { modelSettings: { temperature: 0.1, maxTokens: 111 } } }
+  });
 
   await (await harness.createSession()).prompt("hi");
   check("modelSettings: the harness's apply by default", seen[0]?.temperature === 0.1 && seen[0]?.maxTokens === 111);
   check("tools: the default palette includes Write", seen[0]?.tools.includes("Write") === true);
 
-  await (await harness.createSession({ modelSettings: { temperature: 0.9 } })).prompt("hi");
+  await (await harness.createSession({
+    config: { modelSettings: { temperature: 0.9 } }
+  })).prompt("hi");
   check("modelSettings: a session's replace them whole", seen[1]?.temperature === 0.9 && seen[1]?.maxTokens === undefined);
 
-  await (await harness.createSession({ tools })).prompt("hi");
+  await (await harness.createSession({
+    bindings: { tools: tools }
+  })).prompt("hi");
   check("tools: a session's palette replaces the default", seen[2]?.tools.includes("Read") === true && seen[2]?.tools.includes("Write") === false);
 
   await (await harness.createSession()).prompt("hi");
@@ -103,16 +117,22 @@ async function subagentSettingsAreOneSessionEach(): Promise<void> {
   await (await harness.createSession()).prompt("hi");
   check("workflow: offered by default", seen[0]?.tools.includes("Workflow") === true);
 
-  await (await harness.createSession({ workflowTool: false })).prompt("hi");
+  await (await harness.createSession({
+    config: { subagents: { workflowTool: false } }
+  })).prompt("hi");
   check("workflowTool: false withholds it from this session and keeps Agent", seen[1]?.tools.includes("Workflow") === false && seen[1]?.tools.includes("Agent") === true);
 
-  await (await harness.createSession({ subagentProvider: null })).prompt("hi");
+  await (await harness.createSession({
+    config: { subagents: false }
+  })).prompt("hi");
   check("subagentProvider: null hides Agent for this session", seen[2]?.tools.includes("Agent") === false && seen[2]?.tools.includes("Workflow") === false);
   await harness.close();
 
   const off = provider();
   const offSeen = script(off, [stop("a"), stop("b")]);
-  const closed = harnessOn(off, { subagentProvider: null });
+  const closed = harnessOn(off, {
+    config: { defaults: { subagents: false } }
+  });
   await (await closed.createSession()).prompt("hi");
   check("subagentProvider: null on the harness hides Agent", offSeen[0]?.tools.includes("Agent") === false);
   await closed.close();
@@ -137,10 +157,14 @@ async function peakConcurrency(session: { prompt(input: string): Promise<unknown
 
 async function concurrencyCapIsPerSession(): Promise<void> {
   const faux = provider();
-  const harness = harnessOn(faux, { maxConcurrentSubagents: 4 });
+  const harness = harnessOn(faux, {
+    config: { defaults: { subagents: { maxConcurrent: 4 } } }
+  });
   const open = await peakConcurrency(await harness.createSession(), faux);
   check("maxConcurrentSubagents: the harness's cap lets two overlap", open === 2, String(open));
-  const capped = await peakConcurrency(await harness.createSession({ maxConcurrentSubagents: 1 }), faux);
+  const capped = await peakConcurrency(await harness.createSession({
+    config: { subagents: { maxConcurrent: 1 } }
+  }), faux);
   check("maxConcurrentSubagents: a session's cap replaces it", capped === 1, String(capped));
   await harness.close();
 }
@@ -155,9 +179,9 @@ async function childModel(
   const seen = script(faux, [fauxAssistantMessage(fauxToolCall("Workflow", { script: workflow(call) }), { stopReason: "toolUse" }), stop("child"), stop("done")]);
   const helper = defineAgent({ name: "helper", model: "faux/other", instructions: "Help." });
   const harness = harnessOn(faux, options.helper
-    ? { agent: defineAgent({ name: "lead", model: "faux/main", instructions: "Lead.", subagents: [helper] }) }
+    ? { config: { defaults: { agent: "lead" } }, registry: { agents: { lead: defineAgent({ name: "lead", model: "faux/main", instructions: "Lead.", subagents: [helper] }) } } }
     : {});
-  const session = await harness.createSession(options.sessionModel !== undefined ? { model: options.sessionModel } : {});
+  const session = await harness.createSession(options.sessionModel !== undefined ? { config: { model: options.sessionModel } } : {});
   await session.prompt("go");
   await harness.close();
   return { models: seen.map((entry) => entry.model), result: seen.at(-1)?.lastMessage ?? "" };
@@ -188,8 +212,13 @@ async function subagentModelOrder(): Promise<void> {
 
   const root = provider();
   const rootSeen = script(root, [stop("a")]);
-  const rootHarness = harnessOn(root, { agent: defineAgent({ name: "lead", model: "faux/main", instructions: "Lead." }) });
-  await (await rootHarness.createSession({ model: "faux/other" })).prompt("hi");
+  const rootHarness = harnessOn(root, {
+    config: { defaults: { agent: "default" } },
+    registry: { agents: { default: defineAgent({ name: "lead", model: "faux/main", instructions: "Lead." }) } }
+  });
+  await (await rootHarness.createSession({
+    config: { model: "faux/other" }
+  })).prompt("hi");
   await rootHarness.close();
   check("order: a session's model still beats its root agent's", rootSeen[0]?.model === "other", rootSeen[0]?.model);
 }

@@ -59,7 +59,7 @@ export class NullEnvironment extends BaseEnvironment {
   async readBytes(_path: string, _range?: ByteRange): Promise<Buffer> {
     throw this.disabled("readBytes");
   }
-  protected async writeBytesRaw(_path: string, _data: Buffer): Promise<void> {
+  async writeBytes(_path: string, _data: Buffer): Promise<void> {
     throw this.disabled("writeBytes");
   }
 

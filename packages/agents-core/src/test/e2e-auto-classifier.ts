@@ -4,7 +4,7 @@ import {
   fauxToolCall,
   registerFauxProvider,
 } from "./faux.ts";
-import { bashTool, defineModel, editTool, LlmAutoApprover, tool } from "../index.ts";
+import { bashTool, defineModel, editTool, LlmAutoApprover, defineTool } from "../index.ts";
 import type { AutoApprovalReport, ChatModel, Message, ResolvedToolExecutionHookContext, Tool } from "../index.ts";
 import { z } from "zod";
 
@@ -58,7 +58,7 @@ const BASH = (cmd: string) => ({ name: "Bash", args: { command: cmd }, tool: bas
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A tool that declares no security relevance (toAutoApprovalInput -> '').
-const inertTool: Tool = tool({
+const inertTool: Tool = defineTool({
   name: "Inert",
   description: "no-op",
   parameters: z.object({ note: z.string() }),

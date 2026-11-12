@@ -132,7 +132,7 @@ export function compactionCapability(options: CompactionOptions): Capability {
             ctx.context.replaceHistory(trimmed);
           }
         }
-        if (strategy.shouldBlock(estimateTokensForMessages(ctx.messages))) {
+        if (strategy.shouldBlock(ctx.context.projectedContextTokens(ctx.model) ?? estimateTokensForMessages(ctx.messages))) {
           await compact(ctx);
         }
         return undefined;
@@ -140,7 +140,7 @@ export function compactionCapability(options: CompactionOptions): Capability {
       afterStep: async (ctx) => {
         maxOutputTokens = ctx.model.maxOutputTokens;
         lastAssistantAtMs = Date.now();
-        if (strategy.checkAfterStep && strategy.shouldCompact(estimateTokensForMessages(ctx.messages))) {
+        if (strategy.checkAfterStep && strategy.shouldCompact(ctx.context.projectedContextTokens(ctx.model) ?? estimateTokensForMessages(ctx.messages))) {
           await compact(ctx);
         }
         return undefined;

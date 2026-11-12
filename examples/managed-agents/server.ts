@@ -4,16 +4,8 @@
  * application-specific Agent, session repository and execution environment.
  */
 import { mkdirSync } from "node:fs";
-import {
-  ConsoleSink,
-  createHarness,
-  defaultCapabilities,
-  DiskSessionRepository,
-  LocalEnvironment,
-  McpOAuthService,
-  MemoryMcpCredentialStore,
-  sinkLogger
-} from "operon-agents";
+import { ConsoleSink, defaultCapabilities, DiskSessionRepository, McpOAuthService, MemoryMcpCredentialStore, sinkLogger } from "operon-agents/advanced";
+import { createHarness, LocalEnvironment } from "operon-agents";
 import {
   allowAllRequests,
   createManagedHttpServer,
@@ -39,28 +31,30 @@ mkdirSync(WORK, { recursive: true });
 // for a sandbox factory, and the credential store for your secret manager.
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
-  model: MODEL,
-  // The process-lived parts: the store, the default environment, and the logger (stdout for the
-  // platform's log collector, not a local rotating file).
+  config: {
+    workDir: WORK,
+    // What a multi-tenant worker requires of its harness, stated once here rather than on each
+    // open: every session on an environment of its own, and events durable before they are seen.
+    policy: { strictIsolation: true },
+    eventPublication: "committed",
+    defaults: {
+      model: MODEL,
+      appendSystemPrompt: "Use the tools to inspect and edit the workspace; explain what you do.",
+      permission: { mode: "workspace" },
+    },
+  },
   infrastructure: () => ({
     sessionRepository: repository,
     environment: new LocalEnvironment(WORK),
     logger: sinkLogger(new ConsoleSink({ write: (line) => process.stdout.write(`${line}\n`) })),
   }),
-  // Built per session, so the OAuth service (and its credential store) is never shared
-  // across sessions — the reason the old preset's shared instance was a problem. A custom
-  // factory passes the session's isolation through: the worker opens every session strict.
   sessionCapabilities: (ctx) =>
+    // The standard bundle for this session — the MCP servers its configuration names, its
+    // isolation and its credentials all come from `ctx` — plus an OAuth store of this host's own.
     defaultCapabilities({
+      session: ctx,
       oauthService: new McpOAuthService({ store: new MemoryMcpCredentialStore() }),
-      ownEnvironment: ctx.ownEnvironment,
-      strictIsolation: ctx.strictIsolation,
-      ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
-      ...(ctx.mcpCredentials !== undefined ? { mcpCredentials: ctx.mcpCredentials } : {}),
     }),
-  workDir: WORK,
-  appendSystemPrompt: "Use the tools to inspect and edit the workspace; explain what you do.",
-  permission: { mode: "workspace" },
 });
 
 // The API surface and the execution half are separate objects joined only by the store. Here
@@ -79,21 +73,19 @@ const environments = new StaticEnvironmentRegistry({
     },
   },
 });
-// Carries live events — including the ones never written to the log, such as token deltas —
-// from the worker to whoever is watching.
+// Carries live events from the worker to whoever is watching, already translated to managed
+// session events.
 //
 // In-memory is correct HERE because this file runs the service and the worker in one process.
 // It is the wrong choice the moment they are separate services: each side would hold its own
-// Map and the worker's events would never reach a subscriber, with no error to notice — the
-// stream would just quietly carry persisted events only. Swap in `RedisEventBroadcaster`
+// Map and the worker's events would never reach a subscriber. Swap in `RedisEventBroadcaster`
 // (publisher + a SEPARATE subscriber connection) and nothing else in this file changes.
 const broadcaster = new MemoryEventBroadcaster();
-// The work table: every accepted input is written to the log AND wakes its session here, and
-// the worker claims woken sessions from here. It is both the queue and the lock, which is why
-// the service and the worker must share ONE instance. In-memory is right for one process;
-// across nodes it is `PgSessionWork` over the same Postgres the log lives in, and nothing else
-// in this file changes.
-const work = new MemorySessionWork({ repository });
+// The work table: the managed event log (what was sent, what the session emitted) and the
+// lease. The service appends sent events and wakes their session; the worker claims woken
+// sessions and pulls their events. The two share nothing else — not even here, in one process.
+// Across nodes it is `PgSessionWork`, and nothing else in this file changes.
+const work = new MemorySessionWork();
 const worker = new SessionWorker({
   harness,
   repository,
@@ -102,19 +94,11 @@ const worker = new SessionWorker({
   broadcaster,
   work,
 });
-// Claim woken sessions. The HTTP layer also nudges this worker directly after every write, so
-// in one process the claim loop only catches what a nudge could not; across nodes it is the path.
+// Claim woken sessions. Nothing else ever hands this worker work.
 worker.start();
-const service = new SessionService({
-  repository,
-  work,
-  metadataStore,
-  environments,
-  broadcaster,
-});
+const service = new SessionService({ work, metadataStore, broadcaster });
 const managed = createManagedHttpServer({
   service,
-  worker,
   // Required, so running without authentication is something this file says out loud rather
   // than something it gets by omitting an option.
   authorize:
@@ -134,6 +118,6 @@ if (API_KEY === undefined) console.error("warning: MANAGED_API_KEY is unset; HTT
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void managed.close().finally(() => process.exit(0));
+    void managed.close().then(() => worker.stop()).finally(() => process.exit(0));
   });
 }

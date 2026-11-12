@@ -24,7 +24,7 @@ export function taskCreateTool(store: TaskStore): Tool {
   return defineTool({
     name: TASK_CREATE_TOOL_NAME,
     description: "Create a task in the structured task list. Returns its id. Use TaskUpdate to set status/dependencies later.",
-    params: TaskCreateInput,
+    parameters: TaskCreateInput,
     resolve: (args) => ({
       approvalRule: TASK_CREATE_TOOL_NAME,
       accesses: ToolAccesses.none(),
@@ -62,7 +62,7 @@ export function taskUpdateTool(store: TaskStore): Tool {
   return defineTool({
     name: TASK_UPDATE_TOOL_NAME,
     description: "Update a task: fields, status (including \"deleted\"), owner, or dependency edges (addBlocks/addBlockedBy).",
-    params: TaskUpdateInput,
+    parameters: TaskUpdateInput,
     resolve: (args) => ({
       approvalRule: TASK_UPDATE_TOOL_NAME,
       accesses: ToolAccesses.none(),
@@ -108,7 +108,7 @@ export function taskListTool(store: TaskStore): Tool {
   return defineTool({
     name: TASK_LIST_TOOL_NAME,
     description: "List all tasks in the structured task list, with status and dependencies.",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: TASK_LIST_TOOL_NAME,
       accesses: ToolAccesses.none(),
@@ -127,7 +127,7 @@ export function taskGetTool(store: TaskStore): Tool {
   return defineTool({
     name: TASK_GET_TOOL_NAME,
     description: "Get one task by id, with its full description, status, and dependencies.",
-    params: z.object({ taskId: z.string().describe("The id of the task to read.") }),
+    parameters: z.object({ taskId: z.string().describe("The id of the task to read.") }),
     resolve: (args) => ({
       approvalRule: TASK_GET_TOOL_NAME,
       accesses: ToolAccesses.none(),

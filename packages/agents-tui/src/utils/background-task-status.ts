@@ -5,7 +5,7 @@
  * failed); the extra nuance lands in the dim detail line.
  */
 
-import type { BackgroundTaskInfo, BackgroundTaskStatus } from 'operon-agents';
+import type { BackgroundTaskInfo, BackgroundTaskStatus } from 'operon-agents/advanced';
 
 import type { BackgroundAgentStatusData, BackgroundAgentStatusPhase } from '../types.ts';
 

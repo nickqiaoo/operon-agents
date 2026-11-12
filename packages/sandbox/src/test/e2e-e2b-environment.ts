@@ -5,7 +5,7 @@
  * a fabricated process handle could not on this backend: a timeout that really kills, an output cap that stops
  * accumulation, incremental output, and an exit code that admits when it is unknown.
  */
-import { materializeWorkspace } from "operon-agents-core";
+import { materializeWorkspace, writeTextFile } from "operon-agents-core";
 import type { E2BCommandHandle, E2BEntryInfo, E2BRunOpts, E2BSandbox } from "../e2b/e2b-api.ts";
 import { E2BEnvironment } from "../e2b/environment.ts";
 import { E2BWorkspace } from "../e2b/lifecycle.ts";
@@ -296,8 +296,8 @@ async function testFilesAndListing(): Promise<void> {
     entries.map((e) => `${e.name}:${e.kind}`).join(",") === "src:dir,a.ts:file,weird:other",
   );
 
-  await environment.writeText("/work/out.txt", "content");
-  check("writeText: reached the sandbox filesystem", sandbox.written("/work/out.txt") === "content");
+  await writeTextFile(environment, "/work/out.txt", "content");
+  check("writeBytes: reached the sandbox filesystem", sandbox.written("/work/out.txt") === "content");
 
   const relative = environment.withCwd("/work/src");
   check("withCwd: re-roots without mutating the original", relative.getcwd() === "/work/src" && environment.getcwd() === "/work");
@@ -338,7 +338,7 @@ async function testDirectWrite(): Promise<void> {
   const sandbox = new FakeSandbox(() => ({ exitCode: 0 }));
   const environment = new E2BEnvironment(() => sandbox, { cwd: "/work" });
 
-  await environment.writeText("/work/f.txt", "new");
+  await writeTextFile(environment, "/work/f.txt", "new");
   check("write: lands on the target itself", sandbox.written("/work/f.txt") === "new");
   check("write: no temp path is staged", [...sandbox.writtenPaths()].every((p) => !p.includes(".tmp")));
   check("write: no shell command — a write is one vendor call", sandbox.commandLog.length === 0);
@@ -470,17 +470,15 @@ async function testNativeMetadata(): Promise<void> {
   }
   check("readBytes: a missing file is ENOENT (append-to-new-file depends on it)", readCode === "ENOENT");
 
-  const written = await environment.writeText("/work/a.ts", "changed");
+  await writeTextFile(environment, "/work/a.ts", "changed");
   const after = await environment.fileInfo("/work/a.ts");
-  check("writeText: reports the version it produced", written.version?.mtimeMs !== undefined && written.version.mtimeMs === after.mtimeMs);
-  check("writeText: and that version moved", written.version?.mtimeMs !== info.mtimeMs);
+  check("writeBytes: the size reflects the new content", after.size === 7);
+  check("writeBytes: the file's mtime moved", after.mtimeMs !== info.mtimeMs);
 
   sandbox.seedSymlink("/work/link.ts", "/work/a.ts");
   const statsBefore = sandbox.commandLog.filter((c) => c.includes("stat")).length;
   await environment.fileInfo("/work/link.ts").catch(() => undefined);
   check("fileInfo: a symlink goes to stat(1), whose follow semantics are exact", sandbox.commandLog.filter((c) => c.includes("stat")).length === statsBefore + 1);
-  const linkWrite = await environment.writeText("/work/link.ts", "via link");
-  check("writeText: through a symlink reports no version (a different source than its fileInfo)", linkWrite.version === undefined);
 
   await environment.mkdir("/work/deep/nested/dir", { parents: true });
   await environment.mkdir("/work/deep/nested/dir", { parents: true });

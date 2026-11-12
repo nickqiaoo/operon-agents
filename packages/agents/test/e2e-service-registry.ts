@@ -1,13 +1,7 @@
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import {
-  createHarness,
-  deadServiceHandle,
-  ServiceRegistry,
-  ServiceUnavailableError,
-  tool,
-  type Message,
-} from "../src/index.ts";
+import { createHarness, defineTool, type Message } from "../src/index.ts";
+import { deadServiceHandle, ServiceRegistry, ServiceUnavailableError } from "../src/advanced.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -184,10 +178,10 @@ async function ctxIntegration(): Promise<void> {
   ]);
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     services: {
       greeter: { instance: { greet: (name: string) => `hi ${name} v1` }, replaceable: true },
     },
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
 
@@ -198,7 +192,7 @@ async function ctxIntegration(): Promise<void> {
     session(api, { services }) {
       const svc = services.greeter as Greeter;
       stashed = svc;
-      api.registerTool(tool({
+      api.registerTool(defineTool({
         name: "Greet",
         description: "Greet via the shared service.",
         parameters: z.object({ name: z.string() }),

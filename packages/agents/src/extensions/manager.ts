@@ -32,7 +32,9 @@ export interface HeldSession {
 /** The narrow harness face the manager operates through (no import cycle with harness.ts). */
 export interface ExtensionHostBridge {
   readonly services: ServiceRegistry;
-  createSession(options?: Record<string, unknown>): Promise<{ readonly id: string }>;
+  /** `extensionId` is who asks: the host's `resolveSession` is told an extension did. */
+  resumeSession(id: string, extensionId: string): ReturnType<ExtensionHostContext["resumeSession"]>;
+  createSession(options: Parameters<ExtensionHostContext["createSession"]>[0], extensionId: string): Promise<{ readonly id: string }>;
   sessions(): readonly HeldSession[];
   /** Rendezvous every session holding one of `extensionIds` at its run boundary, run `fn` in
    *  the quiet moment (held() reads live — sessions born gated during the barrier appear). */
@@ -62,6 +64,7 @@ export interface StagingOptions {
   /** The extension's data folder, already created. */
   readonly dataDir?: string;
   createSession: ExtensionHostContext["createSession"];
+  resumeSession: ExtensionHostContext["resumeSession"];
   /** Resolve one of the definition's `uses` names to its service handle. */
   service(name: string): unknown;
   warn(message: string): void;
@@ -85,6 +88,7 @@ export function stageDefinition(
   if (definition.harness === undefined) return { sessionDef: definition };
   const host: ExtensionHostContext = {
     createSession: (sessionOptions) => options.createSession(sessionOptions),
+    resumeSession: (id) => options.resumeSession(id),
     services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, options.service(name)]))),
     ...(options.dir !== undefined ? { dir: options.dir } : {}),
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
@@ -229,7 +233,8 @@ export class HarnessExtensionManager {
       defaultReplaceable: true,
       dir: await this.loader.manifestDir(definition.id),
       dataDir,
-      createSession: (sessionOptions) => this.bridge.createSession(sessionOptions as Record<string, unknown>),
+      createSession: (sessionOptions) => this.bridge.createSession(sessionOptions, definition.id),
+      resumeSession: (id) => this.bridge.resumeSession(id, definition.id),
       service: (name) => this.bridge.services.handle(name),
       warn: (message) => this.bridge.warn(message),
     });

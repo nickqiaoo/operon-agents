@@ -16,6 +16,23 @@ export type {
   ThinkingConfig,
 } from "./schema.ts";
 
+export {
+  SessionConfigSchema,
+  SessionMcpConfigSchema,
+  SessionPermissionConfigSchema,
+  SessionLimitsSchema,
+  parseSessionConfig,
+  resolveSessionConfig,
+  overlaySessionConfig,
+  inlineMcpSecretPaths,
+  sessionPolicyViolation,
+  normalizeHarnessConfig,
+  loadHarnessConfig,
+} from "./session-config.ts";
+export type { HarnessConfig, SessionConfig, SessionMcpConfig, SessionPermissionConfig, SessionLimits } from "./session-config.ts";
+export { SessionPolicySchema, SkillsConfigSchema, SubagentsConfigSchema } from "./schema.ts";
+export type { SessionPolicy, SkillsConfig, SubagentsConfig } from "./schema.ts";
+
 export { mergeConfigs } from "./merge.ts";
 export { Flags, FLAG_DEFINITIONS } from "./flags.ts";
 export type { FlagDefinition } from "./flags.ts";

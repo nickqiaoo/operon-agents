@@ -6,7 +6,7 @@
  * verified here is only that a server host CAN state the rule once, at the place it assembles
  * capabilities, and have it reach both the workspace servers and a session's own overlay.
  */
-import { defaultCapabilities, McpTransportNotPermittedError } from "../src/index.ts";
+import { defaultCapabilities, McpTransportNotPermittedError } from "../src/advanced.ts";
 import { McpServerConfigSchema } from "operon-agents-core";
 import type { McpServerConfig } from "operon-agents-core";
 

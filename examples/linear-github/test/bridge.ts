@@ -186,7 +186,7 @@ try {
   check("created: the session is the Linear session", sessionId === `lin-${AGENT_SESSION}`);
   check("created: ack came first", first.calls[0]?.kind === "ack", first.calls);
   check("created: the session took the issue as its title", (await client.sessions.retrieve(sessionId)).title === "ENG-7 Add a hello file");
-  check("created: the environment is the default repository (no repo label)", (await client.sessions.retrieve(sessionId)).environment.id === "acme/demo", await client.sessions.retrieve(sessionId));
+  check("created: the environment is the default repository (no repo label)", (await client.sessions.retrieve(sessionId)).environment_id === "acme/demo", await client.sessions.retrieve(sessionId));
   check("created: the clone was of that repository", reposAsked.clone[0] === "acme/demo", reposAsked.clone);
   check("created: text before tools is a thought", first.of("thought")[0] === "Looking at the issue.", first.of("thought"));
   check("created: the shell command ran and finished", first.of("action").some((a) => a.startsWith("Bash[running] git checkout")) && first.of("action").some((a) => a.startsWith("Bash[done]")), first.of("action"));
@@ -194,7 +194,11 @@ try {
   const asked = first.of("ask")[0] ?? "";
   check("created: the question reached the thread with its options", asked.includes("**Question 1 (Style):** Should the greeting be lowercase?") && asked.includes("- **No** — Keep Hello"), asked);
   check("created: nothing was posted as a final reply", first.of("respond").length === 0 && first.of("error").length === 0, first.calls);
-  check("created: the session is interrupted server-side", (await client.sessions.retrieve(sessionId)).state === "interrupted");
+  const latestStatus = async (id: string) =>
+    (await client.sessions.events.list(id, { limit: 200, order: "desc" })).data.find((e) => e.type.startsWith("session.status_"));
+  const paused = await latestStatus(sessionId);
+  check("created: the session waits on requires_action server-side",
+    paused?.type === "session.status_idle" && paused.stop_reason.type === "requires_action", paused);
   const branchInClone = git(cloneDir(sessionId), "rev-parse", "--abbrev-ref", "HEAD");
   check("created: the commit landed on the feature branch in the session's clone", branchInClone === BRANCH, branchInClone);
 
@@ -219,8 +223,8 @@ try {
   check("reply: the thought and the final reply are separate", second.of("thought")[0] === "Lowercase it is." && second.of("respond")[0] === "Opened the PR: https://github.com/acme/demo/pull/1", second.calls);
   check("reply: the PR was linked once, from the tool result", second.of("link").length === 1 && second.of("link")[0] === "Pull request https://github.com/acme/demo/pull/1", second.of("link"));
   const prResults = (await client.sessions.events.list(sessionId, { limit: 500 })).data
-    .filter((e) => e.type === "message.appended" && e.message.role === "toolResult")
-    .map((e) => (e.type === "message.appended" ? JSON.stringify(e.message.content).slice(0, 300) : ""));
+    .filter((e) => e.type === "agent.tool_result")
+    .map((e) => JSON.stringify(e.type === "agent.tool_result" ? e.content : "").slice(0, 300));
   const pushed = (() => {
     try {
       return git(origin, "rev-parse", "--verify", `refs/heads/${BRANCH}`).length === 40;
@@ -235,11 +239,13 @@ try {
   check("reply: the PR was opened on the repository the marker names", reposAsked.pull[0] === "acme/demo", reposAsked.pull);
   // The answer reached the tool: the AskUserQuestion result quotes the reply.
   const events = await client.sessions.events.list(sessionId, { limit: 500 });
-  const answered = events.data.some(
-    (e) => e.type === "message.appended" && e.message.role === "toolResult" && JSON.stringify(e.message.content).includes("lowercase please"),
+  const answered = events.data.find(
+    (e) => e.type === "agent.tool_result" && JSON.stringify(e.content).includes("lowercase please"),
   );
-  check("reply: the answer reached the paused tool call", answered);
-  check("reply: the session is idle again", (await client.sessions.retrieve(sessionId)).state === "idle");
+  check("reply: the answer reached the paused tool call", answered !== undefined);
+  check("reply: the question tool got it as the answer to its question",
+    JSON.stringify(answered).includes(JSON.stringify("Should the greeting be lowercase?").slice(1, -1)), answered);
+  check("reply: the session is idle again", (await client.sessions.retrieve(sessionId)).status === "idle");
 
   // ── 3. A review comment on the PR continues the same session ───────────────────────────
   faux.setResponses([
@@ -260,7 +266,7 @@ try {
   check("review: no second PR was opened", pulls.length === 1);
   // The model saw where the comment was left.
   const prompted = (await client.sessions.events.list(sessionId, { limit: 500 })).data.some(
-    (e) => e.type === "message.appended" && e.message.role === "user" && JSON.stringify(e.message.content).includes("on `hello.txt` line 1"),
+    (e) => e.type === "user.message" && JSON.stringify(e.content).includes("on `hello.txt` line 1"),
   );
   check("review: the prompt names the file and line", prompted);
 
@@ -298,9 +304,9 @@ try {
     promptContext: "# ENG-8 Say hi",
     author: { name: "Ada" },
   });
-  check("repo: a labelled issue's session lives in that repository", outcomeOther.status === "completed" && (await client.sessions.retrieve(sessionIdForLinear(OTHER_SESSION))).environment.id === "acme/web", outcomeOther);
+  check("repo: a labelled issue's session lives in that repository", outcomeOther.status === "completed" && (await client.sessions.retrieve(sessionIdForLinear(OTHER_SESSION))).environment_id === "acme/web", outcomeOther);
   check("repo: and cloned it", reposAsked.clone.at(-1) === "acme/web", reposAsked.clone);
-  const firstPrompt = (await client.sessions.events.list(sessionIdForLinear(OTHER_SESSION), { limit: 50 })).data.find((e) => e.type === "message.appended" && e.message.role === "user");
+  const firstPrompt = (await client.sessions.events.list(sessionIdForLinear(OTHER_SESSION), { limit: 50 })).data.find((e) => e.type === "user.message");
   check("repo: the model is told which repository it is in", JSON.stringify(firstPrompt).includes("Repository: acme/web"), firstPrompt);
   const unresolved = recorder();
   const outcomeUnresolved = await onLinearSession(unresolved.surface, {
@@ -315,13 +321,21 @@ try {
   check("repo: a label that names no repository is refused with an explanation, and no session", outcomeUnresolved.status === "refused" && unresolved.of("error")[0]?.includes('"not a repo"') === true && (await client.sessions.retrieve(sessionIdForLinear("9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a")).catch(() => null)) === null, unresolved.calls);
 
   // ── 5. Answers, in isolation ───────────────────────────────────────────────────────────
-  const approval = { kind: "approval", approvalId: "a1", frameId: "f", address: "main", agent: { key: "k", name: "n" }, toolCallId: "c1", toolName: "Bash", approvalRule: "Bash", display: { detail: "rm -rf build" } } as const;
+  const approval = { type: "agent.tool_use", id: "sevt_a1", processed_at: null, name: "Bash", input: { detail: "rm -rf build" }, evaluated_permission: "ask" } as const;
   check("answers: an approval renders the command", renderPending([approval]).includes("**Approval needed:** `Bash` — rm -rf build"));
-  check("answers: 'approve' approves", answersFor([approval], "approve")["a1"]?.kind === "approval" && (answersFor([approval], "approve")["a1"] as { decision: string }).decision === "approved");
-  const rejected = answersFor([approval], "no, that wipes the cache")["a1"] as { decision: string; feedback?: string };
-  check("answers: 'no' rejects with the rest as feedback", rejected.decision === "rejected" && rejected.feedback === "that wipes the cache", rejected);
-  const unclear = answersFor([approval], "hmm, what does that do?")["a1"] as { decision: string; feedback?: string };
-  check("answers: an unclear reply is a rejection carrying the words", unclear.decision === "rejected" && unclear.feedback === "hmm, what does that do?", unclear);
+  const approved = answersFor([approval], "approve")[0];
+  check("answers: 'approve' allows the call it blocks on",
+    approved?.type === "user.tool_confirmation" && approved.tool_use_id === "sevt_a1" && approved.result === "allow", approved);
+  const rejected = answersFor([approval], "no, that wipes the cache")[0];
+  check("answers: 'no' denies with the rest as the reason",
+    rejected?.type === "user.tool_confirmation" && rejected.result === "deny" && rejected.deny_message === "that wipes the cache", rejected);
+  const unclear = answersFor([approval], "hmm, what does that do?")[0];
+  check("answers: an unclear reply is a denial carrying the words",
+    unclear?.type === "user.tool_confirmation" && unclear.result === "deny" && unclear.deny_message === "hmm, what does that do?", unclear);
+  const questionEvent = { type: "agent.custom_tool_use", id: "sevt_q1", processed_at: null, name: "AskUserQuestion", input: { kind: "question", display: { questions: [{ question: "Which?" }] } } } as const;
+  const reply = answersFor([questionEvent], "  the second one ")[0];
+  check("answers: a question gets the reply as a custom tool result",
+    reply?.type === "user.custom_tool_result" && reply.custom_tool_use_id === "sevt_q1" && reply.content[0]?.text === "the second one", reply);
   check("marker: round-trips", sessionOfPullRequest(`body\n\n${sessionMarker("lin-abc")}\n`) === "lin-abc");
 
   // ── 6. The sandbox lifecycle (E2B mode only) ───────────────────────────────────────────

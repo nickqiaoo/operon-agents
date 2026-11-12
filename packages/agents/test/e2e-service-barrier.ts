@@ -6,7 +6,8 @@
  */
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { BarrierTimeout, createHarness, tool, type ExtensionDefinition, type Message } from "../src/index.ts";
+import { BarrierTimeout } from "../src/advanced.ts";
+import { createHarness, defineTool, type ExtensionDefinition, type Message } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -37,7 +38,7 @@ const consumer = (label: string): ExtensionDefinition<unknown, unknown, { shape:
   uses: ["shape"],
   session(api, { services }) {
     const svc = services.shape;
-    api.registerTool(tool({
+    api.registerTool(defineTool({
       name: "Shape",
       description: "Render via the shared service.",
       parameters: z.object({}),
@@ -53,9 +54,9 @@ async function reshapeHappyPath(): Promise<void> {
   const v1 = { render: () => "v1", close: () => { v1Closed = true; } };
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     services: { shape: { instance: v1, replaceable: true } },
     extensions: [consumer("old")],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const a = await harness.createSession();
   const b = await harness.createSession();
@@ -115,9 +116,9 @@ async function reshapeTimeout(): Promise<void> {
   const v1 = { render: () => "v1" };
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     services: { shape: { instance: v1, replaceable: true } },
     extensions: [consumer("old")],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const a = await harness.createSession();
 
@@ -157,9 +158,9 @@ async function streamAndReopen(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     services: { shape: { instance: { render: () => "v1" }, replaceable: true } },
     extensions: [consumer("old")],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const a = await harness.createSession();
   const b = await harness.createSession();
@@ -204,9 +205,9 @@ async function idleWakeStandDown(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     services: { shape: { instance: { render: () => "v1" }, replaceable: true } },
     extensions: [consumer("old")],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const a = await harness.createSession();
   const b = await harness.createSession();

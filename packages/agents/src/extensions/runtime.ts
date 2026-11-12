@@ -26,7 +26,7 @@ import type {
   ToolResultContent,
   Usage,
 } from "operon-agents-core";
-import { appendAudit, tagToolSource } from "operon-agents-core";
+import { appendAudit, getValidator, tagToolSource, validateValue } from "operon-agents-core";
 import type {
   ExtensionAPI,
   ExtensionActions,
@@ -131,7 +131,7 @@ export class ExtensionRuntime {
 
   /** Harness reach. Absent when the capability is built standalone (bare Runner / tests). */
   private readonly host: ExtensionHost | undefined;
-  /** This session's argument for the extension (`createSession({ params: { [id]: … } })`). */
+  /** This session's argument for the extension (`createSession({ config: { extensions: { [id]: … } } })`). */
   private readonly params: unknown;
   /** What `session.start` reports: `attach` for an extension added to a live session. */
   private readonly startReason: SessionStartReason;
@@ -646,7 +646,7 @@ export class ExtensionRuntime {
         return dispose;
       },
       registerTool: (toolOrSpec) => {
-        // A plain spec (file extensions — no framework imports, so no `tool()` helper) is
+        // A plain spec (file extensions — no framework imports, so no `defineTool` helper) is
         // expanded here; a real Tool passes through untouched.
         const tool = "schema" in toolOrSpec ? toolOrSpec : toolFromSpec(toolOrSpec);
         if (!this.live) {
@@ -785,9 +785,9 @@ export class ExtensionRuntime {
 
   /** viaHost-backed actions promise session handles; when revoked they must reject, not fake. */
   private static readonly PROMISE_ACTIONS: ReadonlySet<string> = new Set([
-    "newSession",
-    "fork",
-    "openSession",
+    "createSession",
+    "forkSession",
+    "resumeSession",
     "listSessions",
     "waitForIdle",
   ]);
@@ -888,9 +888,9 @@ export class ExtensionRuntime {
       },
 
       // ── Harness reach ──
-      newSession: (options) => runtime.viaHost(extensionId, "newSession", (host) => host.newSession(options)),
-      fork: (options) => runtime.viaHost(extensionId, "fork", (host) => host.fork(options)),
-      openSession: (id) => runtime.viaHost(extensionId, "openSession", (host) => host.openSession(id)),
+      createSession: (options) => runtime.viaHost(extensionId, "createSession", (host) => host.createSession(options, extensionId)),
+      forkSession: (options) => runtime.viaHost(extensionId, "forkSession", (host) => host.forkSession(options, extensionId)),
+      resumeSession: (id) => runtime.viaHost(extensionId, "resumeSession", (host) => host.resumeSession(id, extensionId)),
       listSessions: () => runtime.viaHost(extensionId, "listSessions", (host) => host.listSessions()),
       registerProvider: (provider) => {
         const host = runtime.host;
@@ -1033,13 +1033,19 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Expand a dependency-free {@link ExtensionToolSpec} into a Tool. Args are NOT validated —
- *  the spec form has no validator by design; `execute` owns its own input checking. */
+/** Expand a dependency-free {@link ExtensionToolSpec} into a Tool. Arguments are checked against
+ *  the spec's JSON Schema before `execute`; a schema that cannot compile fails at registration. */
 function toolFromSpec(spec: ExtensionToolSpec): Tool {
   const parameters = spec.parameters ?? { type: "object", properties: {} };
+  // The validator is draft-07, and a schema from `z.toJSONSchema` names draft 2020-12: without
+  // this, a perfectly good schema would fail to compile over its own `$schema` tag.
+  const { $schema: _dialect, ...validated } = parameters;
+  getValidator(validated);
   return {
     schema: { name: spec.name, description: spec.description, parameters, ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}) },
     resolve(rawArgs) {
+      const result = validateValue(validated, rawArgs);
+      if (!result.ok) throw new Error(`Invalid arguments for tool "${spec.name}": ${result.error}`);
       return {
         approvalRule: spec.approvalRule ?? spec.name,
         run: async (ctx) => normalizeSpecReturn(await spec.execute(rawArgs, ctx)),

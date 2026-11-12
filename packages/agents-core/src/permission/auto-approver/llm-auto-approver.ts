@@ -126,12 +126,13 @@ export class LlmAutoApprover implements AutoApprover {
     const content = `<transcript>\n${transcript}${actionLine}</transcript>\n`;
     const model = this.options.model ?? input.ctx.model;
     const signal = input.ctx.signal;
-    const mode = this.options.twoStageMode ?? "both";
+    const mode = input.autoApproval?.twoStageMode ?? this.options.twoStageMode ?? "both";
+    const system = input.autoApproval !== undefined ? buildClassifierSystemPrompt(input.autoApproval) : this.system();
 
     try {
       if (mode !== "thinking") {
         const max = this.options.stage1MaxTokens ?? DEFAULT_STAGE1_MAX_TOKENS;
-        const text = await this.runStage(model, content + XML_S1_SUFFIX, max, signal);
+        const text = await this.runStage(model, content + XML_S1_SUFFIX, max, signal, system);
         const block = parseXmlBlock(text);
         if (block === false) {
           report("allow", { stage: "fast" });
@@ -145,7 +146,7 @@ export class LlmAutoApprover implements AutoApprover {
       }
 
       const max = this.options.stage2MaxTokens ?? DEFAULT_STAGE2_MAX_TOKENS;
-      const text = await this.runStage(model, content + XML_S2_SUFFIX, max, signal);
+      const text = await this.runStage(model, content + XML_S2_SUFFIX, max, signal, system);
       const block = parseXmlBlock(text);
       if (block === null) return escalate("parse_failure", "Classifier response was unparseable.", "thinking");
       if (block === false) {
@@ -189,9 +190,9 @@ export class LlmAutoApprover implements AutoApprover {
   }
 
   /** Run one classifier stage and return its text content. Throws on a stream error. */
-  private async runStage(model: ChatModel, userText: string, maxTokens: number, signal: AbortSignal): Promise<string> {
+  private async runStage(model: ChatModel, userText: string, maxTokens: number, signal: AbortSignal, system: string): Promise<string> {
     const request: LlmRequest = {
-      systemPrompt: this.system(),
+      systemPrompt: system,
       messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
       // No thinking, so tokens aren't spent reasoning. No temperature either: providers disagree
       // on what they accept (Mistral rejects 0 without top_p 1), and a request refused here

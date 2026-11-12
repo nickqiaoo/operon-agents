@@ -5,7 +5,7 @@ export type * from "./types.ts";
 export { addUsage, emptyUsage, subtractUsage } from "./usage.ts";
 export { MaxStepsExceededError, isMaxStepsExceededError, isAbortError } from "./errors.ts";
 export { SteerBus, renderSteerText, steerOriginToPromptOrigin, buildSteerMessage, steerQueuedRecord, steerMessageFromRecord } from "./steer.ts";
-export type { SteerOrigin, SteerMessage, SteerContent, SteerContentPart, SteerBusOptions, SteerChannel, SteerReceipt, SteerOptions, SteerEnqueueListener, NowFn } from "./steer.ts";
+export type { SteerOrigin, SteerMessage, SteerContent, SteerContentPart, SteerBusOptions, SteerChannel, SteerReceipt, SteerOptions, SteerEnqueueListener, NowFn, SteerDiscardReason } from "./steer.ts";
 export {
   INTERRUPTION_STATE_KEY,
   INTERRUPTION_STATE_VERSION,

@@ -12,25 +12,27 @@ The script performs two process-shaped phases:
 
 1. Start a session and ask the agent to call `Write`.
 2. Receive `status: "interrupted"`; the file has not been written yet.
-3. Inspect the persisted `InterruptionState`, then close the session and the entire Harness.
+3. Close the session and the entire Harness; only the session id carries over.
 4. Create a fresh Harness over the same `homeDir` and call `resumeSession(sessionId)`.
-5. Answer each pending control by its globally unique `approvalId` and call
-   `session.resume(answers)`.
+5. Read what is awaiting an answer with `session.pendingInterruptions()`, answer each control by
+   its globally unique `approvalId`, and call `session.respond(answers)`.
 6. The Runner replays the appropriate log shard, validates its assistant anchor, executes the
    approved tool, and removes the `interrupt` key after the root agent completes.
 
 The application-facing loop is intentionally small:
 
 ```ts
-while (result.status === "interrupted") {
+let pending = await session.pendingInterruptions();
+while (pending.length > 0) {
   const answers = Object.fromEntries(
-    result.interruptions!.map((item) => [item.approvalId, { decision: "approved" }]),
+    pending.map((item) => [item.approvalId, { decision: "approved" as const }]),
   );
-  result = await session.resume(answers);
+  const result = await session.respond(answers);
+  pending = result.status === "interrupted" ? await session.pendingInterruptions() : [];
 }
 ```
 
-`result.interruptions` is already flattened across the paused foreground Agent tree. A parent
+`pendingInterruptions()` is already flattened across the paused foreground Agent tree. A parent
 with parallel subagents needs no special recovery API: completed siblings are in the parent log,
 while unresolved child frames surface their own `approvalId`, `agent`, and `address` here.
 
@@ -42,7 +44,7 @@ available to typed Agent callbacks but is not serialized. The second process sup
 context object when it creates its Harness; alternatively it could use:
 
 ```ts
-const session = await harness.resumeSession(sessionId, { context: freshContext });
+const session = await harness.resumeSession(sessionId, { bindings: { context: freshContext } });
 session.setContext(replacementContext); // affects subsequent prompt/resume calls
 ```
 

@@ -33,11 +33,10 @@ import { createLocalHarness } from ${JSON.stringify(join(here, "../src/index.ts"
 const faux = registerFauxProvider();
 faux.setResponses([fauxAssistantMessage("never read", { stopReason: "stop" })]);
 const harness = await createLocalHarness({
-  model: faux.getChatModel(),
+  modelManager: faux.harnessModel().modelManager,
   homeDir: ${JSON.stringify(home)},
-  workDir: ${JSON.stringify(work)},
-  permission: { mode: "yolo" },
   loadDiskProfiles: false,
+  config: { workDir: ${JSON.stringify(work)}, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } },
 });
 const session = await harness.createSession({ title: "durability" });
 const receipt = session.steerTo("main", "survive the crash", { kind: "external", source: "test-harness", actor: "peer-a", channel: "follow_up" });

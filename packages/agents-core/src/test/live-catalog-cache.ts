@@ -12,7 +12,7 @@
 import { z } from "zod";
 import { createModelManager, defineAgent, type AssistantMessage, type ChatModel } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import { tool } from "../tool/define.ts";
+import { defineTool } from "../tool/define.ts";
 import type { Tool } from "../tool/types.ts";
 import { SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
 import { testRunner } from "./faux.ts";
@@ -32,14 +32,14 @@ function check(label: string, ok: boolean): void {
 const padding = Array.from({ length: 300 }, (_, i) => `Guideline ${i + 1}: keep answers short, precise, and free of speculation.`).join("\n");
 const instructions = `You are a terse assistant. Use tools when the task needs them.\n\n${padding}`;
 
-const weather = tool({
+const weather = defineTool({
   name: "mcp__weather__get_forecast",
   description: "Get the current weather forecast for a city.",
   parameters: z.object({ city: z.string().describe("City name") }),
   accesses: ToolAccesses.none(),
   execute: ({ city }) => `${city}: sunny, 22C`,
 });
-const filler: Tool[] = Array.from({ length: 30 }, (_, i) => tool({
+const filler: Tool[] = Array.from({ length: 30 }, (_, i) => defineTool({
   name: `mcp__corp__operation_${i}`,
   description: `Internal corporate operation ${i}. `.repeat(25),
   parameters: z.object({ id: z.string().describe("Record identifier") }),

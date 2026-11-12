@@ -1,4 +1,5 @@
-import type { BackgroundTaskInfo, HarnessSession } from 'operon-agents';
+import type { BackgroundTaskInfo } from 'operon-agents/advanced';
+import type { HarnessSession } from 'operon-agents';
 import type { ProcessTerminal, TUI } from 'operon-pi-tui';
 
 import { AgentActivityViewer, formatSubagentActivityPreview } from '../components/dialogs/agent-activity-viewer.ts';

@@ -1,12 +1,11 @@
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import { FILE_UNCHANGED_STUB } from "../file-freshness.ts";
 import { detectFileType, MEDIA_SNIFF_BYTES } from "../support/file-type.ts";
 import { compressImageForModel } from "../support/image-compress.ts";
-import { decodeText, fileVersionFromInfo, fileVersionsMatch, normalizeForCompare, readTextFile } from "../support/environment-ops.ts";
+import { decodeText, readTextFile } from "../support/environment-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
-import type { FileInfo, LineEndings, Environment } from "../environment.ts";
+import type { FileInfo, Environment } from "../environment.ts";
 import type { ToolResult, ToolRunContext } from "../types.ts";
 import { makeCarriageReturnsVisible, type LineEndingStyle } from "./line-endings.ts";
 
@@ -98,7 +97,6 @@ const READ_DESCRIPTION = [
   "- Pure CRLF files are displayed with LF line endings; `Edit` and `Write`-append match this output and preserve CRLF when writing back.",
   "- Mixed or lone carriage-return line endings are shown as `\\r` and require exact `Edit.old_string` escapes.",
   "- For images, the `<system>` block summarizes the mime type, byte size and original pixel dimensions when available. When outputting coordinates, give relative coordinates first and compute absolute coordinates from the original image size. After generating or editing images via commands or scripts, read the result back before continuing.",
-  "- If the same file range is read again and the file is unchanged, Read may return a `file unchanged` stub instead of repeating the content; use the earlier Read tool result in this conversation. Ask for a different range only when you need different content.",
   "- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.",
 ].join("\n");
 
@@ -125,18 +123,6 @@ interface FinishReadResultInput {
   readonly startLine: number;
   readonly totalLines: number;
   readonly requestedLines: number;
-}
-
-interface ReadRangeKey {
-  readonly lineOffset: number;
-  readonly maxLines?: number;
-}
-
-interface ReadOutcome {
-  readonly result: ToolResult;
-  readonly fullRead: boolean;
-  readonly lineEndings: LineEndings;
-  readonly range: ReadRangeKey;
 }
 
 function truncateLine(line: string, maxLength: number): string {
@@ -238,7 +224,7 @@ function err(output: string): ToolResult {
 export const readTool = defineTool({
   name: "Read",
   description: READ_DESCRIPTION,
-  params: ReadInput,
+  parameters: ReadInput,
   async resolve(args, ctx) {
     const path = await resolveToolPath(args.path, ctx.environment, "read");
     return {
@@ -265,16 +251,6 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
     const lineOffset = args.line_offset ?? 1;
     // No `n_lines` means to the end of the file — the byte ceiling is what bounds it.
     const requestedLines = args.n_lines ?? Number.POSITIVE_INFINITY;
-    const range = rangeKeyForArgs(args);
-
-    // Dedup before anything is read: an unchanged file answers from the stat alone. A record
-    // with a range only ever comes from a successful TEXT read, so skipping the type sniff for
-    // it cannot serve the stub for an image.
-    const record = ctx.fileLedger?.get(safePath);
-    if (record?.range && rangesEqual(record.range, range)) {
-      const current = fileVersionFromInfo(info);
-      if (fileVersionsMatch(record.version, current)) return ok(FILE_UNCHANGED_STUB);
-    }
 
     // A file small enough to read whole is read ONCE, and its type sniffed off the front of those
     // same bytes. Sniffing first meant two reads of every text file — free locally, but a second
@@ -286,7 +262,6 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
     if (fileType.kind === "image") return readImageFile(args, safePath, info, environment, fileType.mimeType, whole);
     if (fileType.kind === "unknown") return err(notReadableFileOutput(args.path));
 
-    // After the dedup stub: an unchanged file answers for free no matter how large it is.
     if (args.line_offset === undefined && args.n_lines === undefined && info.size > MAX_UNPAGED_FILE_BYTES) {
       return err(
         `"${args.path}" is ${String(Math.round(info.size / 1024))} KB, over the ${String(MAX_UNPAGED_FILE_BYTES / 1024)} KB limit for reading a whole file at once. ` +
@@ -296,24 +271,9 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
 
     const rawText = whole !== undefined ? decodeText(whole, { errors: "strict" }) : await readTextFile(environment, safePath, { errors: "strict" });
 
-    const outcome =
-      lineOffset < 0
-        ? readTail(rawText, args.path, lineOffset, requestedLines, range)
-        : readForward(rawText, args.path, lineOffset, requestedLines, range);
-
-    if (outcome.result.isError !== true) {
-      ctx.fileLedger?.recordRead(safePath, {
-        version: fileVersionFromInfo(info),
-        ...(outcome.fullRead ? { content: normalizeForCompare(rawText) } : {}),
-        fullRead: outcome.fullRead,
-        range: outcome.range,
-        lineEndings: outcome.lineEndings,
-        encoding: "utf8",
-        readAt: Date.now(),
-      });
-    }
-
-    return outcome.result;
+    return lineOffset < 0
+      ? readTail(rawText, args.path, lineOffset, requestedLines)
+      : readForward(rawText, args.path, lineOffset, requestedLines);
   } catch (error) {
     if (isTextDecodeError(error)) return err(notReadableFileOutput(args.path));
     return err(error instanceof Error ? error.message : String(error));
@@ -457,43 +417,18 @@ function isJpegStartOfFrame(marker: number): boolean {
   );
 }
 
-function rangeKeyForArgs(args: ReadInput): ReadRangeKey {
-  const lineOffset = args.line_offset ?? 1;
-  return {
-    lineOffset: lineOffset < 0 ? lineOffset : lineOffset - 1,
-    ...(args.n_lines !== undefined ? { maxLines: args.n_lines } : {}),
-  };
-}
-
-function rangesEqual(a: ReadRangeKey, b: ReadRangeKey): boolean {
-  return a.lineOffset === b.lineOffset && a.maxLines === b.maxLines;
-}
-
-function toLedgerLineEndings(style: LineEndingStyle): LineEndings {
-  if (style === "crlf") return "CRLF";
-  if (style === "mixed") return "mixed";
-  return "LF";
-}
-
-function errorOutcome(result: ToolResult, range: ReadRangeKey): ReadOutcome {
-  return { result, fullRead: false, lineEndings: "LF", range };
-}
-
 /**
  * Refusal for a range whose rendered output does not fit. It names how many lines DID fit, so
  * the retry is a single obvious call (`n_lines` at or under that) rather than a guess.
  */
-function outputTooLargeOutcome(displayPath: string, startLine: number, linesThatFit: number, range: ReadRangeKey): ReadOutcome {
+function outputTooLarge(displayPath: string, startLine: number, linesThatFit: number): ToolResult {
   const suggestion =
     linesThatFit > 0
       ? `About ${String(linesThatFit)} lines from line ${String(startLine)} fit — retry with \`n_lines\` at or below that`
       : "Even a single line of this range exceeds the limit";
-  return errorOutcome(
-    err(
-      `Reading "${displayPath}" from line ${String(startLine)} produces more than ${String(MAX_BYTES / 1024)} KB of output. ` +
-        `${suggestion}, or narrow the search with Grep.`,
-    ),
-    range,
+  return err(
+    `Reading "${displayPath}" from line ${String(startLine)} produces more than ${String(MAX_BYTES / 1024)} KB of output. ` +
+      `${suggestion}, or narrow the search with Grep.`,
   );
 }
 
@@ -502,8 +437,7 @@ function readForward(
   displayPath: string,
   lineOffset: number,
   limit: number,
-  range: ReadRangeKey,
-): ReadOutcome {
+): ToolResult {
   const selectedEntries: ReadLineEntry[] = [];
   const flags: LineEndingFlags = { hasCrLf: false, hasLf: false, hasLoneCr: false };
   let currentLineNo = 0;
@@ -511,7 +445,7 @@ function readForward(
   // The whole file is walked even once `limit` is met: `totalLines` in the footer is the
   // file's real length, not how far the read happened to get.
   for (const rawLine of readLinesStrict(text)) {
-    if (containsNulByte(rawLine)) return errorOutcome(err(notReadableFileOutput(displayPath)), range);
+    if (containsNulByte(rawLine)) return err(notReadableFileOutput(displayPath));
     currentLineNo += 1;
     updateLineEndingFlags(flags, rawLine);
     if (currentLineNo < lineOffset || selectedEntries.length >= limit) continue;
@@ -527,14 +461,14 @@ function readForward(
     const rendered = renderLine(entry, lineEndingStyle);
     const lineBytes = renderedLineBytes(rendered.line, renderedLines.length === 0);
     if (bytes + lineBytes > MAX_BYTES) {
-      return outputTooLargeOutcome(displayPath, lineOffset, renderedLines.length, range);
+      return outputTooLarge(displayPath, lineOffset, renderedLines.length);
     }
     if (rendered.wasTruncated) truncatedLineNumbers.push(entry.lineNo);
     renderedLines.push(rendered.line);
     bytes += lineBytes;
   }
 
-  const result = finishReadResult({
+  return finishReadResult({
     renderedLines,
     truncatedLineNumbers,
     lineEndingStyle,
@@ -542,15 +476,6 @@ function readForward(
     totalLines: currentLineNo,
     requestedLines: limit,
   });
-  return {
-    result,
-    // Every line of the file, none of them cut short. Reaching a limit no longer produces a
-    // result at all, so the only ways to fall short here are an offset past line 1 or an
-    // over-long line that had to be clipped.
-    fullRead: lineOffset === 1 && truncatedLineNumbers.length === 0 && renderedLines.length === currentLineNo,
-    lineEndings: toLedgerLineEndings(lineEndingStyle),
-    range,
-  };
 }
 
 function readTail(
@@ -558,15 +483,14 @@ function readTail(
   displayPath: string,
   lineOffset: number,
   limit: number,
-  range: ReadRangeKey,
-): ReadOutcome {
+): ToolResult {
   const tailCount = Math.abs(lineOffset);
   const entries: ReadLineEntry[] = [];
   const flags: LineEndingFlags = { hasCrLf: false, hasLf: false, hasLoneCr: false };
   let currentLineNo = 0;
 
   for (const rawLine of readLinesStrict(text)) {
-    if (containsNulByte(rawLine)) return errorOutcome(err(notReadableFileOutput(displayPath)), range);
+    if (containsNulByte(rawLine)) return err(notReadableFileOutput(displayPath));
     currentLineNo += 1;
     updateLineEndingFlags(flags, rawLine);
     entries.push({ lineNo: currentLineNo, rawContent: stripTrailingLf(rawLine) });
@@ -587,14 +511,14 @@ function readTail(
     if (bytes + lineBytes > MAX_BYTES) {
       // A tail read that does not fit is refused like any other range. Silently keeping the
       // last N that fit would answer "the last 500 lines" with some other number of lines.
-      return outputTooLargeOutcome(displayPath, candidate.entry.lineNo, renderedLines.length, range);
+      return outputTooLarge(displayPath, candidate.entry.lineNo, renderedLines.length);
     }
     renderedLines.push(candidate.rendered.line);
     if (candidate.rendered.wasTruncated) truncatedLineNumbers.push(candidate.entry.lineNo);
     bytes += lineBytes;
   }
 
-  const result = finishReadResult({
+  return finishReadResult({
     renderedLines,
     truncatedLineNumbers,
     lineEndingStyle,
@@ -602,12 +526,6 @@ function readTail(
     totalLines: currentLineNo,
     requestedLines: limit,
   });
-  return {
-    result,
-    fullRead: false,
-    lineEndings: toLedgerLineEndings(lineEndingStyle),
-    range,
-  };
 }
 
 function finishReadResult(input: FinishReadResultInput): ToolResult {

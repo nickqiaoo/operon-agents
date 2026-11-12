@@ -6,4 +6,8 @@
  * No stability guarantees — prefer the main `operon-agents` surface.
  */
 export * from "operon-agents-core/internal";
-export { setHarnessCloseTimeoutsForTest } from "./harness.ts";
+export { setHarnessCloseTimeoutsForTest } from "./harness-test-hooks.ts";
+export { hasFireWithinYears } from "./cron/cron-expr.ts";
+export { jitteredNextCronRunMs, oneShotJitteredNextCronRunMs } from "./cron/jitter.ts";
+export { SYSTEM_CLOCKS, mutableClock } from "./cron/clock.ts";
+export type { ClockSources, MutableClock } from "./cron/clock.ts";

@@ -41,7 +41,7 @@ export interface FauxChatProvider extends FauxProviderHandle {
   getChatModel(): ChatModel;
   getChatModel(modelId: string): ChatModel | undefined;
   /** The `model` and `modelManager` a harness needs to run on this provider. */
-  harnessModel(): { readonly model: string; readonly modelManager: ModelManager };
+  harnessModel(): { readonly config: { readonly defaults: { readonly model: string } }; readonly modelManager: ModelManager };
   unregister(): void;
 }
 
@@ -69,7 +69,7 @@ export function registerFauxProvider(
     ...handle,
     runtime,
     getChatModel: getChatModel as FauxChatProvider["getChatModel"],
-    harnessModel: () => ({ model: `${handle.provider.id}/${handle.getModel().id}`, modelManager: runtime }),
+    harnessModel: () => ({ config: { defaults: { model: `${handle.provider.id}/${handle.getModel().id}` } }, modelManager: runtime }),
     unregister(): void {
       runtime.models.deleteProvider(handle.provider.id);
     },

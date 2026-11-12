@@ -1,7 +1,6 @@
 import { recoverOrphanedTurns } from "./lifecycle-recovery.ts";
 import { readSessionTails } from "../events/projection.ts";
 import type { Environment } from "../tool/environment.ts";
-import { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { ChatModel } from "../llm/define-model.ts";
 import type { ThinkingLevel } from "../llm/model.ts";
 import type { PermissionMode, PermissionPolicy, Responder } from "../permission/types.ts";
@@ -36,6 +35,8 @@ import {
   isCheckpointRecord,
   readAudit,
   SESSION_PERMISSION_KEY,
+  SESSION_MODEL_KEY,
+  SESSION_THINKING_KEY,
   SESSION_USAGE_KEY,
   type SessionStore,
 } from "../store/index.ts";
@@ -211,8 +212,6 @@ export interface PlanModeOptions {
 export interface SessionPort {
   readonly store?: SessionStore;
   readonly logger: Logger;
-  /** Per-address file-freshness ledger (read-before-write state shared across turns). */
-  fileLedgerFor(address: string): FileFreshnessLedger;
   /** Session model override; wins over the agent's own model. */
   readonly modelSetting: string | ChatModel | undefined;
   readonly thinkingSetting: ThinkingLevel | undefined;
@@ -236,6 +235,8 @@ export interface SessionPort {
    * from what is stored for its address. Requires a store.
    */
   openFrameContext(address: string): Promise<ConversationContext>;
+  /** The id of the turn about to start at `address`, numbered across the session's whole life. */
+  nextTurnId(address: string): string;
   /** Add one root-agent turn's usage to the session's running total and return the new total. */
   addSessionUsage(usage: Usage): Usage;
   /** Persist the session's runtime permission state after a grant was applied in memory. */
@@ -298,10 +299,6 @@ export class Session implements SessionPort {
   // Rebuildable cache of the leaf reached by following durable `agent.handoff` records from
   // `main`. Storeless sessions keep the same state here for their in-memory lifetime.
   private activeConversationHead: ConversationHead | undefined;
-  // File freshness ledger per address (mirrors liveContexts): each agent line — main agent and
-  // every subagent — has its own read-before-write state, persisted across turns/runs. A subagent
-  // has not "read" what its parent read, so ledgers are never shared across addresses.
-  private readonly fileLedgers = new Map<string, FileFreshnessLedger>();
   private modelOverride?: string | ChatModel;
   /** Caller-supplied one-shot log for open (see SessionOpenOptions.preloadedLog); cleared after
    *  provisionCapabilities so the array itself is not pinned for the session's lifetime. */
@@ -393,6 +390,9 @@ export class Session implements SessionPort {
         address: "main",
         sessionId: id,
       }));
+    this.steer.setDiscardListener((item, reason) => {
+      void this.events.emit({ type: "steer.discarded", steerId: item.id, reason, address: "main", sessionId: id });
+    });
     // Env fallback (`AGENTS_LOG`) is resolved here so every entry point — direct `Session.open`,
     // the Runner's ephemeral session, or the harness — honors it from one place. The harness
     // normally passes its logger in; a session opened directly has nothing else to fall back on.
@@ -403,6 +403,23 @@ export class Session implements SessionPort {
   }
 
   private lifecycleRecovered = false;
+  /** The number of the last turn handed out at each address — see `nextTurnId`. */
+  private readonly turnNumbers = new Map<string, number>();
+
+  /**
+   * The id of the turn about to start at `address`: `<session>-t<n>`, where `n` counts every turn
+   * that address has had since the session was created, across runs and across reopens.
+   *
+   * Nothing is stored for it. Each turn already journals a `turn.started`, the log's lifecycle is
+   * folded per address when a shard is restored, and a checkpoint carries the count of the turns
+   * behind it — so the count is there to read. What is kept here only covers a turn whose record
+   * has not reached the log yet.
+   */
+  nextTurnId(address: string): string {
+    const number = Math.max(this.turnNumbers.get(address) ?? 0, this.checkpointing?.turnsStarted(address) ?? 0) + 1;
+    this.turnNumbers.set(address, number);
+    return `${this.id}-t${number}`;
+  }
 
   /**
    * Reconcile a cold session before its first run. The caller MUST hold this session's
@@ -542,10 +559,12 @@ export class Session implements SessionPort {
     }
     this.provisionedCapabilities = opened;
     this.openedForClose = opened;
-    const [usage, permission] = this.store === undefined
-      ? [undefined, undefined]
-      : await Promise.all([this.store.getState(SESSION_USAGE_KEY), this.store.getState(SESSION_PERMISSION_KEY)]);
+    const [usage, permission, model, thinking] = this.store === undefined
+      ? [undefined, undefined, undefined, undefined]
+      : await Promise.all([this.store.getState(SESSION_USAGE_KEY), this.store.getState(SESSION_PERMISSION_KEY), this.store.getState(SESSION_MODEL_KEY), this.store.getState(SESSION_THINKING_KEY)]);
     if (usage !== null && usage !== undefined) this.totalUsage = usage as Usage;
+    if (typeof model === "string") this.modelOverride = model;
+    if (typeof thinking === "string") this.thinkingOverride = thinking as ThinkingLevel;
     this.buildPermissionManager(opened, (permission ?? undefined) as PermissionState | undefined);
     // A session opened without the workflow capability still needs ONE manager per session (the
     // resume journals of every workflow run in the session must land in the same store).
@@ -1042,17 +1061,6 @@ export class Session implements SessionPort {
     this.invalidateConversationHead();
   }
 
-  /** The file freshness ledger for one agent line (address); created on first use and kept for
-   *  the session lifetime, so read-before-write state survives across turns and run() calls. */
-  fileLedgerFor(address: string): FileFreshnessLedger {
-    let ledger = this.fileLedgers.get(address);
-    if (ledger === undefined) {
-      ledger = new FileFreshnessLedger();
-      this.fileLedgers.set(address, ledger);
-    }
-    return ledger;
-  }
-
   /** Resolve environment + AGENTS.md for the active runtime frame, cached for this Session. */
   resolveSystemPromptContext(environment: Environment): Promise<SystemPromptContext> {
     return this.systemPromptContexts.resolve(environment, this.compactionView?.revision ?? 0);
@@ -1083,11 +1091,17 @@ export class Session implements SessionPort {
     this.ownController.abort(abortReason(reason ?? "session aborted"));
   }
 
+  /** Switch the session's model. A `provider/model` id survives a reopen; a built `ChatModel` cannot. */
   setModel(model: string | ChatModel): void {
     this.modelOverride = model;
+    void this.durable.write(SESSION_MODEL_KEY, () => (typeof this.modelOverride === "string" ? this.modelOverride : null));
+  }
+  setDefaultThinking(level: ThinkingLevel): void {
+    this.thinkingOverride ??= level;
   }
   setThinking(level: ThinkingLevel): void {
     this.thinkingOverride = level;
+    void this.durable.write(SESSION_THINKING_KEY, () => this.thinkingOverride);
   }
   /**
    * Switch the permission mode. Takes effect in memory immediately — policies read the

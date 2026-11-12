@@ -4,7 +4,7 @@
  * `Team`), and an ordinary delegation (`Agent`) never enters the peer world at all.
  *
  * The host wrote no factory: `peers({ teammates })` says what a "schema" teammate IS (its session
- * options) and the extension's own `harness` half spawns it, tagged a member through `params`.
+ * options) and the extension's own `harness` half spawns it, tagged a member through `config.extensions.peers`.
  */
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "../../agents/test/faux.ts";
 import { createHarness, type ExtensionDefinition } from "operon-agents";
@@ -12,7 +12,7 @@ import { defineAgent } from "operon-agents-core";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle } from "../src/index.ts";
 
 /** Born a member: the per-session param `peers()` reads to mount the Hub with this identity. */
-const asMember = (member: PeerMemberOptions) => ({ params: { [PEERS_SERVICE]: { member } } });
+const asMember = (member: PeerMemberOptions) => ({ config: { extensions: { [PEERS_SERVICE]: { member } } } });
 
 /** A harness-wide observer: every session (spawned teammates included) records what entered its
  *  conversation, keyed by session id — the test's window into sessions it did not create. */
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
 
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
+    resolveSession: (request) => request.source !== undefined ? { bindings: { agent: helperRole } } : {},
     extensions: [
       peers({
         visibility: sharedLabelVisibility,
@@ -60,13 +60,16 @@ async function main(): Promise<void> {
       }),
       spy,
     ],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
   const rosterEntry = async (id: string) => (await net.list()).find((ref) => ref.agentId === id || ref.name === id);
 
   const helperRole = defineAgent({ name: "helper", model, instructions: "Do quick work." });
   const leadAgent = defineAgent({ name: "lead", model, instructions: "Coordinate.", subagents: [helperRole] });
-  const lead = await harness.createSession({ agent: leadAgent });
+  const lead = await harness.createSession({
+    bindings: { agent: leadAgent }
+  });
 
   // ── Form a team, spawn a member ─────────────────────────────────────────────────────────
   let leadTools: string[] = [];

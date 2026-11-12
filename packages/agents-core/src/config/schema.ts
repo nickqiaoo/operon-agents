@@ -141,7 +141,58 @@ export const PluginRefSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
+// ── Session-overridable pieces shared by the harness file and `SessionConfig` ──────────────
+
+/** `false` turns skills off for the session; an object is handed to the skills capability. */
+export const SkillsConfigSchema = z.union([
+  z.literal(false),
+  z.strictObject({ roots: z.array(z.string()).optional(), includeDefaultRoots: z.boolean().optional() }),
+]);
+
+/** `false` turns subagents (and the Agent/Workflow tools) off for the session. */
+export const SubagentsConfigSchema = z.union([
+  z.literal(false),
+  z.strictObject({ workflowTool: z.boolean().optional(), maxConcurrent: z.number().int().positive().optional() }),
+]);
+
+/**
+ * What no session configuration can override: the host's statement about every session it opens.
+ * Lives on the harness (`HarnessConfig.policy`), never on a session.
+ */
+export const SessionPolicySchema = z.strictObject({
+  /** Every session is one tenant's among many: nothing process-shared reaches it, MCP over http only,
+   *  and it must bring its own environment. */
+  strictIsolation: z.boolean().optional(),
+  allowedMcpTransports: z.array(z.enum(["stdio", "http"])).optional(),
+  /** Let a session's stored configuration carry inline MCP secrets (`headers`, `env`,
+   *  `oauth.clientSecret`). Off by default; ignored under `strictIsolation`. */
+  allowInlineMcpSecrets: z.boolean().optional(),
+  permission: z
+    .strictObject({
+      /** Modes a session may run in. A mode outside the list is refused, never downgraded. */
+      allowedModes: z.array(z.enum(["manual", "workspace", "yolo", "auto"])).optional(),
+      /** Rules in force for every session, appended after the session's own. */
+      rules: z.array(PermissionRuleConfigSchema).optional(),
+    })
+    .optional(),
+});
+
 export const AgentFrameworkConfigSchema = z.object({
+  /** Default model for sessions that name none: a `provider/model` id. */
+  model: z.string().min(1).optional(),
+  /** Name of a registered agent sessions run by default. */
+  agent: z.string().min(1).optional(),
+  /** Names of the registered tools the default agent may draw on by default (see `SessionConfig.tools`). */
+  tools: z.array(z.string().min(1)).optional(),
+  appendSystemPrompt: z.string().optional(),
+  /** Per-extension session parameters by extension id; `false` skips that extension. */
+  extensions: z.record(z.string(), z.unknown()).optional(),
+  skills: SkillsConfigSchema.optional(),
+  subagents: SubagentsConfigSchema.optional(),
+  policy: SessionPolicySchema.optional(),
+  eventPublication: z.enum(["immediate", "committed"]).optional(),
+  /** Default working directory for new sessions. */
+  workDir: z.string().min(1).optional(),
   permission: PermissionConfigSchema.default({ rules: [] }),
   loopControl: LoopControlSchema.default({}),
   thinking: ThinkingConfigSchema.optional(),
@@ -164,6 +215,9 @@ export type McpOAuthClientConfig = z.infer<typeof McpOAuthClientConfigSchema>;
 export type HookDefConfig = z.infer<typeof HookDefConfigSchema>;
 export type PluginRef = z.infer<typeof PluginRefSchema>;
 export type AgentFrameworkConfig = z.infer<typeof AgentFrameworkConfigSchema>;
+export type SessionPolicy = z.infer<typeof SessionPolicySchema>;
+export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
+export type SubagentsConfig = z.infer<typeof SubagentsConfigSchema>;
 
 export function parseConfig(input: unknown): AgentFrameworkConfig {
   return AgentFrameworkConfigSchema.parse(input ?? {});

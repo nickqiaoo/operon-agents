@@ -9,7 +9,8 @@ are the same; what changed is the one file that talks to the agent
 
 - Each conversation is a managed session: the conversation ID *is* the session ID, the
   session's event log is the transcript, and the chat server stores nothing.
-- Token streaming (`assistant.delta`) types the reply out; tool calls stream to a live
+- Live previews (`event_deltas[]=agent.message`: `event_start` / `event_delta`) type the reply
+  out; tool calls stream to a live
   activity feed and stay in the transcript as a collapsible trace; each research turn ends
   with a "brief ready" card.
 - No third-party credentials: the Chat SDK **web adapter** talks to the page in this repo.
@@ -52,40 +53,46 @@ HTTP surface as the page drives it -- and needs no keys.
 ```
 useChat POST /api/chat ─► Chat SDK web adapter ─► bot.onDirectMessage ─► runTurn
                                                                             │
-   events.list(limit 1, desc) ──► events.stream({ after })  ◄───────────────┤  1. open the stream past the history
-   messages.create({ mode: "follow_up" }) ──► steerId       ◄───────────────┤  2. send
+   events.list(desc) ── requires_action? ─── "stuck on approval" ───────────┤  0. a parked session takes nothing
+   events.stream({ event_deltas: ["agent.message"] })  ◄────────────────────┤  1. open the live stream
+   events.send({ events: [user.message] }) ──► event id    ◄────────────────┤  2. send
                                                                             │
-   turn.started / message.appended(origin.steerId)     ── anchor ───────────┤  3. find OUR turn (older leftovers are skipped)
-   assistant.delta ─────────────────────────── streamed bubble ─────────────┤
-   message.appended(assistant) ─────────────── authoritative text ──────────┤
-   tool.call.started / tool.result ─────────── activity feed + kept trace ──┤
-   turn.ended(completed) / turn.paused ─────── done, or "stuck on approval" ┘
+   user.message(id, processed_at set)    ────── anchor ─────────────────────┤  3. our message reached the
+                                                                            │     conversation (older leftovers skipped)
+   event_start / event_delta ──────────────── streamed bubble ──────────────┤
+   agent.message (same id) ────────────────── authoritative text ───────────┤
+   span.model_request_end, preview unmatched ─ bubble marked "cut off" ─────┤
+   agent.tool_use / agent.tool_result ─────── activity feed + kept trace ───┤
+   session.status_idle(end_turn | requires_action) ── done, or "stuck" ─────┘
 ```
 
 The live bridge and the replay (`historyOf`) apply the same rules -- same text joining, same
-tool labels, same "only a cleanly ended turn gets its trace and card" gate -- so a reopened
-chat looks exactly like it did live. The replay folds the log through `SessionProjection`,
-the engine's own reducer, so compaction is handled the way a reopened session handles it.
+tool labels, same "only a cleanly ended turn gets its trace and card" gate, same timing from
+the events' `processed_at` -- so a reopened chat looks exactly like it did live. The replay
+reads the session's event history; previews are never in it, and each one folds into the
+`agent.message` that carries its id. A preview whose request ended without its message (it
+failed after streaming and was retried) was never persisted: live, its bubble is marked as cut
+off -- deleted outright on platforms that can delete a sent message -- and the replay simply
+does not have it.
 
 ## What is different from the Anthropic quickstart
 
 | | Claude Managed Agents | operon managed agents |
 | - | - | - |
 | Provisioning | `npm run setup` creates an agent + environment, IDs go in `.env` | The agent and environment are registered in `server/main.ts`; nothing to provision |
-| Send | `events.send({ events: [user.message] })` | `messages.create({ input, mode: "follow_up" })` |
-| Stream | live only, `event_deltas[]` opt-in for previews | replays history then follows live; deltas always on; resumable with `after` |
-| Turn events | `agent.message`, `agent.tool_use`, `session.status_idle` | `message.appended`, `tool.call.started`, `turn.ended` |
-| Approval dead end | `stop_reason: requires_action` | `turn.paused` (no `turn.ended` follows) / 409 on send |
-| Rename | `sessions.update({ title })` | `sessions.update({ title })` (added for this example: `PATCH /v1/sessions/{id}`) |
+| Send | `events.send({ events: [user.message] })` | the same |
+| Stream | live only, `event_deltas[]` opt-in for previews | the same; the client reconnects and fills gaps from the history |
+| Turn events | `agent.message`, `agent.tool_use`, `session.status_idle` | the same |
+| Approval dead end | `stop_reason: requires_action` | the same; a message sent meanwhile is held until it is answered |
+| Rename | `sessions.update({ title })` | the same |
 
 ## What the model is told
 
-A chat message is the colleague's own words, and that is how it reaches the model:
-`messages.create` delivers it as the session's user (the default, `origin: "user"`), journaled
-bare, exactly as a prompt typed into a local session would be. The envelope the engine puts
-around *relayed* input -- `<external-message>` stamped "NOT a message from the user", for a peer
-or a webhook passing on someone else's words -- is what `origin: "external"` asks for; the chat
-never does. Transcripts recorded before the managed API could deliver the user's own words still
+A chat message is the colleague's own words, and that is how it reaches the model: a
+`user.message` is delivered as the session's user, journaled bare, exactly as a prompt typed
+into a local session would be. The envelope the engine puts around *relayed* input --
+`<external-message>` stamped "NOT a message from the user", for a peer or a webhook passing on
+someone else's words -- never applies to it. Transcripts recorded before the managed API could deliver the user's own words still
 hold that envelope, so the display strips it (`userTextOf`) and old and new sessions read the
 same.
 
@@ -93,10 +100,10 @@ same.
 
 The analyst's tools (`WebSearch`, `FetchURL`) are always allowed by policy, and the harness
 runs in `workspace` permission mode. If you add a tool that asks (a shell, an editor), the
-chat has no approval surface: the session parks on the question, the server refuses further
-input (409), and the bridge tells the user to start a new chat. Answer such interruptions
-with `client.sessions.resume()` from somewhere that can -- or don't add those tools to a
-bot that reads untrusted web pages.
+chat has no approval surface: the session parks on the question (`requires_action`), holds
+further input until it is answered, and the bridge tells the user to start a new chat. Answer
+such pauses with a `user.tool_confirmation` (or `user.custom_tool_result`) from somewhere that
+can -- or don't add those tools to a bot that reads untrusted web pages.
 
 ## Going to a chat platform
 

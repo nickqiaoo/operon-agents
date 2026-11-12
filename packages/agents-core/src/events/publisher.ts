@@ -292,6 +292,7 @@ function isPersistedLifecycleEvent(event: AgentEvent): event is AgentEvent & imp
     case "turn.ended":
     case "turn.paused":
     case "steer.queued":
+    case "steer.discarded":
     case "tool.detachable":
     case "tool.suspended":
       return true;
@@ -314,6 +315,8 @@ function lifecycleBody(event: AgentEvent & import("./events.ts").PersistedLifecy
       return { type: event.type, pending: event.pending };
     case "steer.queued":
       return { type: event.type, steerId: event.steerId, channel: event.channel, origin: event.origin, message: event.message };
+    case "steer.discarded":
+      return { type: event.type, steerId: event.steerId, reason: event.reason };
     case "tool.detachable":
       return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
     case "tool.suspended":

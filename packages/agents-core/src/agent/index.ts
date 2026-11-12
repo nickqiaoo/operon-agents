@@ -1,4 +1,6 @@
 export { Agent, defineAgent } from "./agent.ts";
+export { SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError } from "./errors.ts";
+export type { OutputSchema } from "./agent.ts";
 export type { AgentConfig, AgentGuardrails, AgentRunContext } from "./agent.ts";
 
 export { Handoff, handoff, getTransferMessage, toFunctionToolName } from "./handoff.ts";
@@ -91,16 +93,20 @@ export type {
 export { Runner } from "./runner.ts";
 export type {
   AgentInput,
+  CompletedRunResult,
+  FailedRunResult,
+  GuardrailBlockedRunResult,
+  InterruptedRunResult,
   ResumeInput,
-  RunInterruption,
+  RunError,
   RunnerConfig,
   RunOptions,
   RunResult,
   RunStatus,
+  StoppedRunResult,
 } from "./runner.ts";
 
 // Workflow engine (the deterministic subagent-orchestration runtime) + its manager
 // and snapshot/journal layers, exposed so upper layers can integrate programmatically.
 export * from "./workflow/index.ts";
 
-export { closeOrphanedTurns, recoverOrphanedTurns } from "./lifecycle-recovery.ts";

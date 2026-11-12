@@ -3,28 +3,23 @@
  * statements.
  *
  * Every operation is ONE statement, and the conditions in their WHERE clauses are the whole
- * mechanism: `claim` and `acquire` only touch a row whose lease is absent or expired, `renew`
- * and `release` only a row this holder still owns at this fence. `FOR UPDATE SKIP LOCKED` is
- * what lets any number of workers claim at once without handing two of them the same session
- * and without making them wait for each other.
+ * mechanism: `claim` and `acquire` only touch a row whose lease is absent or expired; fenced
+ * writes only land while this holder still owns the row at this fence. `FOR UPDATE SKIP LOCKED`
+ * is what lets any number of workers claim at once without handing two of them the same
+ * session and without making them wait for each other.
  *
- * ## Why a table and not a queue
- *
- * An agent turn runs for minutes, must be exclusive, and can be cancelled from outside while it
- * runs. A queue hands a message to a consumer; it has no notion of "the consumer is still on
- * it" or "tell that consumer something". The lease does both: it IS the claim, and its heartbeat
- * is the channel back to the holder. Postgres already holds the log, so this costs no second
- * system and no second source of truth — the wake and the record it announces are one commit.
+ * The history lives next to the lease (`<table>_events`), not in the framework's journal: what
+ * a client sent and what it is shown are the managed layer's records, in its own vocabulary.
  */
-import type { AgentRecord, PgExecutor, PgSessionRepository } from "operon-agents";
-import type { SessionWork, WorkLease } from "./work.ts";
+import type { PgExecutor } from "operon-agents/advanced";
+import type { ManagedEventResource } from "../protocol/types.ts";
+import type { InboxEntry } from "./inbox.ts";
+import { WorkLeaseLostError, type EventPage, type EventPageOptions, type SessionWork, type WorkLease } from "./work.ts";
 
 const DEFAULT_TTL_MS = 30_000;
 
 export interface PgSessionWorkOptions {
   readonly pool: PgExecutor;
-  /** The repository the log lives in — `append` joins its write and the wake in one transaction. */
-  readonly repository: PgSessionRepository;
   /** Identifies this holder in the table. Use something a restart changes — a pod name plus a
    *  boot id — so a restarted node does not look like its old self. */
   readonly ownerId: string;
@@ -49,33 +44,146 @@ ALTER TABLE ${table} DROP COLUMN IF EXISTS pending_since;
 CREATE INDEX IF NOT EXISTS ${table}_claim_idx
   ON ${table} (lease_until)
   WHERE woken OR lease_owner IS NOT NULL;
+CREATE TABLE IF NOT EXISTS ${table}_events (
+  sequence     BIGSERIAL PRIMARY KEY,
+  session_id   TEXT NOT NULL,
+  event_id     TEXT NOT NULL,
+  input        BOOLEAN NOT NULL,
+  payload      JSONB NOT NULL,
+  accepted_at  TIMESTAMPTZ,
+  processed_at TIMESTAMPTZ,
+  UNIQUE (session_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS ${table}_events_session_idx ON ${table}_events (session_id, sequence);
+CREATE INDEX IF NOT EXISTS ${table}_events_pending_idx
+  ON ${table}_events (session_id, sequence)
+  WHERE input AND processed_at IS NULL;
 `;
 }
 
 export class PgSessionWork implements SessionWork {
   private readonly pool: PgExecutor;
-  private readonly repository: PgSessionRepository;
   private readonly ownerId: string;
   private readonly table: string;
+  private readonly events: string;
   private readonly ttlMs: number;
 
   constructor(options: PgSessionWorkOptions) {
     this.pool = options.pool;
-    this.repository = options.repository;
     this.ownerId = options.ownerId;
     this.table = options.table ?? "session_work";
+    this.events = `${this.table}_events`;
     this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
   }
 
-  async append(sessionId: string, record: AgentRecord): Promise<void> {
-    await this.repository.transaction(async (tx) => {
-      await tx.store(sessionId).appendRecord(record);
-      await tx.exec.query(
-        `INSERT INTO ${this.table} (session_id, woken) VALUES ($1, true)
-         ON CONFLICT (session_id) DO UPDATE SET woken = true`,
-        [sessionId],
-      );
+  async append(sessionId: string, entries: readonly InboxEntry[]): Promise<void> {
+    // One statement: the events and the wake commit together, so no claim can see the wake
+    // without the events or the events without the wake.
+    await this.pool.query(
+      `WITH wake AS (
+         INSERT INTO ${this.table} (session_id, woken) VALUES ($1, true)
+         ON CONFLICT (session_id) DO UPDATE SET woken = true
+         RETURNING session_id)
+       INSERT INTO ${this.events} (session_id, event_id, input, payload, accepted_at)
+       SELECT wake.session_id, entry->>'id', true, entry - 'processed_at' - 'accepted_at',
+              to_timestamp((entry->>'accepted_at')::double precision / 1000)
+         FROM wake CROSS JOIN jsonb_array_elements($2::jsonb) WITH ORDINALITY AS t(entry, n)
+        ORDER BY n`,
+      [sessionId, JSON.stringify(entries.map((entry) => ({ ...entry.event, accepted_at: entry.acceptedAt })))],
+    );
+  }
+
+  async wake(sessionId: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ${this.table} (session_id, woken) VALUES ($1, true)
+       ON CONFLICT (session_id) DO UPDATE SET woken = true`,
+      [sessionId],
+    );
+  }
+
+  async pending(sessionId: string): Promise<readonly InboxEntry[]> {
+    const { rows } = await this.pool.query(
+      `SELECT payload, accepted_at FROM ${this.events}
+        WHERE session_id = $1 AND input AND processed_at IS NULL
+        ORDER BY sequence`,
+      [sessionId],
+    );
+    return rows.map((row) => {
+      const { accepted_at: _, ...event } = json(row.payload);
+      return {
+        event: { ...event, processed_at: null } as InboxEntry["event"],
+        acceptedAt: new Date(row.accepted_at as string).getTime(),
+      };
     });
+  }
+
+  async acknowledge(sessionId: string, ids: readonly string[], fence: number): Promise<void> {
+    const { rows } = await this.pool.query(
+      `WITH holder AS (${this.holderQuery()}),
+            done AS (
+              UPDATE ${this.events} SET processed_at = now()
+               WHERE session_id IN (SELECT session_id FROM holder)
+                 AND event_id = ANY($4::text[]) AND input AND processed_at IS NULL)
+       SELECT session_id FROM holder`,
+      [sessionId, this.ownerId, fence, [...ids]],
+    );
+    if (rows.length === 0) throw new WorkLeaseLostError(sessionId);
+  }
+
+  async recordOutput(sessionId: string, events: readonly ManagedEventResource[], fence: number): Promise<void> {
+    if (events.length === 0) return;
+    const { rows } = await this.pool.query(
+      `WITH holder AS (${this.holderQuery()}),
+            saved AS (
+              INSERT INTO ${this.events} (session_id, event_id, input, payload, processed_at)
+              SELECT holder.session_id, e->>'id', false, e - 'processed_at', now()
+                FROM holder CROSS JOIN jsonb_array_elements($4::jsonb) WITH ORDINALITY AS t(e, n)
+               ORDER BY n
+              ON CONFLICT (session_id, event_id) DO NOTHING)
+       SELECT session_id FROM holder`,
+      [sessionId, this.ownerId, fence, JSON.stringify(events)],
+    );
+    if (rows.length === 0) throw new WorkLeaseLostError(sessionId);
+  }
+
+  async listEvents(sessionId: string, options: EventPageOptions): Promise<EventPage> {
+    const descending = options.order === "desc";
+    const params: unknown[] = [sessionId, options.limit + 1];
+    let bound = "";
+    if (options.page !== undefined) {
+      params.push(options.page);
+      bound = `AND sequence ${descending ? "<" : ">"} $3::bigint`;
+    }
+    const { rows } = await this.pool.query(
+      `SELECT sequence, payload, accepted_at, processed_at FROM ${this.events}
+        WHERE session_id = $1 ${bound}
+        ORDER BY sequence ${descending ? "DESC" : "ASC"}
+        LIMIT $2`,
+      params,
+    );
+    const page = rows.slice(0, options.limit);
+    return {
+      data: page.map((row) => toResource(row)),
+      ...(rows.length > options.limit ? { next: String(page.at(-1)!.sequence) } : {}),
+    };
+  }
+
+  async latestStatus(sessionId: string): Promise<ManagedEventResource | undefined> {
+    const { rows } = await this.pool.query(
+      `SELECT payload, accepted_at, processed_at FROM ${this.events}
+        WHERE session_id = $1 AND NOT input AND payload->>'type' LIKE 'session.status\\_%'
+        ORDER BY sequence DESC LIMIT 1`,
+      [sessionId],
+    );
+    return rows[0] === undefined ? undefined : toResource(rows[0]);
+  }
+
+  async purge(sessionId: string): Promise<void> {
+    await this.pool.query(
+      `WITH gone AS (DELETE FROM ${this.events} WHERE session_id = $1)
+       DELETE FROM ${this.table} WHERE session_id = $1`,
+      [sessionId],
+    );
   }
 
   async claim(): Promise<WorkLease | undefined> {
@@ -127,6 +235,13 @@ export class PgSessionWork implements SessionWork {
     return rows.length > 0;
   }
 
+  /** `$1` session, `$2` owner, `$3` fence: the row, locked, only while this holder has it. */
+  private holderQuery(): string {
+    return `SELECT session_id FROM ${this.table}
+             WHERE session_id = $1 AND lease_owner = $2 AND fence = $3 AND lease_until > now()
+             FOR UPDATE`;
+  }
+
   private lease(sessionId: string, fence: number): WorkLease {
     const controller = new AbortController();
     let gone = false;
@@ -140,25 +255,29 @@ export class PgSessionWork implements SessionWork {
       fence,
       signal: controller.signal,
       renew: async () => {
-        if (gone) return "lost";
+        if (gone) return false;
         // Owner AND fence: a node that reclaimed and released this row must not let the old
-        // holder extend a lease that has moved on. The self-join locks the row first and reads
-        // `woken` before clearing it, so a wake committed at this very moment either shows up
-        // here or lands after our clear — never under it.
+        // holder extend a lease that has moved on.
         const { rows } = await this.pool.query(
-          `UPDATE ${this.table} AS w
-              SET lease_until = now() + make_interval(secs => $3), woken = false
-             FROM (SELECT session_id, woken FROM ${this.table} WHERE session_id = $1 FOR UPDATE) AS before
-            WHERE w.session_id = before.session_id AND w.lease_owner = $2 AND w.fence = $4
-            RETURNING before.woken AS woken`,
+          `UPDATE ${this.table} SET lease_until = now() + make_interval(secs => $3)
+            WHERE session_id = $1 AND lease_owner = $2 AND fence = $4 AND lease_until > now()
+            RETURNING 1`,
           [sessionId, this.ownerId, this.ttlMs / 1000, fence],
         );
-        const row = rows[0];
-        if (row === undefined) {
+        if (rows.length === 0) {
           lose();
-          return "lost";
+          return false;
         }
-        return row.woken === true ? "woken" : "quiet";
+        return true;
+      },
+      clearWake: async () => {
+        if (gone) return;
+        // Its own statement, committed before the caller's next `pending` read starts: an
+        // append that commits after this either shows up in that read or wakes the row again.
+        await this.pool.query(
+          `UPDATE ${this.table} SET woken = false WHERE session_id = $1 AND lease_owner = $2 AND fence = $3`,
+          [sessionId, this.ownerId, fence],
+        );
       },
       release: async () => {
         if (gone) return;
@@ -173,4 +292,16 @@ export class PgSessionWork implements SessionWork {
       },
     };
   }
+}
+
+function json(value: unknown): Record<string, unknown> {
+  return (typeof value === "string" ? JSON.parse(value) : value) as Record<string, unknown>;
+}
+
+function toResource(row: Record<string, unknown>): ManagedEventResource {
+  const { accepted_at: _, ...event } = json(row.payload);
+  return {
+    ...event,
+    processed_at: row.processed_at ? new Date(row.processed_at as string).toISOString() : null,
+  } as ManagedEventResource;
 }

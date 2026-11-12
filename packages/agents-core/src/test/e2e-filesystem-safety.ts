@@ -1,25 +1,26 @@
 /**
- * E2E for builtin filesystem safety: Read records FileFreshnessLedger state,
- * Write/Edit enforce read-before-write for existing files, stale files are
- * rejected, repeat Read can dedup unchanged output, and Bash permission rules
- * use conservative compound-command matching.
+ * E2E for builtin filesystem safety: Read ranges and size ceilings, Edit's
+ * old_string matching against the file as it is on disk (there is no
+ * read-before-write gate — old_string is the proof of what the model saw),
+ * Write's line-ending handling, and Bash permission rules' conservative
+ * compound-command matching.
  */
 import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   bashTool,
   editTool,
-  FileFreshnessLedger,
   LocalEnvironment,
   readTool,
   writeTool,
   type ByteRange,
+  type FileInfo,
   type Tool,
   type ToolResult,
 } from "../index.ts";
-import { hashFileContent, matchesBashRule } from "../internal.ts";
+import { matchesBashRule } from "../internal.ts";
 import { MAX_UNPAGED_FILE_BYTES } from "../tool/builtin/read.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -28,13 +29,12 @@ function check(label: string, okFlag: boolean): void {
   console.log(`${okFlag ? "PASS" : "FAIL"} ${label}`);
 }
 
-function makeCtx(host: LocalEnvironment, ledger?: FileFreshnessLedger) {
+function makeCtx(host: LocalEnvironment) {
   return {
     turnId: "t1",
     toolCallId: "c1",
     signal: new AbortController().signal,
     environment: host,
-    ...(ledger ? { fileLedger: ledger } : {}),
   };
 }
 
@@ -47,15 +47,10 @@ function text(result: ToolResult): string {
   return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
-async function bumpMtime(file: string): Promise<void> {
-  await utimes(file, new Date(), new Date(Date.now() + 5_000));
-}
-
 async function main(): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "operon-filesystem-safety-"));
   const host = new LocalEnvironment(dir);
-  const ledger = new FileFreshnessLedger();
-  const ctx = makeCtx(host, ledger);
+  const ctx = makeCtx(host);
 
   try {
     const notes = path.join(dir, "notes.txt");
@@ -63,11 +58,9 @@ async function main(): Promise<void> {
 
     const r1 = await runTool(readTool, { path: notes }, ctx);
     check("read: line-numbered output", text(r1).includes("1\talpha") && text(r1).includes("3\tgamma"));
-    check("read: full read recorded", ledger.get(notes)?.fullRead === true && ledger.get(notes)?.contentHash === hashFileContent("alpha\nbeta\ngamma\n"));
 
     const partial = await runTool(readTool, { path: notes, n_lines: 1 }, ctx);
     check("read: partial output", text(partial).includes("1\talpha") && !text(partial).includes("2\tbeta"));
-    check("read: partial read not full", ledger.get(notes)?.fullRead === false);
 
     const lineOffsetSchema = (readTool.schema.parameters as { properties: Record<string, Record<string, unknown>> }).properties.line_offset;
     check("read: line_offset is one integer, not anyOf", lineOffsetSchema?.type === "integer" && lineOffsetSchema.anyOf === undefined);
@@ -82,61 +75,65 @@ async function main(): Promise<void> {
     );
     check("read: invalid line ranges are still refused", rejected.every(Boolean));
 
-    await runTool(readTool, { path: notes }, ctx);
-    const dedup = await runTool(readTool, { path: notes }, ctx);
-    check("read: unchanged repeat returns stub", text(dedup).includes("File unchanged since last read"));
+    // No dedup stub: after a context compaction the earlier Read result may be gone, so a
+    // repeat Read must always serve the content itself.
+    const repeat = await runTool(readTool, { path: notes }, ctx);
+    check("read: a repeat read serves the content again", text(repeat).includes("1\talpha") && text(repeat).includes("3\tgamma"));
 
-    await writeFile(notes, "alpha\nbeta\ngamma\ndelta\n");
-    await bumpMtime(notes);
-    const changed = await runTool(readTool, { path: notes }, ctx);
-    check("read: dedup invalidates after modification", text(changed).includes("4\tdelta"));
+    // ── No read-before-write gate: the model may have seen the file through Bash, Grep or an
+    //    earlier turn. Edit's old_string is the proof — it must match the file on disk. ────
+    {
+      const existing = path.join(dir, "existing.txt");
+      await writeFile(existing, "old\n");
+      const writeUnread = await runTool(writeTool, { path: existing, content: "new\n" }, ctx);
+      check("write: an existing file can be overwritten without a prior Read", !writeUnread.isError && readFileSync(existing, "utf8") === "new\n");
 
-    const existing = path.join(dir, "existing.txt");
-    await writeFile(existing, "old\n");
-    const writeNotRead = await runTool(writeTool, { path: existing, content: "new\n" }, ctx);
-    check("write: existing file requires a prior read", writeNotRead.isError === true && text(writeNotRead).includes("has not been read yet"));
+      const code = path.join(dir, "code.ts");
+      await writeFile(code, "const a = 1;\nconst b = 1;\n");
+      const editUnread = await runTool(editTool, { path: code, old_string: "const a = 1;", new_string: "const a = 9;" }, ctx);
+      check("edit: an existing file can be edited without a prior Read", !editUnread.isError && readFileSync(code, "utf8").includes("const a = 9;"));
 
-    await runTool(readTool, { path: existing }, ctx);
-    const writeOk = await runTool(writeTool, { path: existing, content: "new\n" }, ctx);
-    check("write: read file can be overwritten", !writeOk.isError && readFileSync(existing, "utf8") === "new\n");
+      const multi = await runTool(editTool, { path: code, old_string: "const ", new_string: "let " }, ctx);
+      check("edit: uniqueness guard still runs", multi.isError === true && text(multi).includes("not unique"));
 
-    // ── Read-before-write gates on "seen", not on "seen in full". Gating on the
-    //    latter locked Edit/Write out of every file past the Read tool's caps: one
-    //    Read reports a partial view, and a paged re-read is not a full read either,
-    //    so there was no sequence of calls that opened the file back up. ──────────
+      const missing = await runTool(editTool, { path: code, old_string: "const c = 1;", new_string: "x" }, ctx);
+      check("edit: an old_string absent from the file is refused", missing.isError === true && text(missing).includes("not found"));
+    }
+
+    // ── An external change between the model's view and its edit: old_string is matched
+    //    against the file as it is NOW, so the edit lands only where it still applies. ──
+    {
+      const changed = path.join(dir, "changed.txt");
+      await writeFile(changed, "one\ntwo\n");
+      await runTool(readTool, { path: changed }, ctx);
+      await writeFile(changed, "one\nchanged\n");
+      const applies = await runTool(editTool, { path: changed, old_string: "one", new_string: "uno" }, ctx);
+      check("edit: changed on disk but old_string still unique → applied to the current file", !applies.isError && readFileSync(changed, "utf8") === "uno\nchanged\n");
+
+      const gone = await runTool(editTool, { path: changed, old_string: "two", new_string: "dos" }, ctx);
+      check("edit: changed on disk and old_string gone → refused, file untouched", gone.isError === true && readFileSync(changed, "utf8") === "uno\nchanged\n");
+
+      const dup = path.join(dir, "dup.txt");
+      await writeFile(dup, "x = 1\n");
+      await runTool(readTool, { path: dup }, ctx);
+      await writeFile(dup, "x = 1\nx = 1\n");
+      const dupEdit = await runTool(editTool, { path: dup, old_string: "x = 1", new_string: "x = 2" }, ctx);
+      check("edit: changed on disk and old_string no longer unique → refused, file untouched", dupEdit.isError === true && readFileSync(dup, "utf8") === "x = 1\nx = 1\n");
+    }
+
+    // ── A paged read leaves most of a big file unseen, yet the edit resolves: uniqueness
+    //    is checked against the whole file on disk, not against what the model was shown. ──
     {
       const big = path.join(dir, "big.ts");
-      // The sentinel sits well past the paged window below, so it is content the model
-      // provably never saw in a Read result.
       const lines = Array.from({ length: 500 }, (_, i) => (i === 400 ? "SENTINEL_LINE" : `line${String(i)}`));
       await writeFile(big, `${lines.join("\n")}\n`);
 
-      // An unpaged read of this file IS complete — a partial view now only comes from
-      // asking for one, which is the point of dropping the silent default truncation.
-      await runTool(readTool, { path: big }, ctx);
-      check("read: an unpaged read of a whole file is recorded as a full read", ledger.get(big)?.fullRead === true);
-
       await runTool(readTool, { path: big, line_offset: 1, n_lines: 100 }, ctx);
-      check("read: an explicitly paged read is not a full read", ledger.get(big)?.fullRead === false);
-      check("read: a paged read retains no content to compare against", ledger.get(big)?.contentHash === undefined);
-
-      // Line 400 was never in that 100-line window, yet the edit resolves: uniqueness is
-      // checked against the whole file on disk, not against what the model was shown.
       const bigEdit = await runTool(editTool, { path: big, old_string: "SENTINEL_LINE", new_string: "EDITED_LINE" }, ctx);
-      check(
-        "edit: a paged read satisfies read-before-write",
-        !bigEdit.isError && readFileSync(big, "utf8").includes("EDITED_LINE"),
-      );
+      check("edit: text outside the paged window still edits when unique", !bigEdit.isError && readFileSync(big, "utf8").includes("EDITED_LINE"));
 
-      // A non-unique old_string is what actually stops an edit guessed from unseen
-      // text — the gate that makes the loosened read check safe.
-      await runTool(readTool, { path: big, line_offset: 1, n_lines: 100 }, ctx);
       const ambiguous = await runTool(editTool, { path: big, old_string: "line1", new_string: "X" }, ctx);
-      check("edit: unseen text cannot be edited blindly — non-unique old_string is refused", ambiguous.isError === true);
-
-      await runTool(readTool, { path: big, line_offset: 1, n_lines: 100 }, ctx);
-      const bigWrite = await runTool(writeTool, { path: big, content: "replaced\n" }, ctx);
-      check("write: a paged read satisfies read-before-write", !bigWrite.isError && readFileSync(big, "utf8") === "replaced\n");
+      check("edit: a non-unique old_string is refused", ambiguous.isError === true);
     }
 
     // ── Past MAX_UNPAGED_FILE_BYTES an unpaged read is refused rather than served a
@@ -153,7 +150,6 @@ async function main(): Promise<void> {
         "read: an oversized file is refused, with the way out in the message",
         refused.isError === true && text(refused).includes("line_offset") && text(refused).includes("Grep"),
       );
-      check("read: the refused read recorded nothing", ledger.get(huge) === undefined);
 
       const paged = await runTool(readTool, { path: huge, line_offset: 1, n_lines: 5 }, ctx);
       check("read: the same file pages fine — the size gate is unpaged-only", !paged.isError && text(paged).includes("1\txxx"));
@@ -174,7 +170,6 @@ async function main(): Promise<void> {
         "read: the refusal names how many lines fit, so the retry is not a guess",
         /About \d+ lines from line 1 fit/.test(text(refused)),
       );
-      check("read: nothing about the refused read reached the ledger", ledger.get(wide) === undefined);
 
       // Follow the advice the error gave and the read succeeds.
       const fitted = Number(/About (\d+) lines/.exec(text(refused))?.[1] ?? "0");
@@ -193,7 +188,6 @@ async function main(): Promise<void> {
 
     const crlfAppend = path.join(dir, "crlf-append.txt");
     await writeFile(crlfAppend, "a\r\nb\r\n");
-    await runTool(readTool, { path: crlfAppend }, ctx);
     const appendCrlf = await runTool(writeTool, { path: crlfAppend, content: "c\n", mode: "append" }, ctx);
     check(
       "write append: preserves pure CRLF file endings",
@@ -202,124 +196,58 @@ async function main(): Promise<void> {
 
     const mixedAppend = path.join(dir, "mixed-append.txt");
     await writeFile(mixedAppend, "a\r\nb\n");
-    await runTool(readTool, { path: mixedAppend }, ctx);
     const appendMixed = await runTool(writeTool, { path: mixedAppend, content: "c\n", mode: "append" }, ctx);
     check(
       "write append: does not normalize mixed line endings",
       !appendMixed.isError && readFileSync(mixedAppend, "utf8") === "a\r\nb\nc\n",
     );
 
-    await runTool(readTool, { path: existing }, ctx);
-    await writeFile(existing, "tampered\n");
-    await bumpMtime(existing);
-    const writeStale = await runTool(writeTool, { path: existing, content: "clobber\n" }, ctx);
-    check("write: external modification rejected", writeStale.isError === true && text(writeStale).includes("modified since read"));
-
-    const code = path.join(dir, "code.ts");
-    await writeFile(code, "const a = 1;\nconst b = 1;\n");
-    const editNotRead = await runTool(editTool, { path: code, old_string: "const a", new_string: "const aa" }, ctx);
-    check("edit: existing file requires prior full read", editNotRead.isError === true && text(editNotRead).includes("has not been read yet"));
-
-    await runTool(readTool, { path: code }, ctx);
-    const multi = await runTool(editTool, { path: code, old_string: "= 1;", new_string: "= 2;" }, ctx);
-    check("edit: existing uniqueness guard still runs", multi.isError === true && text(multi).includes("not unique"));
-
-    const editOk = await runTool(editTool, { path: code, old_string: "const a = 1;", new_string: "const a = 9;" }, ctx);
-    check("edit: fresh edit applies", !editOk.isError && readFileSync(code, "utf8").includes("const a = 9;"));
-
-    const staleEditFile = path.join(dir, "stale-edit.txt");
-    await writeFile(staleEditFile, "one\ntwo\n");
-    await runTool(readTool, { path: staleEditFile }, ctx);
-    await writeFile(staleEditFile, "one\nchanged\n");
-    await bumpMtime(staleEditFile);
-    const editStale = await runTool(editTool, { path: staleEditFile, old_string: "one", new_string: "uno" }, ctx);
-    check(
-      "edit: changed since read but old_string still unique → applied against the current file",
-      !editStale.isError && readFileSync(staleEditFile, "utf8") === "uno\nchanged\n",
-    );
-    check("edit: a recovered edit says the file holds changes not in context", text(editStale).includes("modified on disk since you last read it"));
-    const afterRecovered = await runTool(editTool, { path: staleEditFile, old_string: "uno", new_string: "eins" }, ctx);
-    check(
-      "edit: after a recovered edit the ledger is current — the next edit is an ordinary one",
-      !afterRecovered.isError && !text(afterRecovered).includes("note:") && readFileSync(staleEditFile, "utf8") === "eins\nchanged\n",
-    );
-    const reread = await runTool(readTool, { path: staleEditFile }, ctx);
-    check("edit: the note's advice works — a Read after the write serves content, not the unchanged stub", text(reread).includes("2\tchanged"));
-
-    // Every stale edit short of one unambiguous match goes back for a Read — and says
-    // "modified", not "not found": the model's view is what is wrong, not its old_string.
-    const staleGone = path.join(dir, "stale-gone.txt");
-    await writeFile(staleGone, "alpha\nbeta\n");
-    await runTool(readTool, { path: staleGone }, ctx);
-    await writeFile(staleGone, "gamma\nbeta\n");
-    await bumpMtime(staleGone);
-    const goneEdit = await runTool(editTool, { path: staleGone, old_string: "alpha", new_string: "A" }, ctx);
-    check("edit: stale + old_string gone → modified-since-read", goneEdit.isError === true && text(goneEdit).includes("modified since read"));
-
-    const staleDup = path.join(dir, "stale-dup.txt");
-    await writeFile(staleDup, "x = 1\n");
-    await runTool(readTool, { path: staleDup }, ctx);
-    await writeFile(staleDup, "x = 1\nx = 1\n");
-    await bumpMtime(staleDup);
-    const dupEdit = await runTool(editTool, { path: staleDup, old_string: "x = 1", new_string: "x = 2" }, ctx);
-    check(
-      "edit: stale + old_string no longer unique → modified-since-read, file untouched",
-      dupEdit.isError === true && text(dupEdit).includes("modified since read") && readFileSync(staleDup, "utf8") === "x = 1\nx = 1\n",
-    );
-
-    const staleAll = path.join(dir, "stale-all.txt");
-    await writeFile(staleAll, "k\n");
-    await runTool(readTool, { path: staleAll }, ctx);
-    await writeFile(staleAll, "k\nextra\n");
-    await bumpMtime(staleAll);
-    const allEdit = await runTool(editTool, { path: staleAll, old_string: "k", new_string: "K", replace_all: true }, ctx);
-    check(
-      "edit: stale + replace_all is never recovered (it would rewrite unseen occurrences)",
-      allEdit.isError === true && text(allEdit).includes("modified since read") && readFileSync(staleAll, "utf8") === "k\nextra\n",
-    );
-
     const created = path.join(dir, "created.txt");
     const create = await runTool(writeTool, { path: created, content: "hello\n" }, ctx);
     const editCreated = await runTool(editTool, { path: created, old_string: "hello", new_string: "hi" }, ctx);
-    check("write: successful write records writer as reader", !create.isError && !editCreated.isError && readFileSync(created, "utf8") === "hi\n");
+    check("write: a created file can be edited right away", !create.isError && !editCreated.isError && readFileSync(created, "utf8") === "hi\n");
 
     // ── Chunked writes (the documented way to write a large file: overwrite, then
-    //    append, append…) must read the file ONCE per chunk. The append already reads
-    //    it to concatenate; the freshness check reuses that text instead of taking a
-    //    read of its own. Exercised on an environment that reports no post-write version —
-    //    the remote shape, where the check cannot fall back on an mtime. ──────────
+    //    append, append…) read the file once per append chunk — to concatenate — and
+    //    never more. Counted on a wrapped environment, the remote shape where every read
+    //    is a round trip. ────────────────────────────────────────────────────────────
     {
-      class RemoteShapedEnvironment extends LocalEnvironment {
+      class CountingEnvironment extends LocalEnvironment {
         reads = 0;
+        stats = 0;
         override async readBytes(p: string, range?: ByteRange): Promise<Buffer> {
           this.reads++;
           return await super.readBytes(p, range);
         }
-        /** A sandbox/SSH backend would need a round trip for this, so it reports none. */
-        protected override async versionAfterWrite(): Promise<undefined> {
-          return undefined;
+        override async fileInfo(p: string, options?: { followSymlinks?: boolean }): Promise<FileInfo> {
+          this.stats++;
+          return await super.fileInfo(p, options);
         }
       }
 
-      const remote = new RemoteShapedEnvironment(dir);
-      const chunkedCtx = makeCtx(remote, new FileFreshnessLedger());
+      const remote = new CountingEnvironment(dir);
+      const chunkedCtx = makeCtx(remote);
       const chunked = path.join(dir, "chunked.txt");
 
+      remote.reads = 0;
+      remote.stats = 0;
       await runTool(writeTool, { path: chunked, content: "a\n" }, chunkedCtx);
+      check("write overwrite: no read at all", remote.reads === 0);
+      check("write overwrite: no stat — the write itself is the only round trip", remote.stats === 0);
       remote.reads = 0;
       const appended = await runTool(writeTool, { path: chunked, content: "b\n", mode: "append" }, chunkedCtx);
-      check("write append: one read per chunk — the freshness check reuses the append's read", remote.reads === 1 && !appended.isError);
+      check("write append: one read per chunk", remote.reads === 1 && !appended.isError);
 
       await runTool(writeTool, { path: chunked, content: "c\n", mode: "append" }, chunkedCtx);
       check("write append: chunks accumulate in order", readFileSync(chunked, "utf8") === "a\nb\nc\n");
 
-      // The reuse must not blunt the check: a real external change still stops the write.
-      await writeFile(chunked, "someone else\n");
-      const clobber = await runTool(writeTool, { path: chunked, content: "d\n", mode: "append" }, chunkedCtx);
-      check(
-        "write append: an external change is still caught (reuse is not a bypass)",
-        clobber.isError === true && readFileSync(chunked, "utf8") === "someone else\n",
-      );
+      // The parent is inspected only once the write has failed, and the message names why.
+      const noParent = await runTool(writeTool, { path: path.join(dir, "missing-dir", "f.txt"), content: "x" }, chunkedCtx);
+      check("write: a missing parent directory is reported as such", noParent.isError === true && text(noParent).includes("Parent directory does not exist"));
+      const fileParent = await runTool(writeTool, { path: path.join(chunked, "f.txt"), content: "x" }, chunkedCtx);
+      check("write: a file in the parent position is reported as not a directory", fileParent.isError === true && text(fileParent).includes("Parent path is not a directory"));
+      const appendNoParent = await runTool(writeTool, { path: path.join(dir, "missing-dir", "g.txt"), content: "x", mode: "append" }, chunkedCtx);
+      check("write append: a missing parent directory is reported as such", appendNoParent.isError === true && text(appendNoParent).includes("Parent directory does not exist"));
     }
 
     const bashPlan = await bashTool.resolve({ command: "git add . && git commit -m x" }, ctx);

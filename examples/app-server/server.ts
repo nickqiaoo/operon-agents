@@ -12,7 +12,8 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AppServer, nodeStreamTransport } from "operon-agents/app-server";
-import { createHarness, filesystemTools, bashTool } from "operon-agents";
+import { createHarness } from "operon-agents";
+import { filesystemTools, bashTool } from "operon-agents/tools";
 
 const MODEL = process.env.MODEL ?? "anthropic/claude-opus-4-8";
 const WORK = join(process.cwd(), "workspace");
@@ -24,11 +25,15 @@ console.info = console.error;
 console.debug = console.error;
 
 const harness = createHarness({
-  model: MODEL,
-  workDir: WORK,
-  appendSystemPrompt: "Use the tools; explain briefly what you do.",
-  tools: [...filesystemTools(), bashTool],
-  permission: { mode: "workspace" }, // environment defaults to a LocalEnvironment at the session's workDir
+  config: {
+    workDir: WORK,
+    defaults: {
+      model: MODEL,
+      appendSystemPrompt: "Use the tools; explain briefly what you do.",
+      permission: { mode: "workspace" },
+    },
+  },
+  registry: { tools: [...filesystemTools(), bashTool] },
 });
 
 const transport = nodeStreamTransport(process.stdin, process.stdout, {

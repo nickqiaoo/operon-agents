@@ -37,6 +37,7 @@ import type {
   Message,
   ModelManager,
   RunResult,
+  SessionConfig,
   SessionSummary,
   PendingApprovalInterrupt,
   SessionStore,
@@ -110,12 +111,16 @@ export type ModelProvider = Parameters<ModelManager["models"]["setProvider"]>[0]
 export interface ExtensionHost {
   /** The session this extension instance is bound to. */
   readonly sessionId: string;
-  /** Open a brand-new session on the same harness. */
-  newSession(options?: { readonly title?: string }): Promise<HarnessSessionHandle>;
-  /** Fork THIS session (log + state copied) into a new one and open it. */
-  fork(options?: { readonly title?: string }): Promise<HarnessSessionHandle>;
-  /** Reopen an existing session by id. Trusted code: any session in the repository. */
-  openSession(id: string): Promise<HarnessSessionHandle>;
+  /**
+   * Open a brand-new session on the same harness. It takes this session's working directory and
+   * owner, and goes through the same assembly as any other: the host's `resolveSession` supplies
+   * its live objects, its open listeners wire it. `config` is the new session's setup, as data.
+   */
+  createSession(options?: ExtensionSessionOptions, extensionId?: string): Promise<HarnessSessionHandle>;
+  /** Fork THIS session (log + stored setup copied, live objects provided anew) and open it. */
+  forkSession(options?: ExtensionSessionOptions, extensionId?: string): Promise<HarnessSessionHandle>;
+  /** Get another session, loading it if it is not loaded — `harness.resumeSession(id)`. */
+  resumeSession(id: string, extensionId?: string): Promise<HarnessSessionHandle>;
   listSessions(): Promise<readonly SessionSummary[]>;
   /**
    * Register (or replace) a model provider. HARNESS-GLOBAL: the model runtime is shared by
@@ -135,8 +140,15 @@ export interface ExtensionHost {
   readonly services?: { has(name: string): boolean; handle<T = unknown>(name: string): T };
 }
 
+/** What an extension may say about a session it opens: a title, and its setup as data. An
+ *  extension holds no sandbox or credential to hand over — live objects are the host's to provide. */
+export interface ExtensionSessionOptions {
+  readonly title?: string;
+  readonly config?: SessionConfig;
+}
+
 /**
- * What `newSession`/`fork`/`openSession` hand back. Structurally a `HarnessSession`; typed
+ * What `createSession`/`forkSession`/`resumeSession` hand back. Structurally a `HarnessSession`; typed
  * as the operations an extension realistically needs so the extension contract does not
  * re-export the harness's entire session surface.
  */
@@ -144,17 +156,17 @@ export interface HarnessSessionHandle {
   readonly id: string;
   prompt(input: AgentInput): Promise<RunResult>;
   steer(input: string): SteerReceipt;
-  followUp(input: string): SteerReceipt | null;
+  followUp(input: string): SteerReceipt;
   /**
    * Hand a message to a specific frame in that session — `main` for its root agent,
-   * `main/<agentId>` for one of its subagents — carrying your own provenance. Undefined when no
-   * frame is running there. The receipt's `steerId` (your own, via `options.id`, or minted) is
+   * `main/<agentId>` for one of its subagents — carrying your own provenance. Throws
+   * `SteerTargetNotFoundError` when no frame is running there. The receipt's `steerId` (your own, via `options.id`, or minted) is
    * what the recipient's journal carries as `origin.steerId` once the message is consumed.
    *
    * `steer`/`followUp` above can only ever reach the root; this is what lets an extension address
    * an individual subagent, which is what coordination between agents requires.
    */
-  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined;
+  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt;
   cancel(): void;
   close(): Promise<void>;
 }
@@ -216,12 +228,14 @@ export interface ExtensionActions {
 
   // ── Harness reach. Without a host these warn and no-op (promises reject). ──
 
-  /** Open a new session on the same harness and return a handle to drive it. */
-  newSession(options?: { readonly title?: string }): Promise<HarnessSessionHandle>;
+  /** Open a new session on the same harness (this session's directory and owner) and return a
+   *  handle to drive it. */
+  createSession(options?: ExtensionSessionOptions): Promise<HarnessSessionHandle>;
   /** Fork this session into a new one and open it. */
-  fork(options?: { readonly title?: string }): Promise<HarnessSessionHandle>;
-  /** Reopen an existing session by id. */
-  openSession(id: string): Promise<HarnessSessionHandle>;
+  forkSession(options?: ExtensionSessionOptions): Promise<HarnessSessionHandle>;
+  /** Get another session by id, loading it if needed. A loaded one is returned as it is; a load
+   *  in flight is joined. */
+  resumeSession(id: string): Promise<HarnessSessionHandle>;
   listSessions(): Promise<readonly SessionSummary[]>;
   /** Register/replace a model provider. Harness-global — every session on it sees the change. */
   registerProvider(provider: ModelProvider): void;
@@ -534,9 +548,9 @@ export type ExtensionHandler<K extends ExtensionEventName> = (
 
 /**
  * Dependency-free tool description for `registerTool` — the form FILE extensions use, since they
- * import nothing from the framework (no `tool()` helper, no zod). Parameters are plain JSON
- * Schema, and arguments reach `execute` UNVALIDATED — the model usually honors the schema, but
- * an extension must treat `args` as untrusted input and check what it relies on.
+ * import nothing from the framework (no `defineTool` helper, no zod). Parameters are plain JSON
+ * Schema; arguments are validated against it before `execute`, and a call that fails comes back
+ * to the model as a tool error.
  */
 export interface ExtensionToolSpec {
   readonly name: string;
@@ -625,9 +639,21 @@ export interface ExtensionAPI {
 export interface ExtensionHostContext<
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
 > {
-  /** Open a brand-new session on this harness — what a spawn factory calls. */
+  /** Get a session by id, loading it if it is not loaded — `harness.resumeSession(id)`. */
+  resumeSession(id: string): Promise<HarnessSessionHandle>;
+  /**
+   * Open a brand-new session on this harness — what a spawn factory calls. The options are
+   * `harness.createSession`'s own (`title`, `workDir`, `ownerKey`, `config`, …); a key the harness
+   * does not know is an error. Per-extension parameters go in `config.extensions`.
+   *
+   * `from` is the id of the session this one is created on behalf of (the lead that asked for a
+   * teammate). The new session then takes that session's directory and owner unless told
+   * otherwise, the host's `resolveSession` is told its source, and — because it runs for the same
+   * party — where that session runs in an environment of its own (a sandbox), the new one must be
+   * given one too: it is refused rather than opened on the harness's own machine.
+   */
   createSession(
-    options?: { readonly title?: string; readonly extensions?: readonly ExtensionDefinition[]; readonly params?: Record<string, unknown> } & Record<string, unknown>,
+    options?: { readonly title?: string; readonly workDir?: string; readonly ownerKey?: string; readonly config?: SessionConfig; readonly from?: string },
   ): Promise<{ readonly id: string }>;
   /**
    * Handles to the services named in `uses`, by name — the same handles `session` gets as
@@ -662,11 +688,10 @@ export interface ExtensionSessionContext<
   TParams = unknown,
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
 > {
-  /** Handle to this extension's own shared instance — its `harness` result (one per process) or
-   *  its `workspace` result (this session's workspace's); `undefined` when it has neither. The
-   *  session half does not know, and need not know, which tier it lives at. */
+  /** Handle to this extension's own shared instance — its `harness` result, one per process;
+   *  `undefined` when the definition has no `harness` half. */
   readonly shared: TShared;
-  /** This session's per-session argument (`createSession({ params: { [id]: … } })`); `undefined` when none. */
+  /** This session's per-session argument (`createSession({ config: { extensions: { [id]: … } } })`); `undefined` when none. */
   readonly params: TParams | undefined;
   /**
    * Handles to the services named in `uses`, by name. Every method call resolves the CURRENT
@@ -679,9 +704,9 @@ export interface ExtensionSessionContext<
 /**
  * An extension: a programmatic participant assembled into a session. One definition, handed to
  * the framework once — by value in `createHarness({ extensions })` or from a file in
- * `extensionDir` — and mounted into every session from then on. Four parts, the first three
- * optional, named for the tier each one runs at (the same three tiers as `createHarness`'s
- * `harness` / `workspace` / `session` hooks):
+ * `extensionDir` — and mounted into every session from then on. Two halves and a declaration,
+ * each half named for the tier it runs at (`harness` once per process, `session` once per
+ * session — there is no tier in between):
  *
  * - **`harness` — the process-shared half.** Runs ONCE per harness, not per session. Its return
  *   value is registered as a service under this extension's `id` in the harness scope; every
@@ -690,7 +715,7 @@ export interface ExtensionSessionContext<
  *   registered (a consumer must come after its provider) and handed to `session` resolved as
  *   `ctx.services[name]`. There is no lookup by name from inside an extension.
  * - **`session` — the per-session half.** Runs once per session with the resolved context. A
- *   session varies it with `createSession({ params: { [id]: … } })` — `ctx.params` — and opts
+ *   session varies it with `createSession({ config: { extensions: { [id]: … } } })` — `ctx.params` — and opts
  *   out of it entirely with `false`.
  *
  * `TShared`/`TParams`/`TServices` are for the author's own typing (use an object type alias for
@@ -705,6 +730,12 @@ export interface ExtensionDefinition<
   readonly id: string;
   /** Per-handler invocation budget. Defaults to 30s for decision points, 1s for observers. */
   readonly timeoutMs?: number;
+  /**
+   * What happens to this extension's per-session parameters when a session is forked. `"inherit"`
+   * (the default) copies them with the rest of the session's setup. `"drop"` is for parameters that
+   * IDENTIFY one session — a roster seat, a lease — which a copy must not carry.
+   */
+  readonly forkParams?: "inherit" | "drop";
   /** The process-shared half: once per harness. See above. */
   harness?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
   /** Services this extension consumes, by name — other extensions' shared-half results (their

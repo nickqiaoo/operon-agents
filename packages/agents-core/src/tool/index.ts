@@ -17,11 +17,10 @@ export type {
   RunCommandOptions,
   FileInfo,
   FileKind,
-  FileVersion,
-  LineEndings,
-  WriteTextOptions,
-  WriteTextResult,
 } from "./environment.ts";
+// Text on top of the byte I/O above — Environment itself reads and writes bytes only.
+export { readTextFile, writeTextFile } from "./support/environment-ops.ts";
+export type { WriteTextFileOptions } from "./support/environment-ops.ts";
 // ── Writing an Environment backend ────────────────────────────────────────────────
 // Everything above is the CALLER's surface: `Environment` and the shapes its methods take and
 // return. What follows is the IMPLEMENTER's, and only a backend author needs it.
@@ -34,17 +33,7 @@ export { BaseEnvironment } from "./environment-base.ts";
 export type { SpawnedProcess } from "./environment-base.ts";
 export { materializeWorkspace, describeWorkspace, WorkspaceMaterializeError } from "./workspace-spec.ts";
 export type { HostReader, MaterializeOptions, WorkspaceEntry, WorkspaceSpec } from "./workspace-spec.ts";
-// Low-level file-op helpers (readTextFile / decodeText / …) are on
-// `operon-agents-core/internal`.
-export {
-  FileFreshnessLedger,
-  checkFreshness,
-  LEDGER_MAX_ENTRIES,
-  FILE_NOT_READ_MESSAGE,
-  FILE_MODIFIED_MESSAGE,
-  FILE_UNCHANGED_STUB,
-} from "./file-freshness.ts";
-export type { FileReadRecord, FreshnessVerdict, RecordReadInput, RecordWriteOptions, CheckFreshnessInput } from "./file-freshness.ts";
+// `decodeText` (the shared strict-UTF-8 contract) is on `operon-agents-core/internal`.
 // Bash permission-rule matching helpers are on `operon-agents-core/internal`.
 export { LocalEnvironment, detectOsInfo } from "./environment-local.ts";
 export { NullEnvironment } from "./environment-null.ts";
@@ -56,9 +45,9 @@ export { SshEnvironment } from "./environment-ssh.ts";
 export type { SshEnvironmentOptions, SshEnvironmentExtraOptions } from "./environment-ssh.ts";
 export type { BackgroundSpawner } from "./background.ts";
 export { askUser } from "./ask.ts";
-export { defineTool, tool } from "./define.ts";
+export { defineTool } from "./define.ts";
 export { globApproval } from "./support/tool-path.ts";
-export type { ToolDef, FunctionToolDef, ToolReturn } from "./define.ts";
+export type { FunctionToolDef, ResolveToolDef, ToolReturn } from "./define.ts";
 export { writeTool } from "./builtin/write.ts";
 export { editTool } from "./builtin/edit.ts";
 export { readTool } from "./builtin/read.ts";

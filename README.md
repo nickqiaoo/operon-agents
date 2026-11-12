@@ -76,10 +76,14 @@ pnpm build
 import { createLocalHarness, type AgentEvent } from "operon-agents";
 
 const harness = await createLocalHarness({
-  model: "anthropic/claude-opus-4-8",
   homeDir: ".agent-home",   // sessions persist here — resumable
-  workDir: "workspace",     // the agent's scope on disk
-  permission: { mode: "workspace" },  // auto-approve tools that stay inside workDir
+  config: {
+    workDir: "workspace",   // the agent's scope on disk
+    defaults: {             // what every session starts from; a session overrides it field by field
+      model: "anthropic/claude-opus-4-8",
+      permission: { mode: "workspace" },  // auto-approve tools that stay inside workDir
+    },
+  },
 });
 
 const session = await harness.createSession();
@@ -147,7 +151,96 @@ Most options on `createHarness` are defaults a session can replace: pass the sam
 That covers `model`, `modelSettings`, `agent`, `tools`, `appendSystemPrompt`, `permission`, the
 subagent settings and the turn limits. A model named in the session, or by a Workflow's
 `agent(prompt, { model })`, reaches subagents in this order: `agent(prompt, { model })`, the model a
-subagent declares, the session's model, then the harness's.
+subagent declares, the session's model, then the harness's. `modelSettings`, `tools`,
+`appendSystemPrompt` and `maxStepsPerTurn` only shape the default agent, so passing one beside a
+complete `agent` is an error.
+
+### What a session runs on
+
+Two things decide a session, and they are kept apart:
+
+- **Its setup, as data** — `config` (`SessionConfig`): model, the names of registered tools and
+  agents, MCP servers, permission, extension parameters, limits. A field given replaces the
+  harness's default; a field left out inherits it; `false` turns a capability off. It is stored
+  with the session.
+- **The live objects it runs on** — `bindings`: a sandbox (`environment`), a credential provider,
+  application `context`, an `Agent` or model built in code. They cannot be stored, so they are
+  provided again on every open.
+
+```ts
+const session = await harness.createSession({
+  config: { model: "anthropic/claude-opus-4-8", mcp: { servers: { github: { url: "https://mcp.example/github" } } } },
+  bindings: { environment: sandbox, context: { userId } },
+});
+await session.close();
+// Later, or in another process: nothing is repeated but what cannot be written down.
+const again = await harness.resumeSession(session.id, { bindings: { environment: sandbox, context: { userId } } });
+```
+
+The harness's own configuration is a `HarnessConfig`: the defaults every session starts from, a
+`policy` no session can override (allowed permission modes, pinned rules, MCP transports,
+isolation), and the process-level settings. It is the same object whether you write it in code or
+read it from `config.toml` (`loadHarnessConfig()`), and a host that keeps configuration in a
+database builds the same thing — the harness reads no file on its own.
+
+A host that knows things the harness cannot — which sandbox belongs to which session, whose
+credentials apply — supplies them where the harness asks, instead of repeating them at every call
+site:
+
+```ts
+const harness = createHarness({
+  config,
+  resolveSession: async ({ session, operation, origin, source }) => ({
+    bindings: {
+      environment: await sandboxFor(session.id),
+      mcpCredentials: credentialsFor(session.ownerKey),
+      context: await contextFor(session.id),
+    },
+  }),
+});
+harness.onSessionOpened((session) => {
+  const off = session.onEvent(forward);
+  session.setApprovalHandler(askTheUser);
+  return off;                                   // runs when this instance closes
+});
+```
+
+`resolveSession` is called once for every session being assembled — created, restored or forked,
+by the host, by a remote client or by an extension — and never for attaching to a loaded one. It
+returns data and live objects; it does not open sessions. A `config` it returns is final and is
+not stored by the harness, so configuration kept in the host's database has one copy.
+`onSessionOpened` runs for every session after it is assembled and **before it can start a run**,
+so a subscriber never misses a first event, and its return value runs when that instance closes.
+Throwing from either refuses the open, which is rolled back completely: no instance, no record
+left by a failed create or fork, and `bindings.release()` called exactly once.
+
+`harness.resumeSession(id)` — no options — gets the session: a loaded one is returned as it is
+(running or not), a load in flight is joined, and otherwise it is restored from what is stored with
+it, the harness defaults and `resolveSession`. It never reconfigures a loaded instance, starts a
+turn, or creates missing history (`SessionRepositoryNotFoundError`). Given options it only
+restores: they cannot be applied to an instance that exists, so it throws
+`SessionAlreadyLoadedError` / `SessionAlreadyLoadingError` rather than drop them. A `closeSession`
+that lands during a load cancels it — waiters get `SessionClosedError`, never a closed handle.
+`getSession(id)` only looks in memory.
+
+A restore never quietly substitutes a default for something the session was created on. A session
+opened on a sandbox and reopened without one throws `SessionDependencyMissingError` instead of
+running on the harness's own filesystem; the same holds for a fork, and for a session an extension
+creates from a sandboxed one. A configuration outside the harness's policy throws
+`SessionPolicyViolationError`.
+
+Extensions use the same operations: `actions.createSession` / `forkSession` / `resumeSession`
+(session half) and `host.createSession` / `resumeSession` (harness half) all go through the
+assembly above, so what they open is resolved and wired like any other session.
+
+`permission` defaults to `{ mode: "workspace" }`. Choose `yolo` explicitly, and only behind a sandbox.
+
+A session takes messages three ways. `prompt` sends one and resolves with that run's result.
+`followUp` sends one without waiting for the result. `steer` interrupts the turn in flight, joining
+it at the next step boundary. On an idle session all three start a run, and while a run is going,
+prompts and follow-ups each get a run of their own, in the order they arrived. All three refuse a
+closed session and one waiting for an answer, with `SessionClosedError` and
+`SessionInterruptedError`. `cancel` also drops what the user queued.
 
 ## Examples
 
@@ -168,6 +261,13 @@ Each example is runnable and imports from `operon-agents` exactly as a real cons
 cd examples/local-quickstart
 ANTHROPIC_API_KEY=sk-ant-... pnpm start
 ```
+
+## Entry points
+
+`operon-agents` exports what an application needs and nothing else. Built-in tools are on
+`operon-agents/tools`, and `/llm`, `/mcp`, `/protocol`, `/tracing` and `/telemetry` hold their own
+primitives. Hosts composing a custom deployment (capabilities, stores, extension plumbing) use
+`operon-agents/advanced`. `operon-agents/internal` has no stability guarantee.
 
 ## Packages
 

@@ -259,7 +259,7 @@ engine behavior"**. The harness is not a second engine; it is a composition root
 
 ## 5 · ④ Extension: behavior on top of the engine
 
-### 5.1 One definition, three parts
+### 5.1 One definition, two halves
 
 ```ts
 interface ExtensionDefinition<TShared, TParams, TServices> {
@@ -270,12 +270,12 @@ interface ExtensionDefinition<TShared, TParams, TServices> {
 }
 ```
 
-There is no second type, no `tier` option and no `getService`: providing is `harness` or `workspace`
-(the tier is the NAME of the half — once per process, or once per workspace key — and a definition
-carries at most one of them, so its service and `ctx.shared` live at exactly one tier), consuming is
-`uses`, registration happens once (the `createHarness({ extensions })` array or `extensionDir`), and
-per-session variation is `createSession({ params })`. `setup` only ever sees **handles** (`ctx.shared`
-/ `ctx.services`) and never holds an instance — which is the precondition for hot replacement.
+There is no second type, no `tier` option and no `getService`: providing is `harness` (once per
+process, its return value registered under `id`), consuming is `uses`, registration happens once
+(the `createHarness({ extensions })` array or `extensionDir`), and per-session variation is
+`createSession({ config: { extensions } })`. There is no tier between the process and a session (§5.7).
+`session` only ever sees **handles** (`ctx.shared` / `ctx.services`) and never holds an instance —
+which is the precondition for hot replacement.
 
 ### 5.2 `ExtensionAPI`: two channels, four seams
 
@@ -390,8 +390,8 @@ by which a preset tears down what it opened (its MCP connections, its handles).
 The rule for what may sit in the process tier: **it must hold for every session in the process.**
 Anything derived from an ENVIRONMENT only if it is the harness's environment: the local preset
 scans skills through `HarnessInfrastructure.environment`, publishes no shared registry when that is a
-per-session factory, and a session that brings its own environment (`createSession({ environment })`)
-scans through it instead — the catalog the model sees is always the one whose scripts its tools
+per-session factory, and a session that brings its own environment
+(`createSession({ bindings: { environment } })`) scans through it instead — the catalog the model sees is always the one whose scripts its tools
 can reach. Where MCP servers RUN is a separate axis: stdio servers are spawned by the host process
 (near the user's credentials and devices), remote ones are URLs; neither follows the environment,
 and a session on a remote environment with local connectors is the ordinary shape.
@@ -440,18 +440,22 @@ Three parts, with hard boundaries between them:
 
 | Part | Responsibility | Key properties |
 |---|---|---|
-| `SessionService` | The API surface: **entirely store operations**. It opens no sessions, installs no capabilities, connects no MCP, starts no sandbox | Stateless and horizontally scalable; the gateway in front is an ordinary reverse proxy needing no owner affinity; **there is no `open()`** — otherwise every read could wake a billable sandbox |
-| `SessionWorker` | The execution half: claims sessions from the work table, holds the lease, moves the inbox into session records, and runs. cancel and resume are control records in the same log going through the same loop | **"Handled" means the input landed in the session record** (`message.appended`), not that the turn finished: if a turn dies midway the history is still complete, the reopened session is idle, and the next message continues without re-running. **There is no separate recovery branch**: the next worker seeing unprocessed inbox records past the cursor is indistinguishable from a session nobody has touched. **The worker is pure execution**: it never calls `list()`, never scans logs, and knows no other node; finding work is only the claim loop in `start()` (one indexed statement, zero rows on an empty table) plus an in-process nudge. **Failures are observable**: failures inside a turn get a `turn.ended reason:"failed"` from the kernel runner (with error text, persisted); failures outside a turn (environment, sandbox refusing to start) are broadcast by the worker as a live `error` event; an open turn left by a process dying is closed by the next claim |
-| `SessionWork` (the work table, `Memory` / `Pg`) plus metadata and the broadcaster | **The queue and the lock are the same table**: `append` writes the record into the log and sets the row to woken (in one transaction on Postgres); `claim` takes a row with `FOR UPDATE SKIP LOCKED`, and holding it is holding the lease (with a fencing token); renewal is the heartbeat and **carries back whether anything new arrived** — which is how a cancel reaches the environment currently running, without needing to know which one it is. A lease that expires without a release means something died holding it, and the next claim takes it anyway and appends the missing `turn.ended failed` | No dispatcher, no Kafka, no LISTEN/NOTIFY: Postgres is already the truth, so using it directly as the queue leaves no double write to reconcile. Steady-state load: zero queries for an idle session; one primary-key UPDATE every 2s for a running one; one indexed empty query per worker per second. `authorize` is **required** |
+| `SessionService` | The API surface, shaped after Claude Managed Agents: session resources and the events sent to and emitted by them. **It never touches the framework**: creating a session writes a managed record, sending events persists them in the managed inbox, reading history reads the managed event log. It opens no sessions, writes nothing into a runtime journal, and holds no reference to a worker — not even in one process | Stateless and horizontally scalable; the gateway in front is an ordinary reverse proxy needing no owner affinity; **there is no `open()`** — otherwise every read could wake a billable sandbox |
+| `SessionWorker` | The execution half: claims sessions from the work table, holds the lease, **pulls** the session's pending events while the agent runs (every `inputPollIntervalMs`) and hands them to the Harness through its public interface — `steerTo` for a message, `cancel` for an interrupt, `respond` for a confirmation. The first claim creates the runtime session; later ones reopen it. Output is translated to managed events at this boundary, recorded under the lease, then broadcast | **"Processed" means the message is in the conversation** (`message.appended` carrying its id), not that it was pulled: a worker that dies holding it leaves it pending. One that dies after the conversation took it is recognised in the transcript by the next holder and not delivered twice; an unfinished turn is continued. **Failures are observable**: inside a turn as `session.error` + `session.status_idle`; outside one (environment, sandbox) as `session.error`, with the input still pending; a lapsed lease reads `rescheduling` and the next claim tells watchers the turn stopped |
+| `SessionWork` (the work table, `Memory` / `Pg`) plus metadata and the broadcaster | **The inbox, the history and the lock in one place**: `append` persists sent events and wakes the session in one statement; `claim` takes a woken or abandoned row with `FOR UPDATE SKIP LOCKED`, and holding it is holding the lease (with a fencing token that every holder write — acknowledge, record output — is checked against). A holder clears the wake before its last look, so an event that lands while it is releasing wakes the row for the next claim | No dispatcher, no Kafka, no LISTEN/NOTIFY, no push to a worker. Steady-state load: zero queries for an idle session; one indexed read per poll interval plus a renew every 2s for a running one; one indexed empty query per worker per second. `authorize` is **required** |
 
-Writing and observing are separated at the protocol level: `messages.create()` returns an acceptance
-receipt immediately (the input is journaled **at the moment of acceptance**, which is the durable
-evidence behind the 202); `events.stream()` is a session-level live feed spanning turns that backfills
-history before going live and carries a durable cursor (an SSE `id:` is emitted only for events
-findable in the log, with `Last-Event-ID` / `after` resumption; clients reconnect automatically and
-deduplicate by `eventId`); `events.list()` pages through history; the same `eventId` denotes the same
-identity in both. `run()` only recognizes the end of the turn its own delivery belongs to, so it is
-never ended early by an older turn's `turn.ended` arriving in the backfill.
+Writing and observing are separated at the protocol level: `events.send()` returns the accepted
+events with `processed_at: null` (they are durable at that moment); `events.stream()` is live-only
+— a client opens it before sending, and on a dropped connection the client fills the gap from
+`events.list()` and deduplicates by `id`; `events.list()` pages through the history, inputs and
+outputs interleaved, under the same ids. A connection that opts in with `event_deltas[]` also gets
+`event_start` / `event_delta` previews of an `agent.message` while it is generated: the worker
+broadcasts them on the same ordered channel as persisted events but never records them, and the
+buffered `agent.message` reuses the id its preview announced. Each model request is a persisted
+`span.model_request_start` / `span.model_request_end` pair; the end follows the message the request
+produced, or reports `is_error` when there was none, which is how a client knows a preview it
+holds will not be reconciled. `run()` only treats as its ending the idle that follows its
+own message coming back processed, so it is never ended early by the turn that was already running.
 
 > **Why single ownership belongs in the framework rather than the application**: it is a
 > framework-level invariant, and making every consumer implement
@@ -509,7 +513,7 @@ host that states nothing will spawn a process for a config that merely forgot th
 ## 7 · The journey of one prompt (threading all six rings)
 
 ```
-⑤ desktop → app-server RPC "prompt"                    (or ⑤ HTTP POST /messages → journal steer.queued → worker claims it)
+⑤ desktop → app-server RPC "prompt"                    (or ⑤ HTTP POST /events → managed inbox → worker pulls it → steerTo)
 ③ HarnessSession.prompt()  ── run gate (stands down during a barrier) ── extension run.start decision point (30s guardrail)
 ① Runner.run → acquireSession → withRunLock (single owner)
 ① Runner.execute → beginRun → ② assembleCapabilities (10s start timeout, absence isolated)
@@ -537,7 +541,7 @@ provides.
 |---|---|---|
 | A safety/correctness invariant (permissions, compaction, single owner) | ① kernel / ② capability | permission, compaction, SessionLock |
 | Changes run semantics, needs the compaction gate / a toolFilter / a session-lived `provides` service | ② capability | background, skills, mcp |
-| An object with a lifetime — shared by the process, by a working directory, or owned by one session | the matching scope tier (§5.7), via the `harness` / `workspace` / `session` hook | repository, MCP connections, a session's goal store |
+| An object with a lifetime — shared by the process or owned by one session | the matching tier (§5.7): `infrastructure` / `sessionCapabilities`, or an extension's `harness` half | repository, MCP connections, a session's goal store |
 | Tools, injection, commands, notifications, telemetry, shared resources, external integrations | ④ extension | cron, peers, browser |
 | 99% behavior plus 1% out of reach | open the narrowest seam in core, keep the body in ④ | peers' `steerTo` |
 | Where it runs / where it is stored / which model | ⑥ adapter | sandbox, pg, provider |

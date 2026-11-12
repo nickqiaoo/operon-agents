@@ -1,7 +1,7 @@
 /** `/plugins` status card: one installed plugin in detail, or the whole set in brief. */
 
 import type { Component } from 'operon-pi-tui';
-import type { PluginInfo, PluginSummary } from 'operon-agents';
+import type { PluginInfo, PluginSummary } from 'operon-agents/advanced';
 
 import { FAILURE_MARK, STATUS_BULLET, SUCCESS_MARK } from '../../constant/symbols.ts';
 import { currentTheme } from '../../theme/index.ts';

@@ -31,7 +31,7 @@ import {
 } from "../index.ts";
 import { CommandBackgroundTask } from "../capabilities/background/index.ts";
 import { runCommandInline } from "../tool/background.ts";
-import { prepareBackgroundLog } from "../tool/index.ts";
+import { prepareBackgroundLog, writeTextFile } from "../tool/index.ts";
 import { looksLikePrompt } from "../capabilities/background/stall-watchdog.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -938,7 +938,7 @@ async function testStuckOnAPromptIsReported(): Promise<void> {
   const dir = await mkdtempDir();
   // Writes its output, then blocks the way a command waiting on stdin does: until stopped.
   const writesThenBlocks = (logPath: string, output: string): CommandStarter => async ({ signal }) => {
-    await ENVIRONMENT.writeText(logPath, output);
+    await writeTextFile(ENVIRONMENT, logPath, output);
     await new Promise<void>((resolve) => {
       if (signal.aborted) resolve();
       else signal.addEventListener("abort", () => resolve(), { once: true });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { BackgroundTaskInfo, GoalSnapshot } from 'operon-agents';
+import type { BackgroundTaskInfo, GoalSnapshot } from 'operon-agents/advanced';
 
 import { parseCliArgs, helpText } from '../src/cli.ts';
 import { DEFAULT_TUI_CONFIG, normalizeTuiConfig, parseTuiConfig, renderTuiConfig } from '../src/config.ts';

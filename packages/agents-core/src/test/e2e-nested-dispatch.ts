@@ -9,7 +9,7 @@ import type { AgentEventBody } from "../events/events.ts";
 import { runCalls, type ToolCallStepContext } from "../loop/tool-call.ts";
 import type { LoopHooks } from "../loop/types.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import { tool } from "../tool/define.ts";
+import { defineTool } from "../tool/define.ts";
 import { NullEnvironment } from "../tool/environment-null.ts";
 import type { Tool, ToolResult } from "../tool/types.ts";
 import type { ApprovalResponse } from "../permission/types.ts";
@@ -30,7 +30,7 @@ function overlapProbe(name: string, accesses: ToolAccesses): { tool: Tool; peak:
   let peak = 0;
   return {
     peak: () => peak,
-    tool: tool({
+    tool: defineTool({
       name,
       description: name,
       parameters: z.object({}),
@@ -48,8 +48,8 @@ function overlapProbe(name: string, accesses: ToolAccesses): { tool: Tool; peak:
 
 async function main(): Promise<void> {
   const faux = registerFauxProvider();
-  const inner = tool({ name: "Inner", description: "inner", parameters: z.object({ x: z.number() }), execute: (args) => `inner:${String(args.x)}` });
-  const suspender = tool({
+  const inner = defineTool({ name: "Inner", description: "inner", parameters: z.object({ x: z.number() }), execute: (args) => `inner:${String(args.x)}` });
+  const suspender = defineTool({
     name: "Suspender",
     description: "asks",
     parameters: z.object({}),
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
   const writer = overlapProbe("Writer", ToolAccesses.writeFile("/x"));
   const reader = overlapProbe("Reader", ToolAccesses.readFile("/x"));
   /** The tool under test: dispatches whatever it is told to, in parallel when asked. */
-  const outer = tool({
+  const outer = defineTool({
     name: "Outer",
     description: "outer",
     parameters: z.object({ calls: z.array(z.object({ name: z.string(), args: z.record(z.string(), z.unknown()).optional() })) }),
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
 
   // ── arguments the tool's schema refuses ──
   {
-    const strict = tool({
+    const strict = defineTool({
       name: "Strict",
       description: "strict",
       parameters: z.object({ count: z.number(), either: z.union([z.number(), z.boolean()]).optional() }),
@@ -174,7 +174,7 @@ async function main(): Promise<void> {
   // ── the approval channel: a paused caller can carry the answer back ──
   {
     const answers: Record<string, ApprovalResponse> = {};
-    const reporter = tool({
+    const reporter = defineTool({
       name: "Reporter",
       description: "reports what a nested call came back with",
       parameters: z.object({ approval: z.enum(["approved", "rejected"]).optional() }),

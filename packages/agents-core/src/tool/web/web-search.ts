@@ -25,7 +25,7 @@ export function webSearchTool(provider: WebSearchProvider): Tool {
     description:
       "Search the web and return ranked results (title, URL, snippet). Use it for current facts, " +
       "documentation, or to find pages to FetchURL. Set include_content to pull full page text.",
-    params: WebSearchInput,
+    parameters: WebSearchInput,
     resolve: (args) => {
       const preview = args.query.length > 40 ? `${args.query.slice(0, 40)}…` : args.query;
       return {

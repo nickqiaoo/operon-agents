@@ -13,7 +13,7 @@
 
 import { sessionOfPullRequest } from "../server/pull-request-tool.ts";
 import { answersFor } from "./answers.ts";
-import { AGENT_ID, client, deliver, ownedSession, resume, truncate, type Surface, type TurnOutcome } from "./bridge.ts";
+import { AGENT_ID, client, deliver, ownedSession, pendingActions, resume, truncate, type Surface, type TurnOutcome } from "./bridge.ts";
 import { ManagedApiClientError } from "operon-managed-agents/client";
 
 /** The repository sessions default to when the issue names none (`owner/name`, optional). */
@@ -85,7 +85,7 @@ async function ensureSession(sessionId: string, event: LinearSessionEvent, repo:
       id: sessionId,
       agent: AGENT_ID,
       // The environment is the repository: the server clones it on the first open.
-      environment: repo,
+      environment_id: repo,
       title,
       metadata: { quickstart: "linear-github", linear: { issueId: issue.id, agentSessionId: event.agentSessionId } },
     });
@@ -143,8 +143,9 @@ export async function onGitHubComment(surface: Surface, event: GitHubCommentEven
   return continueSession(surface, sessionId, text, event.text);
 }
 
-// A message into an existing session: an answer if the session is paused on a question, a
-// follow-up otherwise. `reply` is the bare words for the answer; `text` is the attributed
+// A message into an existing session: an answer if the session is paused on a question or an
+// approval (a message sent then would only be held until someone answers), a follow-up
+// otherwise. `reply` is the bare words for the answer; `text` is the attributed
 // message the model sees as a prompt.
 async function continueSession(surface: Surface, sessionId: string, text: string, reply: string): Promise<TurnOutcome> {
   const session = await ownedSession(sessionId);
@@ -152,10 +153,8 @@ async function continueSession(surface: Surface, sessionId: string, text: string
     await surface.error("This session has ended on the server. Delegate the issue again to start over.");
     return { status: "gone" };
   }
-  if (session.state === "interrupted") {
-    const { data: pending } = await client.sessions.interruptions(sessionId);
-    if (pending.length > 0) return resume(surface, sessionId, answersFor(pending, reply));
-  }
+  const pending = await pendingActions(sessionId);
+  if (pending.length > 0) return resume(surface, sessionId, pending, answersFor(pending, reply));
   return deliver(surface, sessionId, text);
 }
 

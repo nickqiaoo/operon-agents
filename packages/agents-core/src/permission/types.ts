@@ -86,6 +86,7 @@ export interface PermissionPolicy {
 
 /** Input handed to the `auto`-mode judge for a single would-prompt action. */
 export interface AutoApprovalInput {
+  readonly autoApproval?: { readonly allow?: readonly string[]; readonly deny?: readonly string[]; readonly environment?: readonly string[]; readonly twoStageMode?: "both" | "fast" | "thinking" };
   /** The action under review (tool name / args / tool / model / signal). */
   readonly ctx: ResolvedToolExecutionHookContext;
   /** Conversation so far. The judge sanitises this (user text + tool calls only). */

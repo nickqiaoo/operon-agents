@@ -13,24 +13,24 @@
  * no retries, no dead letters, and no durable queue — which is what keeps it swappable for a
  * Redis `PUBLISH` (or NATS, or nothing at all in a single process).
  *
- * ## Why everything goes through here, not just the ephemeral events
+ * ## What travels here
  *
- * It is tempting to send only live-only events (token deltas) this way and let persisted events
- * arrive via the store. That breaks ordering: a delta belongs to the message it precedes, and
- * two paths with different latencies deliver them out of order with no way for a client to
- * reassemble. One channel carries all of it; the store is used to fill the gap before the
- * subscription started, not to race it.
+ * Managed events only, already translated by the worker that emitted them: every persisted
+ * event, and the `event_start` / `event_delta` previews of messages being generated, which
+ * exist nowhere else. The SSE endpoint forwards them as they are (previews only to connections
+ * that asked for them); nothing on the API side needs to know the framework's vocabulary.
+ * A stream is live-only: a client that needs what came before reads the event history.
  */
-import type { AgentEvent } from "operon-agents";
+import type { ManagedStreamEvent } from "../protocol/types.ts";
 
-export type BroadcastListener = (event: AgentEvent) => void;
+export type BroadcastListener = (event: ManagedStreamEvent) => void;
 
 export interface EventBroadcaster {
   /**
    * Publish to whoever is listening. Returns nothing and never throws — a broadcaster that made
    * callers await it would put a best-effort side channel on the critical path of writing a turn.
    */
-  publish(sessionId: string, event: AgentEvent): void;
+  publish(sessionId: string, event: ManagedStreamEvent): void;
   /** Listen until the returned function is called. */
   subscribe(sessionId: string, listener: BroadcastListener): () => void;
 }
@@ -52,7 +52,7 @@ export interface EventBroadcaster {
 export class MemoryEventBroadcaster implements EventBroadcaster {
   private readonly listeners = new Map<string, Set<BroadcastListener>>();
 
-  publish(sessionId: string, event: AgentEvent): void {
+  publish(sessionId: string, event: ManagedStreamEvent): void {
     const set = this.listeners.get(sessionId);
     if (set === undefined) return;
     // Copy before iterating: a listener may unsubscribe itself while being notified.
@@ -138,7 +138,7 @@ export class RedisEventBroadcaster implements EventBroadcaster {
     this.onError = options.onError ?? ((): void => undefined);
   }
 
-  publish(sessionId: string, event: AgentEvent): void {
+  publish(sessionId: string, event: ManagedStreamEvent): void {
     // Fire-and-forget: the caller is mid-turn, and a side channel must never be able to slow
     // down or fail the work that produced the event.
     void Promise.resolve(this.publisher.publish(this.prefix + sessionId, JSON.stringify(event)))
@@ -173,9 +173,9 @@ export class RedisEventBroadcaster implements EventBroadcaster {
     this.subscriber.on("message", (channel: string, message: string) => {
       const set = this.listeners.get(channel);
       if (set === undefined || set.size === 0) return;
-      let event: AgentEvent;
+      let event: ManagedStreamEvent;
       try {
-        event = JSON.parse(message) as AgentEvent;
+        event = JSON.parse(message) as ManagedStreamEvent;
       } catch (error) {
         this.onError(error);
         return;

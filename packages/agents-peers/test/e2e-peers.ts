@@ -1,22 +1,22 @@
 /**
  * A HOST-arranged standing team, end to end — and a demonstration that peer messaging needs
  * nothing from the engine: this is built on `api.onEvent`, `api.registerTool`,
- * `actions.openSession` and `handle.steerTo`, all public.
+ * host `resumeSession` and `handle.steerTo`, all public.
  *
  * One `peers()` registered on the harness; members are made at birth by a session param
- * (`params: { peers: { member } }`): identity and the Hub arrive with birth, no spawn involved.
+ * (`config.extensions.peers: { member }`): identity and the Hub arrive with birth, no spawn involved.
  */
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, offeredToolNames } from "../../agents/test/faux.ts";
 import { createHarness } from "operon-agents";
 import { PEERS_SERVICE, peers, sharedLabelVisibility, type PeerMemberOptions, type PeerNetworkHandle } from "../src/index.ts";
 
 /** Born a member: the per-session param `peers()` reads to mount the Hub with this identity. */
-const asMember = (member: PeerMemberOptions) => ({ params: { [PEERS_SERVICE]: { member } } });
+const asMember = (member: PeerMemberOptions) => ({ config: { extensions: { [PEERS_SERVICE]: { member } } } });
 
 const checks: Array<[string, boolean]> = [];
-function check(label: string, ok: boolean): void {
+function check(label: string, ok: boolean, detail = ""): void {
   checks.push([label, ok]);
-  console.log(ok ? `✅ ${label}` : `❌ ${label}`);
+  console.log(ok ? `✅ ${label}` : `❌ ${label}${detail === "" ? "" : ` (${detail})`}`);
 }
 
 /** The recipient's turn is started fire-and-forget by delivery. */
@@ -28,8 +28,8 @@ async function main(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [peers({ visibility: sharedLabelVisibility, limits: { maxOutboundPerTurn: 2 } })],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   // The host reaches the network the same way sessions do: through its handle.
   const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
@@ -97,7 +97,16 @@ async function main(): Promise<void> {
   ]);
   const revived = await alice.prompt("message bob again");
   await settle();
-  check("park: a parked teammate is still addressable", !JSON.stringify(revived.messages).includes("unknown_agent"));
+  // The last tool result is this send's: "not unknown" alone also holds for a send refused on
+  // other grounds, which never reaches the sleeper at all.
+  const sendResult = JSON.stringify(revived.messages.filter((message) => message.role === "toolResult").at(-1));
+  check("park: a parked teammate is still addressable", !sendResult.includes("unknown_agent"));
+  check("park: the send to it is delivered", sendResult.includes("delivered"), sendResult);
+  const bobAgain = harness.getSession(bob.id);
+  check("park: delivery reopened its session", bobAgain !== undefined && bobAgain !== bob);
+  const bobTranscript = JSON.stringify(bobAgain?.snapshot());
+  check("park: the woken teammate took the message", bobTranscript.includes("WAKE_UP"));
+  check("park: and answered it in a turn of its own", bobTranscript.includes("bob is awake"));
   check("park: reopening it kept the team label", (await bobRef())?.labels?.includes("team:host:alpha") === true);
 
   // ── Per-turn outbound budget ──
@@ -116,7 +125,10 @@ async function main(): Promise<void> {
   ]);
   const budgeted = await alice.prompt("send three messages at once");
   await settle();
-  check("limits: the third send in one turn is refused", JSON.stringify(budgeted.messages).includes("quota_exceeded"));
+  // One per send, in order. A budget that never refilled would refuse all three.
+  const sends = budgeted.messages.filter((message) => message.role === "toolResult").slice(-3).map((message) => JSON.stringify(message));
+  check("limits: a new turn starts with a full budget", sends.slice(0, 2).every((result) => result.includes("delivered")), sends.join(" | "));
+  check("limits: the third send in one turn is refused", sends[2]?.includes("quota_exceeded") === true);
 
   faux.unregister();
   await harness.close();

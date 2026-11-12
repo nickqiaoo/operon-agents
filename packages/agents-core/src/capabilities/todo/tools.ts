@@ -37,7 +37,7 @@ export function todoListTool(store: TodoStore): Tool {
   return defineTool({
     name: TODO_LIST_TOOL_NAME,
     description: TODO_LIST_DESCRIPTION,
-    params: TodoListInput,
+    parameters: TodoListInput,
     resolve: (args) => {
       const title =
         args.todos === undefined

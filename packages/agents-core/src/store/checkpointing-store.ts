@@ -62,6 +62,11 @@ export class CheckpointingSessionStore implements SessionStore {
     }
   }
 
+  /** How many turns have started at `address`, in what was restored and what was written since. */
+  turnsStarted(address: string): number {
+    return this.frames.turnsStarted(address);
+  }
+
   appendRecord(record: AgentRecord): Promise<string> {
     // The audit shard has no lifecycle to fold, and no checkpoint is ever written to it.
     if (record.address === AUDIT_ADDRESS) return this.inner.appendRecord(record);

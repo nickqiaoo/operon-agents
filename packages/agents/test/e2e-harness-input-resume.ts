@@ -1,6 +1,6 @@
 // Durable INPUT suspension answered through the Harness facade.
 //
-// `HarnessSession.resume` used to wrap every answer as `{ kind: "approval" }` — a run
+// `HarnessSession.respond` used to wrap every answer as `{ kind: "approval" }` — a run
 // durably suspended on a tool's `ctx.suspend` (an input interrupt) could never be answered
 // through the facade at all: the harness was approval-only while the core Runner already
 // accepted `{ kind: "input", data }`. This exercises the pass-through: bare
@@ -14,6 +14,15 @@ import { defineAgent, DiskSessionRepository, type AgentEvent, type SteerReceipt,
 import { createHarness } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
+function refused(send: () => unknown): boolean {
+  try {
+    send();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function check(label: string, ok: boolean): void {
   checks.push([label, ok]);
   console.log(ok ? `✅ ${label}` : `❌ ${label}`);
@@ -29,9 +38,8 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
   const model = faux.getChatModel()!;
   const harness = createHarness({
     ...faux.harnessModel(),
-    workDir: home,
     infrastructure: () => ({ sessionRepository: new DiskSessionRepository(join(home, "sessions")) }),
-    permission: { mode: "yolo" },
+    config: { workDir: home, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   let onResumed: (() => void) | undefined;
   let onPausedAgain: (() => void) | undefined;
@@ -59,10 +67,12 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
     fauxAssistantMessage("consumed late messages", { stopReason: "stop" }),
   ]);
   try {
-    const session = await harness.createSession({ agent: defineAgent({ name: "picker", model, instructions: "x", tools: [pick] }) });
+    const session = await harness.createSession({
+    bindings: { agent: defineAgent({ name: "picker", model, instructions: "x", tools: [pick] }) }
+  });
     const first = await session.prompt("pick");
     const pending = first.interruptions![0]!;
-    check(`${mode}: paused root refuses steerTo before resume`, session.steerTo("main", "not yet", { kind: "user" }) === undefined);
+    check(`${mode}: paused root refuses steerTo before resume`, refused(() => session.steerTo("main", "not yet", { kind: "user" })));
     const events: AgentEvent[] = [];
     const late: SteerReceipt[] = [];
     let during: SteerReceipt | undefined;
@@ -77,13 +87,13 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
       if (mode === "gated") gate = session.holdAtBoundary();
       late.push(session.steer("late one"), session.steer("late two"));
     });
-    const resuming = session.resume({
+    const resuming = session.respond({
       [mode === "invalid-answer" ? "unknown-answer" : pending.approvalId]: { kind: "input", data: "chosen" },
     });
     // The call has registered its run but is still awaiting the durable control record.
     const early = session.steerTo("main", "while loading resume state", { kind: "user" });
     check(`${mode}: resume synchronously reports running and accepts steerTo`, session.status.state === "running" && early !== undefined);
-    check(`${mode}: absent child is not started by steerTo`, session.steerTo("main/missing", "hello", { kind: "user" }) === undefined);
+    check(`${mode}: absent child is not started by steerTo`, refused(() => session.steerTo("main/missing", "hello", { kind: "user" })));
     const outcome = await resuming.then((result) => result.status, (error: Error) => error.message);
     await new Promise<void>((resolve) => setImmediate(resolve));
     await session.whenIdle();
@@ -93,7 +103,7 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
       check(`${mode}: queued input cannot wake a paused run`, session.status.state === "interrupted" && session.status.hasQueuedMessages);
       check(`${mode}: no extra run starts`, events.filter((event) => event.type === "agent.started").length === (mode === "invalid-answer" ? 0 : 1));
       check(`${mode}: the pending interruption remains recoverable`, (await session.pendingInterruptions()).length > 0);
-      check(`${mode}: paused root still refuses steerTo`, session.steerTo("main", "not yet", { kind: "user" }) === undefined);
+      check(`${mode}: paused root still refuses steerTo`, refused(() => session.steerTo("main", "not yet", { kind: "user" })));
     } else {
       check(`${mode}: resume completes`, outcome === "completed");
       check(`${mode}: steerTo accepts input during resumed execution`, during !== undefined);
@@ -109,9 +119,9 @@ async function testResumeSteering(mode: "complete" | "gated" | "reinterrupt" | "
       check(`${mode}: session finishes idle with an empty queue`, session.status.state === "idle" && !session.status.hasQueuedMessages);
     }
     const closing = session.close();
-    check(`${mode}: closing refuses steerTo`, session.steerTo("main", "closed", { kind: "user" }) === undefined);
+    check(`${mode}: closing refuses steerTo`, refused(() => session.steerTo("main", "closed", { kind: "user" })));
     await closing;
-    check(`${mode}: closed refuses steerTo`, session.steerTo("main", "closed", { kind: "user" }) === undefined);
+    check(`${mode}: closed refuses steerTo`, refused(() => session.steerTo("main", "closed", { kind: "user" })));
   } finally {
     await harness.close();
     faux.unregister();
@@ -161,8 +171,14 @@ async function main(): Promise<void> {
 
   try {
     // ── Process 1: the tool suspends for input; the run interrupts durably ──
-    const harness1 = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
-    const session1 = await harness1.createSession({ agent: picker });
+    const harness1 = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+    const session1 = await harness1.createSession({
+    bindings: { agent: picker }
+  });
     const sessionId = session1.id;
 
     const first = await session1.prompt("book me a flight");
@@ -175,12 +191,18 @@ async function main(): Promise<void> {
     await harness1.close();
 
     // ── Process 2: a fresh harness answers the INPUT suspension via resume ──
-    const harness2 = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
-    const session2 = await harness2.resumeSession(sessionId, { agent: picker });
+    const harness2 = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+    const session2 = await harness2.resumeSession(sessionId, {
+    bindings: { agent: picker }
+  });
     check("input-resume: reopened durable pause reports interrupted", session2.status.state === "interrupted");
     check("input-resume: reopened pause exposes pending input", (await session2.pendingInterruptions())[0]?.kind === "input");
 
-    const second = await session2.resume({ [pending!.approvalId]: { kind: "input", data: { choice: "flight-A" } } });
+    const second = await session2.respond({ [pending!.approvalId]: { kind: "input", data: { choice: "flight-A" } } });
     check("input-resume: resume with a { kind: 'input' } answer completes the run", second.status === "completed");
     check("input-resume: the answer + saved state reached the suspended tool", counters.books === 1 && second.messages.some((m) => JSON.stringify(m.content).includes("booked:flight-A of:flight-A,flight-B")));
     check("input-resume: final output surfaced", second.output.includes("Booked the flight"));
@@ -199,7 +221,7 @@ async function main(): Promise<void> {
   const total = checks.length;
   console.log(`\n${passed}/${total} checks passed`);
   if (passed === total) {
-    console.log("✅ HARNESS INPUT-RESUME E2E PASS — durable input suspension answered through HarnessSession.resume");
+    console.log("✅ HARNESS INPUT-RESUME E2E PASS — durable input suspension answered through HarnessSession.respond");
   } else {
     console.log("❌ HARNESS INPUT-RESUME E2E FAIL");
     process.exit(1);

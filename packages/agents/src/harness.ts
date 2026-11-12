@@ -11,105 +11,18 @@
  * primitives for the "assemble it yourself / stateless server" path are exported from
  * `operon-agents` too.
  */
-import {
-  type AgentEvent,
-  type AgentRecord,
-  type EventPublicationMode,
-  type TelemetryService,
-  type AgentEventListener,
-  type AgentInput,
-  readSessionTails,
-  SessionProjection,
-  type SessionSnapshot,
-  type SnapshotOptions,
-  type DirectoryEntry,
-  type ProjectionObservation,
-  type ProjectionListener,
-  type ApprovalRequest,
-  type ApprovalResponse,
-  type Capability,
-  type InterruptAnswer,
-  type ChatModel,
-  type ModelSettings,
-  type RunOptions,
-  ListenerSink,
-  recoverOrphanedTurns,
-  type PermissionManagerOptions,
-  type PermissionMode,
-  type PendingRunInterrupt,
-  type QuestionRequest,
-  type QuestionResult,
-  type Responder,
-  type RunHandle,
-  type RunResult,
-  type SessionStore,
-  type SessionHandle,
-  type SessionSummary,
-  type ListSessionsFilter,
-  type CreateSessionInput,
-  type OpenSessionOptions,
-  type DeleteSessionOptions,
-  type ThinkingLevel,
-  type Tool,
-  type PromptOrigin,
-  type SteerMessage,
-  type SteerOptions,
-  type SteerOrigin,
-  type SteerReceipt,
-  Agent,
-  buildAgentFromProfile,
-  INTERRUPTION_STATE_KEY,
-  flattenPendingInterrupts,
-  parseInterruptionState,
-  Runner,
-  Session,
-  emptyUsage,
-  isGuardrailTripwireError,
-  type GuardrailTripwireError,
-  askUserQuestionTool,
-  createModelManager,
-  backgroundCapability,
-  compactionCapability,
-  filesystemTools,
-  goalCapability,
-  LocalEnvironment,
-  McpOAuthService,
-  MemorySessionRepository,
-  SessionRepositoryNotFoundError,
-  planCapability,
-  skillsCapability,
-  SkillRegistry,
-  mcpServersCapability,
-  pluginsCapability,
-  userHooksCapability,
-  type HookDef,
-  type McpServerConfig,
-  type McpTransportKind,
-  type McpCredentialProvider,
-  type PluginManager,
-  type ApprovalRequestOptions,
-  type Environment,
-  type EnvironmentFactory,
-  type ActivateSkillRequest,
-  type SessionRepository,
-  type ResolvedAgentProfile,
-  taskCapability,
-  workflowCapability,
-  DEFAULT_AGENT_PROFILES,
-  DEFAULT_AGENT_PROFILE_NAME,
-  DEFAULT_SUBAGENT_NAMES,
-  profileSubagentProvider,
-  type SubagentProvider,
-  DEFAULT_ADDRESS,
-  envLogger,
-  noopLogger,
-} from "operon-agents-core";
+import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { closeDeadlines } from "./harness-test-hooks.ts";
+import { type AgentEvent, type AgentRecord, type EventPublicationMode, type TelemetryService, type AgentEventListener, type AgentInput, readSessionTails, SessionProjection, type SessionSnapshot, type SnapshotOptions, type DirectoryEntry, type ProjectionObservation, type ProjectionListener, type ApprovalRequest, type ApprovalResponse, type Capability, type InterruptAnswer, type ChatModel, type ModelSettings, type RunOptions, ListenerSink, type AutoApprover, type PermissionMode, type PermissionRule, type PendingRunInterrupt, type QuestionRequest, type QuestionResult, type Responder, type RunHandle, type RunResult, type SessionStore, type SessionHandle, type SessionSummary, type ListSessionsFilter, type CreateSessionInput, type OpenSessionOptions, type DeleteSessionOptions, type ThinkingLevel, type Tool, type PromptOrigin, type SteerMessage, type SteerOptions, type SteerOrigin, type SteerReceipt, Agent, buildAgentFromProfile, INTERRUPTION_STATE_KEY, flattenPendingInterrupts, parseInterruptionState, Runner, Session, emptyUsage, isGuardrailTripwireError, type GuardrailTripwireError, askUserQuestionTool, createAutoApprover, createModelManager, backgroundCapability, compactionCapability, filesystemTools, goalCapability, LocalEnvironment, McpOAuthService, MemorySessionRepository, SessionRepositoryNotFoundError, SessionBusyError, SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError, isAbortError, planCapability, skillsCapability, SkillRegistry, mcpServersCapability, pluginsCapability, userHooksCapability, type HookDef, type McpServerConfig, type McpTransportKind, type McpCredentialProvider, type PluginManager, type ApprovalRequestOptions, type Environment, type EnvironmentFactory, type ActivateSkillRequest, type SessionRepository, type ResolvedAgentProfile, taskCapability, workflowCapability, DEFAULT_AGENT_PROFILES, DEFAULT_AGENT_PROFILE_NAME, DEFAULT_SUBAGENT_NAMES, profileSubagentProvider, type SubagentProvider, DEFAULT_ADDRESS, envLogger, noopLogger, parseSessionConfig, resolveSessionConfig, inlineMcpSecretPaths, sessionPolicyViolation, hookDefsFromConfig, SessionPolicySchema, SESSION_MODEL_KEY, SESSION_PERMISSION_KEY, SESSION_THINKING_KEY, type SessionConfig, type HarnessConfig, type SessionPolicy, type SessionMcpConfig, type SkillsConfig } from "operon-agents-core";
+import { recoverOrphanedTurns } from "operon-agents-core/internal";
 import type {
   TodoStore,
   SkillsService,
   CompactionService,
   BackgroundManager,
   McpServersHandle,
+  McpServersCapabilityOptions,
   GoalStore,
   PlanMode,
   Logger,
@@ -131,17 +44,245 @@ export type QuestionHandler = (
   options?: { readonly signal?: AbortSignal },
 ) => Promise<QuestionResult> | QuestionResult;
 
+/**
+ * What a session may do without asking. `mode` picks the baseline, `rules` allow or deny specific
+ * tools on top of it, and `autoApprover` is the judge the `auto` mode consults.
+ */
+export interface HarnessPermissionOptions {
+  readonly mode?: PermissionMode;
+  readonly rules?: readonly PermissionRule[];
+  readonly autoApprover?: AutoApprover;
+}
+
+
+/** The harness has been closed and can open nothing further. */
+export class HarnessClosedError extends Error {
+  constructor() {
+    super("harness is closed");
+    this.name = "HarnessClosedError";
+  }
+}
+
+/** Another harness-wide operation is in progress. */
+export class HarnessBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HarnessBusyError";
+  }
+}
+
+/** The harness or session options cannot work as given. */
+export class HarnessConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HarnessConfigError";
+  }
+}
+
+/**
+ * `resumeSession(id, options)` was asked to restore a session that is already loaded. Options
+ * cannot be applied to an existing instance without dropping them, so this is refused: attach with
+ * `resumeSession(id)` (no options), or close the session first to restore it differently.
+ */
+export class SessionAlreadyLoadedError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(`session "${sessionId}" is already loaded, so the options given cannot be applied to it; call resumeSession(id) without options to get the loaded session, or close it first`);
+    this.name = "SessionAlreadyLoadedError";
+    this.sessionId = sessionId;
+  }
+}
+
+/** The same refusal while a load of that session is in flight: `resumeSession(id)` joins it. */
+export class SessionAlreadyLoadingError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(`session "${sessionId}" is already being loaded, so the options given cannot be applied to it; call resumeSession(id) without options to join that load`);
+    this.name = "SessionAlreadyLoadingError";
+    this.sessionId = sessionId;
+  }
+}
+
+/**
+ * A session was created on a live object — a sandbox, a credential provider, an agent built in code —
+ * that nobody provides on this open. The harness does not substitute a default: a sandboxed session
+ * restored onto the host's own filesystem is not the same session. Provide it through `bindings` or
+ * `resolveSession`.
+ */
+export class SessionDependencyMissingError extends Error {
+  readonly sessionId: string;
+  readonly missing: readonly SessionBindingKey[];
+  constructor(sessionId: string, missing: readonly SessionBindingKey[]) {
+    super(`session "${sessionId}" needs ${missing.join(", ")} provided when it is opened (through \`bindings\` or \`resolveSession\`); the harness does not substitute a default`);
+    this.name = "SessionDependencyMissingError";
+    this.sessionId = sessionId;
+    this.missing = missing;
+  }
+}
+
+/** A session's configuration asks for something the harness's policy does not allow. */
+export class SessionPolicyViolationError extends Error {
+  readonly sessionId: string;
+  readonly field: string;
+  constructor(sessionId: string, field: string, reason: string) {
+    super(`session "${sessionId}": ${reason}`);
+    this.name = "SessionPolicyViolationError";
+    this.sessionId = sessionId;
+    this.field = field;
+  }
+}
+
+/**
+ * The live objects one open of a session runs on — what cannot be written down. Never stored: a
+ * later open provides them again, directly or through `resolveSession`. An object given here wins
+ * over the same thing named in the session's configuration (`agent`, `model`, `tools`).
+ */
+export interface SessionBindings<TContext = unknown> {
+  /** Host application context for this session's runs. Absent, the harness's own applies. */
+  readonly context?: TContext;
+  /** Where this session's tools execute. The session only operates it; see `release`. */
+  readonly environment?: Environment | EnvironmentFactory;
+  /** Where this session's http MCP servers get their credentials, asked on every connect. */
+  readonly mcpCredentials?: McpCredentialProvider;
+  /** A complete agent, instead of one named in the configuration or the default. */
+  readonly agent?: Agent<TContext>;
+  /** A built model — how one session gets its own API key. */
+  readonly model?: ChatModel;
+  /** Concrete tools for this session's default agent, instead of names from the registry. */
+  readonly tools?: readonly Tool[];
+  readonly subagentProvider?: SubagentProvider<TContext>;
+  readonly extraSubagentProfiles?: Record<string, ResolvedAgentProfile>;
+  /**
+   * Give back what these bindings acquired. Called exactly once: when the session closes, or when
+   * its open fails after the bindings were handed over. What "give back" means — destroy a
+   * sandbox, return it to a pool, drop a reference — is the provider's. Absent, nothing is done.
+   */
+  release?(): void | Promise<void>;
+}
+
+/** The kinds of live object a session can depend on being provided again. */
+export type SessionBindingKey = "environment" | "mcpCredentials" | "agent" | "model" | "tools" | "subagentProvider";
+const SESSION_BINDING_KEYS: readonly SessionBindingKey[] = ["environment", "mcpCredentials", "agent", "model", "tools", "subagentProvider"];
+
+export type SessionOperation = "create" | "restore" | "fork";
+
+/** Who asked for a session to be opened: the host's own code, an extension, or a remote client. */
+export type SessionOrigin = { readonly kind: "host" } | { readonly kind: "extension"; readonly extensionId: string } | { readonly kind: "remote" };
+
+/** The session being opened, as its durable record names it. */
+export interface SessionIdentity {
+  readonly id: string;
+  readonly workDir: string;
+  readonly ownerKey?: string;
+  readonly title?: string;
+}
+
+export interface SessionResolveRequest<TContext = unknown> {
+  readonly operation: SessionOperation;
+  readonly origin: SessionOrigin;
+  readonly session: SessionIdentity;
+  /** The session a fork copies, or the one an extension is creating this session from. */
+  readonly source?: { readonly id: string; readonly workDir: string; readonly ownerKey?: string };
+  /** What this call handed in directly. */
+  readonly requested: { readonly config?: SessionConfig; readonly bindings: SessionBindings<TContext> };
+  /** The setup stored with the session (a restore or a fork), runtime changes included. */
+  readonly stored?: SessionConfig;
+  /** Aborted when the harness closes. */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * What the host resolves for one open. A `config` returned here is FINAL — the host saw what was
+ * requested and what was stored and decided — and is not stored by the harness, so a host that
+ * keeps configuration in its own database has exactly one copy. `bindings` are laid over the
+ * requested ones key by key.
+ */
+export interface SessionResolution<TContext = unknown> {
+  readonly config?: SessionConfig;
+  readonly bindings?: SessionBindings<TContext>;
+}
+
+export interface SessionOpenInfo {
+  readonly operation: SessionOperation;
+  readonly origin: SessionOrigin;
+  readonly source?: { readonly id: string; readonly workDir: string; readonly ownerKey?: string };
+}
+
+export type SessionOpenedListener<TContext = unknown> = (
+  session: HarnessSession<TContext>,
+  info: SessionOpenInfo,
+) => void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>;
+
+interface SessionSource {
+  readonly id: string;
+  readonly workDir: string;
+  readonly ownerKey?: string;
+  readonly requires: readonly SessionBindingKey[];
+}
+
+interface OpenRequest<TContext> {
+  /** `config` as given, validated. On a resume it replaces the stored setup. */
+  readonly config?: SessionConfig;
+  readonly bindings: SessionBindings<TContext>;
+  readonly hasContext: boolean;
+  readonly origin: SessionOrigin;
+}
+
+interface StoredSetup {
+  readonly config: SessionConfig;
+  readonly requires: readonly SessionBindingKey[];
+  /** False for a session from before the setup was stored under its own key. */
+  readonly present: boolean;
+}
+
+interface AssembleArgs<TContext> {
+  readonly operation: SessionOperation;
+  readonly id: string;
+  readonly workDir: string;
+  readonly store: SessionStore;
+  readonly request: OpenRequest<TContext>;
+  readonly source?: SessionSource;
+  readonly ownerKey?: string;
+  readonly title?: string;
+  /** This open made the durable record, so a failed open removes it. */
+  readonly createdRecord: boolean;
+}
+
+/** Session-store key holding a session's stored setup: `{ version, config, requires }`. */
+const SESSION_CONFIG_STATE_KEY = "session:config";
+const DEFAULT_PERMISSION_MODE: PermissionMode = "workspace";
+
+/** Every key `createSession` takes — what an extension's options are checked against. */
+const CREATE_SESSION_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "workDir", "ownerKey", "title", "config", "from",
+]);
+
+function definedOnly<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
+}
+
+/** A session's model is remembered by the core under its own key; the stored setup holds the rest. */
+function withoutModel(config: SessionConfig): SessionConfig {
+  const { model: _model, thinking: _thinking, permission, ...rest } = config;
+  const { mode: _mode, ...permissionConfig } = permission ?? {};
+  return { ...rest, ...(Object.keys(permissionConfig).length > 0 ? { permission: permissionConfig } : {}) };
+}
+
+const DEFAULT_AGENT_ONLY_OPTIONS = ["modelSettings", "tools", "appendSystemPrompt", "maxStepsPerTurn"] as const;
+
+/** These options shape the default agent. Given alongside a complete `agent`, they could only be ignored. */
+function assertNoDefaultAgentOptions(options: { readonly [K in (typeof DEFAULT_AGENT_ONLY_OPTIONS)[number]]?: unknown }, agentGivenAt: string): void {
+  const conflicting = DEFAULT_AGENT_ONLY_OPTIONS.filter((name) => options[name] !== undefined);
+  if (conflicting.length === 0) return;
+  throw new HarnessConfigError(`${conflicting.join(", ")} only apply to the default agent, but ${agentGivenAt} sets \`agent\`. Set them on that agent instead.`);
+}
+
 export type HarnessSessionState = "idle" | "running" | "interrupted" | "closed";
 
-/** How long `HarnessSession.close()` waits for aborted runs to settle before continuing teardown. */
-let CLOSE_RUN_WAIT_MS = 5_000;
-/** Test-only (exported via `operon-agents/internal`): shrink the close deadlines. */
-export function setHarnessCloseTimeoutsForTest(ms: { runSettle?: number }): void {
-  if (ms.runSettle !== undefined) CLOSE_RUN_WAIT_MS = ms.runSettle;
-}
 /** Rendezvous budget for `replaceExtension` when the caller names none. */
 const DEFAULT_REPLACE_TIMEOUT_MS = 30_000;
-/** Session-store key holding the per-session extension params map (see `createSession({ params })`). */
+/** Where the per-session extension params lived before `session:config`. Read for sessions stored
+ *  back then (as `config.extensions`), never written. */
 const EXTENSION_PARAMS_STATE_KEY = "extensions:params";
 
 /** A slash command as listed by `HarnessSession.listCommands`. */
@@ -159,13 +300,22 @@ export interface HarnessSessionStatus {
 
 export interface DefaultCapabilitiesOptions {
   /**
+   * The session this bundle is built for — the context a `sessionCapabilities` factory receives.
+   * Given it, the bundle reads what that session runs on from it: the MCP servers, skills and hooks
+   * its configuration names, the transports policy allows, whether it is isolated or on its own
+   * environment, its credentials, and the harness's shared parts. A factory that only adds to the
+   * standard bundle passes this and its additions; any option below, given too, wins over what the
+   * context says.
+   */
+  readonly session?: SessionCapabilityContext;
+  /**
    * The harness's process-shared parts. When it carries a set of MCP connections, a skill scan or
    * an OAuth service, the bundle uses THOSE instead of building per-session ones. Without it
    * everything here is built per session.
    */
   readonly shared?: HarnessInfrastructure;
   /**
-   * The session brought its own environment (`createSession({ environment })`). The shared
+   * The session brought its own environment (`bindings.environment`). The shared
    * `skillRegistry` was scanned through the HARNESS's environment and does not describe this one,
    * so the skill scan runs per session through the session's environment instead — the catalog
    * follows the filesystem the session's tools actually operate. Default false.
@@ -173,13 +323,28 @@ export interface DefaultCapabilitiesOptions {
   readonly ownEnvironment?: boolean;
   /** Context window budget used to size compaction. Defaults to 200_000. */
   readonly maxContextTokens?: number;
-  /** Harness-level MCP servers. When set (or with `pluginManager`), an MCP capability is included. */
+  /**
+   * The session's MCP configuration (`SessionConfig.mcp`): `false` for none, or the COMPLETE set of
+   * servers it sees — not an overlay. When given it decides visibility alone, and `mcpServers`,
+   * `sessionMcpServers` and the plugins' servers are not consulted (the harness has already folded
+   * what applies into it). Where each connection comes from is a separate matter: a server whose
+   * configuration is identical to one the process shares (`shared.mcpServers` built from
+   * `shared.mcpServerConfigs`) is viewed there; every other one is connected for this session.
+   */
+  readonly mcp?: SessionMcpConfig;
+  /** The session's skills configuration (`SessionConfig.skills`): `false` for none, or the roots to
+   *  scan for this session instead of the shared catalog. */
+  readonly skills?: SkillsConfig;
+  /**
+   * Servers for a bundle built WITHOUT a session configuration (`mcp` above, or `session`): every
+   * session this factory builds for sees them. With `mcp` they do not decide what is visible, only
+   * what a directory pool may lend.
+   */
   readonly mcpServers?: Record<string, McpServerConfig>;
   /**
-   * MCP servers private to the session being built — `SessionCapabilityContext.mcpServers`, i.e.
-   * what the caller passed to `createSession({ mcpServers })`. They are layered OVER the
-   * harness's shared servers (`HarnessInfrastructure.mcpServers`) and over `mcpServers` above: same name, the
-   * session's wins for this session only. Built, connected and shut down with the session.
+   * Like `mcpServers`, for a bundle built without a session configuration: servers private to the
+   * one session being built, layered over the shared ones (same name: these win). Built, connected
+   * and shut down with the session. A session's own servers normally arrive as `mcp` instead.
    */
   readonly sessionMcpServers?: Record<string, McpServerConfig>;
   /**
@@ -231,6 +396,9 @@ export interface DefaultCapabilitiesOptions {
   /** Credentials the host hands out per connect for this session's http MCP servers. See
    *  `McpCredentialProvider`. */
   readonly mcpCredentials?: McpCredentialProvider;
+  /** How this session's own MCP connections are made, for a host with a transport of its own.
+   *  Connections the session only views (the process's, a directory pool's) were made elsewhere. */
+  readonly mcpTransportFactory?: McpServersCapabilityOptions["transportFactory"];
   /**
    * The session belongs to one tenant among many (a managed host's default): nothing the process
    * shares reaches it — no process-wide MCP set, skill scan, OAuth service or directory pool —
@@ -252,7 +420,8 @@ export interface DefaultCapabilitiesOptions {
  * a harness capability factory) so per-session state (goal/plan/todo/…) and the plugin set are
  * isolated per session, mirroring a fresh-Session-per-create model.
  */
-export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): Capability[] {
+export function defaultCapabilities(given: DefaultCapabilitiesOptions = {}): Capability[] {
+  const options = given.session === undefined ? given : { ...optionsOfSession(given.session), ...definedOnly({ ...given }) };
   const manager = options.pluginManager ?? options.shared?.pluginManager;
   // A session on its own environment ignores the process-wide registry: it was scanned elsewhere.
   const strict = options.strictIsolation === true;
@@ -270,18 +439,28 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
   const registry = sharedSkills ?? (manager !== undefined ? new SkillRegistry() : undefined);
   // `includeDefaultRoots` because the plugin dirs ADD to the project/user `.agents/skills` roots —
   // without it, enabling a single skill-bearing plugin would hide every local skill.
+  const ownSkills = options.skills !== undefined && options.skills !== false ? options.skills : undefined;
   const skills =
-    sharedSkills !== undefined
-      ? skillsCapability({ registry: sharedSkills, scan: false })
-      : manager !== undefined
-        ? skillsCapability({ registry, roots: manager.skillRoots(), includeDefaultRoots: true })
-        : skillsCapability();
+    options.skills === false
+      ? undefined
+      : ownSkills !== undefined && (ownSkills.roots !== undefined || ownSkills.includeDefaultRoots !== undefined)
+        // The session names its own roots: scanned for it, the shared catalog does not apply.
+        ? skillsCapability({
+            ...(manager !== undefined ? { registry } : {}),
+            roots: [...(ownSkills.roots ?? []).map((path) => ({ path, source: "project" as const })), ...(manager?.skillRoots() ?? [])],
+            includeDefaultRoots: ownSkills.includeDefaultRoots ?? true,
+          })
+        : sharedSkills !== undefined
+          ? skillsCapability({ registry: sharedSkills, scan: false })
+          : manager !== undefined
+            ? skillsCapability({ registry, roots: manager.skillRoots(), includeDefaultRoots: true })
+            : skillsCapability();
   const capabilities: Capability[] = [
     goalCapability(),
     workflowCapability(),
     planCapability(),
     taskCapability(),
-    skills,
+    ...(skills !== undefined ? [skills] : []),
     backgroundCapability(),
     compactionCapability({ maxContextTokens: options.maxContextTokens ?? 200_000 }),
   ];
@@ -291,6 +470,7 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     ...(oauthService !== undefined ? { oauthService } : {}),
     ...(allowedMcpTransports !== undefined ? { allowedTransports: allowedMcpTransports } : {}),
     ...(options.mcpCredentials !== undefined ? { credentials: options.mcpCredentials } : {}),
+    ...(options.mcpTransportFactory !== undefined ? { transportFactory: options.mcpTransportFactory } : {}),
   };
   // Everything this session would connect that is not private to it: the directory's servers
   // last, so they win over a same-named plugin server the way they did as a session overlay.
@@ -303,12 +483,44 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     // The process environment has no tenant boundary: a token read from it is every tenant's.
     for (const [name, config] of Object.entries({ ...shareable, ...sessionMcp })) {
       if (config.bearerTokenEnvVar !== undefined) {
-        throw new Error(`MCP server "${name}" reads its token from the process environment (bearerTokenEnvVar), which every tenant on this host shares; hand it out per session with mcpCredentials instead.`);
+        throw new HarnessConfigError(`MCP server "${name}" reads its token from the process environment (bearerTokenEnvVar), which every tenant on this host shares; hand it out per session with mcpCredentials instead.`);
       }
     }
   }
   const pooled = sharedServers === undefined && !isolated ? options.workspaceMcp : undefined;
-  if (pooled !== undefined && Object.keys(shareable).length > 0) {
+  if (options.mcp !== undefined) {
+    // The session's configuration names what it sees. `false`: nothing, and no MCP capability.
+    if (options.mcp !== false) {
+      const visible = options.mcp.servers;
+      if (strict) {
+        for (const [name, config] of Object.entries(visible)) {
+          if (config.bearerTokenEnvVar !== undefined) {
+            throw new HarnessConfigError(`MCP server "${name}" reads its token from the process environment (bearerTokenEnvVar), which every tenant on this host shares; hand it out per session with mcpCredentials instead.`);
+          }
+        }
+      }
+      // A connection is shared only when it IS the same server: same name, same configuration.
+      const sharedConfigs = sharedServers !== undefined ? options.shared?.mcpServerConfigs : undefined;
+      const viewed = sharedConfigs === undefined
+        ? []
+        : Object.keys(visible).filter((name) => sharedConfigs[name] !== undefined && mcpFingerprint(sharedConfigs[name]!) === mcpFingerprint(visible[name]!));
+      // Likewise a directory's pool lends what the host declared shareable there, as long as the
+      // session sees that very server; anything else it sees is connected for it alone.
+      const borrowed = pooled === undefined
+        ? []
+        : Object.keys(visible).filter((name) => shareable[name] !== undefined && mcpFingerprint(shareable[name]!) === mcpFingerprint(visible[name]!));
+      const elsewhere = new Set([...viewed, ...borrowed]);
+      const own = Object.fromEntries(Object.entries(visible).filter(([name]) => !elsewhere.has(name)));
+      if (viewed.length > 0 && sharedServers !== undefined) {
+        capabilities.push(mcpServersCapability(own, { ...mcpOptions, sharedServers: onlyServers(sharedServers, new Set(viewed)) }));
+      } else if (borrowed.length > 0 && pooled !== undefined) {
+        const servers = Object.fromEntries(borrowed.map((name) => [name, visible[name]!]));
+        capabilities.push(workspaceMcpCapability({ pool: pooled.pool, workDir: pooled.workDir, servers, overlay: own, overlayOptions: mcpOptions }));
+      } else if (Object.keys(own).length > 0) {
+        capabilities.push(mcpServersCapability(own, mcpOptions));
+      }
+    }
+  } else if (pooled !== undefined && Object.keys(shareable).length > 0) {
     // Borrowed per directory: the capability views the pool's set, `sessionMcp` is its overlay.
     capabilities.push(workspaceMcpCapability({ pool: pooled.pool, workDir: pooled.workDir, servers: shareable, overlay: sessionMcp, overlayOptions: mcpOptions }));
   } else {
@@ -334,6 +546,55 @@ export function defaultCapabilities(options: DefaultCapabilitiesOptions = {}): C
     capabilities.push(userHooksCapability(hookDefs));
   }
   return capabilities;
+}
+
+/** What a session's context says about the standard bundle: its configuration, policy and bindings. */
+function optionsOfSession(ctx: SessionCapabilityContext): DefaultCapabilitiesOptions {
+  return {
+    shared: ctx.shared,
+    ownEnvironment: ctx.ownEnvironment,
+    strictIsolation: ctx.strictIsolation,
+    ...(ctx.config.mcp !== undefined ? { mcp: ctx.config.mcp } : {}),
+    ...(ctx.config.skills !== undefined ? { skills: ctx.config.skills } : {}),
+    ...(ctx.config.hooks !== undefined && ctx.config.hooks.length > 0 ? { hooks: hookDefsFromConfig(ctx.config.hooks) } : {}),
+    ...(ctx.policy.allowedMcpTransports !== undefined ? { allowedMcpTransports: ctx.policy.allowedMcpTransports } : {}),
+    ...(ctx.mcpCredentials !== undefined ? { mcpCredentials: ctx.mcpCredentials } : {}),
+  };
+}
+
+/** One server's configuration, order-independent — two with the same fingerprint are the same server. */
+function mcpFingerprint(config: McpServerConfig): string {
+  return JSON.stringify(config, (_key, value: unknown) =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : value,
+  );
+}
+
+/** A view of a shared set of MCP connections limited to `names`. It connects and shuts down
+ *  nothing: the set belongs to whoever built it. */
+function onlyServers(shared: McpServersHandle, names: ReadonlySet<string>): McpServersHandle {
+  return {
+    list: () => shared.list().filter((view) => names.has(view.name)),
+    listTools: async (name) => (names.has(name) ? shared.listTools(name) : []),
+    reconnect: async (name) => {
+      if (!names.has(name)) throw new Error(`Unknown MCP server: ${name}`);
+      await shared.reconnect(name);
+    },
+    onStatusChange: (listener) => shared.onStatusChange((view) => {
+      if (names.has(view.name)) listener(view);
+    }),
+    // One provider per server, in the order `list()` reports them.
+    toolProviders: () => {
+      const views = shared.list();
+      return shared.toolProviders().filter((_provider, index) => {
+        const view = views[index];
+        return view !== undefined && names.has(view.name);
+      });
+    },
+    connect: async () => {},
+    shutdown: async () => {},
+  };
 }
 
 /**
@@ -374,6 +635,10 @@ export interface HarnessInfrastructure {
   readonly pluginManager?: PluginManager;
   /** One set of MCP connections for every session in this process. */
   readonly mcpServers?: McpServersHandle;
+  /** The configurations `mcpServers` was built from, by name. With them a session whose
+   *  configuration names the very same server views the shared connection; without them a session
+   *  that names its servers connects its own. */
+  readonly mcpServerConfigs?: Readonly<Record<string, McpServerConfig>>;
   /** One skill scan for every session in this process. */
   readonly skillRegistry?: SkillRegistry;
   readonly oauthService?: McpOAuthService;
@@ -392,94 +657,36 @@ function toolPaletteOf(tools: readonly Tool[]): Readonly<Record<string, Tool>> {
   return Object.fromEntries(tools.map((tool) => [tool.schema.name, tool]));
 }
 
-/**
- * What a harness sets for every session and a session may set for itself. A value given when a
- * session is opened replaces the harness's, whole; nothing merges.
- */
-export interface SessionSettings<TContext = unknown> {
-  /**
-   * This session's model: a `provider/model` id, or a built `ChatModel`, which is how one session
-   * gets its own API key. Applied like `setModel` at open, so it also beats `agent`'s own model.
-   * Not persisted: a resume passes it again or runs on the harness's model.
-   */
-  readonly model?: string | ChatModel;
-  /**
-   * How the default agent's model should behave: `maxTokens`, `temperature`, `reasoning` and so on.
-   * Ignored when `agent` is given, whose own `modelSettings` apply. Timeouts and retries are
-   * `connection` on the provider's registration.
-   */
-  readonly modelSettings?: ModelSettings;
-  /**
-   * The agent for new sessions. Provide a complete `Agent`, or omit it to run the builtin default
-   * profile (`DEFAULT_AGENT_PROFILES.agent`) rendered as an agent — there is no piecemeal middle
-   * ground.
-   */
-  readonly agent?: Agent<TContext>;
-  /**
-   * Host application context for sessions. It is runtime-only: never serialized into the log or
-   * SessionStore, so a process reopening a session provides it again with
-   * `resumeSession(id, { context })`.
-   */
+export interface HarnessOptions<TContext = unknown> {
   readonly context?: TContext;
-  /**
-   * Concrete tool palette the default profile's tool NAMES resolve against (and the subagent palette).
-   * Defaults to `filesystemTools()` plus `askUserQuestionTool`; capability tools (goal/plan/todo/…) are
-   * injected at runtime, so they need not appear here. Ignored when `agent` is given — a complete agent
-   * carries its own tools.
-   */
-  readonly tools?: readonly Tool[];
-  /**
-   * Extra guidance appended to the default agent's system prompt (the profile's `roleAdditional` slot,
-   * rendered after its own prompt). This LAYERS on the default profile — it does not replace it; for a
-   * wholly different prompt, pass a complete `agent`. Ignored when `agent` is given.
-   */
-  readonly appendSystemPrompt?: string;
-  /**
-   * Subagent fleet the `Agent` / `Workflow` tools spawn by type. Defaults to the builtin
-   * `coder` / `explore` / `plan` profiles (each inherits the session model; their tools resolve
-   * against the default agent's toolset), so orchestration works out of the box. Pass your own
-   * provider to override, or `null` to disable subagents entirely — which also hides the
-   * Agent/Workflow tools, since there is nothing for them to spawn.
-   */
-  readonly subagentProvider?: SubagentProvider<TContext> | null;
-  /**
-   * Extra subagent profiles merged into the builtin `coder`/`explore`/`plan` fleet. The SOURCE is
-   * the composition root's concern — disk (`loadAgentProfiles`) locally, external on a server —
-   * but the merge/tool-wiring is identical. Ignored when `subagentProvider` is given.
-   */
   readonly extraSubagentProfiles?: Record<string, ResolvedAgentProfile>;
   /**
-   * Expose the builtin `Workflow` tool (default true).
-   *
-   * The narrow version of the switch above: use it when the host has its own
-   * workflow orchestration and two overlapping tools would leave the model
-   * guessing. Subagents and the `Agent` tool are unaffected — unlike
-   * `subagentProvider: null`, which necessarily takes both tools with it.
+   * The harness's serializable configuration: the defaults every session starts from, the policy no
+   * session can override, and the process-level settings. The same object a `config.toml` loads
+   * into (`loadHarnessConfig`), so configuration built in code, read from a file or fetched from a
+   * database takes one path. `config.defaults.model` is what a session with no model of its own
+   * runs on: a `provider/model` id looked up in {@link modelManager}.
    */
-  readonly workflowTool?: boolean;
+  readonly config?: HarnessConfig;
   /**
-   * Cap on subagents running concurrently from one session's root frame. Defaults to the same
-   * bound the `Workflow` tool uses, so a batch of `Agent` spawns cannot fan out further than a
-   * workflow would. Nested spawns are exempt by design (they would deadlock a shared pool).
+   * The code a session's configuration refers to by name: `tools` (keyed by their schema name;
+   * defaults to `filesystemTools()` plus `askUserQuestionTool`) and `agents`.
    */
-  readonly maxConcurrentSubagents?: number;
-  /** Permission config. Defaults to `{ mode: "yolo" }`. */
-  readonly permission?: PermissionManagerOptions;
-  /** Event durability policy. Defaults to `immediate` for low-latency local applications.
-   *  Managed servers override each opened session to `committed`. */
-  readonly eventPublication?: EventPublicationMode;
-  /** Turn cap for each run. */
-  readonly maxTurns?: number;
+  readonly registry?: {
+    readonly tools?: readonly Tool[];
+    readonly agents?: Readonly<Record<string, Agent<TContext>>>;
+  };
   /**
-   * Step-per-turn cap. Carried on the default agent (the Runner reads the agent's value first),
-   * so it is ignored when `agent` is given.
+   * Supplies what the harness cannot know when it opens a session — a sandbox, a user's
+   * credentials, application context, configuration kept in the host's own database. Called once
+   * for every session being assembled (create, restore and fork alike, whoever asked), before its
+   * capabilities are built; never for attaching to a loaded one. It returns data and live objects:
+   * it does not return a session and must not open the one it is resolving. Throwing refuses the
+   * open. Without it a session runs on what the call handed in and what is stored with it.
    */
-  readonly maxStepsPerTurn?: number;
-}
-
-export interface HarnessOptions<TContext = unknown> extends SessionSettings<TContext> {
-  /** Model for sessions that name none: a `provider/model` id looked up in {@link modelManager}. */
-  readonly model: string;
+  readonly resolveSession?: (request: SessionResolveRequest<TContext>) => SessionResolution<TContext> | void | Promise<SessionResolution<TContext> | void>;
+  /** The judge the `auto` permission mode consults, for every session of this harness. */
+  readonly autoApprover?: AutoApprover;
   /**
    * The one model manager this harness runs on: what every string model id resolves against.
    * Defaults to a fresh `createModelManager()`. Pass one only for what cannot be changed later,
@@ -504,8 +711,6 @@ export interface HarnessOptions<TContext = unknown> extends SessionSettings<TCon
    * (goal/plan/todo/background/skills/mcp) is isolated by construction.
    */
   readonly sessionCapabilities?: (ctx: SessionCapabilityContext) => readonly Capability[] | Promise<readonly Capability[]>;
-  /** Default working directory for new sessions. Defaults to `process.cwd()`. */
-  readonly workDir?: string;
   /**
    * Product telemetry (docs/telemetry.md). Process-lifetime: create ONE service, attach the
    * appenders once, pass the same instance to every harness. Absent = nothing is counted.
@@ -541,7 +746,7 @@ export interface HarnessOptions<TContext = unknown> extends SessionSettings<TCon
   /**
    * Programmatic runtime extensions, registered once here — the by-value twin of `extensionDir`.
    * Every definition's `session` runs in every session; a session varies that with
-   * `createSession({ params })` (a value configures, `false` skips). A definition with a
+   * `config.extensions` (a value configures, `false` skips). A definition with a
    * `harness` half has it run here, once, and the result registered as a service under its `id`
    * before any session opens; `harness.close()` unregisters (and disposes) those services.
    * Each definition's `uses` is checked at this point, in order — a consumer comes after its
@@ -554,71 +759,45 @@ export interface HarnessOptions<TContext = unknown> extends SessionSettings<TCon
 }
 
 /**
- * What a capability factory is told about the session it is building for.
- *
- * Exists so conversation-scoped resources don't force conversation-scoped harnesses.
- * MCP is the motivating case: a host that gives each conversation its own server
- * (a REPL kernel keyed by conversation id, say) used to need a whole separate
- * harness per conversation, duplicating the agent profile, tool palette, plugins and
- * skills along with it. Session-level servers keep one harness serving every
- * conversation — `mcpServers` here is the session-level
- * counterpart of the harness-level `DefaultCapabilitiesOptions.mcpServers`.
+ * What a capability factory is told about the session it is building for: the configuration the
+ * session runs on (its own over the harness defaults), the live objects of this open, and the
+ * policy no session overrides. `defaultCapabilities({ session: ctx })` builds the standard bundle
+ * from exactly this; a custom factory that builds its own is responsible for honouring it.
  */
 export interface SessionCapabilityContext {
   readonly sessionId: string;
   readonly workDir: string;
-  /** Session-scoped MCP servers, as given to createSession / resumeSession / forkSession. */
-  readonly mcpServers?: Record<string, McpServerConfig>;
-  /** The session brought its own environment (`{ environment }` on this open): harness-shared objects
-   *  derived from the harness's environment (the skill scan) do not apply to it. */
+  readonly ownerKey?: string;
+  /** The configuration this session runs on: its own over the harness defaults. MCP, skills and
+   *  hooks are built from this — `config.mcp.servers` is the complete set the session sees. */
+  readonly config: SessionConfig;
+  readonly shared: HarnessInfrastructure;
+  /** The live objects this open runs on. */
+  readonly bindings: SessionBindings<any>;
+  /** What the harness does not let a session override. */
+  readonly policy: SessionPolicy;
+  /** The session brought its own environment (`bindings.environment` on this open): harness-shared
+   *  objects derived from the harness's environment (the skill scan) do not apply to it. */
   readonly ownEnvironment: boolean;
-  /** {@link OpenSessionOptionsBase.mcpCredentials} for this open. */
+  /** `bindings.mcpCredentials` for this open. */
   readonly mcpCredentials?: McpCredentialProvider;
-  /** {@link OpenSessionOptionsBase.strictIsolation} for this open. A custom factory owns honouring
-   *  it the way `defaultCapabilities` does. */
+  /** `policy.strictIsolation`. A custom factory owns honouring it the way `defaultCapabilities` does. */
   readonly strictIsolation: boolean;
 }
 
 /**
- * Options common to every way of opening a session.
- *
- * Beyond `agent` / `context`, these are per-session overrides of harness-level
- * defaults. They exist so one harness can serve sessions that differ in workspace,
- * persona or permission policy, instead of the host having to stand up a whole
- * harness per combination — which duplicates the agent profile, tool palette,
- * plugins, skills and MCP connections that have nothing to do with the difference.
- * Each one is already a session-level input inside the engine; the harness was
- * simply passing its own value straight through.
+ * What every way of opening a session takes. One harness serves sessions that differ in model,
+ * tools, MCP servers or permission: none of that needs a harness of its own.
  */
-interface OpenSessionOptionsBase<TContext = unknown> extends SessionSettings<TContext> {
-  /** Override the execution environment for this session only. Lifecycle remains host-owned. */
-  readonly environment?: Environment | EnvironmentFactory;
-  /**
-   * MCP servers scoped to this session, surfaced to the capability factory via
-   * {@link SessionCapabilityContext}. Merge policy is the factory's call — the
-   * harness only carries them across. `defaultCapabilities` (and so the local preset)
-   * layers them OVER the harness's shared servers, a reused name shadowing the
-   * shared one for this session; a custom factory can decide otherwise.
-   */
-  readonly mcpServers?: Record<string, McpServerConfig>;
-  /**
-   * Where this session's http MCP servers get their credentials, asked on every connect: the
-   * seam a host builds a per-user vault on. Not persisted — a resume passes it again.
-   */
-  readonly mcpCredentials?: McpCredentialProvider;
-  /**
-   * This session is one tenant's among many: see `DefaultCapabilitiesOptions.strictIsolation`.
-   * A managed host's worker sets it on every open unless it runs single-tenant.
-   */
-  readonly strictIsolation?: boolean;
-  /**
-   * Per-session argument for each registered extension, by extension id — handed to that
-   * extension's `session(api, ctx)` as `ctx.params`. A value of `false` skips the extension for
-   * this session entirely (its `session` never runs). Persisted with the session, so a
-   * `resumeSession` or a reload re-applies the same params without the caller repeating them.
-   * This is the per-session knob: definitions themselves are registered once, on the harness.
-   */
-  readonly params?: Record<string, unknown>;
+interface OpenSessionOptionsBase<TContext = unknown> {
+  /** This session's own configuration, laid over the harness defaults field by field. Stored with
+   *  the session, so a later `resumeSession(id)` needs none of it again. */
+  readonly config?: SessionConfig;
+  /** The live objects this open runs on — never stored; see {@link SessionBindings}. */
+  readonly bindings?: SessionBindings<TContext>;
+  /** Who is asking, as `resolveSession` and `onSessionOpened` are told. Defaults to the host; a
+   *  server opening a session for a remote client says `{ kind: "remote" }`. */
+  readonly origin?: SessionOrigin;
 }
 
 export interface CreateSessionOptions<TContext = unknown> extends OpenSessionOptionsBase<TContext> {
@@ -644,7 +823,7 @@ class MutableResponder implements Responder {
   questionHandler: QuestionHandler | undefined;
 
   /** No handler ⇒ not a live approver ⇒ the run interrupts durably (resume later via
-   *  `HarnessSession.resume`) instead of auto-rejecting the tool. */
+   *  `HarnessSession.respond`) instead of auto-rejecting the tool. */
   isLiveApprover(): boolean {
     return this.approvalHandler !== undefined;
   }
@@ -671,9 +850,16 @@ class MutableResponder implements Responder {
  * `onEvent`/approval handlers) live here; everything else delegates to the core
  * `Session` (reachable via `.core` for anything not surfaced).
  */
-export class HarnessSession<TContext = unknown> {
+export class HarnessSession<TContext = unknown, TOutput = unknown> {
   readonly id: string;
   readonly workDir: string;
+  /** The owner this session is partitioned under, when it has one. */
+  readonly ownerKey: string | undefined;
+  /** The configuration this session was assembled with: its own setup over the harness defaults.
+   *  A snapshot of the open — `setModel` and the other setters do not rewrite it. */
+  readonly config: SessionConfig;
+  /** The kinds of live object this session depends on being provided again when it is reopened. */
+  readonly requires: readonly SessionBindingKey[];
   /** The underlying core session — escape hatch for the full control plane. */
   readonly core: Session;
   /**
@@ -692,9 +878,13 @@ export class HarnessSession<TContext = unknown> {
   private readonly onClosed: (id: string) => void | Promise<void>;
   private runContext: TContext | undefined;
   /** Barrier gate (docs/architecture.md §5.5): while set, no NEW run starts on this
-   *  session — prompt/resume park at it, promptStream starts lazily behind it. The in-flight
+   *  session — prompt/respond park at it, promptStream starts lazily behind it. The in-flight
    *  run is never touched. */
   private runGate: { readonly released: Promise<void>; release(): void } | undefined;
+  /** Held from construction until the harness has finished wiring this session: no run starts
+   *  before the host's open listeners have subscribed. Independent of `runGate`, which a reshape
+   *  barrier takes and releases on its own schedule. */
+  private birthHold: { readonly released: Promise<void>; release(): void } | undefined;
   /**
    * Every run this facade has begun and not yet seen settle, by its controller. More than one
    * entry means runs are queued behind the core's run lock (`prompt` while a turn is in flight):
@@ -717,6 +907,8 @@ export class HarnessSession<TContext = unknown> {
   /** A wake is already scheduled on the microtask queue; more enqueues fold into it. */
   private wakeScheduled = false;
   private readonly runOverrides: SessionRunOverrides<TContext>;
+  /** The permission modes the harness's policy allows; undefined when it does not restrict them. */
+  private readonly allowedModes: readonly PermissionMode[] | undefined;
   /** Builds the capability an extension attached to THIS session runs as — bound to the
    *  session's harness reach and its per-session params. */
   private readonly mountExtension: (definition: ExtensionDefinition) => Capability;
@@ -729,6 +921,10 @@ export class HarnessSession<TContext = unknown> {
     responder: MutableResponder;
     projection: SessionProjection;
     workDir: string;
+    ownerKey?: string;
+    config: SessionConfig;
+    requires: readonly SessionBindingKey[];
+    allowedModes?: readonly PermissionMode[];
     context?: TContext;
     runOverrides: SessionRunOverrides<TContext>;
     interrupted?: boolean;
@@ -739,6 +935,12 @@ export class HarnessSession<TContext = unknown> {
     this.id = args.core.id;
     this.projection = args.projection;
     this.workDir = args.workDir;
+    this.ownerKey = args.ownerKey;
+    this.config = args.config;
+    this.requires = args.requires;
+    this.allowedModes = args.allowedModes;
+    let releaseBirth!: () => void;
+    this.birthHold = { released: new Promise<void>((resolve) => { releaseBirth = resolve; }), release: releaseBirth };
     this.agent = args.agent;
     this.runner = args.runner;
     this.events = args.events;
@@ -772,7 +974,7 @@ export class HarnessSession<TContext = unknown> {
       if (this.closed || this.lastRunInterrupted) return;
       // Held at a barrier: stand down instead of parking a drain run at the gate (stacked
       // parked drains would race on release). `release()` re-schedules this wake.
-      if (this.runGate !== undefined) return;
+      if (this.gated) return;
       // A run in flight drains at its own turn boundary; an interrupted one must be resumed,
       // not talked over.
       if (this.hasActiveRuns()) return;
@@ -782,7 +984,7 @@ export class HarnessSession<TContext = unknown> {
       // call), just as the follow-up queue is drained before the turn starts.
       if (!this.core.steer.hasItems()) return;
       // No input: the queue IS the prompt for this turn.
-      void this.runPrompt([]).catch(() => undefined);
+      this.startWakeRun();
     });
   }
 
@@ -797,10 +999,25 @@ export class HarnessSession<TContext = unknown> {
    * Re-checked in a loop: a new hold can land between a release and this task resuming.
    */
   private async parkAtGate(): Promise<void> {
-    while (this.runGate !== undefined) {
-      await Promise.race([this.runGate.released, this.closingNotified]);
-      if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    while (this.gated) {
+      await Promise.race([(this.birthHold ?? this.runGate)!.released, this.closingNotified]);
+      if (this.closed) throw new SessionClosedError(this.id);
     }
+  }
+
+  /** Held at birth, or by a reshape barrier: new runs wait. */
+  private get gated(): boolean {
+    return this.runGate !== undefined || this.birthHold !== undefined;
+  }
+
+  /** Harness-internal: the session is wired, let it run. Anything queued meanwhile drains on the
+   *  normal idle-wake path. */
+  releaseBirthHold(): void {
+    const hold = this.birthHold;
+    if (hold === undefined) return;
+    this.birthHold = undefined;
+    hold.release();
+    this.scheduleIdleWake();
   }
 
   /** Current runtime-only application context supplied to Agent callbacks. */
@@ -830,7 +1047,7 @@ export class HarnessSession<TContext = unknown> {
     return flattenPendingInterrupts(parseInterruptionState(raw));
   }
 
-  /** Replace the runtime-only context used by subsequent prompt/resume calls. */
+  /** Replace the runtime-only context used by subsequent prompt/respond calls. */
   setContext(context: TContext | undefined): void {
     this.runContext = context;
   }
@@ -891,16 +1108,49 @@ export class HarnessSession<TContext = unknown> {
   }
 
   /** Run a turn to completion. Serialized with other runs on this session. */
-  async prompt(input: AgentInput): Promise<RunResult> {
-    return this.runPrompt(input);
+  async prompt(input: AgentInput): Promise<RunResult<TOutput>> {
+    this.drainFollowUpsAhead();
+    return this.runPrompt(input) as Promise<RunResult<TOutput>>;
+  }
+
+  /** Messages can go in while running or idle, but not past a question waiting for its answer. */
+  private assertCanSendPrompt(input: AgentInput): void {
+    // A wake run consumes what was already accepted; only new input can be refused here.
+    if (Array.isArray(input) && input.length === 0) {
+      if (this.closed) throw new SessionClosedError(this.id);
+      return;
+    }
+    this.assertCanSend();
+  }
+
+  private assertCanSend(): void {
+    if (this.closed) throw new SessionClosedError(this.id);
+    if (this.lastRunInterrupted && !this.hasActiveRuns()) throw new SessionInterruptedError(this.id);
+  }
+
+  /** Follow-ups accepted before this prompt go first: they get a run ahead of it on the lock. */
+  private drainFollowUpsAhead(): void {
+    if (!this.closed && this.core.steer.fenceUserFollowUps()) this.startWakeRun();
+  }
+
+  /** A run with no input of its own, whose prompt is whatever is queued. Nobody awaits it, so its
+   *  failures are reported on the event stream. */
+  private startWakeRun(): void {
+    const reportFailure = (message: string): void => {
+      void this.events.emit({ type: "error", message, address: DEFAULT_ADDRESS, sessionId: this.id });
+    };
+    void this.runPrompt([]).then(
+      (result) => { if (result.status === "error") reportFailure(result.error.message); },
+      (error: unknown) => { if (!isAbortError(error)) reportFailure(error instanceof Error ? error.message : String(error)); },
+    );
   }
 
   private async runPrompt(input: AgentInput, inputOrigin?: PromptOrigin): Promise<RunResult> {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    this.assertCanSendPrompt(input);
     // Barrier gate: park until released (a hold is "wait", not "fail") — unless the session
     // closes meanwhile, which is the one thing that turns the wait into a failure. Ungated, the
     // run is registered SYNCHRONOUSLY: a cancel() or close() on the next line must find it.
-    if (this.runGate !== undefined) await this.parkAtGate();
+    if (this.gated) await this.parkAtGate();
     const controller = new AbortController();
     this.beginRun(controller);
     try {
@@ -925,24 +1175,28 @@ export class HarnessSession<TContext = unknown> {
 
   /**
    * Hand a message to the frame running at `address` in this session (`main` for the root agent,
-   * `main/<agentId>` for a subagent); undefined when nobody is there, or the session is paused
-   * on a question. The seam an out-of-process coordinator uses to address a specific subagent.
+   * `main/<agentId>` for a subagent). Throws `SteerTargetNotFoundError` when nobody is there, and
+   * the usual errors when the session is closed or waiting for an answer. The seam an
+   * out-of-process coordinator uses to address a specific subagent.
    *
    * The receipt's `journaled` settles once the `steer.queued` record is on disk — the moment a
    * caller may answer "accepted" to someone else and mean it survives a crash. A running frame
    * drains the message at its next boundary; an idle root frame is woken to take it.
    */
-  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt | undefined {
-    if (this.closed) return undefined;
+  steerTo(address: string, content: string, origin: SteerOrigin, options?: SteerOptions): SteerReceipt {
+    this.assertCanSend();
     // A run in flight drains its own queues, so handing the message to the frame is enough.
     // A resume keeps the prior interruption flag until it settles, but is already running.
-    if (this.hasActiveRuns()) return this.core.steerTo(address, content, origin, options);
-    if (this.lastRunInterrupted) return undefined;
+    if (this.hasActiveRuns()) {
+      const receipt = this.core.steerTo(address, content, origin, options);
+      if (receipt === undefined) throw new SteerTargetNotFoundError(this.id, address);
+      return receipt;
+    }
     // Idle: only the root frame can be woken. A subagent whose frame has ended is not a teammate
     // waiting for mail — it is a finished delegation, and only the parent that delegated it can
     // decide to continue it (`Agent(resume=...)`). Its store, capabilities, permissions and
     // lifetime are all the parent's; there is no independent agent here to start.
-    if (address !== DEFAULT_ADDRESS) return undefined;
+    if (address !== DEFAULT_ADDRESS) throw new SteerTargetNotFoundError(this.id, address);
     // Queue it and let the idle-wake listener start the turn. Going through the bus (rather
     // than synthesizing a prompt here) is what gives the message its `steer.queued` record and
     // a `steerId` on its journal record, same as every other producer.
@@ -961,7 +1215,7 @@ export class HarnessSession<TContext = unknown> {
    * running turn drains it at its next boundary, an idle session is woken to take it.
    */
   requeue(item: SteerMessage): SteerReceipt {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    if (this.closed) throw new SessionClosedError(this.id);
     return this.core.steer.requeue(item);
   }
 
@@ -976,7 +1230,7 @@ export class HarnessSession<TContext = unknown> {
   }
 
   /**
-   * Resume a durably-interrupted run. When a `prompt` returns `status:"interrupted"` — which
+   * Answer a durably-interrupted run and continue it. When a `prompt` returns `status:"interrupted"` — which
    * happens when no live approval handler is registered (`no live responder ⇒ durable`) — the run's
    * interruption control tree was persisted to the session store. This loads it, applies the
    * caller's `answers` (prefer `approvalId`; a unique `toolCallId` is also accepted), and continues the
@@ -994,12 +1248,16 @@ export class HarnessSession<TContext = unknown> {
    * last durable pause. Only callers driving `Runner.resume` directly with a kept-around
    * copy see a "stale interruption state" error; re-fetching the persisted state clears it.
    */
-  async resume(answers: Record<string, ApprovalResponse | InterruptAnswer>): Promise<RunResult> {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+  async respond(answers: Record<string, ApprovalResponse | InterruptAnswer>): Promise<RunResult<TOutput>> {
+    return this.resumeRun(answers) as Promise<RunResult<TOutput>>;
+  }
+
+  private async resumeRun(answers: Record<string, ApprovalResponse | InterruptAnswer>): Promise<RunResult> {
+    if (this.closed) throw new SessionClosedError(this.id);
     // Barrier gate first (a coordinator holding the barrier should not be resumed against —
     // the call parks here until release rather than failing; closing meanwhile does fail it).
-    if (this.runGate !== undefined) await this.parkAtGate();
-    if (this.hasActiveRuns()) throw new Error(`session "${this.id}" already has an active run`);
+    if (this.gated) await this.parkAtGate();
+    if (this.hasActiveRuns()) throw new SessionBusyError(this.id, `session "${this.id}" already has an active run`);
     const controller = new AbortController();
     // Set this BEFORE the first await (past the gate). A host returning 202 from resume can
     // immediately observe `running`, and a concurrent steer joins this resumed turn instead
@@ -1008,7 +1266,7 @@ export class HarnessSession<TContext = unknown> {
     try {
       const raw = await this.core.store?.getState(INTERRUPTION_STATE_KEY);
       if (raw === null || raw === undefined) {
-        throw new Error("No interrupted run to resume on this session (no persisted interruption state).");
+        throw new SessionNotInterruptedError(this.id);
       }
       const interruption = parseInterruptionState(raw);
       // Bare ApprovalResponses (no `kind` field — the common case) are wrapped into the
@@ -1037,13 +1295,18 @@ export class HarnessSession<TContext = unknown> {
   }
 
   /** Streaming variant: iterate events, await `.completed` for the result. */
-  promptStream(input: AgentInput): RunHandle<RunResult> {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+  promptStream(input: AgentInput): RunHandle<RunResult<TOutput>> {
+    this.drainFollowUpsAhead();
+    return this.promptStreamRun(input) as RunHandle<RunResult<TOutput>>;
+  }
+
+  private promptStreamRun(input: AgentInput): RunHandle<RunResult> {
+    if (this.closed) throw new SessionClosedError(this.id);
     const controller = new AbortController();
     // Ungated: start synchronously, byte-identical to the pre-barrier behavior. Gated: the
     // handle returns immediately but the underlying run starts only after release (lazy start —
     // promptStream has no callers that depend on first-event timing).
-    const gated = this.runGate !== undefined;
+    const gated = this.gated;
     if (!gated) this.beginRun(controller);
     const start = (async () => {
       if (gated) {
@@ -1114,22 +1377,24 @@ export class HarnessSession<TContext = unknown> {
    * settles once the `steer.queued` record is durable.
    */
   steer(input: string): SteerReceipt {
-    if (this.closed) throw new Error(`session "${this.id}" is closed`);
+    this.assertCanSend();
     return this.core.steer.steer(input, { kind: "user" });
   }
 
   /**
-   * Queue a user message for a new turn after the current run's active turn finishes.
-   * Returns the receipt (see `steer`), or null when the session has no active run — use
-   * `prompt` instead in that case.
+   * Send a user message without waiting for the answer: `prompt` that returns a receipt. It runs
+   * as its own run, after the current turn finishes or right away on an idle session, so the
+   * current run's result stays its own. Track it by the receipt's `steerId` (see `steer`).
    */
-  followUp(input: string): SteerReceipt | null {
-    if (!this.hasActiveRuns()) return null;
+  followUp(input: string): SteerReceipt {
+    this.assertCanSend();
     return this.core.steer.followUp(input);
   }
 
-  /** Abort every run this session has accepted: the one in flight AND any queued behind it. */
+  /** Abort every run this session has accepted, the one in flight and any queued behind it, and
+   *  drop what the user queued for them. Cron fires and background results stay queued. */
   cancel(): void {
+    this.core.steer.discardUserMessages("cancelled");
     for (const controller of [...this.runs.keys()]) controller.abort();
   }
 
@@ -1180,8 +1445,13 @@ export class HarnessSession<TContext = unknown> {
   setThinking(level: ThinkingLevel): void {
     this.core.setThinking(level);
   }
-  /** In-memory switch is immediate; await the returned promise to confirm it was journaled. */
+  /** In-memory switch is immediate; await the returned promise to confirm it was journaled.
+   *  A mode the harness's policy does not allow is refused (`SessionPolicyViolationError`) — the
+   *  policy holds for a running session as it does for a new one, whoever asks. */
   setPermissionMode(mode: PermissionMode): Promise<void> {
+    if (this.allowedModes !== undefined && !this.allowedModes.includes(mode)) {
+      return Promise.reject(new SessionPolicyViolationError(this.id, "permission.mode", `permission mode "${mode}" is not allowed here (allowed: ${this.allowedModes.join(", ") || "none"})`));
+    }
     return this.core.setPermissionMode(mode);
   }
   /** The model this session runs on, as last set; undefined means the agent's own. */
@@ -1269,7 +1539,7 @@ export class HarnessSession<TContext = unknown> {
   }
   /** Remove an extension mid-session: `session.end("detach")` fires, then its scope unwinds. */
   async detachExtension(extensionId: string): Promise<void> {
-    if (this.extensionRuntime(extensionId) === undefined) throw new Error(`unknown extension "${extensionId}"`);
+    if (this.extensionRuntime(extensionId) === undefined) throw new HarnessConfigError(`unknown extension "${extensionId}"`);
     await this.core.detachCapability(extensionId);
   }
   /** Ids of currently attached extensions, in mount order. */
@@ -1309,7 +1579,7 @@ export class HarnessSession<TContext = unknown> {
    * their journal writes — then detach the projection and take the core down. Every call
    * returns the SAME promise, so nobody returns while the teardown is still running.
    *
-   * The wait for runs is bounded (`CLOSE_RUN_WAIT_MS`, 5s): a run that ignores its abort signal
+   * The wait for runs is bounded (`closeDeadlines.runSettleMs`, 5s): a run that ignores its abort signal
    * is logged and left behind, and the teardown continues — the deadline caps the wait for
    * runs, not the whole close (flushes and disposes carry their own deadlines).
    */
@@ -1329,7 +1599,7 @@ export class HarnessSession<TContext = unknown> {
       const timedOut = await Promise.race([
         settled.then(() => false),
         new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(true), CLOSE_RUN_WAIT_MS);
+          timer = setTimeout(() => resolve(true), closeDeadlines.runSettleMs);
         }),
       ]);
       clearTimeout(timer);
@@ -1337,12 +1607,11 @@ export class HarnessSession<TContext = unknown> {
         this.core.logger.log("warn", "session close: runs still settling after the deadline; continuing teardown", {
           sessionId: this.id,
           runs: this.runs.size,
-          deadlineMs: CLOSE_RUN_WAIT_MS,
+          deadlineMs: closeDeadlines.runSettleMs,
         });
       }
-      this.projection.detach();
-      await this.core.close();
-      await this.onClosed(this.id);
+      try { await this.core.close(); }
+      finally { this.projection.detach(); await this.onClosed(this.id); }
     } finally {
       this.lifecycle = "closed";
     }
@@ -1350,7 +1619,7 @@ export class HarnessSession<TContext = unknown> {
 }
 
 /** Manages a fleet of in-process sessions over a shared engine config. */
-export class Harness<TContext = unknown> {
+export class Harness<TContext = unknown, TOutput = unknown> {
   private readonly options: HarnessOptions<TContext>;
   private readonly runner: Runner<TContext>;
   /** Concrete tools the default profile's tool NAMES resolve against (keyed by schema name). */
@@ -1358,11 +1627,22 @@ export class Harness<TContext = unknown> {
   private readonly agentTools: readonly Tool[];
   private readonly defaultSubagents: SubagentProvider<TContext>;
   private readonly activeSessions = new Map<string, HarnessSession<TContext>>();
-  /** Opens in flight by session id (`resumeSession`): concurrent callers share ONE open — the
-   *  whole of it, reconcile and failure cleanup included — instead of each building an instance. */
+  /** Opens in flight, including reconciliation and cleanup. Prevents duplicate instances and
+   *  lets closeSession wait until construction settles. `resumeSession(id)` joins the entry here. */
   private readonly opening = new Map<string, Promise<HarnessSession<TContext>>>();
   /** The one close in flight (or finished): every `close()` call returns THIS promise. */
   private closing: Promise<void> | undefined;
+  /** Opens a `closeSession` asked to abandon: closed as soon as they are built. */
+  private readonly cancelledOpens = new Set<string>();
+  /** Sessions whose `resolveSession` call is running — it must not open the one it is resolving. */
+  private readonly resolving = new AsyncLocalStorage<string>();
+  private readonly openListeners: SessionOpenedListener<TContext>[] = [];
+  /** Aborted when the harness closes; what `resolveSession` receives as its signal. */
+  private readonly abortController = new AbortController();
+  /** What every session starts from: `config.defaults`, validated. */
+  private readonly defaultConfig: SessionConfig;
+  private readonly sessionPolicy: SessionPolicy;
+  private readonly agents: Readonly<Record<string, Agent<TContext>>>;
 
   /** The one model manager of this harness. Edit its providers in place; it is never swapped. */
   readonly modelManager: ModelManager;
@@ -1373,7 +1653,7 @@ export class Harness<TContext = unknown> {
    *  providers here (`services.replace`); sessions only ever see handles (`ctx.shared`, `ctx.services`). */
   readonly services: ServiceRegistry;
   /** The one in-flight reshape barrier (mutex: a second barrier operation rejects). Sessions
-   *  appearing while it holds are gated at birth — see the tail of `openFromStore`. */
+   *  appearing while it holds are gated at birth — see `assemble`. */
   private activeBarrier: { readonly holds: Map<string, { readonly quiescent: Promise<void>; release(): void }> } | undefined;
   /** File-extension manager (both tiers) — present only when the host opted in with
    *  `extensionDir`. NOT the Codex-compatible skill/MCP plugin system (`pluginManager`). */
@@ -1395,17 +1675,32 @@ export class Harness<TContext = unknown> {
   private runningCreate: string | undefined;
 
   constructor(options: HarnessOptions<TContext>) {
+    assertHarnessOptions(options);
     this.options = options;
     this.modelManager = options.modelManager ?? createModelManager();
     this.resolveModel = (id) => this.modelManager.resolve(id);
     this.services = new ServiceRegistry();
-    this.agentTools = options.tools ?? [...filesystemTools(), askUserQuestionTool];
+    let configured: SessionConfig;
+    try {
+      configured = parseSessionConfig(options.config?.defaults, "createHarness({ config.defaults })");
+    } catch (error) {
+      throw new HarnessConfigError(error instanceof Error ? error.message : String(error));
+    }
+    this.defaultConfig = configured;
+    if (configured.agent !== undefined) assertNoDefaultAgentOptions({ modelSettings: configured.modelSettings, tools: configured.tools, appendSystemPrompt: configured.appendSystemPrompt, maxStepsPerTurn: configured.limits?.maxStepsPerTurn }, "the harness");
+    const policy = SessionPolicySchema.safeParse(options.config?.policy ?? {});
+    if (!policy.success) {
+      throw new HarnessConfigError(`createHarness({ config.policy }) is invalid: ${policy.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; ")}`);
+    }
+    this.sessionPolicy = policy.data;
+    this.agents = options.registry?.agents ?? {};
+    this.agentTools = options.registry?.tools ?? [...filesystemTools(), askUserQuestionTool];
     this.toolPalette = toolPaletteOf(this.agentTools);
     this.defaultSubagents = defaultSubagentProvider<TContext>(this.agentTools, this.resolveModel, options.extraSubagentProfiles);
     this.runner = new Runner<TContext>({
       resolveModel: this.resolveModel,
-      maxTurns: options.maxTurns,
-      maxStepsPerTurn: options.maxStepsPerTurn,
+      maxTurns: this.defaultConfig.limits?.maxTurns,
+      maxStepsPerTurn: this.defaultConfig.limits?.maxStepsPerTurn,
     });
     this.dataRoot = options.extensionDataDir ?? (options.extensionDir !== undefined ? join(options.extensionDir, ".data") : undefined);
     this.extensions = options.extensionDir === undefined
@@ -1415,7 +1710,8 @@ export class Harness<TContext = unknown> {
           dataDir: this.dataRoot ?? join(options.extensionDir, ".data"),
           bridge: {
             services: this.services,
-            createSession: (sessionOptions) => this.createSession(sessionOptions as CreateSessionOptions<TContext>),
+            resumeSession: (id, extensionId) => this.resumeFrom(id, undefined, { kind: "extension", extensionId }),
+            createSession: (sessionOptions, extensionId) => this.createFromExtension(sessionOptions, extensionId),
             sessions: () => [...this.activeSessions.values()],
             withBarrier: (extensionIds, timeoutMs, fn) => this.withBarrier(extensionIds, timeoutMs, fn),
             warn: (message) => console.warn(`[extensions] ${message}`),
@@ -1432,7 +1728,7 @@ export class Harness<TContext = unknown> {
       }
     }
     for (const definition of options.extensions ?? []) {
-      if (this.valueDefs.has(definition.id)) throw new Error(`duplicate by-value extension id "${definition.id}" in createHarness({ extensions })`);
+      if (this.valueDefs.has(definition.id)) throw new HarnessConfigError(`duplicate by-value extension id "${definition.id}" in createHarness({ extensions })`);
       this.valueDefs.set(definition.id, definition);
     }
     // The host's process-tier registrations come first (extension `harness` halves may consume
@@ -1511,8 +1807,9 @@ export class Harness<TContext = unknown> {
               new Error(`extension "${this.runningCreate}": createSession is not available inside create() — open sessions later, from setup, a tool, or an event`),
             );
           }
-          return this.createSession(sessionOptions as CreateSessionOptions<TContext>);
+          return this.createFromExtension(sessionOptions, definition.id);
         },
+        resumeSession: (id) => this.resumeFrom(id, undefined, { kind: "extension", extensionId: definition.id }),
         service: (name) => this.services.handle(name),
         warn: (message) => console.warn(`[extensions] ${message}`),
       });
@@ -1528,7 +1825,7 @@ export class Harness<TContext = unknown> {
    * register the result as a service under the extension's `id`. Stays synchronous as long as
    * every `harness` is — so `createHarness` returns with a synchronous extension's service
    * already registered; the first async `harness` turns the rest of the sequence into a promise
-   * chain that `openFromStore` awaits. Staging (`stageDefinition`) collects before registering,
+   * chain that `assemble` awaits. Staging (`stageDefinition`) collects before registering,
    * so a throwing `harness` publishes nothing.
    */
   private registerDefinitions(extensions: readonly ExtensionDefinition[] | undefined): Promise<void> {
@@ -1536,7 +1833,7 @@ export class Harness<TContext = unknown> {
     const run = (definition: ExtensionDefinition): void | Promise<void> => {
       for (const name of definition.uses ?? []) {
         if (!this.services.has(name)) {
-          throw new Error(`extension "${definition.id}" uses service "${name}", which is not registered — list its provider earlier in createHarness({ extensions }) (or register it in services)`);
+          throw new HarnessConfigError(`extension "${definition.id}" uses service "${name}", which is not registered — list its provider earlier in createHarness({ extensions }) (or register it in services)`);
         }
       }
       if (definition.harness === undefined) return;
@@ -1572,16 +1869,16 @@ export class Harness<TContext = unknown> {
    * resolves the current frame's environment + cwd through the Session cache, so root/subagent/worktree
    * prompts stay isolated without coupling Agent lifetime to environment lifetime.
    */
-  private buildDefaultAgent(opts: SessionSettings<TContext>): Promise<Agent<TContext>> {
-    const additional = opts.appendSystemPrompt ?? this.options.appendSystemPrompt;
-    const steps = opts.maxStepsPerTurn ?? this.options.maxStepsPerTurn;
-    const modelSettings = opts.modelSettings ?? this.options.modelSettings;
+  private buildDefaultAgent(config: SessionConfig, sessionTools: readonly Tool[] | undefined): Promise<Agent<TContext>> {
+    const steps = config.limits?.maxStepsPerTurn;
     return buildAgentFromProfile<TContext>(DEFAULT_AGENT_PROFILES[DEFAULT_AGENT_PROFILE_NAME]!, {
-      tools: opts.tools === undefined ? this.toolPalette : toolPaletteOf(opts.tools),
-      model: this.options.model,
-      ...(additional !== undefined ? { roleAdditional: additional } : {}),
+      tools: sessionTools === undefined ? this.toolPalette : toolPaletteOf(sessionTools),
+      // The profile declares no model: the harness default. A model the session names is applied
+      // on the session itself, like `setModel`.
+      ...(this.defaultConfig.model !== undefined ? { model: this.defaultConfig.model } : {}),
+      ...(config.appendSystemPrompt !== undefined ? { roleAdditional: config.appendSystemPrompt } : {}),
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
-      ...(modelSettings !== undefined ? { modelSettings } : {}),
+      ...(config.modelSettings !== undefined ? { modelSettings: config.modelSettings as ModelSettings } : {}),
       resolveModel: this.resolveModel,
     });
   }
@@ -1589,28 +1886,28 @@ export class Harness<TContext = unknown> {
   /**
    * The Agent/Workflow tools only appear when a run has subagents to spawn. The fleet defaults to
    * the builtin coder/explore/plan profiles so orchestration works out of the box; an explicit
-   * provider overrides it, and `null` opts out (hiding those tools).
+   * provider overrides it, and `subagents: false` (or a `null` provider) opts out, hiding those tools.
    */
-  private subagentProviderFor(opts: SessionSettings<TContext>): SubagentProvider<TContext> | null {
-    const chosen = opts.subagentProvider !== undefined ? opts.subagentProvider : this.options.subagentProvider;
+  private subagentProviderFor(config: SessionConfig, bindings: SessionBindings<TContext>, sessionTools: readonly Tool[] | undefined): SubagentProvider<TContext> | null {
+    if (config.subagents === false) return null;
+    const chosen = bindings.subagentProvider;
     if (chosen !== undefined) return chosen;
-    if (opts.tools === undefined && opts.extraSubagentProfiles === undefined) return this.defaultSubagents;
+    if (sessionTools === undefined && bindings.extraSubagentProfiles === undefined) return this.defaultSubagents;
     return defaultSubagentProvider<TContext>(
-      opts.tools ?? this.agentTools,
+      sessionTools ?? this.agentTools,
       this.resolveModel,
-      opts.extraSubagentProfiles ?? this.options.extraSubagentProfiles,
+      bindings.extraSubagentProfiles ?? this.options.extraSubagentProfiles,
     );
   }
 
-  private runOverridesFor(opts: SessionSettings<TContext>): SessionRunOverrides<TContext> {
-    const maxTurns = opts.maxTurns ?? this.options.maxTurns;
-    const workflowTool = opts.workflowTool ?? this.options.workflowTool;
-    const maxConcurrentSubagents = opts.maxConcurrentSubagents ?? this.options.maxConcurrentSubagents;
+  private runOverridesFor(config: SessionConfig, bindings: SessionBindings<TContext>, sessionTools: readonly Tool[] | undefined): SessionRunOverrides<TContext> {
+    const maxTurns = config.limits?.maxTurns;
+    const subagents = config.subagents === false ? undefined : config.subagents;
     return {
-      subagentProvider: this.subagentProviderFor(opts),
+      subagentProvider: this.subagentProviderFor(config, bindings, sessionTools),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
-      ...(workflowTool !== undefined ? { workflowTool } : {}),
-      ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
+      ...(subagents?.workflowTool !== undefined ? { workflowTool: subagents.workflowTool } : {}),
+      ...(subagents?.maxConcurrent !== undefined ? { maxConcurrentSubagents: subagents.maxConcurrent } : {}),
     };
   }
 
@@ -1618,96 +1915,237 @@ export class Harness<TContext = unknown> {
     return this.activeSessions;
   }
 
-  async createSession(opts: CreateSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
+  /**
+   * Called for every session this harness opens, whichever way it was opened — `createSession`,
+   * a cold `resumeSession`, `forkSession`, or an extension doing any of the three — after it is
+   * fully assembled and BEFORE it can start a run. This is where a host wires events and approval
+   * handlers, so a subscriber never misses a session's first event. The returned function (if any)
+   * runs when that session closes. A listener that throws fails the open, which is rolled back:
+   * a host can refuse a session that should not exist here. Attaching to an already loaded session
+   * does not fire it again. Returns an unsubscribe function.
+   */
+  onSessionOpened(listener: SessionOpenedListener<TContext>): () => void {
+    this.openListeners.push(listener);
+    return () => {
+      const index = this.openListeners.indexOf(listener);
+      if (index >= 0) this.openListeners.splice(index, 1);
+    };
+  }
+
+  /** What every session starts from: the harness's own session configuration. */
+  get config(): HarnessConfig {
+    return { ...this.options.config, defaults: this.defaultConfig, policy: this.sessionPolicy };
+  }
+
+  get defaults(): SessionConfig {
+    return this.defaultConfig;
+  }
+
+  /** What no session's configuration can override. */
+  get policy(): SessionPolicy {
+    return this.sessionPolicy;
+  }
+
+  /** Passing `agent` replaces the harness's for this session, so its output type wins too. */
+  async createSession<TAgentOutput>(opts: CreateSessionOptions<TContext> & { readonly bindings: { readonly agent: Agent<TContext, TAgentOutput> } }): Promise<HarnessSession<TContext, TAgentOutput>>;
+  async createSession(opts?: CreateSessionOptions<TContext>): Promise<HarnessSession<TContext, TOutput>>;
+  async createSession(opts: CreateSessionOptions<TContext> = {}): Promise<HarnessSession<TContext, any>> {
+    return this.createFrom(opts, undefined);
+  }
+
+  /** `source` is the session an extension created this one from: it lends its directory and its
+   *  owner, and — because the new session runs for the same party — its execution boundary: a
+   *  source on an environment of its own means this one must be given one too. */
+  private async createFrom(opts: CreateSessionOptions<TContext>, source: SessionSource | undefined): Promise<HarnessSession<TContext>> {
     this.assertAcceptingSessions();
-    const workDir = opts.workDir ?? this.options.workDir ?? process.cwd();
-    const handle = await (await this.repository()).create({ id: opts.id, workDir, ownerKey: opts.ownerKey, title: opts.title });
-    return this.trackOpen(handle.id, () => this.openFromStore(handle.id, handle.workDir, handle.store, opts));
+    this.assertSessionOptions(opts);
+    const request = this.requestOf(opts);
+    const workDir = opts.workDir ?? source?.workDir ?? this.options.config?.workDir ?? process.cwd();
+    const ownerKey = opts.ownerKey ?? source?.ownerKey;
+    const id = opts.id ?? randomUUID();
+    return this.trackOpen(id, async () => {
+      const handle = await this.prepareRecord(request, () => this.repository().then((repository) => repository.create({ id, workDir, ownerKey, title: opts.title })));
+      return this.assemble({
+        operation: "create",
+        id: handle.id,
+        workDir: handle.workDir,
+        store: handle.store,
+        request,
+        ...(source !== undefined ? { source } : {}),
+        ...(ownerKey !== undefined ? { ownerKey } : {}),
+        ...(opts.title !== undefined ? { title: opts.title } : {}),
+        createdRecord: true,
+      });
+    });
   }
 
   /**
-   * Register an open in flight under its id for as long as it runs. Every path that builds a
-   * session goes through here — create, resume, fork — so a `resumeSession` for an id that is
-   * being created joins that open instead of building a twin over the same store, and
-   * `closeSession` / `harness.close()` wait for it instead of closing its scope under it.
+   * Track construction through reconciliation and cleanup; closes wait for this promise. A
+   * `closeSession` that lands while the open is in flight cancels it: the instance is closed the
+   * moment it is built and everyone waiting gets `SessionClosedError`, never a dead handle.
    */
+  private async prepareRecord(request: OpenRequest<TContext>, prepare: () => Promise<SessionHandle>): Promise<SessionHandle> {
+    try { return await prepare(); }
+    catch (error) {
+      try { await request.bindings.release?.(); } catch (cleanup) { this.logger.log("warn", "binding release failed", { error: String(cleanup) }); }
+      throw error;
+    }
+  }
+
   private trackOpen(id: string, open: () => Promise<HarnessSession<TContext>>): Promise<HarnessSession<TContext>> {
-    const promise: Promise<HarnessSession<TContext>> = open().finally(() => {
-      if (this.opening.get(id) === promise) this.opening.delete(id);
-    });
+    if (this.opening.has(id)) throw new SessionAlreadyLoadingError(id);
+    if (this.getSession(id) !== undefined) throw new SessionAlreadyLoadedError(id);
+    const promise: Promise<HarnessSession<TContext>> = Promise.resolve().then(open)
+      .then(async (session) => {
+        if (!this.cancelledOpens.has(id)) return session;
+        await session.close();
+        throw new SessionClosedError(id);
+      })
+      .finally(() => {
+        this.cancelledOpens.delete(id);
+        if (this.opening.get(id) === promise) this.opening.delete(id);
+      });
     this.opening.set(id, promise);
     return promise;
   }
 
   /**
-   * The open session with this id, or reopen it from the store. Concurrent calls for one id share
-   * a single open (`opening`): the second caller waits for the first's — reconcile included — and
-   * receives the same instance, never a second one that a close would then unregister. An
-   * instance that is closing is not handed out: the reopen waits for its close to finish first.
+   * Get the session with this id, loading it if it is not loaded.
+   *
+   * `resumeSession(id)` — no options — attaches or restores: a loaded session is returned as it is,
+   * a load already in flight is joined (every caller gets the same instance or the same error),
+   * and otherwise the session is restored from storage. What it runs on comes from the setup stored
+   * with it, the harness defaults, and `resolveSession` for what cannot be stored. It never
+   * reconfigures or replaces a loaded instance, never starts a turn, never creates missing history.
+   *
+   * `resumeSession(id, options)` restores an UNLOADED session with what the caller hands it. Because
+   * options cannot be applied to an instance that already exists without silently dropping them,
+   * it throws `SessionAlreadyLoadedError` / `SessionAlreadyLoadingError` instead of joining. A
+   * `config` given here replaces the stored setup.
+   *
+   * Missing history throws `SessionRepositoryNotFoundError`. A close in progress is awaited before
+   * restoring. A live object the session was created with and nobody provides now throws
+   * `SessionDependencyMissingError` — the harness does not fall back to a default resource.
    */
-  resumeSession(id: string, opts: ResumeSessionOptions<TContext> = {}): Promise<HarnessSession<TContext>> {
-    // Not async (the in-flight/active fast paths return existing promises), so refuse by rejecting.
-    if (this.closing !== undefined) return Promise.reject(new Error("harness is closed"));
-    const inflight = this.opening.get(id);
-    if (inflight !== undefined) {
-      return hasOwnContext(opts)
-        ? inflight.then((session) => {
-            session.setContext(opts.context);
-            return session;
-          })
-        : inflight;
+  resumeSession<TAgentOutput>(id: string, opts: ResumeSessionOptions<TContext> & { readonly bindings: { readonly agent: Agent<TContext, TAgentOutput> } }): Promise<HarnessSession<TContext, TAgentOutput>>;
+  resumeSession(id: string, opts?: ResumeSessionOptions<TContext>): Promise<HarnessSession<TContext, TOutput>>;
+  async resumeSession(id: string, opts?: ResumeSessionOptions<TContext>): Promise<HarnessSession<TContext, any>> {
+    return this.resumeFrom(id, opts);
+  }
+
+  private async resumeFrom(id: string, opts?: ResumeSessionOptions<TContext>, origin?: SessionOrigin): Promise<HarnessSession<TContext, any>> {
+    if (this.closing !== undefined) throw new HarnessClosedError();
+    if (this.resolving.getStore() === id) {
+      throw new HarnessConfigError(`resolveSession for session "${id}" tried to open that same session; it supplies configuration and live objects, it does not open sessions`);
     }
-    const existing = this.activeSessions.get(id);
-    if (existing !== undefined && existing.status.state !== "closed") {
-      if (hasOwnContext(opts)) existing.setContext(opts.context);
-      return Promise.resolve(existing);
+    if (opts === undefined) {
+      const inflight = this.opening.get(id);
+      if (inflight !== undefined) return inflight;
+      const loaded = this.getSession(id);
+      if (loaded !== undefined) return loaded;
+    } else {
+      this.assertSessionOptions(opts);
+      if (this.opening.has(id)) throw new SessionAlreadyLoadingError(id);
+      if (this.getSession(id) !== undefined) throw new SessionAlreadyLoadedError(id);
     }
+    const request = this.requestOf({ ...(opts ?? {}), ...(origin !== undefined ? { origin } : {}) });
+    // An instance still registered here is closing (or closed): wait it out, then restore.
+    const leaving = this.activeSessions.get(id);
     return this.trackOpen(id, async (): Promise<HarnessSession<TContext>> => {
-      // `existing` here is one that is closing: wait for that close (its registration goes
-      // with it) rather than open a twin beside it.
-      if (existing !== undefined) await existing.close();
-      const handle = await (await this.repository()).open(id);
+      if (leaving !== undefined) await leaving.close();
+      const repository = await this.repository();
+      const handle = await repository.open(id);
       if (handle === undefined) throw new SessionRepositoryNotFoundError(id);
-      const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
-      // Reopening: orphaned background subagents (running from a dead process) → lost. A failure
-      // here is an open failure: the session is torn down, not left registered and unreturned.
-      try {
-        await session.background?.reconcileSubagents() ?? [];
-      } catch (error) {
-        await session.close();
-        throw error;
-      }
-      return session;
+      const summary = await repository.get(id);
+      return this.assemble({
+        operation: "restore",
+        id: handle.id,
+        workDir: handle.workDir,
+        store: handle.store,
+        request,
+        ...(summary?.ownerKey !== undefined ? { ownerKey: summary.ownerKey } : {}),
+        ...(summary?.title !== undefined ? { title: summary.title } : {}),
+        createdRecord: false,
+      });
     });
   }
 
-  /** Fork an existing session into a new one (copies its log + state) and open it. */
+  /**
+   * Fork an existing session into a new one and open it. The fork copies the history and the stored
+   * setup, never a connection or a sandbox: live objects are provided again (by the caller or by
+   * `resolveSession`), and one the source needed that is missing now is an error. A `config` given
+   * here is laid over the source's setup field by field.
+   */
+  async forkSession<TAgentOutput>(sourceId: string, opts: ForkSessionOptions<TContext> & { readonly bindings: { readonly agent: Agent<TContext, TAgentOutput> } }): Promise<HarnessSession<TContext, TAgentOutput>>;
+  async forkSession(sourceId: string, opts?: ForkSessionOptions<TContext>): Promise<HarnessSession<TContext, TOutput>>;
   async forkSession(
     sourceId: string,
     opts: ForkSessionOptions<TContext> = {},
-  ): Promise<HarnessSession<TContext>> {
+  ): Promise<HarnessSession<TContext, any>> {
     this.assertAcceptingSessions();
-    const handle = await (await this.repository()).fork(sourceId, {
-      ...(opts.id !== undefined ? { id: opts.id } : {}),
+    this.assertSessionOptions(opts);
+    const request = this.requestOf(opts);
+    const id = opts.id ?? randomUUID();
+    return this.trackOpen(id, async () => {
+    const repository = await this.repository();
+    const origin = await repository.get(sourceId);
+    const handle = await this.prepareRecord(request, () => repository.fork(sourceId, {
+      id,
       ...(opts.ownerKey !== undefined ? { ownerKey: opts.ownerKey } : {}),
       ...(opts.title !== undefined ? { title: opts.title } : {}),
-    });
-    return this.trackOpen(handle.id, async () => {
-      const session = await this.openFromStore(handle.id, handle.workDir, handle.store, opts);
-      // A fork copies the subagent ledger; its background "running" rows have no live task → lost.
-      try {
-        await session.background?.reconcileSubagents() ?? [];
-      } catch (error) {
-        await session.close();
-        throw error;
-      }
-      return session;
+    }));
+    const ownerKey = opts.ownerKey ?? origin?.ownerKey;
+    const title = opts.title ?? origin?.title;
+    return this.assemble({
+        operation: "fork",
+        id: handle.id,
+        workDir: handle.workDir,
+        store: handle.store,
+        request,
+        source: { id: sourceId, workDir: origin?.workDir ?? handle.workDir, ...(origin?.ownerKey !== undefined ? { ownerKey: origin.ownerKey } : {}), requires: [] },
+        ...(ownerKey !== undefined ? { ownerKey } : {}),
+        ...(title !== undefined ? { title } : {}),
+        createdRecord: true,
+      });
     });
   }
 
-  /** The currently-open session with this id, or undefined (does not reopen — use resumeSession). */
+  /**
+   * `createSession` from an extension's `harness` half. Its options are checked — a key this
+   * harness does not know is an error, never silently dropped. `from` names the session the new
+   * one is created on behalf of (a lead spawning a teammate): like a session-side `createSession`,
+   * the new session takes that one's directory and owner, and what that one needed live must be
+   * provided for it too.
+   */
+  private async createFromExtension(sessionOptions: Parameters<import("./extensions/types.ts").ExtensionHostContext["createSession"]>[0], extensionId: string): Promise<HarnessSession<TContext>> {
+    const unknown = Object.keys(sessionOptions ?? {}).filter((key) => !CREATE_SESSION_OPTION_KEYS.has(key));
+    if (unknown.length > 0) {
+      throw new HarnessConfigError(`createSession from an extension got unknown option${unknown.length > 1 ? "s" : ""} ${unknown.map((key) => `"${key}"`).join(", ")}; per-extension parameters go in config.extensions`);
+    }
+    const { from, ...rest } = (sessionOptions ?? {});
+    if (from !== undefined && typeof from !== "string") throw new HarnessConfigError("createSession from an extension: `from` is the id of the session it is created on behalf of");
+    return this.createFrom({ ...rest, origin: { kind: "extension", extensionId } }, from === undefined ? undefined : await this.sourceOf(from));
+  }
+
+  /** The session an extension is acting from, as the source of what it creates: the loaded
+   *  instance, or — when it is not loaded here — what is stored with it. */
+  private async sourceOf(sessionId: string): Promise<SessionSource> {
+    const session = this.activeSessions.get(sessionId);
+    if (session !== undefined) {
+      return { id: session.id, workDir: session.workDir, ...(session.ownerKey !== undefined ? { ownerKey: session.ownerKey } : {}), requires: session.requires };
+    }
+    const repository = await this.repository();
+    const [summary, handle] = await Promise.all([repository.get(sessionId), repository.open(sessionId)]);
+    if (summary === undefined || handle === undefined) throw new SessionRepositoryNotFoundError(sessionId);
+    const stored = await this.readStoredSetup(sessionId, handle.store);
+    return { id: sessionId, workDir: handle.workDir, ...(summary.ownerKey !== undefined ? { ownerKey: summary.ownerKey } : {}), requires: stored.requires };
+  }
+
+  /** The fully opened session with this id, running or not. Undefined while opening or closed. */
   getSession(id: string): HarnessSession<TContext> | undefined {
-    return this.activeSessions.get(id);
+    if (this.opening.has(id)) return undefined;
+    const session = this.activeSessions.get(id);
+    return session?.status.state === "closed" ? undefined : session;
   }
 
   /** Read a session's durable handle without constructing a Session, opening capabilities,
@@ -1723,12 +2161,15 @@ export class Harness<TContext = unknown> {
   }
 
   /** Close one open session by id (no-op if it isn't open). An open in flight for this id is
-   *  waited for and then closed, so a close/delete never races a half-built session. */
+   *  cancelled — whoever awaits it gets `SessionClosedError` — and waited for, so a close/delete
+   *  never races a half-built session. */
   async closeSession(id: string): Promise<void> {
     const inflight = this.opening.get(id);
     if (inflight !== undefined) {
-      const session = await inflight.catch(() => undefined);
-      await session?.close();
+      // Abandon the open: it closes the instance as soon as it is built and rejects for everyone
+      // waiting on it, so nobody is handed a session that is already closed.
+      this.cancelledOpens.add(id);
+      await inflight.catch(() => undefined);
       return;
     }
     await this.activeSessions.get(id)?.close();
@@ -1773,6 +2214,7 @@ export class Harness<TContext = unknown> {
     // Opens in flight finish (or fail) first: closing the scope tree under a half-built session
     // would tear its scope out from under `Session.open`. New opens are refused from here on
     // (`assertAcceptingSessions`), so the set only shrinks.
+    this.abortController.abort();
     await Promise.allSettled([...this.opening.values()]);
     for (const session of [...this.activeSessions.values()]) await session.close();
     await this.sharedReady.catch(() => undefined);
@@ -1798,9 +2240,25 @@ export class Harness<TContext = unknown> {
     }
   }
 
+  /** An option this harness does not know is an error, and one that only shapes the default agent
+   *  is an error beside a complete agent — neither is a no-op. */
+  private assertSessionOptions(opts: OpenSessionOptionsBase<TContext>): void {
+    const allowed = new Set(["id", "workDir", "ownerKey", "title", "config", "bindings", "origin"]);
+    const unknown = Object.keys(opts).filter((key) => !allowed.has(key));
+    if (unknown.length) throw new HarnessConfigError(`unknown session options: ${unknown.join(", ")}; use config and bindings`);
+    // A request that contradicts itself is refused as such, whatever state the session is in.
+    const config = opts.config !== null && typeof opts.config === "object" ? opts.config : undefined;
+    if (opts.bindings?.agent !== undefined || config?.agent !== undefined) {
+      assertNoDefaultAgentOptions(
+        { modelSettings: config?.modelSettings, tools: opts.bindings?.tools ?? config?.tools, appendSystemPrompt: config?.appendSystemPrompt, maxStepsPerTurn: config?.limits?.maxStepsPerTurn },
+        "this session",
+      );
+    }
+  }
+
   /** Every path that opens a session starts here: a closing harness opens nothing new. */
   private assertAcceptingSessions(): void {
-    if (this.closing !== undefined) throw new Error("harness is closed");
+    if (this.closing !== undefined) throw new HarnessClosedError();
   }
 
   /**
@@ -1837,11 +2295,11 @@ export class Harness<TContext = unknown> {
   ): Promise<void> {
     const definitions = Array.isArray(next) ? [...(next as readonly ExtensionDefinition[])] : [next as ExtensionDefinition];
     if (definitions.length === 0) {
-      throw new Error("replaceExtension needs at least one definition — to swap a service alone, use harness.services.replace");
+      throw new HarnessConfigError("replaceExtension needs at least one definition — to swap a service alone, use harness.services.replace");
     }
     for (const definition of definitions) {
       if (!this.valueDefs.has(definition.id)) {
-        throw new Error(
+        throw new HarnessConfigError(
           `cannot replace extension "${definition.id}": it is not registered on this harness by value — pass it in createHarness({ extensions }), or use harness.extensions.reload("${definition.id}") for a file extension`,
         );
       }
@@ -1948,7 +2406,7 @@ export class Harness<TContext = unknown> {
     timeoutMs: number,
     fn: (held: () => readonly HarnessSession<TContext>[]) => Promise<void>,
   ): Promise<void> {
-    if (this.activeBarrier !== undefined) throw new Error("another barrier operation is already in progress");
+    if (this.activeBarrier !== undefined) throw new HarnessBusyError("another barrier operation is already in progress");
     const holds = new Map<string, { readonly quiescent: Promise<void>; release(): void }>();
     this.activeBarrier = { holds };
     try {
@@ -1979,13 +2437,7 @@ export class Harness<TContext = unknown> {
     // skill scan: both describe the HARNESS's machine, not the one this session's tools run on.
     const base = this.options.sessionCapabilities !== undefined
       ? await this.options.sessionCapabilities(ctx)
-      : defaultCapabilities({
-        shared: this.infrastructure,
-        ownEnvironment: ctx.ownEnvironment,
-        strictIsolation: ctx.strictIsolation,
-        ...(ctx.mcpServers !== undefined ? { sessionMcpServers: ctx.mcpServers } : {}),
-        ...(ctx.mcpCredentials !== undefined ? { mcpCredentials: ctx.mcpCredentials } : {}),
-      });
+      : defaultCapabilities({ session: ctx });
     // Every definition registered on this harness: by value (`extensions`, harness halves
     // included — their per-session `session` is mounted here like any other), then from files.
     const extensions = [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
@@ -1994,7 +2446,7 @@ export class Harness<TContext = unknown> {
     const baseNames = new Set(base.map((capability) => capability.name));
     for (const definition of extensions) {
       if (baseNames.has(definition.id)) {
-        throw new Error(`extension "${definition.id}" has the name of one of this session's capabilities; give it another id`);
+        throw new HarnessConfigError(`extension "${definition.id}" has the name of one of this session's capabilities; give it another id`);
       }
     }
     // Put extension transforms first. Shell PreToolUse remains in the staged permission policy,
@@ -2015,9 +2467,16 @@ export class Harness<TContext = unknown> {
     const runtime = this.modelManager;
     return {
       sessionId,
-      newSession: (options) => self.createSession({ ...(options?.title !== undefined ? { title: options.title } : {}) }),
-      fork: (options) => self.forkSession(sessionId, { ...(options?.title !== undefined ? { title: options.title } : {}) }),
-      openSession: (id) => self.resumeSession(id),
+      // A session an extension creates runs for the same party as the one it acts from: it gets that
+      // session's directory and owner, and what that session needed live must be provided for it too.
+      createSession: async (options, extensionId = "unknown") =>
+        self.createFrom(
+          { ...(options?.title !== undefined ? { title: options.title } : {}), ...(options?.config !== undefined ? { config: options.config } : {}), origin: { kind: "extension", extensionId } },
+          await self.sourceOf(sessionId),
+        ),
+      forkSession: (options, extensionId = "unknown") =>
+        self.forkSession(sessionId, { ...(options?.title !== undefined ? { title: options.title } : {}), ...(options?.config !== undefined ? { config: options.config } : {}), origin: { kind: "extension", extensionId } }),
+      resumeSession: (id, extensionId = "unknown") => self.resumeFrom(id, undefined, { kind: "extension", extensionId }),
       listSessions: () => self.listSessions(),
       registerProvider: (provider) => {
         runtime.models.setProvider(provider);
@@ -2039,32 +2498,204 @@ export class Harness<TContext = unknown> {
     };
   }
 
-  private async openFromStore(
-    id: string,
-    workDir: string,
-    store: SessionStore,
-    opts: OpenSessionOptionsBase<TContext>,
-  ): Promise<HarnessSession<TContext>> {
-    // A session's `session` reaches a harness half through its service, so none opens before the
-    // harness halves have registered them.
-    await this.sharedReady;
-    // Per-session extension params: given at create, persisted, and read back on every later
-    // open (resume, fork) so a session keeps them without the caller repeating them.
-    let params = opts.params;
-    if (params !== undefined) await store.putState(EXTENSION_PARAMS_STATE_KEY, params);
-    else params = ((await store.getState(EXTENSION_PARAMS_STATE_KEY)) as Record<string, unknown> | null) ?? undefined;
-    await this.sharedReady;
-    // From here the open is a transaction: the session is registered as active only once every
-    // step has succeeded, and any failure tears down exactly what was built — the projection, the
-    // core when it got that far — before rethrowing.
+  /** What a caller asked for on one open, read off its options. */
+  private requestOf(opts: OpenSessionOptionsBase<TContext>): OpenRequest<TContext> {
+    const bindings = opts.bindings ?? {};
+    return {
+      ...(opts.config !== undefined ? { config: this.validConfig(opts.config, "session config") } : {}),
+      bindings, hasContext: hasOwnContext(bindings), origin: opts.origin ?? { kind: "host" },
+    };
+  }
+
+  private validConfig(config: unknown, where: string): SessionConfig {
+    try {
+      return parseSessionConfig(config, where);
+    } catch (error) {
+      throw new HarnessConfigError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** The setup stored with a session: what it was explicitly configured with, and which kinds of
+   *  live object it was opened on. A session from before this record existed has only its
+   *  extension params, under their old key. */
+  private async readStoredSetup(id: string, store: SessionStore): Promise<StoredSetup> {
+    const raw = (await store.getState(SESSION_CONFIG_STATE_KEY)) as { readonly config?: unknown; readonly requires?: unknown } | null;
+    if (raw !== null && typeof raw === "object") {
+      let config: SessionConfig;
+      try {
+        config = parseSessionConfig(raw.config, `the stored setup of session "${id}"`);
+      } catch (error) {
+        throw new HarnessConfigError(error instanceof Error ? error.message : String(error));
+      }
+      const requires = Array.isArray(raw.requires) ? raw.requires.filter((key): key is SessionBindingKey => SESSION_BINDING_KEYS.includes(key as SessionBindingKey)) : [];
+      return { config, requires, present: true };
+    }
+    const params = (await store.getState(EXTENSION_PARAMS_STATE_KEY)) as Record<string, unknown> | null;
+    return { config: params !== null && typeof params === "object" ? { extensions: params } : {}, requires: [], present: false };
+  }
+
+  /** A fork does not inherit the parameters of an extension that says they identify one session. */
+  private forkedSetup(config: SessionConfig): SessionConfig {
+    if (config.extensions === undefined) return config;
+    const dropped = new Set(this.allDefinitions().filter((definition) => definition.forkParams === "drop").map((definition) => definition.id));
+    if (dropped.size === 0) return config;
+    const extensions = Object.fromEntries(Object.entries(config.extensions).filter(([id]) => !dropped.has(id)));
+    const { extensions: _extensions, ...rest } = config;
+    return Object.keys(extensions).length > 0 ? { ...rest, extensions } : rest;
+  }
+
+  /**
+   * The one way a session comes to exist in this process, shared by create, resume and fork: read
+   * the stored setup, let the host resolve what cannot be stored, compute the configuration the
+   * session runs on, check it against policy, assemble, wire, and only then let it run. Any
+   * failure undoes exactly what was built — including a record this open created and whatever the
+   * host's bindings acquired.
+   */
+  private async assemble(args: AssembleArgs<TContext>): Promise<HarnessSession<TContext>> {
+    const { operation, id, workDir, store, request } = args;
+    const releases: (() => void | Promise<void>)[] = [];
+    let released = false;
+    const release = async (): Promise<void> => {
+      if (released) return;
+      released = true;
+      for (const run of releases.reverse()) {
+        try {
+          await run();
+        } catch (error) {
+          this.logger.log("warn", "session bindings release failed", { sessionId: id, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    };
+    if (request.bindings.release !== undefined) releases.push(() => request.bindings.release!());
+    const disposers: (() => void | Promise<void>)[] = [];
     let projection: SessionProjection | undefined;
     let core: Session | undefined;
+    let session: HarnessSession<TContext> | undefined;
     try {
+      // A session's `session` reaches a harness half through its service, so none opens before the
+      // harness halves have registered them.
+      await this.sharedReady;
+      const stored = await this.readStoredSetup(id, store);
+      const [storedModel, storedPermission, storedThinking] = operation === "create" ? [null, null, null]
+        : await Promise.all([store.getState(SESSION_MODEL_KEY), store.getState(SESSION_PERMISSION_KEY), store.getState(SESSION_THINKING_KEY)]);
+      const runtimeMode = (storedPermission as { readonly mode?: PermissionMode } | null)?.mode;
+      const inherited = resolveSessionConfig(operation === "fork" ? this.forkedSetup(stored.config) : stored.config, {
+        ...(typeof storedModel === "string" ? { model: storedModel } : {}),
+        ...(typeof storedThinking === "string" ? { thinking: storedThinking as ThinkingLevel } : {}),
+        ...(runtimeMode !== undefined ? { permission: { mode: runtimeMode } } : {}),
+      });
+      // What THIS call asked for.
+      const asked = request.config ?? {};
+      // Explicit configuration, by operation: a create has only what it was given; a resume keeps
+      // the stored setup unless handed a `config`, which replaces it (the three runtime values a
+      // setter owns survive when the new config does not name them); a fork adjusts its source's.
+      let explicit: SessionConfig;
+      if (operation === "create") explicit = asked;
+      else if (operation === "restore" && request.config !== undefined) {
+        const kept: SessionConfig = {
+          ...(inherited.model !== undefined ? { model: inherited.model } : {}),
+          ...(inherited.thinking !== undefined ? { thinking: inherited.thinking } : {}),
+          ...(inherited.permission?.mode !== undefined ? { permission: { mode: inherited.permission.mode } } : {}),
+        };
+        explicit = resolveSessionConfig(kept, asked);
+      } else explicit = resolveSessionConfig(inherited, asked);
+
+      let bindings = request.bindings;
+      let hasContext = request.hasContext;
+      let fromResolver = false;
+      const resolve = this.options.resolveSession;
+      if (resolve !== undefined) {
+        // The values a setter owns live in the core's own keys; the host sees them with the rest.
+        const storedView = inherited;
+        let resolution: SessionResolution<TContext> | undefined | void;
+        {
+          resolution = await this.resolving.run(id, () => resolve({
+            operation,
+            origin: request.origin,
+            session: { id, workDir, ...(args.ownerKey !== undefined ? { ownerKey: args.ownerKey } : {}), ...(args.title !== undefined ? { title: args.title } : {}) },
+            ...(args.source !== undefined
+              ? { source: { id: args.source.id, workDir: args.source.workDir, ...(args.source.ownerKey !== undefined ? { ownerKey: args.source.ownerKey } : {}) } }
+              : {}),
+            requested: {
+              ...(Object.keys(asked).length > 0 || request.config !== undefined ? { config: asked } : {}),
+              bindings: request.bindings,
+            },
+            ...(operation !== "create" ? { stored: storedView } : {}),
+            signal: this.abortController.signal,
+          }));
+        }
+        if (resolution?.bindings !== undefined) {
+          const resolved = resolution.bindings;
+          if (resolved.release !== undefined) releases.push(() => resolved.release!());
+          bindings = { ...bindings, ...resolved };
+          hasContext = hasContext || hasOwnContext(resolved);
+        }
+        if (resolution?.config !== undefined) {
+          try {
+            explicit = parseSessionConfig(resolution.config, `resolveSession's result for session "${id}"`);
+          } catch (error) {
+            throw new HarnessConfigError(error instanceof Error ? error.message : String(error));
+          }
+          fromResolver = true;
+        }
+      }
+
+      let effective = resolveSessionConfig(this.defaultConfig, explicit);
+      const pluginServers = explicit.mcp === undefined && effective.mcp !== false ? this.infrastructure.pluginManager?.mcpServerConfigs() : undefined;
+      if (pluginServers !== undefined) effective = { ...effective, mcp: { servers: { ...(effective.mcp && effective.mcp.servers), ...pluginServers } } };
+      const strictPolicy = this.sessionPolicy.strictIsolation === true;
+      const violation = sessionPolicyViolation(effective, this.sessionPolicy)
+        ?? (strictPolicy && bindings.environment === undefined
+          ? { field: "bindings.environment", reason: "this host isolates every session, so each one must be opened on its own environment; without one its tools would run in the harness's own" }
+          : undefined);
+      if (violation !== undefined) throw new SessionPolicyViolationError(id, violation.field, violation.reason);
+
+      // What the session was created on must be provided again. A session an extension creates
+      // from another must stay inside that one's execution boundary: where the source runs in an
+      // environment of its own, so must this one (its agent, model and tools are its own affair).
+      // Nothing here falls back to a default resource.
+      const needed = operation === "create"
+        ? (request.origin.kind === "extension" ? (args.source?.requires ?? []) : [])
+        : stored.requires;
+      const missing = needed.filter((key) => bindings[key] === undefined);
+      if (missing.length > 0) throw new SessionDependencyMissingError(id, missing);
+
+      // Names resolve against what is registered on the harness; an object given directly wins.
+      const namedAgent = effective.agent !== undefined ? this.agents[effective.agent] : undefined;
+      if (effective.agent !== undefined && bindings.agent === undefined && namedAgent === undefined) {
+        const known = Object.keys(this.agents);
+        throw new HarnessConfigError(`session "${id}" names the agent "${effective.agent}", which is not registered on this harness (registry.agents has ${known.length > 0 ? known.join(", ") : "none"})`);
+      }
+      const givenAgent = bindings.agent ?? namedAgent;
+      if (givenAgent !== undefined) {
+        assertNoDefaultAgentOptions(
+          { modelSettings: effective.modelSettings, tools: bindings.tools ?? effective.tools, appendSystemPrompt: effective.appendSystemPrompt, maxStepsPerTurn: effective.limits?.maxStepsPerTurn },
+          bindings.agent !== undefined || effective.agent !== undefined ? "this session" : "the harness",
+        );
+      }
+      const sessionTools = bindings.tools ?? (effective.tools !== undefined ? this.toolsNamed(id, effective.tools) : undefined);
+
+      // Store the setup: only what was explicitly configured (never the harness defaults, so a
+      // change to those still reaches this session), and never what the host resolves each time.
+      const storedConfig = withoutModel(fromResolver ? inherited : explicit);
+      const requires = SESSION_BINDING_KEYS.filter((key) => bindings[key] !== undefined || (operation !== "create" && stored.requires.includes(key)));
+      const changed = JSON.stringify({ config: storedConfig, requires }) !== JSON.stringify({ config: stored.config, requires: stored.requires });
+      if (changed) {
+        // Checked before anything is connected; written only once the open has succeeded, so a
+        // setup that cannot be assembled never replaces one that could.
+        const secrets = inlineMcpSecretPaths(storedConfig);
+        if (secrets.length > 0 && (strictPolicy || this.sessionPolicy.allowInlineMcpSecrets !== true)) {
+          throw new HarnessConfigError(`session "${id}" would store MCP secrets as given (${secrets.join(", ")}). Read the token from the environment (bearerTokenEnvVar), hand credentials out per connect (bindings.mcpCredentials), or — on a single-user host whose session store is as trusted as its config file — set policy.allowInlineMcpSecrets.`);
+        }
+      }
+
+      // From here the open is a transaction over live objects: the session is released to run only
+      // once every step has succeeded.
       const events = new ListenerSink();
       const responder = new MutableResponder();
-      // Environment: this call's override → the harness's default → a LocalEnvironment at the
-      // session's own workDir. The session only OPERATES a caller-supplied environment.
-      const environment = opts.environment ?? this.infrastructure.environment ?? new LocalEnvironment(workDir);
+      // Environment: this open's → the harness's default → a LocalEnvironment at the session's own
+      // workDir. The session only OPERATES a caller-supplied environment.
+      const environment = bindings.environment ?? this.infrastructure.environment ?? new LocalEnvironment(workDir);
       // ONE open-time log read, shared: every shard from its newest checkpoint on (each
       // checkpoint carries the history and lifecycle before it). The projection seeds from it,
       // and Session.open receives it as `preloadedLog` so its capability restore + context
@@ -2083,17 +2714,29 @@ export class Harness<TContext = unknown> {
           preloadedLog = [...preloadedLog, ...recoveryRecords];
         }
       }
+      const strictIsolation = strictPolicy;
       const capabilities = await this.resolveCapabilities(
         {
           sessionId: id,
           workDir,
-          ownEnvironment: opts.environment !== undefined,
-          strictIsolation: opts.strictIsolation === true,
-          ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
-          ...(opts.mcpCredentials !== undefined ? { mcpCredentials: opts.mcpCredentials } : {}),
+          ...(args.ownerKey !== undefined ? { ownerKey: args.ownerKey } : {}),
+          ownEnvironment: bindings.environment !== undefined,
+          strictIsolation,
+          // With a configured server set the overlay is already folded into it above.
+          ...(bindings.mcpCredentials !== undefined ? { mcpCredentials: bindings.mcpCredentials } : {}),
+          config: effective,
+          bindings,
+          shared: this.infrastructure,
+          policy: this.sessionPolicy,
         },
-        params,
+        effective.extensions,
       );
+      const publication = this.options.config?.eventPublication;
+      const judge = this.options.autoApprover
+        ?? (effective.permission?.mode === "auto" ? createAutoApprover() : undefined);
+      const autoApprover = judge !== undefined && effective.permission?.autoApproval !== undefined
+        ? { classify: (input: Parameters<AutoApprover["classify"]>[0]) => judge.classify({ ...input, autoApproval: effective.permission!.autoApproval }) }
+        : judge;
       // Everything the session runs on, by value. The repository owns the store's lifetime.
       core = await Session.open({
         capabilities,
@@ -2104,20 +2747,37 @@ export class Harness<TContext = unknown> {
         events,
         responder,
         environment,
-        permissionOptions: opts.permission ?? this.options.permission ?? { mode: "yolo" },
+        permissionOptions: {
+          mode: effective.permission?.mode ?? DEFAULT_PERMISSION_MODE,
+          rules: [...(effective.permission?.rules ?? []), ...(this.sessionPolicy.permission?.rules ?? [])],
+          ...(autoApprover !== undefined ? { autoApprover } : {}),
+        },
         ...(this.infrastructure.logger !== undefined ? { logger: this.infrastructure.logger } : {}),
         ...(this.infrastructure.tracing !== undefined ? { tracing: this.infrastructure.tracing } : {}),
         ...(this.options.telemetry !== undefined ? { telemetry: this.options.telemetry } : {}),
-        ...(opts.eventPublication ?? this.options.eventPublication) !== undefined
-          ? { eventPublication: (opts.eventPublication ?? this.options.eventPublication)! }
-          : {},
+        ...(publication !== undefined ? { eventPublication: publication } : {}),
       });
-      const agent =
-        opts.agent ??
-        this.options.agent ??
-        (await this.buildDefaultAgent(opts));
-      if (opts.model !== undefined) core.setModel(opts.model);
-      const session = new HarnessSession<TContext>({
+      // A custom capability factory may not honour policy; what it connected is still visible.
+      const allowedTransports = strictIsolation && strictPolicy
+        ? (this.sessionPolicy.allowedMcpTransports ?? ["http", "stdio"]).filter((kind) => kind === "http")
+        : this.sessionPolicy.allowedMcpTransports;
+      if (allowedTransports !== undefined) {
+        const refused = (core.mcp?.list() ?? []).filter((view) => !allowedTransports.includes(view.transport));
+        if (refused.length > 0) {
+          throw new SessionPolicyViolationError(id, "mcp", `MCP server ${refused.map((view) => `"${view.name}"`).join(", ")} runs over ${refused[0]!.transport}, which this host does not allow`);
+        }
+      }
+      if (givenAgent === undefined && this.defaultConfig.model === undefined && explicit.model === undefined && bindings.model === undefined && core.modelSetting === undefined) {
+        throw new HarnessConfigError(`session "${id}" has no model: name one in the harness configuration (\`config.defaults.model\`, or \`model\`), in the session's own, or run a complete agent`);
+      }
+      const agent = givenAgent ?? (await this.buildDefaultAgent(effective, sessionTools));
+      // A model the session names is set like `setModel`, so it is remembered with the session;
+      // the harness default is not, and keeps reaching the session through its agent.
+      if (bindings.model !== undefined) core.setModel(bindings.model);
+      else if (explicit.model !== undefined && core.modelSetting !== explicit.model) core.setModel(explicit.model);
+      if (explicit.thinking !== undefined) core.setThinking(explicit.thinking);
+      else if (effective.thinking !== undefined) core.setDefaultThinking(effective.thinking);
+      const built = new HarnessSession<TContext>({
         core,
         // The two caps land in different places: maxStepsPerTurn is an Agent property
         // (the Runner reads the agent's value first), maxTurns is a per-run option.
@@ -2127,35 +2787,101 @@ export class Harness<TContext = unknown> {
         responder,
         projection,
         workDir,
-        context: this.contextFor(opts),
-        runOverrides: this.runOverridesFor(opts),
+        ...(args.ownerKey !== undefined ? { ownerKey: args.ownerKey } : {}),
+        config: effective,
+        requires,
+        ...(this.sessionPolicy.permission?.allowedModes !== undefined ? { allowedModes: this.sessionPolicy.permission.allowedModes } : {}),
+        context: hasContext ? bindings.context : this.options.context,
+        runOverrides: this.runOverridesFor(effective, bindings, sessionTools),
         interrupted,
         mountExtension: (definition) => {
-          if (params?.[definition.id] === false) {
-            throw new Error(`extension "${definition.id}" is opted out for this session (params["${definition.id}"] is false)`);
+          const params = effective.extensions?.[definition.id];
+          if (params === false) {
+            throw new HarnessConfigError(`extension "${definition.id}" is opted out for this session (params["${definition.id}"] is false)`);
           }
-          return extensionCapability(definition, { host: this.extensionHost(id), params: params?.[definition.id], startReason: "attach" });
+          return extensionCapability(definition, { host: this.extensionHost(id), params, startReason: "attach" });
         },
-        onClosed: (sid) => {
+        onClosed: async (sid) => {
           // Only THIS instance's registration goes — a later open under the same id (a resume
           // that waited for this close) must keep its own.
-          if (this.activeSessions.get(sid) === session) this.activeSessions.delete(sid);
+          for (const dispose of disposers.reverse()) {
+            try {
+              await dispose();
+            } catch (error) {
+              this.logger.log("warn", "session open listener cleanup failed", { sessionId: sid, error: error instanceof Error ? error.message : String(error) });
+            }
+          }
+          await release();
+          if (this.activeSessions.get(sid) === built) this.activeSessions.delete(sid);
         },
       });
-      this.activeSessions.set(id, session);
-      // Born gated: a session appearing while a reshape barrier holds (createSession,
-      // resumeSession and openSession all land here) must not start runs mid-swap. Its
-      // quiescent is trivially settled — it has no run — so it never delays the rendezvous.
-      if (this.activeBarrier !== undefined) this.activeBarrier.holds.set(id, session.holdAtBoundary());
-      return session;
+      session = built;
+      // Born gated: a session appearing while a reshape barrier holds must not start runs mid-swap.
+      // Its quiescent is trivially settled — it has no run — so it never delays the rendezvous.
+      if (this.activeBarrier !== undefined) this.activeBarrier.holds.set(id, built.holdAtBoundary());
+      // A mode asked for on a reopen beats the one the session remembered, as a setter would.
+      if (explicit.permission?.mode !== undefined) await built.setPermissionMode(explicit.permission.mode);
+      // The mode a session remembered from a runtime switch is held to today's policy as well.
+      const allowedModes = this.sessionPolicy.permission?.allowedModes;
+      const mode = core.permissionModeSetting;
+      if (allowedModes !== undefined && mode !== undefined && !allowedModes.includes(mode)) {
+        throw new SessionPolicyViolationError(id, "permission.mode", `permission mode "${mode}", which this session was last switched to, is not allowed here (allowed: ${allowedModes.join(", ") || "none"}); restore it with a \`config.permission.mode\` that is`);
+      }
+      // Running subagents from a dead process (or copied by a fork) have no live task to reconnect to.
+      if (operation !== "create") await built.background?.reconcileSubagents();
+      // The host wires events and handlers now, while the session still cannot run.
+      const info: SessionOpenInfo = {
+        operation,
+        origin: request.origin,
+        ...(args.source !== undefined
+          ? { source: { id: args.source.id, workDir: args.source.workDir, ...(args.source.ownerKey !== undefined ? { ownerKey: args.source.ownerKey } : {}) } }
+          : {}),
+      };
+      for (const listener of [...this.openListeners]) {
+        const dispose = await listener(built, info);
+        if (typeof dispose === "function") disposers.push(dispose);
+      }
+      // Assembled and wired: this is the setup the session is restored from next time. It still
+      // cannot run, so no turn precedes the record.
+      if (changed) await store.putState(SESSION_CONFIG_STATE_KEY, { version: 1, config: storedConfig, requires });
+      // Let it run (a reshape barrier that took a hold above keeps its own).
+      if (this.cancelledOpens.has(id)) throw new SessionClosedError(id);
+      this.activeSessions.set(id, built);
+      built.releaseBirthHold();
+      return built;
     } catch (error) {
-      await this.rollbackOpen(id, { projection, core }, error);
+      if (session !== undefined) {
+        // Closing runs the listeners' cleanups and releases the bindings.
+        await session.close().catch((closeError: unknown) => {
+          this.logger.log("warn", "closing a session whose open failed also failed", { sessionId: id, error: closeError instanceof Error ? closeError.message : String(closeError) });
+        });
+      } else {
+        await this.rollbackOpen(id, { projection, core }, error);
+        await release();
+      }
+      if (args.createdRecord) {
+        // The record this open made describes a session that never existed.
+        try {
+          await (await this.repository()).delete(id, { purge: true });
+        } catch (deleteError) {
+          this.logger.log("warn", "removing the record of a session whose open failed also failed", { sessionId: id, error: deleteError instanceof Error ? deleteError.message : String(deleteError) });
+        }
+      }
       throw error;
     }
   }
 
+  /** The registered tools with these names, as one session's palette. */
+  private toolsNamed(id: string, names: readonly string[]): readonly Tool[] {
+    const unknown = names.filter((name) => this.toolPalette[name] === undefined);
+    if (unknown.length > 0) {
+      throw new HarnessConfigError(`session "${id}" names tool${unknown.length > 1 ? "s" : ""} ${unknown.map((name) => `"${name}"`).join(", ")}, not registered on this harness (registry.tools has ${Object.keys(this.toolPalette).join(", ") || "none"})`);
+    }
+    return names.map((name) => this.toolPalette[name]!);
+  }
+
   /**
-   * Undo a failed `openFromStore`, newest artifact first. Every step runs even if an earlier one
+   * Undo a failed `assemble`, newest artifact first. Every step runs even if an earlier one
    * throws (a cleanup failure is logged, never allowed to mask the open's own error).
    */
   private async rollbackOpen(
@@ -2185,9 +2911,6 @@ export class Harness<TContext = unknown> {
     return [...this.valueDefs.values(), ...(this.extensions?.sessionDefinitions() ?? [])];
   }
 
-  private contextFor(options: { readonly context?: TContext }): TContext | undefined {
-    return hasOwnContext(options) ? options.context : this.options.context;
-  }
 }
 
 /** A reshape rendezvous that did not converge in time. Nothing was changed; the sessions that
@@ -2235,8 +2958,50 @@ function isServiceDescriptor(value: unknown): value is { instance: unknown } & S
   );
 }
 
-export function createHarness<TContext = unknown>(options: HarnessOptions<TContext>): Harness<TContext> {
-  return new Harness<TContext>(options);
+/** Every key `createHarness` takes. */
+const HARNESS_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "config", "registry", "resolveSession", "context", "autoApprover", "modelManager", "infrastructure",
+  "sessionCapabilities", "telemetry", "services", "extensions", "extensionDir", "extensionDataDir", "extraSubagentProfiles",
+]);
+
+/** Where each option `createHarness` used to take flat lives now. */
+const MOVED_HARNESS_OPTIONS: Readonly<Record<string, string>> = {
+  model: "config.defaults.model (a ChatModel object: bindings.model on the session)",
+  modelSettings: "config.defaults.modelSettings",
+  appendSystemPrompt: "config.defaults.appendSystemPrompt",
+  agent: "registry.agents + config.defaults.agent (an Agent object for one session: bindings.agent)",
+  tools: "registry.tools (+ config.defaults.tools to name a subset)",
+  permission: "config.defaults.permission (the judge: autoApprover)",
+  maxTurns: "config.defaults.limits.maxTurns",
+  maxStepsPerTurn: "config.defaults.limits.maxStepsPerTurn",
+  mcpServers: "config.defaults.mcp.servers",
+  mcpCredentials: "bindings.mcpCredentials on the session, or resolveSession",
+  environment: "infrastructure().environment, or bindings.environment on the session",
+  extensionParams: "config.defaults.extensions",
+  subagentProvider: "config.defaults.subagents = false, or bindings.subagentProvider on the session",
+  workflowTool: "config.defaults.subagents.workflowTool",
+  maxConcurrentSubagents: "config.defaults.subagents.maxConcurrent",
+  strictIsolation: "config.policy.strictIsolation",
+  eventPublication: "config.eventPublication",
+  workDir: "config.workDir",
+  sessionHost: "resolveSession + harness.onSessionOpened",
+};
+
+/**
+ * An option this harness does not know is an error, never silently dropped: a `permission` or a
+ * `strictIsolation` that quietly stops applying is a boundary that quietly stops existing.
+ */
+function assertHarnessOptions(options: object): void {
+  const unknown = Object.keys(options).filter((key) => !HARNESS_OPTION_KEYS.has(key) && (options as Record<string, unknown>)[key] !== undefined);
+  if (unknown.length === 0) return;
+  const described = unknown.map((key) => (MOVED_HARNESS_OPTIONS[key] !== undefined ? `\`${key}\` (now ${MOVED_HARNESS_OPTIONS[key]})` : `\`${key}\``));
+  throw new HarnessConfigError(`createHarness got unknown option${unknown.length > 1 ? "s" : ""} ${described.join(", ")}`);
+}
+
+export function createHarness<TContext = unknown, TOutput = unknown>(
+  options: HarnessOptions<TContext>,
+): Harness<TContext, TOutput> {
+  return new Harness<TContext, TOutput>(options);
 }
 
 function hasOwnContext<TContext>(value: { readonly context?: TContext }): boolean {

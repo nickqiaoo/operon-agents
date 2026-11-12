@@ -127,7 +127,7 @@ const GREP_DESCRIPTION = [
 export const grepTool = defineTool({
   name: "Grep",
   description: GREP_DESCRIPTION,
-  params: GrepInput,
+  parameters: GrepInput,
   async resolve(args, ctx) {
     const searchPath =
       args.path !== undefined

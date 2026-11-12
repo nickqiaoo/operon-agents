@@ -1,4 +1,5 @@
-import type { AgentRecord, BackgroundTaskInfo, HarnessSession, Message, PermissionMode } from 'operon-agents';
+import type { AgentRecord, BackgroundTaskInfo } from 'operon-agents/advanced';
+import type { HarnessSession, Message, PermissionMode } from 'operon-agents';
 
 import { ToolCallComponent } from '../components/messages/tool-call.ts';
 import type { TodoItem } from '../components/chrome/todo-panel.ts';

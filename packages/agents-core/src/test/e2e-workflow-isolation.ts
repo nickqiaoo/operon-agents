@@ -15,7 +15,8 @@ import {
   type Message,
   Runner,
   Session,
-  SessionProjection
+  SessionProjection,
+  writeTextFile,
 } from "../index.ts";
 
 const checks: Array<[string, boolean]> = [];
@@ -50,7 +51,7 @@ async function testWorktree(): Promise<void> {
     if (wt) {
       check("worktree cwd exists on disk", existsSync(wt.cwd));
       check("scoped environment getcwd() == worktree cwd", wt.environment.getcwd() === wt.cwd);
-      await wt.environment.writeText("scratch.txt", "isolated");
+      await writeTextFile(wt.environment, "scratch.txt", "isolated");
       check("write via scoped environment lands IN the worktree", existsSync(join(wt.cwd, "scratch.txt")));
       check("write does NOT touch the main repo", !existsSync(join(repo, "scratch.txt")));
       await wt.cleanup();

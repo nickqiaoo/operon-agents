@@ -31,8 +31,8 @@
 export class SessionBusyError extends Error {
   readonly sessionId: string;
 
-  constructor(sessionId: string) {
-    super(`session "${sessionId}" is currently held by another runner`);
+  constructor(sessionId: string, message = `session "${sessionId}" is currently held by another runner`) {
+    super(message);
     this.name = "SessionBusyError";
     this.sessionId = sessionId;
   }

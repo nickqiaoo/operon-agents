@@ -4,9 +4,9 @@
  * turn-boundary injections (skills catalog, todo/task mirrors, …), the compaction reserve,
  * and the free remainder.
  *
- * The numbers are ESTIMATES (same char/4 heuristic the compaction strategy uses), computed
- * from exactly the `{ system, tools, messages }` the Runner is about to send — so the buckets
- * sum to the real request, not a separate re-derivation.
+ * Total occupancy comes from the provider's last measured request when available. Category
+ * weights are estimates of `{ system, tools, messages }`, normalised to that measured total.
+ * Before any usage is available (or after history replacement), the total is estimated too.
  */
 import type { ChatModel } from "../llm/define-model.ts";
 import type { Message } from "../protocol/index.ts";
@@ -14,7 +14,7 @@ import type { Tool } from "../tool/types.ts";
 import { estimateTokens, estimateTokensForMessages } from "../capabilities/compaction/tokens.ts";
 import { isMcpToolName } from "../mcp/tool-naming.ts";
 
-/** One additive slice of the context window: its token estimate and share of the whole window. */
+/** Estimated attribution of occupancy; normalised to the provider total when available. */
 export interface ContextSlice {
   readonly tokens: number;
   /** Percent of the full context window, 0..100. */
@@ -31,8 +31,9 @@ export interface ContextBreakdown {
   /** The active model's full context window (tokens). */
   readonly contextWindow: number;
   readonly model: string;
-  /** systemPrompt + tools + messages + injections (everything actually sent this turn). */
+  /** Last measured input occupancy; falls back to an estimate until provider usage is available. */
   readonly used: number;
+  readonly usageSource: "provider" | "estimate";
   readonly usedPercent: number;
 
   readonly systemPrompt: ContextSlice;
@@ -63,6 +64,8 @@ export interface ComputeContextBreakdownInput {
   /** Compaction reserve (`CompactionService.reservedContextTokens`), or 0 if absent. */
   readonly compactBufferTokens: number;
   readonly capturedAt: number;
+  /** Exact input tokens, including cached input, from the latest provider response. */
+  readonly observedInputTokens?: number;
 }
 
 export function computeContextBreakdown(input: ComputeContextBreakdownInput): ContextBreakdown {
@@ -94,19 +97,48 @@ export function computeContextBreakdown(input: ComputeContextBreakdownInput): Co
   injections.sort((a, b) => b.tokens - a.tokens);
   const conversationTokens = Math.max(0, messagesTotal - injectionsTotal);
 
-  const used = systemTokens + builtinTools + mcpTools + messagesTotal;
+  const estimatedUsed = systemTokens + builtinTools + mcpTools + messagesTotal;
+  const observed = input.observedInputTokens;
+  const measured = observed !== undefined && Number.isFinite(observed) && observed > 0;
+  const used = measured ? observed : estimatedUsed;
+  // Allocate rounded estimates cumulatively so every category adds up to the measured total.
+  // These remain attribution estimates, not provider-supplied per-category token counts.
+  let estimatedSoFar = 0;
+  let allocated = 0;
+  const attributed = (tokens: number): ContextSlice => {
+    if (!measured || estimatedUsed === 0) return slice(tokens);
+    estimatedSoFar += tokens;
+    const next = Math.round(estimatedSoFar / estimatedUsed * used);
+    const result = slice(Math.max(0, next - allocated));
+    allocated = next;
+    return result;
+  };
+  const systemSlice = attributed(systemTokens);
+  const builtinSlice = attributed(builtinTools);
+  const mcpSlice = attributed(mcpTools);
+  // Stale injection estimates must not create extra occupancy.
+  let injectionRemaining = messagesTotal;
+  const attributedInjections = injections.map((item) => {
+    const tokens = Math.min(item.tokens, injectionRemaining);
+    injectionRemaining -= tokens;
+    return { id: item.id, ...attributed(tokens) };
+  });
+  const messagesSlice = measured && estimatedUsed === 0
+    ? slice(used)
+    : attributed(measured ? injectionRemaining : conversationTokens);
   const free = Math.max(0, window - used - input.compactBufferTokens);
 
   return {
     contextWindow: window,
     model: input.model.id,
     used,
+    usageSource: measured ? "provider" : "estimate",
     usedPercent: pct(used),
-    systemPrompt: slice(systemTokens),
-    toolsBuiltin: slice(builtinTools),
-    toolsMcp: slice(mcpTools),
-    messages: slice(conversationTokens),
-    injections,
+    systemPrompt: systemSlice,
+    toolsBuiltin: builtinSlice,
+    toolsMcp: mcpSlice,
+    messages: messagesSlice,
+    injections: measured ? attributedInjections : injections,
     compactBuffer: slice(input.compactBufferTokens),
     free: slice(free),
     capturedAt: input.capturedAt,

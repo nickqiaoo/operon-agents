@@ -105,44 +105,6 @@ export interface DirEntry {
 }
 
 /**
- * Version stamp for the session's read-state record (see FileFreshnessLedger).
- * mtime and nothing else (local-first): on hosts with a reliable mtime the check
- * is free; hosts without one (some sandbox vendors) leave `mtimeMs` undefined,
- * and every check there falls back to content comparison, done on a digest
- * (`hashFileContent`) so neither side retains the text.
- *
- * Size deliberately plays no part. It only ever ruled on cases the mtime had
- * already decided, except for one it decided WRONG: an mtime-less backend
- * with an unchanged size was read as "no evidence of a change" when it is in
- * fact no evidence either way. Without it, mtime-less means unverifiable
- * means fall back to content — one rule instead of a matrix.
- */
-export interface FileVersion {
-  /** stat mtime in milliseconds. undefined = backend does not provide one. */
-  readonly mtimeMs?: number;
-}
-
-export type LineEndings = "LF" | "CRLF" | "mixed";
-
-export interface WriteTextOptions {
-  readonly encoding?: BufferEncoding;
-  /** Line-ending style to restore on write; `data` is LF-normalized. Default LF. */
-  readonly lineEndings?: "LF" | "CRLF";
-}
-
-export interface WriteTextResult {
-  readonly bytesWritten: number;
-  /**
-   * The version this write produced — present ONLY when the backend already knew it
-   * (LocalEnvironment: one stat syscall). `undefined` everywhere a round trip would be
-   * needed to learn it, which is why it is optional rather than a promise: the caller
-   * records what it got, and a versionless record is decided by content instead
-   * (see FileFreshnessLedger). Never stat here just to fill it in.
-   */
-  readonly version?: FileVersion;
-}
-
-/**
  * Handle to the environment the workspace lives on.
  *
  * Not a filesystem abstraction: files, processes and path/OS semantics are one
@@ -153,21 +115,21 @@ export interface WriteTextResult {
  * - `run` is the universal primitive — the single way anything executes, from a
  *   one-shot `git status` to a background build. Search-shaped operations (grep,
  *   glob) run a uniform binary through it rather than getting their own member.
- * - File I/O is `readBytes` (every read, whole file or a byte window) plus two
- *   unconditional writes, `writeText` and `writeBytes`. There is deliberately NO
- *   compare-and-swap write: the read-before-write safety the tools need is decided
- *   against the session's read-state record (FileFreshnessLedger) BEFORE the write,
- *   and no backend but the local one can make the compare and the write one step
- *   anyway — a CAS member could only have promised what it does not deliver.
+ * - File I/O is bytes in, bytes out: `readBytes` (whole file or a byte window) and
+ *   `writeBytes` (unconditional whole-file write). Text is a caller concern, composed
+ *   on top by `readTextFile` / `writeTextFile` — encoding and line endings are the
+ *   same on every backend, so no backend implements them. There is deliberately NO
+ *   compare-and-swap write: no backend but the local one can make the compare and
+ *   the write one step — a CAS member could only promise what it does not deliver.
  * - `realpath` exists for symlink anti-bypass: path-access
  *   checks canonicalize before prefix-matching. The threat model is the tool
  *   call escaping the workspace, not the backend lying — so a `readlink -f` run
  *   through `run` is as authoritative as the backend's own FS view.
  *
  * Implementations extend {@link BaseEnvironment} (environment-base.ts):
- * it derives the high-level operations from a small SPI so a new backend only
+ * it derives `run` and `realpath` from a small SPI so a new backend only
  * writes the dumb primitives, and overrides them only where it can do better
- * (single round trip, true atomicity, bounded-memory streaming).
+ * (single round trip, native kill, exact symlink resolution).
  *
  * Agent bookkeeping (cron/background task state, plans, plugin registries)
  * does NOT belong here — that is SessionStore's job. The rule: content owned
@@ -267,19 +229,9 @@ export interface Environment {
    */
   readBytes(path: string, range?: ByteRange): Promise<Buffer>;
   /**
-   * Unconditional binary write — the exact bytes, no encoding and no line-ending rewriting.
-   * The counterpart of `readBytes`: without it, anything not valid UTF-8 (an image, an
-   * archive being unpacked into the workspace) has no way in, and callers resort to base64
-   * through a shell.
-   */
-  writeBytes(path: string, data: Buffer): Promise<void>;
-  /**
-   * Unconditional text write — no staleness check, no stat round trips, no version stamp.
-   *
-   * `lineEndings: "CRLF"` normalizes to LF first and then joins, so text that ALREADY contains
-   * `\r\n` — which model output routinely does, having just read a CRLF file — comes out with
-   * `\r\n` rather than `\r\r\n`. Backends share one implementation of this; a backend
-   * overriding `writeText` must keep the same two-step.
+   * Unconditional whole-file write of the exact bytes — no encoding, no line-ending
+   * rewriting, no stat. The one write primitive: text goes through `writeTextFile`, which
+   * encodes and then calls this. The parent directory must exist (ENOENT otherwise).
    *
    * Whether the file lands all-at-once is a BACKEND property, not a promise of this
    * contract: LocalEnvironment swaps a sibling temp file into place (free there, and it
@@ -287,7 +239,7 @@ export interface Environment {
    * because staging a temp file and renaming it costs round trips on every write to
    * narrow a window nothing in the tool path depends on.
    */
-  writeText(path: string, data: string, options?: WriteTextOptions): Promise<WriteTextResult>;
+  writeBytes(path: string, data: Buffer): Promise<void>;
 
   /**
    * Canonicalize symlinks (security: path-access checks must canonicalize before

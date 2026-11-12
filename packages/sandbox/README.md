@@ -15,8 +15,10 @@ import { E2BWorkspace } from "operon-sandbox";
 const workspace = await E2BWorkspace.open({ sandbox: Sandbox, template: "node20" });
 
 const harness = createHarness({
-  model,
-  environment: workspace.environment,   // tools now run inside the sandbox
+  config: { defaults: { model } },
+  // Every session's tools now run inside the sandbox. For a sandbox per session, hand each one
+  // its own instead: `createSession({ bindings: { environment } })`, or `resolveSession`.
+  infrastructure: () => ({ environment: workspace.environment }),
 });
 
 // … run sessions …

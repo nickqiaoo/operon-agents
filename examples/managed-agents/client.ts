@@ -10,28 +10,28 @@ const client = new ManagedAgentsClient({
 const session = await client.sessions.create({
   title: "managed SDK demo",
   agent: "default",
-  environment: "workspace",
+  environment_id: "workspace",
 });
 console.log(`▸ session ${session.id}`);
 
-// The stream belongs to the session, not to the prompt. Open it once and keep it while
-// foreground turns, detached commands, subagents and workflows come and go.
+// The stream is live-only: open it before sending, or what happens in between is missed.
 const controller = new AbortController();
 const stream = await client.sessions.events.stream(session.id, { signal: controller.signal });
-const consume = (async () => {
-  for await (const event of stream) {
-    if (event.type === "assistant.delta") process.stdout.write(event.delta);
-    if (event.type === "tool.call.started") {
-      process.stdout.write(`\n  ⚙︎ ${event.toolName}\n`);
-    }
-    if (event.type === "turn.ended" && event.address === "main") {
-      process.stdout.write(`\n▸ turn ${event.reason}\n`);
-      controller.abort();
-      return;
-    }
-  }
-})();
+const [sent] = (await client.sessions.events.send(session.id, {
+  events: [{ type: "user.message", content: [{ type: "text", text: TASK }] }],
+})).data;
+console.log(`▸ sent ${sent!.id}`);
 
-const receipt = await client.sessions.messages.create(session.id, { input: TASK });
-console.log(`▸ accepted on the ${receipt.channel} channel: ${receipt.steerId}`);
-await consume;
+let ours = false;
+for await (const event of stream) {
+  // Our message coming back processed is the moment it entered the conversation.
+  if (event.id === sent!.id && event.processed_at !== null) ours = true;
+  if (event.type === "agent.tool_use") process.stdout.write(`  ⚙︎ ${event.name}\n`);
+  if (event.type === "agent.message") process.stdout.write(`${event.content.map((block) => block.text).join("")}\n`);
+  if (event.type === "session.error") process.stdout.write(`  ✖ ${event.error.message}\n`);
+  if (ours && event.type === "session.status_idle") {
+    process.stdout.write(`▸ idle (${event.stop_reason.type})\n`);
+    break;
+  }
+}
+controller.abort();

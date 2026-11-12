@@ -1,14 +1,28 @@
+/**
+ * The managed HTTP API, shaped after Claude Managed Agents:
+ *
+ *   POST   /sessions                      create (optionally with `initial_events`)
+ *   GET    /sessions                      list
+ *   GET    /sessions/{id}                 retrieve
+ *   POST   /sessions/{id}                 update
+ *   DELETE /sessions/{id}                 delete
+ *   POST   /sessions/{id}/archive         archive
+ *   POST   /sessions/{id}/events          send events
+ *   GET    /sessions/{id}/events          list the event history
+ *   GET    /sessions/{id}/events/stream   follow live events (SSE, live-only); repeat
+ *                                         `event_deltas[]=agent.message` for live previews
+ *
+ * Every route is a call on `SessionService`. The server holds no worker and starts no work: an
+ * accepted event is persisted, and a worker pulls it.
+ */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isDurableAgentEvent } from "operon-agents";
-import { ResumeSessionRequestSchema, parseRequest } from "./request-schemas.ts";
-import type {
-  CreateManagedMessageRequest,
-  CreateManagedSessionRequest,
-  InterruptionsResponse,
-  ListSessionEventsResponse,
-  ListManagedSessionsResponse,
-  ManagedApiError,
-  UpdateManagedSessionRequest,
+import {
+  isManagedPreviewEvent,
+  type CreateManagedSessionRequest,
+  type ManagedApiError,
+  type ManagedPreviewableEventType,
+  type SendManagedEventsRequest,
+  type UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
 import {
   ManagedForbiddenError,
@@ -16,7 +30,6 @@ import {
   ManagedServerError,
 } from "./errors.ts";
 import type { SessionService } from "./session-service.ts";
-import type { SessionWorker } from "./session-worker.ts";
 
 export type ManagedAuthorizationAction =
   | "sessions.create"
@@ -24,22 +37,14 @@ export type ManagedAuthorizationAction =
   | "sessions.read"
   | "sessions.update"
   | "sessions.delete"
-  | "messages.create"
+  | "sessions.archive"
+  | "events.send"
   | "events.list"
-  | "events.stream"
-  | "sessions.cancel"
-  | "interruptions.list"
-  | "sessions.resume";
+  | "events.stream";
 
 export interface ManagedAuthorizationContext {
   readonly action: ManagedAuthorizationAction;
   readonly sessionId?: string;
-  /**
-   * `messages.create` only: whose words the caller says these are. `user` is the default and
-   * makes the caller this session's user; a deployment that hands a credential to something
-   * that only relays (a webhook bridge, a teammate agent) can refuse it anything but `external`.
-   */
-  readonly origin?: "user" | "external";
 }
 
 export type ManagedAuthorize = (
@@ -56,17 +61,9 @@ export type ManagedAuthorize = (
  */
 export const allowAllRequests: ManagedAuthorize = () => true;
 
-export interface ManagedHttpServerOptions<TContext = unknown> {
+export interface ManagedHttpServerOptions {
   /** Reads and writes of session state. Every route that is not execution goes here. */
   readonly service: SessionService;
-  /**
-   * Execution. Optional: a deployment can run the API surface with no worker in this process at
-   * all — accepted inputs and commands wait for a worker elsewhere to claim them, because the
-   * work table is what connects the two. With one, it is nudged after every write so the common
-   * single-process case needs no claim latency. Nothing here is answered BY the worker: every
-   * route is a store operation, so any node can serve any session.
-   */
-  readonly worker?: SessionWorker<TContext>;
   readonly basePath?: string;
   readonly heartbeatMs?: number;
   readonly maxBodyBytes?: number;
@@ -93,9 +90,7 @@ export interface ManagedHttpServer {
   close(): Promise<void>;
 }
 
-export function createManagedHttpServer<TContext = unknown>(
-  options: ManagedHttpServerOptions<TContext>,
-): ManagedHttpServer {
+export function createManagedHttpServer(options: ManagedHttpServerOptions): ManagedHttpServer {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const maxBodyBytes = options.maxBodyBytes ?? 1024 * 1024;
@@ -114,7 +109,7 @@ export function createManagedHttpServer<TContext = unknown>(
       sendJson(
         response,
         managed?.status ?? 500,
-        apiError(managed?.code ?? "internal_error", managed?.message ?? messageOf(error)),
+        apiError(managed?.code ?? "api_error", managed?.message ?? messageOf(error)),
       );
     });
   });
@@ -122,184 +117,114 @@ export function createManagedHttpServer<TContext = unknown>(
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://managed.local");
     if (!url.pathname.startsWith(`${basePath}/`) && url.pathname !== basePath) {
-      return sendJson(response, 404, apiError("not_found", "route not found"));
+      return sendJson(response, 404, apiError("not_found_error", "route not found"));
     }
     const relative = url.pathname.slice(basePath.length);
     const parts = relative.split("/").filter(Boolean).map(decodeURIComponent);
     const method = request.method ?? "GET";
+    const service = options.service;
 
-    if (method === "POST" && parts.length === 1 && parts[0] === "sessions") {
-      await authorize(request, "sessions.create");
-      const body = await readJson<CreateManagedSessionRequest>(request, maxBodyBytes);
-      return sendJson(response, 201, await options.service.create(body));
-    }
-    if (method === "GET" && parts.length === 1 && parts[0] === "sessions") {
-      await authorize(request, "sessions.list");
-      const body: ListManagedSessionsResponse = { data: await options.service.list() };
-      return sendJson(response, 200, body);
+    if (parts[0] !== "sessions") return sendJson(response, 404, apiError("not_found_error", "route not found"));
+
+    if (parts.length === 1) {
+      if (method === "POST") {
+        await authorize(request, "sessions.create");
+        return sendJson(response, 200, await service.create(await readJson<CreateManagedSessionRequest>(request, maxBodyBytes)));
+      }
+      if (method === "GET") {
+        await authorize(request, "sessions.list");
+        return sendJson(response, 200, await service.list({
+          ...optionalInteger(url, "limit", 1, 1000),
+          ...optionalString(url, "page"),
+          ...optionalOrder(url),
+        }));
+      }
+      return sendJson(response, 405, apiError("invalid_request_error", "method not allowed"));
     }
 
-    if (parts[0] !== "sessions" || parts[1] === undefined) {
-      return sendJson(response, 404, apiError("not_found", "route not found"));
-    }
-    const sessionId = parts[1];
-
-    if (method === "GET" && parts.length === 2) {
-      await authorize(request, "sessions.read", sessionId);
-      return sendJson(response, 200, await options.service.get(sessionId));
-    }
-    if (method === "PATCH" && parts.length === 2) {
-      await authorize(request, "sessions.update", sessionId);
-      const body = await readJson<UpdateManagedSessionRequest>(request, maxBodyBytes);
-      return sendJson(response, 200, await options.service.update(sessionId, body));
-    }
-    if (method === "DELETE" && parts.length === 2) {
-      await authorize(request, "sessions.delete", sessionId);
-      await options.service.delete(sessionId);
-      response.writeHead(204);
-      response.end();
-      return;
-    }
-    if (method === "POST" && parts[2] === "messages" && parts.length === 3) {
-      // Body before authorization: the hook is told whose words the caller claims these are.
-      // Reading first costs an unauthenticated caller at most `maxBodyBytes` of parsing.
-      const body = await readJson<CreateManagedMessageRequest>(request, maxBodyBytes);
-      await authorize(request, "messages.create", sessionId, body.origin === "external" ? "external" : "user");
-      if (typeof body.input !== "string" || !body.input.trim()) {
-        return sendJson(response, 400, apiError("invalid_request", "input must not be empty"));
+    const sessionId = parts[1]!;
+    if (parts.length === 2) {
+      if (method === "GET") {
+        await authorize(request, "sessions.read", sessionId);
+        return sendJson(response, 200, await service.retrieve(sessionId));
       }
-      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
-      const receipt = await options.service.appendEvent(sessionId, body, idempotencyKey);
-      // Nudge the local worker, if this node has one. Fire-and-forget on purpose: the append
-      // already woke the session in the work table, so a failed or skipped nudge costs latency
-      // until a claim loop gets to it, never the message. Redundant nudges are free.
-      void options.worker?.drain(sessionId).catch(() => undefined);
-      return sendJson(response, 202, receipt);
-    }
-    if (method === "GET" && parts[2] === "events" && parts.length === 3) {
-      await authorize(request, "events.list", sessionId);
-      let limit: number;
-      let requestedOrder: "asc" | "desc" | undefined;
-      let cursor: EventPageCursor | undefined;
-      try {
-        limit = positiveInteger(url.searchParams.get("limit"), 100, 500);
-        requestedOrder = eventOrder(url.searchParams.get("order"));
-        cursor = decodePage(url.searchParams.get("page"));
-      } catch (error) {
-        return sendJson(response, 400, apiError("invalid_request", messageOf(error)));
+      if (method === "POST") {
+        await authorize(request, "sessions.update", sessionId);
+        return sendJson(response, 200, await service.update(sessionId, await readJson<UpdateManagedSessionRequest>(request, maxBodyBytes)));
       }
-      const requestedAddress = url.searchParams.get("address") ?? undefined;
-      if (cursor !== undefined) {
-        if (requestedOrder !== undefined && requestedOrder !== cursor.order) {
-          return sendJson(response, 400, apiError("invalid_request", "page cursor order does not match order"));
-        }
-        if (requestedAddress !== undefined && requestedAddress !== cursor.address) {
-          return sendJson(response, 400, apiError("invalid_request", "page cursor address does not match address"));
-        }
+      if (method === "DELETE") {
+        await authorize(request, "sessions.delete", sessionId);
+        await service.delete(sessionId);
+        return sendJson(response, 200, { id: sessionId, type: "session_deleted" });
       }
-      const order = requestedOrder ?? cursor?.order ?? "asc";
-      const address = requestedAddress ?? cursor?.address;
-      const page = await options.service.listEvents(sessionId, {
-        limit,
-        order,
-        ...(address !== undefined ? { address } : {}),
-        ...(cursor !== undefined ? { after: cursor.sequence } : {}),
-      });
-      const body: ListSessionEventsResponse = {
-        data: page.data,
-        nextPage: page.next === undefined ? null : encodePage({ sequence: page.next, order, ...(address !== undefined ? { address } : {}) }),
-      };
-      return sendJson(response, 200, body);
     }
-    if (method === "GET" && parts[2] === "events" && parts[3] === "stream" && parts.length === 4) {
+    if (parts.length === 3 && parts[2] === "archive" && method === "POST") {
+      await authorize(request, "sessions.archive", sessionId);
+      return sendJson(response, 200, await service.archive(sessionId));
+    }
+    if (parts.length === 3 && parts[2] === "events") {
+      if (method === "POST") {
+        await authorize(request, "events.send", sessionId);
+        const body = await readJson<SendManagedEventsRequest>(request, maxBodyBytes);
+        const key = singleHeader(request.headers["idempotency-key"]);
+        return sendJson(response, 200, await service.sendEvents(sessionId, body, key));
+      }
+      if (method === "GET") {
+        await authorize(request, "events.list", sessionId);
+        return sendJson(response, 200, await service.listEvents(sessionId, {
+          ...optionalInteger(url, "limit", 1, 1000),
+          ...optionalString(url, "page"),
+          ...optionalOrder(url),
+        }));
+      }
+    }
+    if (parts.length === 4 && parts[2] === "events" && parts[3] === "stream" && method === "GET") {
       await authorize(request, "events.stream", sessionId);
-      // `Last-Event-ID` is what EventSource sends on its own reconnect; `after` is the same
-      // cursor for clients that manage reconnection themselves. The header wins when both are
-      // present, since it describes what this connection actually last received.
-      const after = singleHeader(request.headers["last-event-id"]) ?? url.searchParams.get("after") ?? undefined;
-      return streamEvents(sessionId, url.searchParams.get("address") ?? undefined, after, request, response);
+      return streamEvents(sessionId, request, response, eventDeltas(url));
     }
-    // Control commands are writes, like messages: the command is journaled and the worker that
-    // holds the session — wherever it is — acts on it. 202 here means "durable", not "done".
-    if (method === "POST" && parts[2] === "cancel" && parts.length === 3) {
-      await authorize(request, "sessions.cancel", sessionId);
-      const receipt = await options.service.requestCancel(sessionId);
-      void options.worker?.drain(sessionId).catch(() => undefined);
-      return sendJson(response, 202, receipt);
-    }
-    if (method === "GET" && parts[2] === "interruptions" && parts.length === 3) {
-      await authorize(request, "interruptions.list", sessionId);
-      const body: InterruptionsResponse = { data: await options.service.interruptions(sessionId) };
-      return sendJson(response, 200, body);
-    }
-    if (method === "POST" && parts[2] === "resume" && parts.length === 3) {
-      await authorize(request, "sessions.resume", sessionId);
-      const body = parseRequest(ResumeSessionRequestSchema, await readJson(request, maxBodyBytes));
-      const receipt = await options.service.answerInterruption(sessionId, body.answers);
-      void options.worker?.drain(sessionId).catch(() => undefined);
-      return sendJson(response, 202, receipt);
-    }
-
-    return sendJson(response, 404, apiError("not_found", "route not found"));
+    return sendJson(response, 404, apiError("not_found_error", "route not found"));
   }
 
   async function streamEvents(
     sessionId: string,
-    address: string | undefined,
-    after: string | undefined,
     request: IncomingMessage,
     response: ServerResponse,
+    deltas: readonly ManagedPreviewableEventType[],
   ): Promise<void> {
+    const controller = new AbortController();
+    // Subscribed before the headers go out: a client that sends right after the stream opens
+    // cannot lose events to the gap.
+    const events = await options.service.stream(sessionId, controller.signal, { eventDeltas: deltas });
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
-    // Never attaches to a running session: the service backfills from the log and then follows
-    // the broadcast channel, so subscribing starts nothing and any replica can serve any
-    // session. Whether live-only events (token deltas) appear depends on whether a broadcaster
-    // was configured — without one this carries the persisted stream alone.
-    const controller = new AbortController();
-    const pump = (async () => {
-      try {
-        for await (const event of options.service.watchEvents(sessionId, {
-          ...(address !== undefined ? { address } : {}),
-          ...(after !== undefined ? { after } : {}),
-          signal: controller.signal,
-        })) {
-          if (response.destroyed || response.writableEnded) break;
-          // `id:` only on events a reconnect can resume from. Per the SSE spec a frame without
-          // one leaves the client's last-event-id untouched, so a delta never becomes a cursor
-          // that points at nothing in the log.
-          const id = isDurableAgentEvent(event) ? event.eventId : undefined;
-          // If the transport's own buffer fills, terminate this client rather than letting an
-          // unbounded SSE queue turn into memory growth.
-          if (!writeSse(response, "session.event", event, id)) {
-            response.destroy();
-            break;
-          }
-        }
-      } catch {
-        if (!response.destroyed) response.destroy();
-      }
-    })();
-    pump.catch(() => undefined);
     response.flushHeaders();
     response.write(": connected\n\n");
     manageStream(request, response, () => controller.abort());
+    try {
+      for await (const event of events) {
+        if (response.destroyed || response.writableEnded) break;
+        if (!writeSse(response, event.type, event, isManagedPreviewEvent(event) ? undefined : event.id)) {
+          response.destroy();
+          break;
+        }
+      }
+    } finally {
+      controller.abort();
+    }
   }
 
   async function authorize(
     request: IncomingMessage,
     action: ManagedAuthorizationAction,
     sessionId?: string,
-    origin?: "user" | "external",
   ): Promise<void> {
     const allowed = await options.authorize(request, {
       action,
       ...(sessionId !== undefined ? { sessionId } : {}),
-      ...(origin !== undefined ? { origin } : {}),
     });
     if (allowed === false) throw new ManagedForbiddenError();
   }
@@ -340,7 +265,6 @@ export function createManagedHttpServer<TContext = unknown>(
         if (!server.listening) return resolve();
         server.close((error) => error === undefined ? resolve() : reject(error));
       });
-      await options.worker?.stop();
     },
   };
 }
@@ -377,62 +301,55 @@ async function readJson<T>(request: IncomingMessage, maxBytes: number): Promise<
   return (raw ? JSON.parse(raw) : {}) as T;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function singleHeader(value: string | string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
   const header = Array.isArray(value) ? value[0] : value;
   return header?.trim() || undefined;
 }
 
-function apiError(code: string, message: string): ManagedApiError {
-  return { error: { code, message } };
+function apiError(type: string, message: string): ManagedApiError {
+  return { type: "error", error: { type, message } };
 }
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-interface EventPageCursor {
-  readonly sequence: string;
-  readonly order: "asc" | "desc";
-  readonly address?: string;
-}
-
-function encodePage(cursor: EventPageCursor): string {
-  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
-}
-
-function decodePage(value: string | null): EventPageCursor | undefined {
-  if (value === null) return undefined;
-  try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
-    if (parsed["v"] !== 1 || typeof parsed["sequence"] !== "string" || !/^[1-9]\d*$/.test(parsed["sequence"])) throw new Error();
-    if (parsed["order"] !== "asc" && parsed["order"] !== "desc") throw new Error();
-    if (parsed["address"] !== undefined && typeof parsed["address"] !== "string") throw new Error();
-    return {
-      sequence: parsed["sequence"],
-      order: parsed["order"],
-      ...(typeof parsed["address"] === "string" ? { address: parsed["address"] } : {}),
-    };
-  } catch {
-    throw new Error("invalid event page cursor");
-  }
-}
-
-function positiveInteger(value: string | null, fallback: number, max: number): number {
-  if (value === null) return fallback;
+function optionalInteger(url: URL, name: string, min: number, max: number): { readonly limit?: number } {
+  const value = url.searchParams.get(name);
+  if (value === null) return {};
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) {
-    throw new Error(`limit must be an integer between 1 and ${String(max)}`);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new ManagedInvalidRequestError(`${name} must be an integer between ${String(min)} and ${String(max)}`);
   }
-  return parsed;
+  return { limit: parsed };
 }
 
-function eventOrder(value: string | null): "asc" | "desc" | undefined {
-  if (value === null) return undefined;
-  if (value === "asc" || value === "desc") return value;
-  throw new Error("order must be asc or desc");
+function optionalString(url: URL, name: "page"): { readonly page?: string } {
+  const value = url.searchParams.get(name);
+  return value === null || value === "" ? {} : { page: value };
+}
+
+const PREVIEWABLE: ReadonlySet<string> = new Set<ManagedPreviewableEventType>(["agent.message", "agent.thinking"]);
+const MAX_EVENT_DELTAS = 100;
+
+/** `event_deltas[]`, repeated once per type to preview. Claude's rules: known types, at most 100. */
+function eventDeltas(url: URL): ManagedPreviewableEventType[] {
+  const values = [...url.searchParams.getAll("event_deltas[]"), ...url.searchParams.getAll("event_deltas")];
+  if (values.length > MAX_EVENT_DELTAS) {
+    throw new ManagedInvalidRequestError(`event_deltas accepts at most ${String(MAX_EVENT_DELTAS)} values`);
+  }
+  for (const value of values) {
+    if (!PREVIEWABLE.has(value)) {
+      throw new ManagedInvalidRequestError(`event_deltas: unsupported value ${JSON.stringify(value)}; expected agent.message or agent.thinking`);
+    }
+  }
+  return [...new Set(values)] as ManagedPreviewableEventType[];
+}
+
+function optionalOrder(url: URL): { readonly order?: "asc" | "desc" } {
+  const value = url.searchParams.get("order");
+  if (value === null) return {};
+  if (value === "asc" || value === "desc") return { order: value };
+  throw new ManagedInvalidRequestError("order must be asc or desc");
 }

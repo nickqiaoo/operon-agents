@@ -30,7 +30,7 @@ function makeDeployTool(counter: { runs: number }) {
   return defineTool({
     name: "deploy",
     description: "deploy the service",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "deploy",
       run: async () => {
@@ -105,7 +105,7 @@ async function testStepLevelModeChange(environment: LocalEnvironment, store: Mem
   const switchTool = defineTool({
     name: "switch_yolo",
     description: "switch permission mode to yolo",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "switch_yolo",
       controlFlow: true, // framework control flow → approved even in manual mode

@@ -31,11 +31,16 @@ mkdirSync(WORK, { recursive: true });
 // auto-approves tool use as long as it stays inside the workspace — safe for running
 // on your own environment.
 const harness = await createLocalHarness({
-  model: MODEL,
   homeDir: HOME,
-  workDir: WORK,
-  permission: { mode: "workspace" },
-  appendSystemPrompt: "Be concise. Use the tools; explain briefly what you do.",
+  config: {
+    workDir: WORK,
+    // What every session starts from; a session overrides it field by field.
+    defaults: {
+      model: MODEL,
+      permission: { mode: "workspace" },
+      appendSystemPrompt: "Be concise. Use the tools; explain briefly what you do.",
+    },
+  },
 });
 const session = await harness.createSession();
 

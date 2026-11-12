@@ -1,8 +1,8 @@
 /**
  * Implementer-side base for Environment backends.
  *
- * A backend writes only the dumb primitives (the abstract SPI below); this
- * class derives the high-level operations from them:
+ * A backend writes only the dumb primitives (the abstract SPI below, file I/O
+ * included); this class derives the high-level operations from them:
  *
  * - `run`: spawn → cap both streams → escalating kill on timeout/abort.
  * - `realpath`: `readlink -f` via `run` on posix, normpath on win32. Hosts with
@@ -13,18 +13,13 @@ import { StringDecoder } from "node:string_decoder";
 import { posix, win32 } from "node:path";
 import {
   type RunCommandResult,
-  type DecodeErrors,
   type DirEntry,
   type OsInfo,
   type ByteRange,
   type Environment,
   type RunCommandOptions,
   type FileInfo,
-  type FileVersion,
-  type WriteTextOptions,
-  type WriteTextResult,
 } from "./environment.ts";
-import { materializeModelText } from "./builtin/line-endings.ts";
 
 /** Deadline for the `readlink -f` realpath fallback (see BaseEnvironment.realpath). */
 const REALPATH_TIMEOUT_MS = 10_000;
@@ -166,18 +161,7 @@ export abstract class BaseEnvironment implements Environment {
   abstract listDir(path: string): Promise<readonly DirEntry[]>;
   abstract mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void>;
   abstract readBytes(path: string, range?: ByteRange): Promise<Buffer>;
-  /** Raw unconditional whole-file write — the single write primitive everything else derives from. */
-  protected abstract writeBytesRaw(path: string, data: Buffer): Promise<void>;
-
-  /** Decode with the shared contract: strict UTF-8 throws on invalid bytes (binary detection). */
-  protected decodeText(data: Buffer, options?: { encoding?: BufferEncoding; errors?: DecodeErrors }): string {
-    const encoding = options?.encoding ?? "utf8";
-    const errors = options?.errors ?? "strict";
-    if ((encoding === "utf8" || encoding === "utf-8") && errors === "strict") {
-      return new TextDecoder("utf-8", { fatal: true }).decode(data);
-    }
-    return data.toString(encoding);
-  }
+  abstract writeBytes(path: string, data: Buffer): Promise<void>;
 
   // ---- Derived high-level operations (override when the backend can do better) ----
 
@@ -333,33 +317,6 @@ export abstract class BaseEnvironment implements Environment {
     if (cwd === undefined) return [...argv];
     const quoted = argv.map(shellQuoteArg).join(" ");
     return ["sh", "-c", `cd ${shellQuoteArg(cwd)} && ${quoted}`];
-  }
-
-  /**
-   * The version the last write produced, for backends that can answer without a round
-   * trip. Default: nothing — a remote backend would have to stat for it, and paying that
-   * on every write to save a content comparison on the rare write-after-write is the
-   * wrong trade (see WriteTextResult.version).
-   */
-  protected async versionAfterWrite(_path: string): Promise<FileVersion | undefined> {
-    return undefined;
-  }
-
-  async writeText(path: string, data: string, options: WriteTextOptions = {}): Promise<WriteTextResult> {
-    // Normalize to LF BEFORE joining with CRLF. Text that already contains `\r\n` — which a
-    // model's output routinely does, having just read a CRLF file — would otherwise come out
-    // as `\r\r\n` and corrupt the file. Same two-step as `materializeModelText`, which the
-    // Edit path uses; the two must not disagree about what "write this as CRLF" means.
-    const payload = options.lineEndings === "CRLF" ? materializeModelText(data, "crlf") : data;
-    const buf = Buffer.from(payload, options.encoding ?? "utf8");
-    await this.writeBytesRaw(path, buf);
-    const version = await this.versionAfterWrite(path);
-    return { bytesWritten: buf.byteLength, ...(version !== undefined ? { version } : {}) };
-  }
-
-  /** Exact bytes through the same primitive `writeText` uses — no encoding, no CRLF rewrite. */
-  async writeBytes(path: string, data: Buffer): Promise<void> {
-    await this.writeBytesRaw(path, data);
   }
 
   /** Deadline for the readlink fallback; a test/backend subclass may shorten it. */

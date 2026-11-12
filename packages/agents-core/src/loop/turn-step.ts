@@ -5,7 +5,6 @@ import type { AssistantMessage, AssistantMessageEvent, Usage } from "../protocol
 import type { ConversationContext } from "./context.ts";
 import type { Tool } from "../tool/types.ts";
 import type { Environment } from "../tool/environment.ts";
-import type { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import type { Logger } from "../logging/index.ts";
@@ -36,8 +35,6 @@ export interface ExecuteStepDeps {
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
-  /** Session-scoped file freshness ledger for this agent line; forwarded to tool contexts. */
-  readonly fileLedger?: FileFreshnessLedger;
   /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
   readonly hostContext?: unknown;
   readonly system?: string;
@@ -51,6 +48,7 @@ export interface ExecuteStepDeps {
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   /** The request exactly as it goes to the model, after every hook (an extension may rewrite it). */
   readonly onRequestPrepared?: (request: LlmRequest) => void;
+  readonly onResponseReceived?: () => void;
   readonly hooks?: LoopHooks;
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
   readonly currentStep: number;
@@ -165,6 +163,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
   });
 
   let message!: AssistantMessage;
+  let providerUsage!: Usage;
   let stopReason!: StepStopReason;
   let stopTurnAfterUsage = false;
   try {
@@ -206,6 +205,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
       onDropPartial: (failed) => deps.context.audit({ type: "custom", name: "dropped_partial", data: failed }),
     });
     message = retryResult.message;
+    providerUsage = { ...message.usage };
     if (hooks?.afterModelResponse) {
       try {
         message =
@@ -259,13 +259,17 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
   // `message.appended` (see ConversationContext.onHistoryChange), so there is no paired
   // emit here to forget.
   deps.context.appendMessage(message);
+  if (stopReason !== "error" && stopReason !== "aborted") {
+    deps.context.recordContextUsage(model, providerUsage);
+    deps.onResponseReceived?.();
+  }
 
   let effectiveStopReason: StepStopReason = stopTurnAfterUsage && stopReason === "tool_use" ? "end_turn" : stopReason;
   let handoff: HandoffSignal | undefined;
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, fileLedger: deps.fileLedger, hostContext: deps.hostContext, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, hostContext: deps.hostContext, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
       message,
     );
 

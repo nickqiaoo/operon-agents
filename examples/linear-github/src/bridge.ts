@@ -6,14 +6,13 @@
 // a recorder. Nothing here knows which.
 //
 // The shape is the chat-sdk example's bridge (../../chat-sdk/src/managed-agents.ts) with two
-// changes: a turn's interruptions are surfaced as a question instead of a dead end, and a
-// resume is followed the same way a delivery is.
+// changes: a `requires_action` pause is surfaced as a question instead of a dead end, and the
+// answers are followed the same way a message is.
 
-import type { AgentEvent, InterruptAnswer, PendingRunInterrupt, PromptOrigin } from "operon-agents";
 import { ManagedAgentsClient, ManagedApiClientError } from "operon-managed-agents/client";
-import type { ManagedSession } from "operon-managed-agents/protocol";
+import type { ManagedInputEvent, ManagedSessionResource } from "operon-managed-agents/protocol";
 import { PR_TOOL } from "../server/agent-config.ts";
-import { renderPending } from "./answers.ts";
+import { isBlocking, renderPending, type BlockingEvent } from "./answers.ts";
 
 export const MANAGED_URL = process.env.OPERON_MANAGED_URL ?? "http://127.0.0.1:8088/v1";
 /** The agent sessions are created against (server/agent-config.ts). Sessions of any other agent
@@ -58,8 +57,8 @@ export interface Surface {
 
 export type TurnOutcome =
   | { readonly status: "completed" }
-  | { readonly status: "waiting"; readonly pending: readonly PendingRunInterrupt[] }
-  | { readonly status: "failed" | "cancelled" | "dropped" | "gone" | "refused" };
+  | { readonly status: "waiting"; readonly pending: readonly BlockingEvent[] }
+  | { readonly status: "failed" | "dropped" | "gone" | "refused" };
 
 // The event stream EOF'd mid-turn while the session keeps working server-side -- distinct from a
 // failed turn: the work continues, only our view of it is gone.
@@ -71,12 +70,12 @@ class StreamDropped extends Error {
 
 // Session IDs are derived from platform IDs (src/flows.ts), so never trust one blindly: it must
 // look like an ID (it becomes an API path segment), resolve, and belong to this bot's agent.
-export async function ownedSession(sessionId: string): Promise<ManagedSession | null> {
+export async function ownedSession(sessionId: string): Promise<ManagedSessionResource | null> {
   if (!/^[A-Za-z0-9_-]{4,128}$/.test(sessionId)) return null;
   try {
     const session = await client.sessions.retrieve(sessionId);
     if (session.agent.id !== AGENT_ID) return null;
-    if (session.state === "closed") return null;
+    if (session.archived_at !== null || session.status === "terminated") return null;
     return session;
   } catch (err) {
     // Only a definitive rejection means the session is gone; a transient failure must not.
@@ -86,8 +85,8 @@ export async function ownedSession(sessionId: string): Promise<ManagedSession | 
 }
 
 // Serialize turns per session: one stream reader, replies in order. Messages from Linear and
-// GitHub can land on the same session at the same time; the server queues the input, this
-// queues the observers.
+// GitHub can land on the same session at the same time; the server takes the input in order,
+// this queues the observers.
 const queues = new Map<string, Promise<unknown>>();
 
 function enqueue<T>(sessionId: string, turn: () => Promise<T>): Promise<T> {
@@ -106,35 +105,43 @@ function enqueue<T>(sessionId: string, turn: () => Promise<T>): Promise<T> {
  *  failure ends in a message on the surface and an outcome. */
 export function deliver(surface: Surface, sessionId: string, text: string): Promise<TurnOutcome> {
   return enqueue(sessionId, () =>
-    run(surface, sessionId, async () => {
-      const receipt = await client.sessions.messages.create(sessionId, { input: text, mode: "follow_up" });
-      return { steerId: receipt.steerId };
+    run(surface, sessionId, [], async () => {
+      const sent = await client.sessions.events.send(sessionId, {
+        events: [{ type: "user.message", content: [{ type: "text", text }] }],
+      });
+      return { messageId: sent.data[0]!.id };
     }),
   );
 }
 
-/** Answer the paused turn's interruptions and follow the continuation. */
-export function resume(surface: Surface, sessionId: string, answers: Readonly<Record<string, InterruptAnswer>>): Promise<TurnOutcome> {
+/** Answer what the paused session is blocked on and follow the continuation. */
+export function resume(surface: Surface, sessionId: string, pending: readonly BlockingEvent[], answers: readonly ManagedInputEvent[]): Promise<TurnOutcome> {
   return enqueue(sessionId, () =>
-    run(surface, sessionId, async () => {
-      await client.sessions.resume(sessionId, answers);
+    run(surface, sessionId, pending, async () => {
+      await client.sessions.events.send(sessionId, { events: answers });
       return { resumed: true };
     }),
   );
 }
 
-type Anchor = { readonly steerId: string } | { readonly resumed: true };
+/**
+ * What a session is blocked on, if it is paused: the events its newest `requires_action` idle
+ * names. Empty when it is not paused.
+ */
+export async function pendingActions(sessionId: string): Promise<BlockingEvent[]> {
+  const { data } = await client.sessions.events.list(sessionId, { limit: 200, order: "desc" });
+  const status = data.find((event) => event.type.startsWith("session.status_"));
+  if (status?.type !== "session.status_idle" || status.stop_reason.type !== "requires_action") return [];
+  const ids = new Set(status.stop_reason.event_ids);
+  return data.filter((event): event is BlockingEvent => ids.has(event.id) && isBlocking(event)).reverse();
+}
 
-async function run(surface: Surface, sessionId: string, send: () => Promise<Anchor>): Promise<TurnOutcome> {
+type Anchor = { readonly messageId: string } | { readonly resumed: true };
+
+async function run(surface: Surface, sessionId: string, pending: readonly BlockingEvent[], send: () => Promise<Anchor>): Promise<TurnOutcome> {
   try {
-    return await follow(surface, sessionId, send);
+    return await follow(surface, sessionId, pending, send);
   } catch (err) {
-    if (err instanceof ManagedApiClientError && err.status === 409) {
-      // The server refused the input: the session is paused on a question this message did
-      // not answer (a race with another reply), or a resume raced a delivery.
-      await surface.error("I'm waiting for an answer to my last question; reply to it and I'll continue.").catch(() => {});
-      return { status: "refused" };
-    }
     if (err instanceof StreamDropped) {
       const still = await ownedSession(sessionId).catch(() => null);
       await surface
@@ -157,12 +164,6 @@ export function rawTextOf(content: unknown): string {
     .join("");
 }
 
-// The steer a journaled user message -- or the turn it started -- came in as. Undefined for a
-// message that went through no bus (a reminder, a compaction summary): those answer nothing of ours.
-function steerOf(origin: PromptOrigin | undefined): string | undefined {
-  return origin !== undefined && "steerId" in origin ? origin.steerId : undefined;
-}
-
 export function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
@@ -183,8 +184,7 @@ export function hintOf(input: unknown): string {
   return "";
 }
 
-function resultTextOf(result: unknown): string {
-  const content = (result as { content?: unknown } | undefined)?.content;
+function resultTextOf(content: unknown): string {
   return rawTextOf(content).trim();
 }
 
@@ -193,16 +193,15 @@ export function pullRequestUrlIn(text: string): string | undefined {
   return /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/.exec(text)?.[0];
 }
 
-// Stream first, then send: the stream resumes after the newest durable event, so the whole turn
-// is seen live. `send` returns how to recognize our turn on the stream -- the delivery a fresh
-// turn will name, or "resumed": a continuation keeps the paused turn's id and emits no
-// turn.started, and nothing else can run on a paused session, so every event until the next
-// turn.ended is ours.
-async function follow(surface: Surface, sessionId: string, send: () => Promise<Anchor>): Promise<TurnOutcome> {
-  const newest = await client.sessions.events.list(sessionId, { limit: 1, order: "desc" });
-  const after = newest.data[0]?.eventId;
+// Stream first, then send: the stream is live-only, so the order is what makes the whole turn
+// visible. `send` returns how to recognize our turn on the stream: a message is ours once it
+// comes back processed (`processed_at` set: it is in the conversation), and everything before
+// that belongs to a turn already running. Answers need no anchor -- nothing runs on a paused
+// session, so every event after them is the continuation (their own echo only comes once it is
+// over).
+async function follow(surface: Surface, sessionId: string, pending: readonly BlockingEvent[], send: () => Promise<Anchor>): Promise<TurnOutcome> {
   const controller = new AbortController();
-  const stream = await client.sessions.events.stream(sessionId, { signal: controller.signal, ...(after !== undefined ? { after } : {}) });
+  const stream = await client.sessions.events.stream(sessionId, { signal: controller.signal });
   let anchor: Anchor;
   try {
     anchor = await send();
@@ -211,112 +210,104 @@ async function follow(surface: Surface, sessionId: string, send: () => Promise<A
     throw err;
   }
 
-  let currentTurn: string | undefined;
-  let ourTurn: string | undefined;
-  let claimNextTurn = false;
-  const resumed = "resumed" in anchor;
-  const steerId = "steerId" in anchor ? anchor.steerId : undefined;
-  // Tool call id -> trace, so the result can report by name; PR URLs seen in this turn.
-  const calls = new Map<string, ToolTrace>();
+  let ours = "resumed" in anchor;
+  const messageId = "messageId" in anchor ? anchor.messageId : undefined;
+  // agent.tool_use id -> trace, so the result can report by name. A call that was waiting on an
+  // approval runs under the id it paused with, announced by the turn that paused.
+  const calls = new Map<string, ToolTrace>(
+    pending.map((event) => [event.id, { id: event.id, name: event.name, hint: hintOf(event.input), status: "running" as const }]),
+  );
+  // The newest agent.message, not yet placed: text followed by a tool call is the model thinking
+  // out loud; text the turn ends on is the reply. agent.message carries text only, so which one
+  // it was is known by what comes next.
+  let said: string | undefined;
+  let failure: string | undefined;
   let linked: string | undefined;
-  const ours = (event: AgentEvent & { readonly turnId?: string }) => resumed || (ourTurn !== undefined && event.turnId === ourTurn);
+  const link = async (text: string) => {
+    const url = pullRequestUrlIn(text);
+    if (url && url !== linked) {
+      linked = url;
+      await surface.link("Pull request", url);
+    }
+  };
+  const thinking = async () => {
+    if (said === undefined) return;
+    const text = said;
+    said = undefined;
+    await surface.thought(text);
+  };
 
   try {
     for await (const event of stream) {
-      if (event.address !== "main") continue;
-      if (!resumed) {
-        // ── Anchoring: find the turn that took our delivery ──
-        if (event.type === "turn.started") {
-          currentTurn = event.turnId;
-          if (claimNextTurn || steerOf(event.origin) === steerId) {
-            ourTurn = event.turnId;
-            claimNextTurn = false;
-          }
-          continue;
-        }
-        if (event.type === "message.appended" && event.message.role === "user") {
-          if (ourTurn === undefined && steerOf(event.origin) === steerId) {
-            if (currentTurn !== undefined) ourTurn = currentTurn;
-            else claimNextTurn = true;
-          }
-          continue;
-        }
-        // A previous turn is still finishing: its events are not ours to render.
-        if (ourTurn === undefined) continue;
+      if (!ours) {
+        // ── Anchoring: wait for our message to reach the conversation ──
+        if (event.type === "user.message" && event.id === messageId && event.processed_at !== null) ours = true;
+        continue;
       }
 
       switch (event.type) {
-        case "message.appended": {
-          if (event.message.role !== "assistant" || (!resumed && ourTurn !== currentTurn)) break;
-          const text = rawTextOf(event.message.content).trim();
-          const callsTools = event.message.content.some((part) => part.type === "toolCall");
-          if (!text) break;
-          // Text alongside tool calls is the model thinking out loud; text alone ends the turn.
-          if (callsTools) await surface.thought(text);
-          else {
-            await surface.respond(text);
-            const url = pullRequestUrlIn(text);
-            if (url && url !== linked) {
-              linked = url;
-              await surface.link("Pull request", url);
-            }
-          }
+        case "agent.message": {
+          await thinking();
+          const text = rawTextOf(event.content).trim();
+          if (text) said = text;
           break;
         }
-        case "tool.call.started": {
-          const call: ToolTrace = { id: event.toolCallId, name: event.toolName, hint: hintOf(event.args), status: "running" };
-          calls.set(event.toolCallId, call);
+        case "agent.tool_use": {
+          await thinking();
+          // Announced only to ask about it: the pause, reported when the session goes idle.
+          if (event.evaluated_permission === "ask") break;
+          const call: ToolTrace = { id: event.id, name: event.name, hint: hintOf(event.input), status: "running" };
+          calls.set(event.id, call);
           await surface.action(call);
           break;
         }
-        case "tool.result": {
-          const started = calls.get(event.toolCallId);
-          const text = resultTextOf(event.result);
+        case "agent.custom_tool_use":
+          await thinking();
+          break;
+        case "agent.tool_result": {
+          const started = calls.get(event.tool_use_id);
+          const text = resultTextOf(event.content);
           const call: ToolTrace = {
-            id: event.toolCallId,
-            name: started?.name ?? event.toolName,
+            id: event.tool_use_id,
+            name: started?.name ?? "tool",
             hint: started?.hint ?? "",
-            status: event.isError ? "error" : "done",
+            status: event.is_error ? "error" : "done",
             result: truncate(text, 400),
           };
-          calls.set(event.toolCallId, call);
+          calls.set(event.tool_use_id, call);
           await surface.action(call);
           // The PR tool names the PR it opened; link it as soon as it exists rather than waiting
           // for the model to repeat the URL.
-          if (event.toolName === PR_TOOL && !event.isError) {
-            const url = pullRequestUrlIn(text);
-            if (url && url !== linked) {
-              linked = url;
-              await surface.link("Pull request", url);
-            }
-          }
+          if (call.name === PR_TOOL && !event.is_error) await link(text);
           break;
         }
-        case "turn.step.retrying":
-          if (ours(event)) console.warn(`[bridge] ${sessionId} retry ${event.attempt}/${event.maxAttempts}: ${event.reason ?? ""}`);
+        case "session.error":
+          console.warn(`[bridge] ${sessionId} error: ${event.error.message}`);
+          failure = event.error.message;
           break;
-        case "error":
-          console.warn(`[bridge] ${sessionId} error: ${event.message}`);
-          break;
-        case "turn.paused": {
-          // The turn stopped on a question or an approval and the session is now interrupted:
-          // nothing runs until someone answers. The question goes to the thread, and the next
-          // message there answers it (src/flows.ts). No turn.ended follows a pause.
-          if (!resumed && ourTurn !== currentTurn) break;
-          currentTurn = undefined;
-          await surface.ask(renderPending(event.pending));
-          return { status: "waiting", pending: event.pending };
-        }
-        case "turn.ended": {
-          currentTurn = undefined;
-          if (!ours(event)) break;
-          if (event.reason === "completed") return { status: "completed" };
-          if (event.reason === "cancelled") {
-            await surface.error("I was stopped before finishing.");
-            return { status: "cancelled" };
+        case "session.status_idle": {
+          if (event.stop_reason.type === "requires_action") {
+            // The turn stopped on a question or an approval: nothing runs until someone answers.
+            // The question goes to the thread, and the next message there answers it
+            // (src/flows.ts).
+            await thinking();
+            const ids = new Set(event.stop_reason.event_ids);
+            const blocking = (await pendingActions(sessionId)).filter((entry) => ids.has(entry.id));
+            await surface.ask(renderPending(blocking));
+            return { status: "waiting", pending: blocking };
           }
-          await surface.error(`The turn failed${event.error ? `: ${truncate(event.error, 300)}` : ""}.`);
-          return { status: "failed" };
+          if (failure !== undefined) {
+            await thinking();
+            await surface.error(`The turn failed: ${truncate(failure, 300)}.`);
+            return { status: "failed" };
+          }
+          if (said !== undefined) {
+            const text = said;
+            said = undefined;
+            await surface.respond(text);
+            await link(text);
+          }
+          return { status: "completed" };
         }
       }
     }

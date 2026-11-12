@@ -76,7 +76,11 @@ async function main(): Promise<void> {
   await writeFile(join(consumerDir, "index.js"), consumerSource);
 
   const faux = registerFauxProvider();
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, extensionDir: dir });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    extensionDir: dir,
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const manager = harness.extensions!;
 
   const listed = await manager.list();
@@ -110,7 +114,9 @@ async function main(): Promise<void> {
 
   // A session that opted out of both (`params: { [id]: false }`) is born with neither, and the
   // reload below must leave it that way.
-  const off = await harness.createSession({ params: { shapes: false, "uses-shape": false } });
+  const off = await harness.createSession({
+    config: { extensions: { shapes: false, "uses-shape": false } }
+  });
   check("params: `false` keeps the per-session half off this session", !off.attachedExtensionIds().includes("shapes") && !off.attachedExtensionIds().includes("uses-shape"));
 
   // ── Reload: edit the file, reload = one coordinated swap (service + per-session half) ──

@@ -27,7 +27,11 @@ async function main(): Promise<void> {
   const model = faux.getChatModel()!;
 
   try {
-    const harness = createHarness({ ...faux.harnessModel(), infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }), workDir: work, permission: { mode: "yolo" } });
+    const harness = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: new DiskSessionRepository(home) }),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
 
     const session = await harness.createSession();
     check("harness: createSession returns a session with an id", typeof session.id === "string" && session.id.length > 0);
@@ -61,7 +65,9 @@ async function main(): Promise<void> {
       instructions: "x",
       guardrails: { output: [{ name: "no-secret", execute: ({ output }) => ({ tripwireTriggered: output.includes("SECRET") }) }] },
     });
-    const gSession = await harness.createSession({ agent: guarded });
+    const gSession = await harness.createSession({
+    bindings: { agent: guarded }
+  });
     const gEvents: AgentEvent[] = [];
     gSession.onEvent((e) => gEvents.push(e));
     let threw = false;

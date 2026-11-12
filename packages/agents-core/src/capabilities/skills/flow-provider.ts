@@ -21,7 +21,7 @@ function flowSkillTool(skill: SkillDefinition, registry: SkillRegistry, executor
         ? ` When to use: ${skill.metadata.whenToUse}`
         : ""
     } Runs the "${skill.name}" flow skill as a sub-agent and returns its result.`,
-    params: z.object({
+    parameters: z.object({
       input: z.string().describe(`The task / arguments for the "${skill.name}" flow skill.`),
     }),
     resolve: (args) => ({

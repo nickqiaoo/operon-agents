@@ -14,7 +14,8 @@
 
 import type { Component, Focusable } from 'operon-pi-tui';
 import { deleteAllKittyImages, getCapabilities, Spacer, TuiAltScreen, TuiMainScreen } from 'operon-pi-tui';
-import { defineModel, type ApprovalRequest, type Message, type ModelRuntime, type ApprovalResponse, type BackgroundTaskInfo, type Harness, type HarnessSession, type PermissionMode, type SkillSummary, type ThinkingLevel } from 'operon-agents';
+import { defineModel, type ApprovalRequest, type Message, type ApprovalResponse, type Harness, type HarnessSession, type PermissionMode, type ThinkingLevel } from 'operon-agents';
+import { type ModelRuntime, type BackgroundTaskInfo, type SkillSummary } from 'operon-agents/advanced';
 import { resolve } from 'node:path';
 
 import { appendInputHistory, loadInputHistory } from './app/utils/history/input-history.ts';

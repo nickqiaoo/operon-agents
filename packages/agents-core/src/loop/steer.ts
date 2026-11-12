@@ -84,6 +84,9 @@ export interface SteerReceipt {
   readonly journaled: Promise<void>;
 }
 
+/** Why a queued message will never reach the model. */
+export type SteerDiscardReason = "cancelled" | "guardrail";
+
 export interface SteerOptions {
   /**
    * Supply the steer's identity instead of having one minted. For a producer that keeps its own
@@ -101,6 +104,13 @@ export type NowFn = () => number;
  */
 export type SteerEnqueueListener = (item: SteerMessage) => Promise<void> | void;
 
+/** Marks where one batch of follow-ups ends and a prompt that arrived after them begins. */
+const FOLLOW_UP_FENCE = Symbol("follow-up-fence");
+
+function isUserFollowUp(item: SteerMessage | typeof FOLLOW_UP_FENCE): item is SteerMessage {
+  return item !== FOLLOW_UP_FENCE && item.origin.kind === "user_follow_up";
+}
+
 export interface SteerBusOptions {
   readonly now?: NowFn;
   readonly onIdleSteer?: (turnId: string) => void;
@@ -117,9 +127,10 @@ let steerTurnCounter = 0;
  *   terminal step, so a user steer is always consumed WITHIN the active turn, never deferred
  *   to a fresh one.
  * - **followUp** — user follow-ups plus external events that surface after the current work
- *   (`cron_*`, `background_done`). Drained only after a turn has run; a queued follow-up forces
- *   one more turn (with the usual boundary reminder injection), because it is a new prompt, not
- *   an interruption of the turn in flight.
+ *   (`cron_*`, `background_done`). Drained only after a turn has run, because it is a new prompt,
+ *   not an interruption of the turn in flight. An external event forces one more turn of the
+ *   current run. With a driver to start the next run, a user's follow-up ends the current run and
+ *   takes one of its own, so that run's result stays its own.
  *
  * Routing is by `origin.kind`, so producers keep calling one `steer(content, origin)` — the bus
  * files the message into the right channel.
@@ -136,10 +147,11 @@ let steerTurnCounter = 0;
  */
 export class SteerBus {
   private readonly steeringQueue: SteerMessage[] = [];
-  private readonly followUpQueue: SteerMessage[] = [];
+  private followUpQueue: Array<SteerMessage | typeof FOLLOW_UP_FENCE> = [];
   private readonly now: NowFn;
   private onIdleSteer?: (turnId: string) => void;
   private onEnqueue?: SteerEnqueueListener;
+  private onDiscard?: (item: SteerMessage, reason: SteerDiscardReason) => void;
   private activeTurnId: string | null = null;
 
   constructor(options: SteerBusOptions = {}) {
@@ -157,6 +169,11 @@ export class SteerBus {
     this.onEnqueue = listener;
   }
 
+  /** Wired by the owning session so a dropped message closes its `steer.queued` record. */
+  setDiscardListener(listener: (item: SteerMessage, reason: SteerDiscardReason) => void): void {
+    this.onDiscard = listener;
+  }
+
   /**
    * Wired by the run driver (the harness): fires when a message lands while NO turn is active,
    * meaning nothing will ever drain it on its own. Without a listener a follow-up queued at an
@@ -169,6 +186,11 @@ export class SteerBus {
    */
   setIdleWakeListener(listener: (turnId: string) => void): void {
     this.onIdleSteer = listener;
+  }
+
+  /** Something starts a turn when a message lands on an idle bus, so a run can leave one queued. */
+  get wakesOnIdle(): boolean {
+    return this.onIdleSteer !== undefined;
   }
 
   beginTurn(turnId: string): void {
@@ -189,7 +211,7 @@ export class SteerBus {
 
   /** Anything queued on either channel. */
   hasItems(): boolean {
-    return this.steeringQueue.length > 0 || this.followUpQueue.length > 0;
+    return this.steeringQueue.length > 0 || this.hasFollowUps();
   }
 
   hasSteering(): boolean {
@@ -197,7 +219,23 @@ export class SteerBus {
   }
 
   hasFollowUps(): boolean {
-    return this.followUpQueue.length > 0;
+    return this.followUpQueue.some((item) => item !== FOLLOW_UP_FENCE);
+  }
+
+  /** A user's follow-up is waiting. It gets a run of its own, so the current one should end. */
+  hasUserFollowUps(): boolean {
+    return this.followUpQueue.some(isUserFollowUp);
+  }
+
+  /**
+   * A prompt arrived behind queued user follow-ups. Close their batch, so a drain takes them and
+   * not whatever is sent after this prompt. False when no follow-up is waiting ahead of it.
+   */
+  fenceUserFollowUps(): boolean {
+    const afterLastFence = this.followUpQueue.slice(this.followUpQueue.lastIndexOf(FOLLOW_UP_FENCE) + 1);
+    if (!afterLastFence.some(isUserFollowUp)) return false;
+    this.followUpQueue.push(FOLLOW_UP_FENCE);
+    return true;
   }
 
   steer(content: SteerContent, origin: SteerOrigin, options: SteerOptions = {}): SteerReceipt {
@@ -231,7 +269,44 @@ export class SteerBus {
 
   /** Turn-boundary channel (pi `getFollowUpMessages`). */
   drainFollowUps(): SteerMessage[] {
-    return this.followUpQueue.splice(0, this.followUpQueue.length);
+    const fence = this.followUpQueue.indexOf(FOLLOW_UP_FENCE);
+    const batch = this.followUpQueue.splice(0, fence === -1 ? this.followUpQueue.length : fence + 1);
+    return batch.filter((item): item is SteerMessage => item !== FOLLOW_UP_FENCE);
+  }
+
+  /** Everything queued except users' follow-ups, which wait for a run of their own. */
+  drainNonUserFollowUps(): SteerMessage[] {
+    const drained: SteerMessage[] = [];
+    this.followUpQueue = this.followUpQueue.filter((item) => {
+      if (item === FOLLOW_UP_FENCE || isUserFollowUp(item)) return true;
+      drained.push(item);
+      return false;
+    });
+    return drained;
+  }
+
+  /** Everything still queued, for a new owner of this conversation to `requeue`. */
+  queued(): SteerMessage[] {
+    return [...this.steeringQueue, ...this.followUpQueue.filter((item): item is SteerMessage => item !== FOLLOW_UP_FENCE)];
+  }
+
+  /** Report a message taken off the bus that the model will never see. */
+  discard(item: SteerMessage, reason: SteerDiscardReason): void {
+    this.onDiscard?.(item, reason);
+  }
+
+  /** Drop everything users have queued. Cron fires and background results stay. */
+  discardUserMessages(reason: SteerDiscardReason): void {
+    const steering = this.steeringQueue.splice(0, this.steeringQueue.length);
+    const kept: SteerMessage[] = [];
+    for (const item of steering) {
+      if (item.origin.kind === "user") this.discard(item, reason);
+      else kept.push(item);
+    }
+    this.steeringQueue.push(...kept);
+    const queued = this.followUpQueue.filter((item): item is SteerMessage => item !== FOLLOW_UP_FENCE);
+    this.followUpQueue = queued.filter((item) => !isUserFollowUp(item));
+    for (const item of queued) if (isUserFollowUp(item)) this.discard(item, reason);
   }
 
   private enqueue(item: SteerMessage, journaled: Promise<void>): SteerReceipt {

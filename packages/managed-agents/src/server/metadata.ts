@@ -1,9 +1,14 @@
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentRef, EnvironmentRef } from "../protocol/types.ts";
 
 export interface ManagedSessionMetadata {
   readonly version: 1;
+  readonly title?: string;
+  readonly ownerKey?: string;
+  readonly archivedAt?: number;
+  /** Deleted through the API; the worker that cleans up the runtime session removes the record. */
+  readonly deletedAt?: number;
   readonly sessionId: string;
   readonly agent: AgentRef;
   readonly environment: EnvironmentRef;
@@ -13,6 +18,8 @@ export interface ManagedSessionMetadata {
 }
 
 export interface ManagedSessionMetadataStore {
+  list(): Promise<readonly ManagedSessionMetadata[]>;
+  update(metadata: ManagedSessionMetadata): Promise<void>;
   get(sessionId: string): Promise<ManagedSessionMetadata | undefined>;
   getMany(sessionIds: readonly string[]): Promise<ReadonlyMap<string, ManagedSessionMetadata>>;
   /** Atomically claim a new managed id. False means another creator already owns it. */
@@ -22,6 +29,9 @@ export interface ManagedSessionMetadataStore {
 
 export class MemoryManagedSessionMetadataStore implements ManagedSessionMetadataStore {
   private readonly values = new Map<string, ManagedSessionMetadata>();
+
+  async list(): Promise<readonly ManagedSessionMetadata[]> { return [...this.values.values()]; }
+  async update(metadata: ManagedSessionMetadata): Promise<void> { this.values.set(metadata.sessionId, metadata); }
 
   async get(sessionId: string): Promise<ManagedSessionMetadata | undefined> {
     return this.values.get(sessionId);
@@ -55,6 +65,14 @@ export class DiskManagedSessionMetadataStore implements ManagedSessionMetadataSt
 
   constructor(directory: string) {
     this.directory = directory;
+  }
+
+  async list(): Promise<readonly ManagedSessionMetadata[]> { return [...(await this.loadAll()).values()]; }
+  async update(metadata: ManagedSessionMetadata): Promise<void> {
+    const temporary = `${this.path(metadata.sessionId)}.${crypto.randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(metadata), { mode: 0o600 });
+    await rename(temporary, this.path(metadata.sessionId));
+    if (this.all !== undefined) (await this.all).set(metadata.sessionId, metadata);
   }
 
   async get(sessionId: string): Promise<ManagedSessionMetadata | undefined> {

@@ -169,21 +169,25 @@ documented at [linear.app/developers/agents](https://linear.app/developers/agent
 Linear webhook (AgentSessionEvent created/prompted) ─▶ @chat-adapter/linear ─▶ bot.onNewMention / onSubscribedMessage
                                                                                         │
   surface.ack ──────────── ephemeral thought (within Linear's 10s deadline) ◀───────────┤
-  sessions.create({ id: "lin-<agentSessionId>", environment: "owner/name" }) ── 409 ok ──┤  created only
-  events.stream({ after }) then messages.create / resume ──────────────────────────────┤
+  sessions.create({ id: "lin-<agentSessionId>", environment_id: "owner/name" }) ─ 409 ok ┤  created only
+  events.stream() then events.send(user.message | answers) ────────────────────────────┤
+  user.message echoed with processed_at ───────── anchor: from here on it is our turn ──┤
                                                                                         │
-  message.appended(assistant, with tool calls) ── thought activity ─────────────────────┤
-  tool.call.started / tool.result ─────────────── action activity (ephemeral → result) ─┤
-  message.appended(assistant, text only) ──────── response activity ────────────────────┤
+  agent.message, then a tool call ─────────────── thought activity ─────────────────────┤
+  agent.tool_use / agent.tool_result ──────────── action activity (ephemeral → result) ─┤
+  agent.message the turn ends on ──────────────── response activity ────────────────────┤
   SubmitPullRequest result ────────────────────── "Pull request" external URL ──────────┤
-  turn.paused(pending) ────────────────────────── elicitation; outcome = waiting ───────┤
-  turn.ended ──────────────────────────────────── outcome = completed / failed ─────────┘
+  session.status_idle(requires_action) ────────── elicitation; outcome = waiting ───────┤
+  session.status_idle(end_turn) ───────────────── outcome = completed / failed ─────────┘
 ```
 
-A reply while the session is paused becomes `resume(answers)`: an approval is read off the first
-word (`approve` / `reject`, the rest is feedback; anything unclear is a rejection carrying the
-words), a question gets the whole reply as free text. The continuation keeps the paused turn's id
-and emits no `turn.started`, so the bridge follows everything until the next `turn.ended`.
+A reply while the session is paused answers what the `requires_action` idle names, one event
+each: an approval (`agent.tool_use` asking) becomes a `user.tool_confirmation`, read off the
+first word (`approve` / `reject`, the rest is the reason; anything unclear is a denial carrying
+the words), and a question (`agent.custom_tool_use`) becomes a `user.custom_tool_result` with
+the whole reply as text, which the server hands to each question as a freeform answer. Nothing
+else runs on a paused session, so the bridge follows everything after the answers until the next
+idle.
 
 The same bridge serves GitHub: `@mention` → `pulls.get` → marker → session; thoughts and tool
 calls accumulate and ride inside the reply as a `<details>` trace, so a review thread gets one

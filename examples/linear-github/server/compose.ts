@@ -8,15 +8,8 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import {
-  ConsoleSink,
-  createHarness,
-  defaultCapabilities,
-  DiskSessionRepository,
-  sinkLogger,
-  type ModelManager,
-  type TracingProcessor,
-} from "operon-agents";
+import { ConsoleSink, defaultCapabilities, DiskSessionRepository, sinkLogger, type TracingProcessor } from "operon-agents/advanced";
+import { createHarness, type ModelManager } from "operon-agents";
 import {
   allowAllRequests,
   createManagedHttpServer,
@@ -60,7 +53,6 @@ export async function composeServer(options: ServerOptions) {
   const repository = new DiskSessionRepository(options.home);
   const sandboxes = options.sandbox !== undefined ? new E2BCheckouts(options.sandbox, options.github, options.work) : undefined;
   const harness = createHarness({
-    model: options.model,
     ...(options.modelManager !== undefined ? { modelManager: options.modelManager } : {}),
     infrastructure: () => ({
       sessionRepository: repository,
@@ -72,14 +64,9 @@ export async function composeServer(options: ServerOptions) {
         await (options.tracing as TracingProcessor | undefined)?.shutdown();
       },
     }),
-    // The builtin coding profile (files, shell, questions) plus the one tool that ships code.
     extensions: [pullRequestExtension(options.github)],
-    appendSystemPrompt: SYSTEM_PROMPT,
-    // One engineer per issue: no subagent fleet, no workflow tool.
-    subagentProvider: null,
-    workflowTool: false,
     sessionCapabilities: (ctx) => {
-      const base = defaultCapabilities({ ownEnvironment: ctx.ownEnvironment });
+      const base = defaultCapabilities({ session: ctx });
       if (sandboxes === undefined) return base;
       // The sandbox lease is session-lived, so it is a capability: closing the session releases
       // it, in reverse order with everything else the session opened.
@@ -96,10 +83,12 @@ export async function composeServer(options: ServerOptions) {
         },
       ];
     },
-    workDir: options.work,
-    // Everything inside the clone is approved; the safety floor (sensitive files, .git internals,
-    // writes outside the checkout) still asks -- and an ask becomes a question in the thread.
-    permission: { mode: "workspace" },
+    config: {
+      workDir: options.work,
+      policy: { strictIsolation: true },
+      eventPublication: "committed",
+      defaults: { model: options.model, appendSystemPrompt: SYSTEM_PROMPT, subagents: false, permission: { mode: "workspace" } },
+    },
   });
 
   const metadataStore = new DiskManagedSessionMetadataStore(join(options.home, "managed"));
@@ -121,14 +110,26 @@ export async function composeServer(options: ServerOptions) {
     },
   };
   const broadcaster = new MemoryEventBroadcaster();
-  const work = new MemorySessionWork({ repository });
+  const work = new MemorySessionWork();
   const worker = new SessionWorker({ harness, repository, metadataStore, environments, broadcaster, work, defaultAgentId: AGENT_ID });
   worker.start();
-  const service = new SessionService({ repository, work, metadataStore, environments, broadcaster });
+  const service = new SessionService({
+    work,
+    metadataStore,
+    broadcaster,
+    // Refuse a session whose environment names no repository, before it exists. Parsing is the
+    // whole check — nothing is cloned or booted here; the worker does that on first claim.
+    validateCreate: ({ environment }) => {
+      try {
+        parseRepo(environment.id);
+      } catch {
+        throw new ManagedInvalidRequestError(`environment "${environment.id}" is not a repository ("owner/name")`);
+      }
+    },
+  });
   const apiKey = options.apiKey;
   const managed = createManagedHttpServer({
     service,
-    worker,
     ...(options.heartbeatMs !== undefined ? { heartbeatMs: options.heartbeatMs } : {}),
     authorize:
       apiKey === undefined

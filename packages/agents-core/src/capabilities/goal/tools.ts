@@ -25,7 +25,7 @@ export function updateGoalTool(store: GoalStore): Tool {
     name: "UpdateGoal",
     description:
       "Set or update the current goal. Provide `objective` to (re)state the task, `status` to drive lifecycle (active = pursue autonomously, paused/blocked = stop autonomous work, complete = finish and clear). Mark `complete` only when all required work is done.",
-    params: z.object({
+    parameters: z.object({
       objective: z.string().optional().describe("The task to pursue (required when first creating a goal)."),
       completionCriterion: z.string().optional().describe("How to know the goal is done."),
       status: z.enum(["active", "blocked", "paused", "complete"]).optional(),
@@ -54,7 +54,7 @@ export function getGoalTool(store: GoalStore): Tool {
   return defineTool({
     name: "GetGoal",
     description: "Read the current goal: objective, completion criterion, status, and budget usage.",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "GetGoal",
       accesses: ToolAccesses.none(),
@@ -69,7 +69,7 @@ export function setGoalBudgetTool(store: GoalStore): Tool {
     name: "SetGoalBudget",
     description:
       "Set a hard budget for the current goal. The goal is auto-blocked once any set budget is reached. Only set a budget when the user/objective states a clear, reasonable limit.",
-    params: z.object({
+    parameters: z.object({
       turns: z.number().int().positive().optional().describe("Max continuation turns."),
       tokens: z.number().int().positive().optional().describe("Max total tokens."),
       wallClockMs: z.number().int().positive().optional().describe("Max wall-clock time in ms."),

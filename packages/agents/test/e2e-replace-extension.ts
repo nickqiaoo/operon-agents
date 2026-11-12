@@ -75,8 +75,8 @@ async function main(): Promise<void> {
   const faux = registerFauxProvider();
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [shapes("v1"), consumer("old")],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
 
   const a = await harness.createSession();

@@ -76,7 +76,8 @@ export class DecisionAutoApprover implements AutoApprover {
   }
 
   async classify(input: AutoApprovalInput): Promise<AutoApprovalVerdict> {
-    const { model, onOutcome, rules } = this.options;
+    const { model, onOutcome } = this.options;
+    const rules = input.autoApproval ?? this.options.rules;
     const startedAt = Date.now();
     const toolName = input.ctx.toolCall.name;
     const report = (outcome: AutoApprovalOutcome, reason?: string): void => {

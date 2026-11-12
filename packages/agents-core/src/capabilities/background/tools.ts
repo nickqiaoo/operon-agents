@@ -44,7 +44,7 @@ export function backgroundListTool(manager: BackgroundManager): Tool {
       "- limit caps how many tasks are returned (1–100, default 20). This tool is read-only and safe to call anytime, including in plan mode.",
       "- This lists background RUNTIME tasks. For the structured to-do task list, use TaskList instead.",
     ].join("\n"),
-    params: z.object({
+    parameters: z.object({
       active_only: z.boolean().default(true).describe("List only non-terminal tasks.").optional(),
       limit: z.number().int().min(1).max(100).default(20).describe("Maximum tasks to return.").optional(),
     }),
@@ -94,7 +94,7 @@ export function backgroundOutputTool(manager: BackgroundManager): Tool {
       "- block=true waits for completion (optional timeout in seconds). It costs you the whole turn — the user cannot say anything to you until the task settles or the timeout expires, so a long block locks them out. Justified only when all three hold: the task settles in seconds, nothing and nobody else has to act first, and you have no other work to do. Otherwise read with block=false, say what you are waiting on, and end the turn.",
       "- NEVER block on a task that is waiting for the user — a login/OAuth flow in a browser, a confirmation, anything whose next step is a human action. Blocking there deadlocks the two of you: the user is waiting to see what you say, and you are waiting for the thing only they can finish. End your turn instead, tell them what to do, and read the task when they say they are done.",
     ].join("\n"),
-    params: z.object({
+    parameters: z.object({
       task_id: z.string().describe("The background task ID to inspect."),
       block: z
         .boolean()
@@ -204,7 +204,7 @@ export function backgroundStopTool(manager: BackgroundManager): Tool {
       "- Stopping is destructive: it may leave partial side effects behind.",
       "- If the task has already finished, this simply returns its current status.",
     ].join("\n"),
-    params: z.object({
+    parameters: z.object({
       task_id: z.string().describe("The background task ID to stop."),
       reason: z.string().default(DEFAULT_STOP_REASON).describe("Short reason recorded when the task is stopped.").optional(),
     }),

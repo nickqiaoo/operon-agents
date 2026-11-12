@@ -56,7 +56,7 @@ export function buildSubagentTool<TContext>(
   return defineTool({
     name: toolName,
     description: sub.handoffDescription ?? `Delegate a sub-task to the ${sub.name} sub-agent and return its result.`,
-    params: z.object({ input: z.string().describe(`The task or prompt for the ${sub.name} sub-agent.`) }),
+    parameters: z.object({ input: z.string().describe(`The task or prompt for the ${sub.name} sub-agent.`) }),
     resolve: (args) => ({
       approvalRule: toolName,
       // Conservative: a sub-agent can do anything, so serialize it against everything.
@@ -185,7 +185,7 @@ export function buildAgentTool<TContext>(
   return defineTool({
     name: "Agent",
     description,
-    params: input,
+    parameters: input,
     resolve: (args) => {
       const requested = args.subagent_type ?? defaultName;
       return {

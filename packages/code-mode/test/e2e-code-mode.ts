@@ -7,7 +7,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHarness, createLocalHarness } from "operon-agents";
-import type { AgentEvent, ExtensionDefinition, PermissionManagerOptions, ToolSchema } from "operon-agents";
+import type { AgentEvent, ExtensionDefinition } from "operon-agents";
+import type { PermissionManagerOptions, ToolSchema } from "operon-agents/advanced";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../../agents/test/faux.ts";
 import { codeMode, DEFAULT_DIRECT_TOOLS, RUN_CODE_NAME } from "../src/index.ts";
 import type { CodeModeOptions, RunCodeApprovalRequest, RunCodeDetails } from "../src/index.ts";
@@ -113,11 +114,10 @@ async function main(): Promise<void> {
   ) => {
     const seen: { tools?: readonly ToolSchema[] } = {};
     const harness = createHarness({
-      model: faux.getChatModel(),
-      workDir: work,
-      permission,
-      extensions: [...extensions, codeMode(options), requestSpy(seen)],
-    });
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    extensions: [...extensions, codeMode(options), requestSpy(seen)],
+    config: { workDir: work, defaults: { permission: permission } }
+  });
     const session = await harness.createSession();
     setup?.(session);
     const events: AgentEvent[] = [];
@@ -186,12 +186,11 @@ return { hits };`);
     const tracker = { count: 0 };
     const open = () =>
       createLocalHarness({
-        model: faux.getChatModel(),
-        homeDir: home,
-        workDir: work,
-        permission: { mode: "manual", rules: [{ decision: "allow", scope: "project", pattern: "mcp__tracker__list_issues" }] },
-        extensions: [issueTracker(tracker), codeMode({ hide: "none" })],
-      });
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    homeDir: home,
+    extensions: [issueTracker(tracker), codeMode({ hide: "none" })],
+    config: { workDir: work, defaults: { permission: { mode: "manual", rules: [{ decision: "allow", scope: "project", pattern: "mcp__tracker__list_issues" }] } } }
+  });
     let harness = await open();
     const session = await harness.createSession();
     const sessionId = session.id;
@@ -230,7 +229,7 @@ return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.l
     const after: AgentEvent[] = [];
     reopened.onEvent((event) => after.push(event));
     faux.setResponses([fauxAssistantMessage("done", { stopReason: "stop" })]);
-    result = await reopened.resume({ [pending!.approvalId]: { kind: "input", data: { decision: "approved" } } });
+    result = await reopened.respond({ [pending!.approvalId]: { kind: "input", data: { decision: "approved" } } });
     const finished = after.find(
       (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
     );
@@ -249,7 +248,12 @@ return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.l
   // ── A rejection reaches the program as a catchable error, and the call never runs ──
   {
     const home = mkdtempSync(join(tmpdir(), "code-mode-home-"));
-    const harness = await createLocalHarness({ model: faux.getChatModel(), homeDir: home, workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
+    const harness = await createLocalHarness({
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    homeDir: home,
+    extensions: [codeMode({ hide: "none" })],
+    config: { workDir: work, defaults: { permission: { mode: "manual" } } }
+  });
     const session = await harness.createSession();
     faux.setResponses([
       fauxAssistantMessage(
@@ -266,7 +270,7 @@ return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.l
     check("reject: the run paused for the approval", result.status === "interrupted" && pending !== undefined);
     const after: AgentEvent[] = [];
     session.onEvent((event) => after.push(event));
-    result = await session.resume({ [pending!.approvalId]: { kind: "input", data: { decision: "rejected", feedback: "not on this box" } } });
+    result = await session.respond({ [pending!.approvalId]: { kind: "input", data: { decision: "rejected", feedback: "not on this box" } } });
     const finished = after.find(
       (event): event is Extract<AgentEvent, { type: "tool.result" }> => event.type === "tool.result" && event.toolName === RUN_CODE_NAME && event.parentToolCallId === undefined,
     );
@@ -280,7 +284,11 @@ return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.l
 
   // ── A long program runs in the background: its console lines and result land in a task log ──
   {
-    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode({ hide: "none" })] });
+    const harness = createHarness({
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    extensions: [codeMode({ hide: "none" })],
+    config: { workDir: work, defaults: { permission: { mode: "yolo" } } }
+  });
     const session = await harness.createSession();
     const events: AgentEvent[] = [];
     session.onEvent((event) => events.push(event));
@@ -316,7 +324,11 @@ return { a: a.includes("hello"), c: c.includes("again"), issues: listed.issues.l
 
   // ── A running program can be moved to the background; console lines stream as progress meanwhile ──
   {
-    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "yolo" }, extensions: [codeMode({ hide: "none" })] });
+    const harness = createHarness({
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    extensions: [codeMode({ hide: "none" })],
+    config: { workDir: work, defaults: { permission: { mode: "yolo" } } }
+  });
     const session = await harness.createSession();
     const events: AgentEvent[] = [];
     let detachedAt: string | undefined;
@@ -475,11 +487,10 @@ return { a, b, split, near, found: found[0].name, listed: ALL_TOOLS.filter((t) =
   // ── The context report counts what was sent: the catalog RunCode took out is not in it ──
   {
     const harness = createHarness({
-      model: faux.getChatModel(),
-      workDir: work,
-      permission: { mode: "yolo" },
-      extensions: [fakeMcp({ github: ["list_issues", "create_issue"] }), codeMode()],
-    });
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    extensions: [fakeMcp({ github: ["list_issues", "create_issue"] }), codeMode()],
+    config: { workDir: work, defaults: { permission: { mode: "yolo" } } }
+  });
     const session = await harness.createSession();
     faux.setResponses([fauxAssistantMessage("hi", { stopReason: "stop" })]);
     await session.prompt("hello");
@@ -514,7 +525,11 @@ return { a, b, split, near, found: found[0].name, listed: ALL_TOOLS.filter((t) =
 
   // ── A live approver answers a nested call in place: no pause, the program just waits ──
   for (const decision of ["approved", "rejected"] as const) {
-    const harness = createHarness({ model: faux.getChatModel(), workDir: work, permission: { mode: "manual" }, extensions: [codeMode({ hide: "none" })] });
+    const harness = createHarness({
+    resolveSession: () => ({ bindings: { model: faux.getChatModel() } }),
+    extensions: [codeMode({ hide: "none" })],
+    config: { workDir: work, defaults: { permission: { mode: "manual" } } }
+  });
     const session = await harness.createSession();
     const events: AgentEvent[] = [];
     session.onEvent((event) => events.push(event));

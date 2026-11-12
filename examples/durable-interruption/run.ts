@@ -10,16 +10,8 @@
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import {
-  INTERRUPTION_STATE_KEY,
-  createLocalHarness,
-  defineAgent,
-  parseInterruptionState,
-  writeTool,
-  type ApprovalResponse,
-  type InterruptionState,
-  type RunResult,
-} from "operon-agents";
+import { createLocalHarness, defineAgent, type ApprovalResponse, type RunResult } from "operon-agents";
+import { writeTool } from "operon-agents/tools";
 
 const MODEL = process.env.MODEL ?? "anthropic/claude-opus-4-8";
 const HOME = join(process.cwd(), ".agent-home");
@@ -52,13 +44,10 @@ const writer = defineAgent<AppContext>({
 // fresh object (and fresh handles such as DB clients/loggers) for the same persisted session.
 const openHarness = (context: AppContext) =>
   createLocalHarness<AppContext>({
-    model,
-    agent: writer,
     context,
     homeDir: HOME,
-    workDir: WORK,
-    permission: { mode: "manual" },
-    subagentProvider: null,
+    config: { workDir: WORK, defaults: { model: model, agent: "default", permission: { mode: "manual" }, subagents: false } },
+    registry: { agents: { default: writer } }
   });
 
 // ── Process 1: start a run and stop at the durable approval boundary ────────────────
@@ -70,20 +59,23 @@ let harness = await openHarness({
 let session = await harness.createSession({ title: "durable-interruption-demo" });
 const sessionId = session.id;
 
-console.log(`session: ${sessionId}`);
-console.log(`state:   ${join(HOME, "sessions", "…", "state.json")} -> ${INTERRUPTION_STATE_KEY}\n`);
+console.log(`session: ${sessionId}\n`);
 
-let result: RunResult = await session.prompt(
+const first = await session.prompt(
   "Use Write to create durable-approved.txt containing: approved after resume",
 );
-requireInterruption(result);
-await showPersistedState(session.core.store && (await session.core.store.getState(INTERRUPTION_STATE_KEY)));
+if (first.status !== "interrupted") {
+  throw new Error(`Expected a durable interruption, received status "${first.status}".`);
+}
 
 console.log("\nSimulating a process exit: closing the session and the entire Harness.\n");
 await session.close();
 await harness.close();
 
 // ── Process 2: reopen the session and resume from SessionStore + per-agent logs ─────
+//
+// Nothing below reads a value from process 1 except the session id: what is awaiting an answer
+// comes from the store, through the same call a real second process would make.
 
 harness = await openHarness({
   requestId: "request-42",
@@ -92,56 +84,26 @@ harness = await openHarness({
 session = await harness.resumeSession(sessionId);
 
 // A resumed run may interrupt more than once. Approve the currently surfaced controls and
-// keep going until the root agent completes. For nested/parallel agents, interruptions already
-// contains the flattened approvals from every paused frame.
-while (result.status === "interrupted") {
+// keep going until the root agent completes. For nested/parallel agents, the pending list
+// already contains the flattened approvals from every paused frame.
+let result: RunResult | undefined;
+let pending = await session.pendingInterruptions();
+while (pending.length > 0) {
   const answers: Record<string, ApprovalResponse> = {};
-  for (const pending of result.interruptions ?? []) {
+  for (const item of pending) {
     console.log(
-      `approve ${pending.approvalId}\n` +
-        `  agent=${pending.agent.name} address=${pending.address} tool=${pending.toolName}`,
+      `approve ${item.approvalId}\n` +
+        `  agent=${item.agent.name} address=${item.address} tool=${item.toolName}`,
     );
-    answers[pending.approvalId] = { decision: "approved" };
+    answers[item.approvalId] = { decision: "approved" };
   }
-  result = await session.resume(answers);
-  if (result.status === "interrupted") {
-    await showPersistedState(session.core.store && (await session.core.store.getState(INTERRUPTION_STATE_KEY)));
-  }
+  result = await session.respond(answers);
+  pending = result.status === "interrupted" ? await session.pendingInterruptions() : [];
 }
 
-console.log(`\ncompleted: ${result.status}`);
-console.log(`output:    ${result.output}`);
-console.log(
-  `interrupt key after completion: ${String(await session.core.store?.getState(INTERRUPTION_STATE_KEY))}`,
-);
+console.log(`\ncompleted: ${result?.status}`);
+console.log(`output:    ${result?.output}`);
+console.log(`still pending after completion: ${(await session.pendingInterruptions()).length}`);
 
 await session.close();
 await harness.close();
-
-function requireInterruption(value: RunResult): asserts value is RunResult & { status: "interrupted" } {
-  if (value.status !== "interrupted" || !value.interruptions?.length) {
-    throw new Error(`Expected a durable interruption, received status "${value.status}".`);
-  }
-}
-
-async function showPersistedState(raw: unknown): Promise<void> {
-  const state = parseInterruptionState(raw);
-  console.log(
-    `interrupted: ${state.interruptionId}@${state.revision} phase=${state.phase} frames=${Object.keys(state.frames).length}`,
-  );
-  printFrameTree(state, state.rootFrameId);
-}
-
-function printFrameTree(state: InterruptionState, frameId: string, depth = 0): void {
-  const frame = state.frames[frameId];
-  if (!frame) throw new Error(`Interruption frame "${frameId}" is missing.`);
-  const indent = "  ".repeat(depth);
-  console.log(
-    `${indent}- ${frame.agent.name} instance=${frame.agentInstanceId} address=${frame.address}` +
-      ` pending=[${frame.pending.map((item) => item.toolName).join(", ")}]`,
-  );
-  for (const [toolCallId, childFrameId] of Object.entries(frame.children)) {
-    console.log(`${indent}  child of ${toolCallId}:`);
-    printFrameTree(state, childFrameId, depth + 2);
-  }
-}

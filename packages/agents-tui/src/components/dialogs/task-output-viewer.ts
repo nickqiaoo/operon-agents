@@ -18,7 +18,7 @@ import {
   visibleWidth,
   type Focusable,
 } from 'operon-pi-tui';
-import type { BackgroundTaskInfo, BackgroundTaskStatus } from 'operon-agents';
+import type { BackgroundTaskInfo, BackgroundTaskStatus } from 'operon-agents/advanced';
 
 import { currentTheme } from '../../theme/index.ts';
 import { printableChar } from '../../utils/printable-key.ts';

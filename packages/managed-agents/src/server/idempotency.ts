@@ -5,18 +5,18 @@
  * cannot tell from a failed request whether the first attempt landed. Keyed by
  * `(sessionId, key)`: the same key on a different session is a different delivery.
  */
-import type { MessageReceiptResource } from "../protocol/types.ts";
+import type { SendManagedEventsResponse } from "../protocol/types.ts";
 
 export interface ManagedDeliveryIdempotencyStore {
   run(
     sessionId: string,
     key: string,
-    operation: () => Promise<MessageReceiptResource>,
-  ): Promise<MessageReceiptResource>;
+    operation: () => Promise<SendManagedEventsResponse>,
+  ): Promise<SendManagedEventsResponse>;
 }
 export class MemoryManagedDeliveryIdempotencyStore implements ManagedDeliveryIdempotencyStore {
   private readonly entries = new Map<string, {
-    readonly result: Promise<MessageReceiptResource>;
+    readonly result: Promise<SendManagedEventsResponse>;
     settled: boolean;
     expiresAt: number;
   }>();
@@ -33,8 +33,8 @@ export class MemoryManagedDeliveryIdempotencyStore implements ManagedDeliveryIde
   async run(
     sessionId: string,
     key: string,
-    operation: () => Promise<MessageReceiptResource>,
-  ): Promise<MessageReceiptResource> {
+    operation: () => Promise<SendManagedEventsResponse>,
+  ): Promise<SendManagedEventsResponse> {
     const compound = `${sessionId}\0${key}`;
     const now = Date.now();
     this.pruneExpired(now);

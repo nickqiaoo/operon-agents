@@ -22,6 +22,20 @@ function mergeRecord<T>(base: Record<string, T>, over: Record<string, T> | undef
 
 function mergeOne(base: AgentFrameworkConfig, layer: PartialConfig): AgentFrameworkConfig {
   return {
+    // Scalars and whole sections a later layer simply replaces. An absent key stays absent, so the
+    // merged file keeps "not set" distinct from "set to empty".
+    ...pickDefined({
+      model: layer.model ?? base.model,
+      agent: layer.agent ?? base.agent,
+      tools: layer.tools ?? base.tools,
+      appendSystemPrompt: layer.appendSystemPrompt ?? base.appendSystemPrompt,
+      extensions: layer.extensions !== undefined || base.extensions !== undefined ? { ...base.extensions, ...layer.extensions } : undefined,
+      skills: layer.skills ?? base.skills,
+      subagents: layer.subagents ?? base.subagents,
+      policy: layer.policy !== undefined || base.policy !== undefined ? { ...base.policy, ...layer.policy } : undefined,
+      eventPublication: layer.eventPublication ?? base.eventPublication,
+      workDir: layer.workDir ?? base.workDir,
+    }),
     permission: {
       mode: layer.permission?.mode ?? base.permission.mode,
       // Concatenate rules across layers — scope encodes the originating tier.
@@ -37,6 +51,10 @@ function mergeOne(base: AgentFrameworkConfig, layer: PartialConfig): AgentFramew
     pluginMarketplaces: dedupe([...base.pluginMarketplaces, ...(layer.pluginMarketplaces ?? [])]),
     flags: { ...base.flags, ...layer.flags },
   };
+}
+
+function pickDefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
 function dedupe(values: readonly string[]): string[] {

@@ -2,12 +2,11 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { ToolAccesses } from "../access.ts";
 import { defineTool } from "../define.ts";
-import type { Environment, FileInfo } from "../environment.ts";
-import { checkFreshness, FILE_MODIFIED_MESSAGE, FILE_NOT_READ_MESSAGE, type FileFreshnessLedger } from "../file-freshness.ts";
-import { fileVersionFromInfo, normalizeForCompare } from "../support/environment-ops.ts";
+import type { Environment } from "../environment.ts";
+import { writeTextFile } from "../support/environment-ops.ts";
 import { pathApproval, resolveToolPath } from "../support/tool-path.ts";
-import type { ToolResolveContext, ToolResult, ToolRunContext } from "../types.ts";
-import { detectLineEndingStyle, materializeModelText, type LineEndingStyle } from "./line-endings.ts";
+import type { ToolResult, ToolRunContext } from "../types.ts";
+import { detectLineEndingStyle, materializeModelText } from "./line-endings.ts";
 
 const WriteInput = z.object({
   path: z
@@ -33,14 +32,14 @@ type WriteInput = z.infer<typeof WriteInput>;
 const WRITE_DESCRIPTION = [
   "Overwrite or append to a file, creating the file if needed; the parent directory must already exist. Defaults to overwrite; append adds content to the end without adding a newline. Write does not use the Read/Edit model text view and writes content exactly as provided — `\\n` stays LF, `\\r\\n` stays CRLF. The one exception: appending to a file whose existing lines are all CRLF writes your `\\n` as CRLF too, so the file stays consistent. Use Edit for targeted changes to existing files. When the content is very large, you can split it across multiple calls: write the first chunk with overwrite, then add the remaining chunks with append.",
   "",
-  "For an existing file you must Read it first; Write fails otherwise. Overwrite replaces the ENTIRE file — whatever you did not read is replaced too, so prefer Edit for changing part of a file and keep Write for new files and complete rewrites. Reading the file in full (no paging) also lets Write tell a real concurrent change from a timestamp that merely moved. Creating a missing file does not require a prior Read.",
+  "Overwrite replaces the ENTIRE existing file — know what is in it before overwriting, prefer Edit for changing part of a file, and keep Write for new files and complete rewrites.",
   "Never use Write to talk to the user — output text directly.",
 ].join("\n");
 
 export const writeTool = defineTool({
   name: "Write",
   description: WRITE_DESCRIPTION,
-  params: WriteInput,
+  parameters: WriteInput,
   // Expose path + content so the judge can see what is being written (e.g. a curl|bash
   // payload, an SSH key), projected as `${file_path}: ${content}`.
   toAutoApprovalInput: (args) => `${args.path}: ${args.content}`,
@@ -57,31 +56,11 @@ export const writeTool = defineTool({
 
 async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext): Promise<ToolResult> {
   const environment = ctx.environment;
-  let info: FileInfo | undefined;
-  try {
-    // ONE stat for the whole call: it answers "does this file exist" and supplies the
-    // version the freshness check needs. The three separate stats this replaced each
-    // cost a round trip on a remote backend to re-learn what this one already knows.
-    info = await statOrUndefined(environment, safePath);
-  } catch (error) {
-    return errorResult(error instanceof Error ? error.message : String(error));
-  }
-  // An existing file already proves its parent directory exists; only a new file needs the
-  // parent checked — which is the one case the helpful "create it first" message is for.
-  if (info === undefined) {
-    const parentError = await checkParentDirectory(safePath, environment);
-    if (parentError !== undefined) return errorResult(parentError);
-  }
-
   try {
     const mode = args.mode ?? "overwrite";
 
     let nextContent = args.content;
     let writtenContent = args.content;
-    // Append reads the file to concatenate onto it. Reading BEFORE the freshness check
-    // lets that one read serve both: chunked writes (overwrite, then append, append…)
-    // would otherwise read the whole file twice per chunk.
-    let priorText: string | undefined;
 
     if (mode === "append") {
       // Append composed from the core members: read-concat-write. Fine for the
@@ -89,9 +68,9 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       let prior = "";
       try {
         prior = (await environment.readBytes(safePath)).toString("utf8");
-        priorText = prior;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
       }
       const priorLineEndings = detectLineEndingStyle(prior);
       writtenContent =
@@ -101,89 +80,23 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       nextContent = prior + writtenContent;
     }
 
-    if (info !== undefined) await validateWrite(safePath, info, ctx, priorText);
-
-    // Unconditional: `validateWrite` above already decided this write is allowed against
-    // the file as the stat found it. A file appearing (or changing) between that check
-    // and this write is the gap documented on Environment.writeText — the record below is
-    // what surfaces it to the next Read/Write.
-    const result = await environment.writeText(safePath, nextContent);
-
-    ctx.fileLedger?.recordWrite(safePath, {
-      // Present only where the backend knew it for free (local); elsewhere the record
-      // is decided by the digest below.
-      ...(result.version !== undefined ? { version: result.version } : {}),
-      content: normalizeForCompare(nextContent),
-      lineEndings: toLedgerLineEndings(detectLineEndingStyle(nextContent)),
-      encoding: "utf8",
-    });
+    // No read-before-write gate: whether the model has seen the file (through Read, Bash
+    // or anything else) is its call, not a ledger's. And no stat up front either: the write
+    // itself reports a missing parent, so the parent is only inspected on that failure —
+    // one round trip per Write on a remote backend instead of two.
+    await writeTextFile(environment, safePath, nextContent);
 
     // Report UTF-8 bytes written; string length only equals byte count for pure ASCII.
     const bytesWritten = Buffer.byteLength(writtenContent, "utf8");
     return textResult(`${mode === "append" ? "Appended" : "Wrote"} ${String(bytesWritten)} bytes to ${args.path}`);
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
-    if (code === "ENOENT") {
-      return errorResult(`Failed to write ${args.path}: parent directory does not exist.`);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      const parentError = await checkParentDirectory(safePath, environment);
+      return errorResult(parentError ?? `Failed to write ${args.path}: parent directory does not exist.`);
     }
     return errorResult(error instanceof Error ? error.message : String(error));
   }
-}
-
-function requireLedger(ctx: ToolResolveContext | ToolRunContext): FileFreshnessLedger {
-  if (ctx.fileLedger === undefined) {
-    throw new Error("File freshness tracking unavailable - cannot verify read-before-write safety for this session.");
-  }
-  return ctx.fileLedger;
-}
-
-async function statOrUndefined(environment: Environment, path: string): Promise<FileInfo | undefined> {
-  try {
-    return await environment.fileInfo(path);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
-}
-
-async function validateWrite(
-  path: string,
-  info: FileInfo,
-  ctx: ToolResolveContext | ToolRunContext,
-  knownContent?: string,
-): Promise<void> {
-  const ledger = requireLedger(ctx);
-  // "Has this agent seen the file", not "did it see all of it" — see the same gate in
-  // edit.ts. Overwriting a file the model only paged through DOES discard the part it
-  // never saw — an accepted trade, since the alternative locks Write out of every
-  // file past the Read tool's caps.
-  const record = ledger.get(path);
-  if (record === undefined) throw new Error(FILE_NOT_READ_MESSAGE);
-
-  const verdict = await checkFreshness({
-    ledger,
-    path,
-    current: fileVersionFromInfo(info),
-    currentContent: async () => {
-      // The caller already has the text (append) — re-reading it would double the
-      // I/O of every chunk in a chunked write.
-      if (knownContent !== undefined) return normalizeForCompare(knownContent);
-      try {
-        return normalizeForCompare((await ctx.environment.readBytes(path)).toString(record.encoding));
-      } catch {
-        return undefined;
-      }
-    },
-  });
-  if (verdict.kind === "not-read") throw new Error(FILE_NOT_READ_MESSAGE);
-  if (verdict.kind === "stale") throw new Error(FILE_MODIFIED_MESSAGE);
-}
-
-function toLedgerLineEndings(style: LineEndingStyle): "LF" | "CRLF" | "mixed" {
-  if (style === "crlf") return "CRLF";
-  if (style === "mixed") return "mixed";
-  return "LF";
 }
 
 async function checkParentDirectory(safePath: string, environment: Environment): Promise<string | undefined> {

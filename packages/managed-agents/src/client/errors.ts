@@ -24,8 +24,8 @@ export async function throwApiError(response: Response): Promise<never> {
     // Fall through to HTTP status text.
   }
   throw new ManagedApiClientError(
-    body?.error.message ?? `${response.status} ${response.statusText}`,
+    body?.error?.message ?? `${response.status} ${response.statusText}`,
     response.status,
-    body?.error.code,
+    body?.error?.type,
   );
 }

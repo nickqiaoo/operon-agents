@@ -33,7 +33,11 @@ async function main(): Promise<void> {
   const captured: Array<{ event: string; properties: Record<string, unknown> }> = [];
   telemetry.addAppender(new PostHogAppender({ client: { capture: (m) => void captured.push({ event: m.event, properties: m.properties }) }, app: { name: "test-product", version: "0.0.1" } }));
 
-  const harness = createHarness({ ...faux.harnessModel(), workDir: work, permission: { mode: "yolo" }, telemetry });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    telemetry,
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   try {
     const session = await harness.createSession({ workDir: work });
     await session.prompt("run it");
@@ -63,7 +67,10 @@ async function main(): Promise<void> {
 
   // No `telemetry` option: nothing is subscribed, nothing is counted, nothing throws.
   faux.setResponses([fauxAssistantMessage("silent", { stopReason: "stop" })]);
-  const silent = createHarness({ ...faux.harnessModel(), workDir: work, permission: { mode: "yolo" } });
+  const silent = createHarness({
+    ...faux.harnessModel(),
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   try {
     const s = await silent.createSession({ workDir: work });
     await s.prompt("hi");

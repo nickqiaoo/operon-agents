@@ -7,6 +7,239 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.31] — 2026-11-12
+
+### Added
+
+- A session's setup is data. `createSession`, `resumeSession` and `forkSession` take `config`, a
+  `SessionConfig`: model, the names of registered tools and agents, MCP servers, skills, hooks,
+  permission, extension parameters, subagents and limits. A field given replaces the harness
+  default, a field left out inherits it, `false` turns a capability off and an empty collection
+  means none. It is validated strictly (an unknown key is an error) and stored with the session,
+  so `resumeSession(id)` needs none of it repeated. Only what a session was explicitly given is
+  stored: every other field follows the harness's current defaults.
+- `createHarness({ config })` takes a `HarnessConfig`: `defaults` (a `SessionConfig`), a `policy`
+  no session can override (`strictIsolation`, `allowedMcpTransports`, `allowInlineMcpSecrets`,
+  `permission.allowedModes`, `permission.rules`) and the process settings. `loadHarnessConfig()`
+  reads it from the `config.toml` tiers and `normalizeHarnessConfig(data)` builds it from the same
+  shape held anywhere else, so configuration written in code, in a file or in a database is one
+  object on one path. The file schema gains `model`, `agent`, `tools`, `appendSystemPrompt`,
+  `extensions`, `skills`, `subagents`, `policy`, `eventPublication` and `workDir`
+  (`operon-agents-core`). The harness reads no file on its own.
+- `bindings` on the same three calls carries the live objects one open runs on: `environment`,
+  `mcpCredentials`, `context`, and an `agent`, `model` or `tools` built in code. They are never
+  stored. `bindings.release()` is called exactly once, when the session closes or its open fails.
+- `createHarness({ resolveSession })` supplies what the harness cannot know, once for every
+  session being assembled (created, restored or forked, by the host, a remote client or an
+  extension): live objects, and optionally the configuration itself, which is then final and not
+  stored by the harness. It is told the operation, who asked, the session's identity, the source
+  of a fork or of an extension's create, and what is stored. Throwing refuses the open.
+- `harness.onSessionOpened(listener)` runs for every session after it is assembled and before it
+  can start a run, whichever way it was opened. The function it returns runs when that instance
+  closes; throwing refuses the open. A session is held from birth until its listeners are done, so
+  a message queued meanwhile starts its run only afterwards.
+- `createHarness({ registry: { tools, agents } })` names the code a configuration refers to.
+  `harness.defaults` and `harness.policy` expose what sessions start from and cannot override, and
+  `session.config` / `session.requires` what one session was assembled with.
+- `SessionDependencyMissingError`: a session created on a kind of live object (a sandbox, a
+  credential provider, an agent built in code) that nobody provides when it is reopened or forked.
+  The harness no longer substitutes a default, such as a local environment for a missing sandbox.
+  A session stored before this release has no record of what it ran on, so it is not checked and
+  still falls back as before: a host with sandboxes keeps passing `bindings` on a restore, or
+  registers `resolveSession`, until its older sessions have been reopened once.
+  `SessionPolicyViolationError`: a configuration outside the harness's policy.
+- app-server: `session/new` and `session/fork` accept `config`, validated by the same schema and
+  checked against the server's policy. The `operon-app-server` binary reads the `config.toml`
+  tiers under `--home` and the working directory, with its flags laid over them; `--no-config`
+  skips the files, and `--permission auto` is accepted.
+- `ExtensionDefinition.forkParams: "drop"` keeps an extension's per-session parameters out of a
+  fork, for parameters that identify one session. `host.createSession({ from })` in a `harness`
+  half names the session the new one is created on behalf of.
+- `defaultCapabilities({ session: ctx })` builds the standard bundle for the session a
+  `sessionCapabilities` factory is called for: the MCP servers, skills and hooks its configuration
+  names, the transports policy allows, its isolation and its credentials all come from that
+  context, so a factory that only adds to the bundle cannot drop one of them. It also takes `mcp`
+  and `skills` on their own, and `mcpTransportFactory`. `HarnessInfrastructure.mcpServerConfigs`
+  lets a session whose configuration names one of the process's servers view that connection
+  instead of opening its own.
+- A session's thinking level is stored with it (`session:thinking`), like its model and its
+  permission mode: `setThinking`, or a `thinking` in its configuration, survives a restore
+  (`operon-agents-core`).
+- Live previews on the managed event stream: a connection opened with
+  `event_deltas[]=agent.message` (`sessions.events.stream(id, { event_deltas })`) also gets
+  `event_start` / `event_delta` while a message is generated, under the id the buffered
+  `agent.message` then carries. Previews are best effort and never persisted
+  (`operon-managed-agents`).
+- Managed sessions emit `span.model_request_start` / `span.model_request_end` for each model
+  request, as Claude Managed Agents does. The end comes after the request's `agent.message` and
+  carries `model_usage`; `is_error: true` marks a request that produced no message (failed,
+  retried, cut short), so a client can close a preview that will not be reconciled
+  (`operon-managed-agents`).
+- A `user.custom_tool_result` answering a paused `AskUserQuestion` reaches the tool as an answer
+  to each question it asked, marked freeform, instead of as a bare string
+  (`operon-managed-agents`).
+
+### Changed
+
+- `RunResult` is a union discriminated on `status`. `interruptions` exists only on an interrupted
+  result and is always set, `guardrail` only on a blocked one, and `outputParsed` and
+  `outputParseError` only on a completed one, so a run cut short is no longer parsed. An `error`
+  result now carries `error.message`.
+- `outputParsed` is typed from the agent's `outputType`, through
+  `createSession({ bindings: { agent } })` (and the same on `resumeSession` / `forkSession`) and
+  `Runner.run`. `outputType` must have a `parse` method.
+  An agent built by `defineAgent` with handoffs has `unknown` output, because another agent may
+  give the final answer.
+- `defineTool` is the one way to build a tool: pass `execute` for the simple form or `resolve`
+  for full control. Its schema field is `parameters`, replacing `params`.
+- `HarnessSession.resume(answers)` is now `HarnessSession.respond(answers)`, leaving "resume" to
+  mean reopening a conversation with `resumeSession`.
+- Per-extension session parameters are `config.extensions` (`createSession({ config: {
+  extensions: { [id]: … } } })`), replacing `params`. An extension still reads its own value as
+  `ctx.params`. They are stored in the session's setup (`session:config`); a session stored before
+  that is still read from the old `extensions:params` key.
+- Extension host actions `newSession` and `fork` are now `createSession` and `forkSession`.
+- `registerTool` validates arguments against a plain spec's JSON Schema before `execute`, and a
+  schema that cannot compile fails at registration.
+- A session with no permission mode configured runs in `workspace` instead of `yolo`, as does
+  the app-server binary. `permission` in a configuration holds `mode`, `rules` and `autoApproval`;
+  the judge the `auto` mode consults is `createHarness({ autoApprover })`.
+- `followUp` always returns a receipt and starts a run on an idle session. While a run is going, a
+  follow-up gets a run of its own after the current turn, so the current run's result stays its
+  own. Prompts and follow-ups run in arrival order.
+- `steer`, `followUp`, `steerTo` and `prompt` refuse a closed session or one waiting for an answer
+  with `SessionClosedError` or `SessionInterruptedError`. `steerTo` throws
+  `SteerTargetNotFoundError` instead of returning `undefined`. Harness failures use
+  `HarnessClosedError`, `HarnessBusyError`, `HarnessConfigError`, `SessionNotInterruptedError` and
+  `SessionBusyError` in place of plain errors.
+- Messages sent with `steer` and `followUp` go through input guardrails. A refused one is dropped
+  and reported, and the run continues.
+- `cancel` drops the user's queued `steer` and `followUp` messages, reported as a new
+  `steer.discarded` event. Cron and background messages stay queued.
+- `resumeSession(id)` with no options gets the session: a loaded one is returned as it is, a load
+  in flight is joined (every caller gets the same instance or the same error), and otherwise it is
+  restored from what is stored with it, the harness defaults and `resolveSession`. Given options
+  it only restores an unloaded session, and throws `SessionAlreadyLoadedError` or
+  `SessionAlreadyLoadingError` rather than apply them to an instance that exists. A `config` given
+  on a restore replaces the stored setup. An explicit `permission.mode` beats the stored one, and
+  a `provider/model` id is remembered with the session. `getSession` returns neither a session
+  that is still opening nor one that is closing.
+- A `closeSession` that lands while that session is being loaded cancels the load: whoever awaits
+  it gets `SessionClosedError` instead of a handle that is already closed.
+- A failed `createSession` or `forkSession` removes the record it made, so no empty conversation
+  or orphaned copy is left in `listSessions`. A failed restore leaves the record alone.
+- A session an extension creates takes the working directory and owner of the session it acts
+  from, goes through `resolveSession` and `onSessionOpened` like any other, and is refused when
+  that session runs in an environment of its own and none is supplied for the new one. A fork
+  never inherits its source's environment. Extension `createSession` / `forkSession` take
+  `{ title?, config? }`; a `harness` half's `createSession` rejects an option it does not know.
+- `session.config.mcp` is the complete set of servers a session sees, not an overlay on the
+  harness's: a session that names its servers sees exactly those, and `mcp: false` gives it none.
+  Where a connection comes from (the process's shared set, a directory pool, the session's own) no
+  longer decides what is visible. A host that wants the old union builds it and passes the result.
+- `WorkspaceMcpPool` keeps one set of connections per directory and configuration, each idling on
+  its own clock, so two sessions in one directory that see different servers no longer evict each
+  other's connections.
+- `AppServer` wires sessions through `onSessionOpened`: every session the harness opens is
+  forwarded, including one an extension created, and unwired when that instance closes.
+  `initialize` reports the harness's allowed permission modes. Concurrent `session/resume` and
+  `session/close` are the harness's to settle; a close during a restore cancels it.
+- peers: a teammate is created on behalf of its lead (the lead's directory, owner and execution
+  boundary; the host's `resolveSession` is told its source), `teammates` entries are
+  `{ title?, workDir?, ownerKey?, config? }`, a spawn request carries `creatorSessionId`, and a
+  fork of a teammate does not take its roster seat (`operon-agents-peers`).
+- A multi-tenant `SessionWorker` refuses a session opened on its harness by anything but the
+  worker itself, since it would hold no lease. It requires `config.policy.strictIsolation: true`
+  and `config.eventPublication: "committed"` on the harness and refuses to construct without
+  them, instead of passing both on every open. `ManagedAgentRegistry.resolve` returns
+  `{ config?, bindings? }` — the session's configuration and its live objects — in place of
+  `agent`, `createOptions` and `resumeOptions`; the worker passes both on every open
+  (`operon-managed-agents`).
+- The local preset takes `config` (a `HarnessConfig`) and, given none, reads the `config.toml`
+  tiers under `homeDir` and the working directory itself. It honours the harness's
+  `policy.strictIsolation` and a session's `mcpCredentials`, builds MCP, skills and hooks from the
+  session's configuration, and lets a session store inline MCP secrets
+  (`policy.allowInlineMcpSecrets`), which other hosts refuse.
+- Passing `modelSettings`, `tools`, `appendSystemPrompt` or `maxStepsPerTurn` beside a complete
+  `agent` to `createHarness`, `createSession`, `resumeSession` or `forkSession` throws `HarnessConfigError` instead
+  of being ignored.
+- `Edit` and `Write` no longer require a prior `Read` of an existing file, and no longer refuse
+  a file that changed on disk since it was read. Models often read files through `Bash`, and
+  forcing a second `Read` gained nothing: `Edit` matches `old_string` against the file as it is
+  now, so an edit made from an outdated view fails to match instead of landing in the wrong
+  place. A repeat `Read` of an unchanged file now returns its content instead of a
+  "file unchanged" stub. The stub could point at a `Read` result that a context compaction had
+  already removed.
+- `Environment` has one write member, `writeBytes`. Backends implement `writeBytes` directly
+  instead of the protected `writeBytesRaw` that `BaseEnvironment` used to wrap. Text goes through
+  the `writeTextFile(environment, path, text, { lineEndings })` helper, next to `readTextFile`
+  (`operon-agents-core`, `operon-sandbox`).
+- `Write` no longer stats the target before writing. The parent directory is checked only when
+  the write fails, so a write on a remote backend takes one round trip instead of two.
+
+### Removed
+
+- The flat session options on `createHarness`, `createLocalHarness`, `createSession`,
+  `resumeSession` and `forkSession`. What is data moved into `config`, what is a live object into
+  `bindings`, and what a host states once into `createHarness`:
+
+  | Was | Is |
+  | --- | --- |
+  | `model` (an id) / `model` (a `ChatModel`) | `config.model` / `bindings.model` |
+  | `modelSettings`, `appendSystemPrompt` | `config`, same names |
+  | `agent`, `context`, `tools`, `environment`, `mcpCredentials` | `bindings`, same names; an agent or tool registered in `registry` is named in `config.agent` / `config.tools` |
+  | `subagentProvider: null` / an object | `config.subagents: false` / `bindings.subagentProvider` |
+  | `workflowTool`, `maxConcurrentSubagents` | `config.subagents.workflowTool` / `.maxConcurrent` |
+  | `permission.mode`, `permission.rules` | `config.permission` |
+  | `permission.autoApprover` | `createHarness({ autoApprover })` |
+  | `maxTurns`, `maxStepsPerTurn` | `config.limits` |
+  | `mcpServers` (an overlay) | `config.mcp.servers` (the complete set) |
+  | `extensionParams` | `config.extensions` |
+  | `strictIsolation`, `eventPublication` (per open) | `config.policy.strictIsolation`, `config.eventPublication` (on the harness) |
+  | `workDir` on `createHarness` | `config.workDir` |
+
+  On `createHarness` the session fields live under `config.defaults`. A removed or unknown option
+  is a `HarnessConfigError` that names where it lives now, not a silent no-op: a `permission` or a
+  `strictIsolation` that quietly stopped applying would be a boundary that quietly stopped
+  existing. `SessionCapabilityContext.mcpServers` is gone with the overlay; a factory reads
+  `ctx.config.mcp`, or passes the context to `defaultCapabilities({ session: ctx })`.
+- `createHarness({ sessionHost })` and `AppServerOptions.resumeSession`. A host supplies what a
+  restored session needs through `resolveSession` and wires sessions in `onSessionOpened`; the
+  harness, not the host, joins concurrent restores.
+- The `operon-agents` root no longer re-exports the whole core. It lists what applications use.
+  Everything else moved to `operon-agents/advanced`, built-in tools to `operon-agents/tools`, and
+  engine details such as `setHarnessCloseTimeoutsForTest`, `closeOrphanedTurns` and the cron clock
+  helpers to `operon-agents/internal`. The `llm`, `mcp`, `protocol`, `tools`, `tracing` and
+  `telemetry` namespaces are gone in favor of the subpaths of the same names.
+- `tool()`, replaced by `defineTool`. The `ToolDef` type is replaced by `FunctionToolDef` and
+  `ResolveToolDef`.
+- `RunResult.interruption` and the `RunInterruption` type. Use `interruptions`.
+- The file freshness ledger: `FileFreshnessLedger`, `checkFreshness`, `LEDGER_MAX_ENTRIES`,
+  `FILE_NOT_READ_MESSAGE`, `FILE_MODIFIED_MESSAGE`, `FILE_UNCHANGED_STUB` and their types,
+  `ToolResolveContext.fileLedger` / `ToolRunContext.fileLedger`, and `SessionPort.fileLedgerFor`.
+  The `FileVersion` and `LineEndings` types and `WriteTextResult.version` are gone too, along with
+  the `BaseEnvironment.versionAfterWrite` hook that filled it in (`operon-agents-core`,
+  `operon-sandbox`). The helpers `fileVersionFromInfo`, `normalizeForCompare` and
+  `hashFileContent` are no longer exported from `operon-agents-core/internal`.
+- `Environment.writeText`, `WriteTextOptions` and `WriteTextResult`. Use `writeTextFile`; text
+  is always written as UTF-8. The unused protected `BaseEnvironment.decodeText` is gone too
+  (`decodeText` stays on `operon-agents-core/internal`).
+
+### Fixed
+
+- A session closed by anything other than `session/close` and reopened over the app-server lost
+  its event forwarding and approval handlers, because wiring was remembered by session id.
+- A permission mode given when a session was created is the one it is restored with. It used to
+  be remembered only after a runtime `setPermissionMode`, so a restore fell back to the harness's
+  default. Overriding only `permission.mode` on a session no longer drops the harness's rules.
+- A turn's id counts up over the whole life of its session (`<session>-t1`, `-t2`, `-t3`). The
+  number came from a counter that starts over with every run, so the first turn of every prompt
+  was `-t1`. Anything keyed by turn was affected: the peers `maxOutboundPerTurn` budget was spent
+  once for the whole session instead of once per turn. The count is read back from the
+  `turn.started` records already in the log, and a checkpoint carries it for the turns behind it,
+  so nothing new is stored. A session created before this goes on from the turns its newest
+  checkpoint can still see (`operon-agents-core`, `operon-agents-peers`).
+
 ## [0.1.0-alpha.30] — 2026-11-10
 
 ### Changed

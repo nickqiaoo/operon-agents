@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { AgentRecord, Message, PromptOrigin } from 'operon-agents';
+import type { AgentRecord, PromptOrigin } from 'operon-agents/advanced';
+import type { Message } from 'operon-agents';
 
 import {
   appStateFromRecords,

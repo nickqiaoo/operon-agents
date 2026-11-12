@@ -68,7 +68,7 @@ export function buildMemberTool(network: PeerNetworkHandle, selfId: string, self
   return defineTool({
     name: "Hub",
     description,
-    params: hubInput,
+    parameters: hubInput,
     resolve: (args) => ({
       // Read-only ops are auto-approved by the host's policy; `send` is not — it wakes a peer and
       // spends its budget.

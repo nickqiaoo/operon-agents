@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { createLocalHarness, createModelRuntimeFromConfig, defineModel, loadProviderConfigs, parseModelsResponse, providersConfigPath } from 'operon-agents';
+import { createLocalHarness, defineModel } from 'operon-agents';
+import { createModelRuntimeFromConfig, loadProviderConfigs, parseModelsResponse, providersConfigPath } from 'operon-agents/advanced';
 
 import { buildModelCatalog } from '../src/utils/model-catalog.ts';
 

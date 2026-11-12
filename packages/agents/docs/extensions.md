@@ -18,7 +18,7 @@ const logging: ExtensionDefinition = {
   },
 };
 
-const harness = createHarness({ model, extensions: [logging] });
+const harness = createHarness({ config: { defaults: { model } }, extensions: [logging] });
 ```
 
 Extensions live in `operon-agents`, not `operon-agents-core`. They need reach that only the
@@ -177,7 +177,7 @@ Timeouts: decision points get 30s, observers 1s. Override per extension with `ti
 | | |
 |---|---|
 | `steer(content)` | queue into the **current** turn — answered within the turn in flight |
-| `followUp(content)` | queue for **after** the current turn settles; forces one more turn |
+| `followUp(content)` | send for **after** the current turn settles, as a run of its own; runs right away on an idle session |
 | `record(name, data?)` | append a custom journal record; not model-visible, replays with the session |
 
 ### Run control
@@ -208,9 +208,9 @@ already fixed its registry.
 
 | | |
 |---|---|
-| `newSession({ title? })` | open a new session on the same harness |
-| `fork({ title? })` | fork *this* session (log + state copied) and open it |
-| `openSession(id)` | reopen an existing session |
+| `createSession({ title?, config? })` | open a new session on the same harness. It takes this session's working directory and owner; `config` is its setup as data (`SessionConfig`). An extension has no sandbox or credential to hand over: the host's `resolveSession` supplies live objects, and if this session runs in an environment of its own and none is supplied for the new one, the create is refused |
+| `forkSession({ title?, config? })` | fork *this* session (history and stored setup copied, live objects provided anew) and open it. `config` adjusts the copied setup field by field. An extension that declares `forkParams: "drop"` does not have its parameters copied |
+| `resumeSession(id)` | `harness.resumeSession(id)`: a loaded session is returned as it is, a load in flight is joined, a closed one is restored from what is stored with it and what the host's `resolveSession` supplies |
 | `listSessions()` | |
 | `registerProvider(p)` / `unregisterProvider(id)` | model provider registry |
 | `isIdle()` / `waitForIdle()` | |
@@ -278,26 +278,27 @@ A `session` that throws is isolated: that extension is skipped with a `warning`,
 loads. On teardown, handlers, tools, and injectors registered during `session` are disposed
 automatically.
 
-Extensions are registered once, on the harness; a session varies them with `params`:
+Extensions are registered once, on the harness; a session varies them with `config.extensions`:
 
 ```ts
-createHarness({ model, extensions: [a, b] });                 // every session, from now on
-harness.createSession({ params: { a: { level: 2 }, b: false } }); // a configured, b skipped — this session
+createHarness({ config: { defaults: { model } }, extensions: [a, b] });        // every session, from now on
+harness.createSession({ config: { extensions: { a: { level: 2 }, b: false } } }); // a configured, b skipped — this session
 ```
 
-`params` reaches `session` as `ctx.params` (`session(api, ctx)`) and persists with the session.
+An extension's entry reaches `session` as `ctx.params` (`session(api, ctx)`) and is stored with the
+session's setup, so a later `resumeSession(id)` brings it back. A fork copies it too, unless the
+definition says its parameters identify one session (`forkParams: "drop"`) — a seat, a membership.
 
-The three halves are named for the tier they run at — the same tiers as `createHarness`'s
-`harness` / `workspace` / `session` hooks:
+The two halves are named for the tier they run at:
 
 | Half | Runs | Its result |
 |---|---|---|
 | `harness(host)` | once per process | the service under `id`, in the harness scope |
-| `workspace(host)` | once per workspace key (working directory / tenant), when its first session opens | the service under `id`, in THAT workspace's scope — disposed when its last session closes |
 | `session(api, ctx)` | once per session | teardown |
 
-A definition carries at most one of `harness` / `workspace`; whichever it has, every `session`
-under it gets a handle to the instance as `ctx.shared`, and another extension consumes it by
-naming it in `uses` and receiving it as `ctx.services[name]` — resolved from the consuming
-session's own scope, so a workspace-tier service lands on that session's workspace's instance.
-The host reaches a workspace's instance with `harness.workspaceService(id, { workDir })`.
+There is no tier in between: a shared object is shared by the WHOLE process or built per session.
+When a definition has a `harness` half, every `session` under it gets a handle to the instance as
+`ctx.shared`, and another extension consumes it by naming it in `uses` and receiving it as
+`ctx.services[name]`. The host reaches the same instance with `harness.services.handle(id)`.
+
+The harness half reaches sessions too, for both by-value and file-loaded extensions: `host.resumeSession(id)` is `harness.resumeSession(id)`, and `host.createSession(options)` takes `harness.createSession`'s own options (`title`, `workDir`, `ownerKey`, `config`; an unknown key is an error) plus `from` — the id of the session the new one is created on behalf of, which lends it its directory, owner and execution boundary the way a session-side `createSession` does. Every session an extension opens goes through the host's `resolveSession` and `onSessionOpened`, so it is resolved and wired like any other. No named service and no host callback is needed for any of it.

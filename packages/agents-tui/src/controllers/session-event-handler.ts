@@ -1,13 +1,6 @@
 import type { Component, Focusable } from 'operon-pi-tui';
-import type {
-  AgentEvent,
-  BackgroundTaskInfo,
-  GoalSnapshot,
-  HarnessSession,
-  Message,
-  PromptOrigin,
-  Usage,
-} from 'operon-agents';
+import type { AgentEvent, HarnessSession, Message, Usage } from 'operon-agents';
+import type { BackgroundTaskInfo, GoalSnapshot, PromptOrigin } from 'operon-agents/advanced';
 
 import { MoonLoader } from '../components/chrome/moon-loader.ts';
 import { buildGoalMarker } from '../components/messages/goal-markers.ts';

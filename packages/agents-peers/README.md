@@ -10,7 +10,7 @@ The organizing rule: **capability follows birth, and identity is produced by exp
 
 ## One definition, two channels
 
-peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordinary extension that happens to carry a `workspace` half (its `PeerNetwork`: one roster, mailbox and budget per working directory — or per tenant on a server). A host takes it through whichever channel fits its deployment; nothing about the definition changes.
+peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordinary extension that happens to carry a `harness` half (its `PeerNetwork`: one roster, mailbox and budget for the whole process). A host takes it through whichever channel fits its deployment; nothing about the definition changes.
 
 | | **Server — by value** | **Desktop — from a file** |
 |---|---|---|
@@ -19,7 +19,7 @@ peers is packaged as **one `ExtensionDefinition`, `peers(config)`** — an ordin
 | Shipping a change | new build, rolling restart | `harness.extensions.reload("peers")`; sessions stay open |
 | Reference | `test/e2e-peers-extension.ts` (a) | `examples/peers-extension`, `test/e2e-peers-extension.ts` (b) |
 
-Same code, same tests on both. The framework runs the `workspace` half **once per workspace** and registers that workspace's network as its `peers` service; the extension's `session` runs **per session** and reaches the network only through a stable handle (`shared`). That handle is what lets the file form reload the network under live sessions — and on the server it is a plain registry lookup with nothing dynamic behind it (not replaceable, no loader, no barrier).
+Same code, same tests on both. The framework runs the `harness` half **once per process** and registers that network as its `peers` service; the extension's `session` runs **per session** and reaches the network only through a stable handle (`shared`). That handle is what lets the file form reload the network under live sessions — and on the server it is a plain registry lookup with nothing dynamic behind it (not replaceable, no loader, no barrier).
 
 Which tool a session gets is decided by its **per-session param**, not by wiring: a spawned teammate carries `params.peers = { member }` and gets `Hub`; every other session gets `Team`. Capability follows birth, and a teammate never holds `Team` — it is a member.
 
@@ -30,7 +30,7 @@ import { createHarness } from "operon-agents";
 import { createFilePeerRepo, peers, sharedLabelVisibility } from "operon-agents-peers";
 
 const harness = createHarness({
-  model,
+  config: { defaults: { model } },
   extensions: [
     peers({
       repo: createFilePeerRepo("/var/lib/myapp/peers"),
@@ -45,7 +45,7 @@ const harness = createHarness({
 const lead = await harness.createSession();    // an ordinary session — born holding Team
 ```
 
-`teammates` is the parameter boundary: the host decides what a `coder` teammate *is* — its session options (agent, model, permissions, title) — and the model only ever picks a type and a name. The extension tags each spawned session `params.peers = { member }` itself, so a teammate is born a member with `Hub`. Everything else is the agent's:
+`teammates` is the parameter boundary: the host decides what a `coder` teammate *is* — `{ title?, workDir?, config? }`, where `config` is an ordinary `SessionConfig` (agent, model, permission, MCP servers) — and the model only ever picks a type and a name. The extension tags each spawned session `config.extensions.peers = { member }` itself, so a teammate is born a member with `Hub`. Everything else is the agent's:
 
 ```
 Team(op: "create", name: "db-migration")
@@ -59,35 +59,21 @@ The team label is `team:<creator>:<name>`. That creator segment is stamped by th
 
 A teammate's name is unique **within its team**, not across the roster: its roster id is `<team label>/<name>`, so two teams can each have a `dba`. `Team send` and `Hub send` take the short name (`Team send` adds `team` when the creator has the same name in several teams; a member sees its creator as `lead`, which is reserved). Roster rows carry the `id` for exact addressing whenever it differs from the name.
 
-The `harness` half runs synchronously inside `createHarness`, so the service exists before the first session; `harness.close()` takes it down again (unregister → `close()`). The host reaches the network the same way sessions do — `harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir })` — for `list()`, `stats()`, `reconcile()`.
+The `harness` half runs synchronously inside `createHarness`, so the service exists before the first session; `harness.close()` takes it down again (unregister → `close()`). The host reaches the network the same way sessions do — `harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE)` — for `list()`, `stats()`, `reconcile()`.
 
 ### Desktop: load it from a file
 
-The host writes no peers code: it opens an `extensionDir` and loads. The bundle's default export is the same `peers(config)` — its state lives in the data dir the framework hands the extension (`host.dataDir`, outside the bundle), so it survives a reload and an update:
-
-```
-~/.myapp/extensions/peers/
-  manifest.json     { "id": "peers", "version": "0.1.0", "engine": "0.1.0-alpha.0", "entry": "index.js", "name": "Peers", "description": "…" }
-  index.js          ← esbuild bundle of the file below, operon-agents-peers baked in
-```
+File bundles use the same built-in ExtensionHost capability as by-value extensions; no `uses`
+service and no host callback is needed for waking a closed teammate:
 
 ```ts
-// index.ts — the whole extension
-import { createFilePeerRepo, createMemoryPeerRepo, peers, sharedLabelVisibility } from "operon-agents-peers";
-
-export default peers({
-  repo: ({ dataDir }) => (dataDir !== undefined ? createFilePeerRepo(dataDir) : createMemoryPeerRepo()),   // survives reload and update
-  visibility: sharedLabelVisibility,
-  teammates: { coder: { title: "coder" } },
+const harness = createHarness({
+  config: { defaults: { model } },
+  extensionDir: "~/.myapp/extensions",
 });
-```
-
-```ts
-const harness = createHarness({ model, extensionDir: "~/.myapp/extensions" });
-await harness.extensions!.load("peers");       // loading IS the approval, recorded at the bundle's mtime
-const lead = await harness.createSession();    // from here on, identical to the server form
-// …the bundle changes on disk…
-await harness.extensions!.reload("peers");     // barrier → swap the per-session half + replace the service → release
+await harness.extensions!.load("peers");
+const lead = await harness.createSession();
+await harness.extensions!.reload("peers");
 ```
 
 `reload` is one coordinated act: every session holding the peers half meets at its next run boundary, the half is swapped, the service is replaced (the old network's `close()` runs), and everyone resumes. No session is reopened and no conversation is interrupted; the repo in the extension's data dir carries the roster and mailbox across, so the same lead reaches the same teammate afterwards. Nothing watches the directory — a changed bundle loads only through an explicit `reload`, so an agent with write access cannot plant code that runs on next open. Two rules the bundle keeps: import the framework as types only (it belongs to the host — this package value-imports nothing from it, which is what keeps the bundle free of the core's native transitive deps), and keep state in the repo under `host.dataDir` (the instance is replaceable; a memory repo is wiped by reload). To ship it, `pnpm release` in `examples/peers-extension` produces the zip, its sha256 and an index entry for a download site.
@@ -98,14 +84,31 @@ A host can stand up a team with no model-driven spawn at all — with `peers()` 
 
 ```ts
 const alice = await harness.createSession({
-  params: { peers: { member: { name: "alice", team: "team:host:alpha", type: "lead", description: "Coordinates the work" } } },
+  config: { extensions: { peers: { member: { name: "alice", team: "team:host:alpha", type: "lead", description: "Coordinates the work" } } } },
 });
 const bob = await harness.createSession({
-  params: { peers: { member: { name: "bob", team: "team:host:alpha", type: "dba", description: "Postgres schema and query tuning" } } },
+  config: { extensions: { peers: { member: { name: "bob", team: "team:host:alpha", type: "dba", description: "Postgres schema and query tuning" } } } },
 });
 ```
 
-The param persists with the session, so a `resumeSession` brings `alice` back as a member without repeating it.
+The param is part of the session's stored setup, so a `resumeSession` brings `alice` back as a member without repeating it. It is a seat, not a setting: forking `alice` gives an ordinary session, and the roster keeps pointing at the original.
+
+## Waking, spawning and the host
+
+A message to a teammate whose session is closed brings it back through `harness.resumeSession(id)`:
+restored from what is stored with it, plus whatever the host's `resolveSession` supplies (a sandbox,
+credentials, context). There is no peers-specific callback to configure, and nothing peers selects
+itself. If the host refuses the restore, the send reports `unreachable` and the message stays in
+the mailbox for redelivery; the session is never opened on defaults instead.
+
+A teammate is created **on behalf of its lead**: it takes the lead's working directory and owner
+unless the `teammates` entry says otherwise, the host's `resolveSession` is told the lead is its
+`source`, and where the lead runs in an environment of its own the teammate must be given one too —
+otherwise the spawn is refused rather than run on the harness's machine. A `teammates` entry is
+data: `{ title?, workDir?, ownerKey?, config? }`.
+
+A standalone `createPeerNetwork` still requires its `resumeSession` function, which a custom
+extension supplies as `(id) => host.resumeSession(id)`.
 
 **State a `type` and `description`.** They are what makes the roster useful: without them every teammate lists as an anonymous `member` and a model has no way to tell who to ask. The `name` is what teammates address it by — unique within `team` (its roster id is `<team>/<name>`).
 
@@ -115,9 +118,9 @@ The param persists with the session, so a `resumeSession` brings `alice` back as
 |---|---|
 | `api.onEvent` | root-frame lifecycle — who is awake, asleep, gone |
 | `api.registerTool` | the `Team` tool (creators) and the `Hub` tool (members) |
-| `actions.openSession` | reach another session, reopening it if it was closed |
+| host `resumeSession(id)` | get a session, loading it if needed — the harness joins concurrent loads and asks the host's `resolveSession` for what cannot be stored |
 | `handle.steerTo(address, …)` | hand a message to one specific frame |
-| `workspace` half / `ctx.shared` | the extension's `workspace` publishes one network per workspace; `session` reaches it through a method-only handle that outlives any one instance — what makes `reload` and `services.replace` land without touching a session |
+| `harness` half / `ctx.shared` | the extension's `harness` publishes one network per process; `session` reaches it through a method-only handle that outlives any one instance — what makes `reload` and `services.replace` land without touching a session |
 
 ## Design notes
 
@@ -149,8 +152,8 @@ peers({
   repo: createFilePeerRepo("/var/lib/myapp/peers"),   // omit for the in-memory default; the bundle's own folder in the file form
 });
 
-// On startup, once at least one session holding a peers extension is open:
-const net = harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir });
+// On startup, once the extension is registered (by value) or loaded (from a file):
+const net = harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE);
 const { redelivered, dropped } = await net.reconcile();
 ```
 
@@ -184,7 +187,7 @@ peers({
   budget: { maxWakes: 200, maxTotalTokens: 5_000_000 },
 });
 
-await harness.workspaceService<PeerNetworkHandle>(PEERS_SERVICE, { workDir }).stats();
+await harness.services.handle<PeerNetworkHandle>(PEERS_SERVICE).stats();
 // → { agents: [{ agentId, messagesSent, messagesReceived, wakes, totalTokens, cost }], totals }
 ```
 

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Message, TextContent, ThinkingContent, Usage } from "../protocol/index.ts";
 import type { LoadedToolSchema, PromptOrigin } from "../store/origin.ts";
 import type { ToolInputRequest, ToolResult, ToolUpdate } from "../tool/types.ts";
+import type { SteerDiscardReason } from "../loop/steer.ts";
 import type { PendingRunInterrupt } from "../loop/interruption.ts";
 import type { ModelSettings } from "../llm/model.ts";
 import type { SkillActivationTrigger } from "../capabilities/skills/service.ts";
@@ -191,6 +192,9 @@ export type AgentEventBody =
       readonly origin: PromptOrigin;
       readonly message: Message;
     }
+  // A queued message the model will never see: the run was cancelled, or a guardrail refused it.
+  // It closes that `steer.queued` the way a consumption would.
+  | { readonly type: "steer.discarded"; readonly steerId: string; readonly reason: SteerDiscardReason }
   // ── Tool lifecycle ──
   // `parentToolCallId` marks a NESTED call: one a running tool made through
   // `ToolRunContext.dispatch` (a Code Mode program calling `tools.Read(...)`). It has no
@@ -306,7 +310,8 @@ export type LifecycleEvent = Extract<
         | "turn.step.reset"
         | "turn.step.interrupted"
         | "turn.paused"
-        | "steer.queued";
+        | "steer.queued"
+        | "steer.discarded";
     }
   | {
       readonly type:
@@ -361,7 +366,7 @@ export type PersistedLifecycleEvent = Extract<
   LifecycleEvent,
   | { readonly type: "agent.started" | "agent.ended" }
   | { readonly type: "turn.started" | "turn.ended" | "turn.paused" }
-  | { readonly type: "steer.queued" }
+  | { readonly type: "steer.queued" | "steer.discarded" }
   | { readonly type: "tool.detachable" | "tool.suspended" }
 >;
 

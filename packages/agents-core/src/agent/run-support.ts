@@ -202,7 +202,7 @@ export function finalText(messages: readonly Message[]): string {
     .join("");
 }
 
-export function mapTerminalStatus(stop: TurnStopReason): RunStatus {
+export function mapTerminalStatus(stop: TurnStopReason): "completed" | "aborted" | "error" {
   switch (stop) {
     case "end_turn":
     case "max_tokens":

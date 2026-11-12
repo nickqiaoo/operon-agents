@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "./faux.ts";
 import { defineModel, LocalEnvironment, PluginManager } from "operon-agents-core";
-import { createHarness, defaultCapabilities } from "../src/index.ts";
+import { createHarness } from "../src/index.ts";
+import { defaultCapabilities } from "../src/advanced.ts";
 
 // Verifies the framework "self-drives" from a PluginManager: pass it to defaultCapabilities and a
 // harness session gets the plugin's skills + MCP — and that a capability FACTORY is invoked fresh
@@ -45,14 +46,11 @@ async function main(): Promise<void> {
   let factoryCalls = 0;
   const harness = createHarness({
     ...faux.harnessModel(),
-    homeDir: home,
-    workDir: work,
-    permission: { mode: "yolo" },
-    // Fresh capabilities per session, self-driven from the plugin manager.
     sessionCapabilities: () => {
       factoryCalls += 1;
       return defaultCapabilities({ pluginManager: pm });
     },
+    config: { workDir: work, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
 
   try {

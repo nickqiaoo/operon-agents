@@ -3,28 +3,21 @@
  * it refuses.
  *
  * Covers:
- *  - both registries are told which session they resolve for — at create (environment) and on
- *    every open (both) — with the server-stamped `ownerKey` and the client's `metadata`;
+ *  - both registries are told which session they resolve for on every open — and never at
+ *    create — with the server-stamped `ownerKey` and the client's `metadata`;
  *  - a multi-tenant worker refuses: an environment registry that resolves no environment, a
  *    harness holding process-wide MCP connections, an stdio MCP server, a token read from the
  *    process environment. Each refusal reaches `onError` and nothing runs;
  *  - a custom `session` hook that ignores `strictIsolation` and connects stdio anyway is caught
- *    after the open, and the session is closed before it runs.
+ *    after the open, and the session is closed before it runs;
+ *  - a session opened on the worker's harness by anything but the worker (an extension creating
+ *    one, or waking a closed one) holds no lease and is refused.
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createHarness,
-  createMcpServers,
-  DiskSessionRepository,
-  mcpServersCapability,
-  LocalEnvironment,
-  type AgentEvent,
-  type Capability,
-  type HarnessInfrastructure,
-  type McpServerConfig,
-} from "operon-agents";
+import { createHarness, LocalEnvironment, type McpServerConfig } from "operon-agents";
+import { createMcpServers, DiskSessionRepository, mcpServersCapability, type Capability, type HarnessInfrastructure } from "operon-agents/advanced";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
 import { SessionService } from "../src/server/session-service.ts";
 import { SessionWorker } from "../src/server/session-worker.ts";
@@ -53,7 +46,7 @@ async function scenario(name: string, options: FixtureOptions) {
   mkdirSync(work);
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("hello", { stopReason: "stop" })]);
-  const repository = new DiskSessionRepository(root);
+  const repository = new DiskSessionRepository(join(root, "sessions"));
   const metadataStore = new MemoryManagedSessionMetadataStore();
   const environmentCalls: ManagedSessionContext[] = [];
   const agentCalls: ManagedSessionContext[] = [];
@@ -68,17 +61,17 @@ async function scenario(name: string, options: FixtureOptions) {
   const agents: ManagedAgentRegistry = {
     resolve: (_ref, session) => {
       agentCalls.push(session);
-      return options.mcpServers !== undefined ? { resumeOptions: { mcpServers: options.mcpServers } } : {};
+      return options.mcpServers !== undefined ? { config: { mcp: { servers: options.mcpServers } } } : {};
     },
   };
   const harness = createHarness({
     infrastructure: () => ({ sessionRepository: repository, ...(options.parts ?? {}) }),
     ...(options.session !== undefined ? { sessionCapabilities: options.session } : {}),
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
+    config: { eventPublication: "committed", policy: { strictIsolation: true }, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
-  const sessionWork = new MemorySessionWork({ repository });
-  const service = new SessionService({ repository, metadataStore, environments, work: sessionWork, ownerKey: "tenant-a" });
+  const sessionWork = new MemorySessionWork();
+  const service = new SessionService({ metadataStore, work: sessionWork, ownerKey: "tenant-a" });
   const errors: string[] = [];
   const worker = new SessionWorker({
     harness,
@@ -88,19 +81,25 @@ async function scenario(name: string, options: FixtureOptions) {
     agents,
     work: sessionWork,
     renewIntervalMs: 30,
+    claimIntervalMs: 20,
     onError: (error) => { errors.push(error instanceof Error ? error.message : String(error)); },
   });
-  const session = await service.create({ agent: "default", environment: "default", metadata: { vault: "vlt-a" } });
-  await service.appendEvent(session.id, { input: "hi" });
-  await worker.drain(session.id);
-  const events: readonly AgentEvent[] = (await service.listEvents(session.id, { limit: 200 })).data;
-  const replied = events.some((e) => e.type === "message.appended" && e.message.role === "assistant");
+  const session = await service.create({ agent: "default", environment_id: "default", metadata: { vault: "vlt-a" } });
+  check(`${name}: create resolves nothing`, environmentCalls.length === 0 && agentCalls.length === 0);
+  await service.sendEvents(session.id, { events: [{ type: "user.message", content: [{ type: "text", text: "hi" }] }] });
+  worker.start();
+  const deadline = Date.now() + 5_000;
+  let replied = false;
+  while (Date.now() < deadline && errors.length === 0 && !replied) {
+    replied = (await service.listEvents(session.id, { limit: 200 })).data.some((e) => e.type === "session.status_idle");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   const cleanup = async (): Promise<void> => {
-    await harness.close();
+    await worker.stop();
     faux.unregister();
     rmSync(root, { recursive: true, force: true });
   };
-  return { sessionId: session.id, environmentCalls, agentCalls, errors, replied, cleanup };
+  return { sessionId: session.id, environmentCalls, agentCalls, errors, replied, cleanup, harness };
 }
 
 const tenantOf = (context: ManagedSessionContext | undefined, sessionId: string): boolean =>
@@ -111,9 +110,16 @@ async function main(): Promise<void> {
   {
     const s = await scenario("profile-ok", { perSessionEnvironment: true });
     check("multi-tenant: a session with its own environment runs", s.replied && s.errors.length === 0);
-    check("identity: the environment registry is told at create", tenantOf(s.environmentCalls[0], s.sessionId));
-    check("identity: and again on open", s.environmentCalls.length === 2 && tenantOf(s.environmentCalls[1], s.sessionId));
+    check("identity: the environment registry is told on open, once", s.environmentCalls.length === 1 && tenantOf(s.environmentCalls[0], s.sessionId));
     check("identity: the agent registry is told on open", s.agentCalls.length === 1 && tenantOf(s.agentCalls[0], s.sessionId));
+    // What an extension reaches for — the harness itself — opens nothing here: no lease, no tenant.
+    const before = (await s.harness.listSessions()).length;
+    const unleased = (error: unknown): boolean => error instanceof Error && error.message.includes("without a lease");
+    const environment = new LocalEnvironment(tmpdir());
+    check("lease: a session created outside the worker is refused", await s.harness.createSession({ bindings: { environment } }).then(() => false, unleased));
+    check("lease: and leaves no record behind", (await s.harness.listSessions()).length === before);
+    await s.harness.closeSession(s.sessionId);
+    check("lease: a managed session is not woken outside the worker either", await s.harness.resumeSession(s.sessionId, { bindings: { environment } }).then(() => false, unleased) && s.harness.getSession(s.sessionId) === undefined);
     await s.cleanup();
   }
 

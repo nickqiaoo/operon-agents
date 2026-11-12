@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { ContextBreakdown } from 'operon-agents';
+import type { ContextBreakdown } from 'operon-agents/advanced';
 
 import { BoxPanelComponent } from '../src/components/messages/box-panel.ts';
 import { buildContextReportLines, ContextPanelComponent } from '../src/components/messages/context-panel.ts';

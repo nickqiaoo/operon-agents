@@ -8,6 +8,11 @@
  * `session/event` notifications and (2) wires `setApprovalHandler` /
  * `setQuestionHandler` to reverse-RPC requests — the cross-process form of the
  * in-process `approvalHandlers` map.
+ *
+ * Both happen in the harness's open hook (`onSessionOpened`), so every session the harness opens
+ * is wired — one a client asked for, one an extension created, one a teammate's message woke —
+ * before it can run, and unwired when that instance closes. Joining concurrent resumes and racing
+ * a close are the harness's (`resumeSession` / `closeSession`); nothing here keeps its own table.
  */
 import type { AgentEvent, ApprovalResponse, QuestionResult } from "operon-agents-core";
 import type { Harness, HarnessSession } from "../harness.ts";
@@ -67,7 +72,8 @@ import {
 } from "./params.ts";
 
 export interface AppServerOptions {
-  readonly harness: Harness;
+  /** Any harness: the server only forwards, so the host's context and output types do not matter. */
+  readonly harness: Harness<any, any>;
   readonly transport: JsonRpcTransport;
   readonly serverInfo?: { readonly name: string; readonly version: string };
   /** Diagnostics sink. Never write protocol to this — it is for human logs. */
@@ -80,13 +86,8 @@ interface PendingReverse {
   reject(error: unknown): void;
 }
 
-interface WiredSession {
-  readonly session: HarnessSession;
-  readonly unsubscribe: () => void;
-}
-
 export class AppServer {
-  private readonly harness: Harness;
+  private readonly harness: Harness<any, any>;
   private readonly transport: JsonRpcTransport;
   private readonly serverInfo: { readonly name: string; readonly version: string };
   private readonly log: (message: string) => void;
@@ -95,7 +96,10 @@ export class AppServer {
   private clientApproval = false;
   private clientQuestion = false;
 
-  private readonly wired = new Map<string, WiredSession>();
+  /** Every live session instance this server forwards, with what undoes it. Keyed by INSTANCE: a
+   *  session closed and reopened under the same id is a new instance and is wired anew. */
+  private readonly wired = new Map<HarnessSession, () => void>();
+  private readonly stopWiring: () => void;
   private readonly reversePending = new Map<JsonRpcId, PendingReverse>();
   private reverseSeq = 0;
 
@@ -104,6 +108,9 @@ export class AppServer {
     this.transport = opts.transport;
     this.serverInfo = opts.serverInfo ?? { name: "operon-app-server", version: "0.0.0" };
     this.log = opts.log ?? (() => undefined);
+    // Sessions opened before this server existed are picked up here; every later one by the hook.
+    for (const session of this.harness.sessions.values()) this.wire(session);
+    this.stopWiring = this.harness.onSessionOpened((session) => this.wire(session));
   }
 
   /** Run the dispatch loop until the transport closes. */
@@ -121,8 +128,8 @@ export class AppServer {
       pending.reject(new RpcError(ErrorCode.RequestCancelled, "transport closed"));
     }
     this.reversePending.clear();
-    for (const { unsubscribe } of this.wired.values()) unsubscribe();
-    this.wired.clear();
+    this.stopWiring();
+    for (const unwire of [...this.wired.values()]) unwire();
     await this.harness.close();
   }
 
@@ -204,10 +211,12 @@ export class AppServer {
     this.clientApproval = params.clientCapabilities?.approval ?? false;
     this.clientQuestion = params.clientCapabilities?.question ?? false;
     this.initialized = true;
+    // Sessions wired before the client said what it can answer get their handlers now.
+    for (const session of this.wired.keys()) this.installHandlers(session);
     return {
       protocolVersion: PROTOCOL_VERSION,
       serverInfo: this.serverInfo,
-      permissionModes: ["manual", "workspace", "yolo"],
+      permissionModes: this.harness.policy.permission?.allowedModes ?? ["manual", "workspace", "yolo", "auto"],
       invokableMethods: INVOKABLE_METHODS,
     };
   }
@@ -215,35 +224,39 @@ export class AppServer {
   // ── Fleet ───────────────────────────────────────────────────────────────────
 
   private async onSessionNew(params: SessionNewParams): Promise<SessionInfo> {
+    // A client sends data only: names and settings, checked against the harness's policy like any
+    // other configuration. Live objects are the host's to provide (`resolveSession`).
+    const config = params.model !== undefined ? { ...params.config, model: params.model } : params.config;
     const session = await this.harness.createSession({
       ...(params.workDir !== undefined ? { workDir: params.workDir } : {}),
       ...(params.title !== undefined ? { title: params.title } : {}),
+      ...(config !== undefined ? { config } : {}),
+      origin: { kind: "remote" },
     });
-    if (params.model !== undefined) session.setModel(params.model);
-    this.wireSession(session);
     return { sessionId: session.id, workDir: session.workDir };
   }
 
   private async onSessionResume(params: SessionResumeParams): Promise<SessionInfo> {
+    // A client reconnecting may find its session mid-run, so this attaches or reopens: a loaded
+    // session is returned as it is, a load in flight is joined.
     const session = await this.harness.resumeSession(params.sessionId);
-    this.wireSession(session);
     return { sessionId: session.id, workDir: session.workDir };
   }
 
   private async onSessionFork(params: SessionForkParams): Promise<SessionInfo> {
     const session = await this.harness.forkSession(params.sessionId, {
       ...(params.title !== undefined ? { title: params.title } : {}),
+      ...(params.config !== undefined ? { config: params.config } : {}),
+      origin: { kind: "remote" },
     });
-    this.wireSession(session);
     return { sessionId: session.id, workDir: session.workDir };
   }
 
   private async onSessionClose(params: SessionRef): Promise<Record<string, never>> {
-    const id = params.sessionId;
-    this.wired.get(id)?.unsubscribe();
-    this.wired.delete(id);
-    this.rejectReverseForSession(id, "session closed");
-    await this.harness.closeSession(id);
+    // Whatever the session is still asking the client is abandoned first, so its run can settle;
+    // closing the instance then runs its unwiring (the open hook's cleanup).
+    this.rejectReverseForSession(params.sessionId, "session closed");
+    await this.harness.closeSession(params.sessionId);
     return {};
   }
 
@@ -271,7 +284,7 @@ export class AppServer {
     const session = this.requireSession(params);
     // Continue a run that durably interrupted for approval: apply the answers and resume.
     // Like prompt, resolves when the run reaches its next stop (which may interrupt again).
-    return session.resume(params.answers);
+    return session.respond(params.answers);
   }
 
   private onSessionSteer(params: SessionSteerParams): SessionSteerResult {
@@ -281,8 +294,7 @@ export class AppServer {
 
   private onSessionFollowUp(params: SessionFollowUpParams): SessionFollowUpResult {
     const session = this.requireSession(params);
-    const receipt = session.followUp(params.text);
-    return receipt === null ? { accepted: false } : { accepted: true, steerId: receipt.steerId };
+    return { accepted: true, steerId: session.followUp(params.text).steerId };
   }
 
   private onSessionCancel(params: SessionRef): Record<string, never> {
@@ -327,11 +339,28 @@ export class AppServer {
 
   // ── Per-session wiring: events out, reverse-RPC for approvals/questions ──────
 
-  private wireSession(session: HarnessSession): void {
-    if (this.wired.has(session.id)) return;
+  /** Forward one session instance's events and answer its approvals/questions over the wire.
+   *  Returns what undoes it, which the harness runs when that instance closes. */
+  private wire(session: HarnessSession): () => void {
+    const existing = this.wired.get(session);
+    if (existing !== undefined) return existing;
     const unsubscribe = session.onEvent((event: AgentEvent) => {
       this.transport.send(notification(Method.SessionEvent, event));
     });
+    const unwire = (): void => {
+      if (!this.wired.delete(session)) return;
+      unsubscribe();
+      // Whatever this instance was still asking the client can never be answered now.
+      this.rejectReverseForSession(session.id, "session closed");
+    };
+    this.wired.set(session, unwire);
+    this.installHandlers(session);
+    return unwire;
+  }
+
+  /** Only what the client declared it can answer: without a handler a run that needs approval
+   *  pauses durably instead of asking a client that would not reply. */
+  private installHandlers(session: HarnessSession): void {
     if (this.clientApproval) {
       session.setApprovalHandler((req) => this.callClient(Method.ClientRequestApproval, session.id, { sessionId: session.id, request: req } satisfies ClientRequestApprovalParams) as Promise<ApprovalResponse>);
     }
@@ -345,7 +374,6 @@ export class AppServer {
         ) as Promise<QuestionResult>,
       );
     }
-    this.wired.set(session.id, { session, unsubscribe });
   }
 
   // ── Reverse-RPC (server → host request) ─────────────────────────────────────

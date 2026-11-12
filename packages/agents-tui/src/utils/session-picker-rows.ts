@@ -1,4 +1,4 @@
-import type { SessionSummary } from 'operon-agents';
+import type { SessionSummary } from 'operon-agents/advanced';
 
 import type { SessionRow } from '../components/dialogs/session-picker.ts';
 

@@ -11,7 +11,7 @@
  * so a crash in between leaves a resolvable-but-unused id rather than a durable session the
  * managed layer cannot name.
  */
-import type { PgExecutor } from "operon-agents";
+import type { PgExecutor } from "operon-agents/advanced";
 import type { ManagedSessionMetadata, ManagedSessionMetadataStore } from "./metadata.ts";
 
 export interface PgManagedSessionMetadataStoreOptions {
@@ -35,6 +35,15 @@ export class PgManagedSessionMetadataStore implements ManagedSessionMetadataStor
   constructor(options: PgManagedSessionMetadataStoreOptions) {
     this.pool = options.pool;
     this.table = options.table ?? "managed_session_metadata";
+  }
+
+  async list(): Promise<readonly ManagedSessionMetadata[]> {
+    const { rows } = await this.pool.query(`SELECT document FROM ${this.table}`);
+    return rows.flatMap(row => { const value = parse(row.document); return value ? [value] : []; });
+  }
+
+  async update(metadata: ManagedSessionMetadata): Promise<void> {
+    await this.pool.query(`UPDATE ${this.table} SET document = $2 WHERE session_id = $1`, [metadata.sessionId, JSON.stringify(metadata)]);
   }
 
   async get(sessionId: string): Promise<ManagedSessionMetadata | undefined> {

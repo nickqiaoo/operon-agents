@@ -1,4 +1,4 @@
-import type { CommandInfo } from 'operon-agents';
+import type { CommandInfo } from 'operon-agents/advanced';
 
 import type { TuiSlashCommand } from './types.ts';
 

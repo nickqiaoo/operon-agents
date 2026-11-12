@@ -35,7 +35,7 @@ import {
   type ToolSchema,
 } from "../index.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import { tool } from "../tool/define.ts";
+import { defineTool } from "../tool/define.ts";
 import { withToolLoads } from "../tool/search/catalog.ts";
 import { acceptsMidConvoToolChanges } from "../llm/define-model.ts";
 import { runSearchQuery, SEARCH_TOOL_NAME } from "../tool/search/deferral.ts";
@@ -61,7 +61,7 @@ const CATALOG: ToolSchema[] = [
   t("NotebookEdit", "Edit a Jupyter notebook cell."),
 ];
 
-const slackTool = tool({
+const slackTool = defineTool({
   name: "mcp__slack__send_message",
   description: "Send a message to a Slack channel.",
   parameters: z.object({ text: z.string() }),

@@ -2,7 +2,8 @@
  * `ModelManager.register` / `resolveDecision`: what a host's picked model actually sends. The HTTP
  * layer is stubbed; the URLs, auth headers and dialects are the real ones pi produces.
  */
-import { DecisionModel, createModelManager, type ChatModel, type ModelProviderRegistration } from "../src/index.ts";
+import { DecisionModel, type ModelProviderRegistration } from "../src/advanced.ts";
+import { createModelManager, type ChatModel } from "../src/index.ts";
 
 type ChatModelConfig = Omit<ModelProviderRegistration, "id" | "models" | "allowUnlisted"> & { readonly provider: string; readonly model: string };
 

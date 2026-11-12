@@ -8,7 +8,8 @@
 // mapping: when someone @-mentions the bot on the PR, the bot reads the body and knows which
 // session to continue (src/flows.ts). No table, nothing to lose on a restart.
 
-import { defineTool, ToolAccesses, type ExtensionDefinition, type Tool } from "operon-agents";
+import { defineTool, type ExtensionDefinition, type Tool } from "operon-agents";
+import { ToolAccesses } from "operon-agents/advanced";
 import { z } from "zod";
 import { PR_TOOL } from "./agent-config.ts";
 import { git, readMarker } from "./checkout.ts";
@@ -39,7 +40,7 @@ export function submitPullRequestTool(github: GitHubApi): Tool {
     name: PR_TOOL,
     description:
       "Push the current branch (HEAD) to GitHub and open a pull request for it, or push new commits to the pull request already open for the branch. Commit first: the working tree must be clean. Never targets the default branch.",
-    params: Input,
+    parameters: Input,
     resolve: (args) => ({
       approvalRule: PR_TOOL,
       accesses: ToolAccesses.none(),

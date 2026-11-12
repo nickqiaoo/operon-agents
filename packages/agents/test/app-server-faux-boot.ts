@@ -21,10 +21,9 @@ const faux = registerFauxProvider();
 faux.setResponses([fauxAssistantMessage("hello from subprocess", { stopReason: "stop" })]);
 
 const harness = createHarness({
-  ...faux.harnessModel(),
-  workDir: process.cwd(),
-  permission: { mode: "yolo" },
-});
+    ...faux.harnessModel(),
+    config: { workDir: process.cwd(), defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
 
 const transport = nodeStreamTransport(process.stdin, process.stdout, {
   onParseError: (line, error) => process.stderr.write(`boot parse error: ${String(error)} :: ${line}\n`),

@@ -234,6 +234,9 @@ export function durableStateKey(owner: string, address: string): StateKey {
 /** The session's own current state in KV: its runtime permission state, and its running usage
  *  (the root agent's turns only — see `SessionSummary.usage`). */
 export const SESSION_PERMISSION_KEY: StateKey = "session:permission";
+/** The session's own model, when it is a `provider/model` id. A built `ChatModel` cannot be stored. */
+export const SESSION_THINKING_KEY: StateKey = "session:thinking";
+export const SESSION_MODEL_KEY: StateKey = "session:model";
 export const SESSION_USAGE_KEY: StateKey = "session:usage";
 
 /** KV key under which a store indexes a shard's newest checkpoint. An index, not state:

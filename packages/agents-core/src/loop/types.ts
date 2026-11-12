@@ -95,6 +95,8 @@ export interface TurnResult {
   readonly handoff?: HandoffSignal;
   readonly pending?: readonly PendingInterrupt[];
   readonly suspensions?: readonly ToolCallSuspension[];
+  /** Why the turn failed, when `stopReason` is "error" and the reason is not on an assistant message. */
+  readonly errorMessage?: string;
 }
 
 export interface StepHookContext {

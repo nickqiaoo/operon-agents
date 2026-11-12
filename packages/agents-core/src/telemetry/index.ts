@@ -32,6 +32,6 @@ export { nullTelemetryAppender, ConsoleAppender, MemoryAppender } from "./append
 export type { TelemetryAppender, TelemetryEvent, ConsoleAppenderOptions } from "./appender.ts";
 export { createTelemetryService, noopTelemetryService } from "./service.ts";
 export type { TelemetryService, TelemetryServiceOptions, TelemetryContext } from "./service.ts";
-export { redactTelemetryString, redactTelemetryProperties, capTelemetryText, REDACTED_EMAIL, REDACTED_URL, REDACTED_PATH } from "./redact.ts";
+export { redactTelemetryString, redactTelemetryProperties, capTelemetryText } from "./redact.ts";
 export { subscribeTelemetryProjection } from "./projection.ts";
 export type { TelemetryProjectionOptions } from "./projection.ts";

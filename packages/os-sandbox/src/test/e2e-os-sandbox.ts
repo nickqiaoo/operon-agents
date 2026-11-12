@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { OsSandbox, SandboxedLocalEnvironment } from "../index.ts";
-import { LocalEnvironment } from "operon-agents-core";
+import { LocalEnvironment, writeTextFile } from "operon-agents-core";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: string): void {
@@ -98,8 +98,8 @@ async function testEnabledContract(): Promise<void> {
   check("withCwd: sibling cwd writable", siblingWrite.exitCode === 0 && existsSync(join(sub, "from-sibling.txt")), siblingWrite.stderr);
 
   // Direct file I/O is NOT the sandbox's business (path-access policy owns it).
-  await environment.writeText(join(work, "direct.txt"), "direct\n");
-  check("io: writeText untouched", (await environment.readBytes(join(work, "direct.txt"))).toString("utf8") === "direct\n");
+  await writeTextFile(environment, join(work, "direct.txt"), "direct\n");
+  check("io: direct writes untouched", (await environment.readBytes(join(work, "direct.txt"))).toString("utf8") === "direct\n");
 
   // Timeout/kill machinery still works through the wrapper.
   const slow = await environment.run(["/bin/sh", "-c", "sleep 30"], { timeoutMs: 1_500 });

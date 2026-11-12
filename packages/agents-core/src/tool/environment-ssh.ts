@@ -563,7 +563,7 @@ export class SshEnvironment extends BaseEnvironment {
   /** Streamed via SFTP + the shared scanner: bounded memory ("read the last 10 lines"
    *  no longer pulls the whole file into a Buffer), same range/byte-cap semantics as
    *  LocalEnvironment's streaming path — replaces the whole-file BaseEnvironment composition. */
-  protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
+  async writeBytes(path: string, data: Buffer): Promise<void> {
     await sftpWriteFile(this.sftp, this.resolvePath(path), data);
   }
 

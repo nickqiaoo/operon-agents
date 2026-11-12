@@ -51,7 +51,7 @@ await sandbox.dispose(); // on shutdown
 
 Only local environments are wrapped — SSH and vendor-sandbox environments run their
 commands elsewhere, so this layer deliberately does not touch them. Direct
-file I/O (`readBytes`/`writeText`/…) is also untouched: those are the
+file I/O (`readBytes`/`writeBytes`/…) is also untouched: those are the
 framework's own code paths, gated by its path-access policy; the OS sandbox
 exists for arbitrary *commands*, which have no such gate.
 

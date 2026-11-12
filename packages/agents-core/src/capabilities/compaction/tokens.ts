@@ -13,6 +13,7 @@ export function estimateTokensForMessage(message: Message): number {
   for (const part of message.content) {
     if (typeof part === "string") chars += part.length;
     else if (part.type === "text") chars += part.text.length;
+    else if (part.type === "thinking") chars += part.thinking.length;
     else if (part.type === "toolCall") chars += JSON.stringify(part.arguments ?? {}).length + part.name.length;
     else chars += 16; // images/other parts: a flat nominal cost
   }

@@ -1,4 +1,5 @@
-import type { AgentRecord, BackgroundTaskInfo, Message, PromptOrigin, ToolCall } from 'operon-agents';
+import type { AgentRecord, BackgroundTaskInfo, PromptOrigin, ToolCall } from 'operon-agents/advanced';
+import type { Message } from 'operon-agents';
 
 import type { AppState, BackgroundAgentMetadata, ToolCallBlockData, TranscriptEntry } from '../types.ts';
 import { isTerminalBackgroundTask } from './background-task-status.ts';

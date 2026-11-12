@@ -36,7 +36,10 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
     fauxAssistantMessage("started the helper", { stopReason: "stop" }),
     fauxAssistantMessage("acknowledged the helper's result", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -88,7 +91,10 @@ async function concurrentSettlesFoldIntoOneTurn(): Promise<void> {
     fauxAssistantMessage("started both", { stopReason: "stop" }),
     fauxAssistantMessage("saw both results", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -127,7 +133,6 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
 
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{
       id: "run-gate",
       session(api) {
@@ -139,6 +144,7 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
@@ -167,7 +173,10 @@ async function steerToIdleGoesThroughTheBus(): Promise<void> {
     fauxAssistantMessage("first", { stopReason: "stop" }),
     fauxAssistantMessage("answered the peer", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -197,7 +206,14 @@ async function steerToIdleGoesThroughTheBus(): Promise<void> {
   );
   check(
     "steerTo: a subagent frame that is not running stays unreachable",
-    session.steerTo("main/nobody", "hi", { kind: "external", source: "peer", channel: "follow_up" }, { id: "pm_2" }) === undefined,
+    (() => {
+      try {
+        session.steerTo("main/nobody", "hi", { kind: "external", source: "peer", channel: "follow_up" }, { id: "pm_2" });
+        return false;
+      } catch (error) {
+        return (error as Error).name === "SteerTargetNotFoundError";
+      }
+    })(),
   );
 
   await session.close();

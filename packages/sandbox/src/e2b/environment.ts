@@ -3,7 +3,6 @@ import type {
   DirEntry,
   OsInfo,
   FileInfo,
-  FileVersion,
   Environment,
   ByteRange,
   RunCommandOptions,
@@ -245,23 +244,6 @@ export class E2BEnvironment extends SandboxEnvironment {
   }
 
   /**
-   * The version a write produced, from one `getInfo` — the same source `fileInfo` reads, so the
-   * two compare equal. Without it every E2B write left the read-state record versionless, and
-   * the next Write had to download the file to compare contents. Symlinked targets report
-   * nothing: their `fileInfo` comes from `stat(1)`, a different source.
-   */
-  protected override async versionAfterWrite(path: string): Promise<FileVersion | undefined> {
-    const getInfo = this.sandbox.files.getInfo;
-    if (getInfo === undefined) return undefined;
-    try {
-      const entry = await getInfo.call(this.sandbox.files, this.resolve(path));
-      return entry.symlinkTarget === undefined ? mtimeOf(entry) : undefined;
-    } catch {
-      return undefined; // the write succeeded; this only costs the fast path
-    }
-  }
-
-  /**
    * One `files.list()` round trip — the vendor listing already carries each entry's kind, so there
    * is no stat per entry. A symlink is reported as `"symlink"` (lstat semantics, per `DirEntry`)
    * from its `symlinkTarget`.
@@ -320,7 +302,7 @@ export class E2BEnvironment extends SandboxEnvironment {
     return sliceRange(bytes, range);
   }
 
-  protected async writeBytesRaw(path: string, data: Buffer): Promise<void> {
+  async writeBytes(path: string, data: Buffer): Promise<void> {
     await this.sandbox.files.write(this.resolve(path), toArrayBuffer(data));
   }
 

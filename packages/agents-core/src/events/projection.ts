@@ -207,6 +207,8 @@ interface AgentState {
   messages: Message[];
   origins: (PromptOrigin | undefined)[];
   turn?: TurnState;
+  /** Turns started at this address so far, over the whole life of the session. */
+  turns: number;
   pendingSteers: ProjectedPendingSteer[];
   usage?: Usage;
   lastEventAt?: number;
@@ -233,6 +235,12 @@ export interface FrameCheckpoint {
     readonly toolCalls: readonly ProjectedToolCall[];
     readonly paused?: readonly PendingRunInterrupt[];
   };
+  /**
+   * How many turns had started at this address, the open one included. The next turn's number
+   * comes from it, and the `turn.started` records it counts are behind the checkpoint. Absent on
+   * a checkpoint written before turns were numbered across runs.
+   */
+  readonly turns?: number;
   readonly pendingSteers: readonly ProjectedPendingSteer[];
   readonly usage?: Usage;
 }
@@ -316,10 +324,15 @@ export class SessionProjection {
     return this.agents.has(address);
   }
 
+  /** How many turns have started at `address` in everything folded so far. */
+  turnsStarted(address: string): number {
+    return this.agents.get(address)?.turns ?? 0;
+  }
+
   /** `address`'s durable lifecycle state, for a checkpoint of its shard. */
   frameCheckpoint(address: string): FrameCheckpoint {
     const state = this.agents.get(address);
-    if (state === undefined) return { live: false, pendingSteers: [] };
+    if (state === undefined) return { live: false, turns: 0, pendingSteers: [] };
     const turn = state.turn;
     return {
       ...(state.agent !== undefined ? { agent: state.agent } : {}),
@@ -337,6 +350,7 @@ export class SessionProjection {
             },
           }
         : {}),
+      turns: state.turns,
       pendingSteers: [...state.pendingSteers],
       ...(state.usage !== undefined ? { usage: state.usage } : {}),
     };
@@ -447,7 +461,7 @@ export class SessionProjection {
   private stateFor(address: string): AgentState {
     const existing = this.agents.get(address);
     if (existing !== undefined) return existing;
-    const created: AgentState = { address, live: false, messages: [], origins: [], pendingSteers: [] };
+    const created: AgentState = { address, live: false, messages: [], origins: [], turns: 0, pendingSteers: [] };
     this.agents.set(address, created);
     return created;
   }
@@ -491,6 +505,7 @@ export class SessionProjection {
         state.turn = undefined;
         break;
       case "turn.started":
+        state.turns += 1;
         state.turn = {
           turnId: event.turnId,
           ...(event.origin !== undefined ? { origin: event.origin } : {}),
@@ -610,6 +625,9 @@ export class SessionProjection {
           origin: event.origin,
           message: event.message,
         });
+        break;
+      case "steer.discarded":
+        state.pendingSteers = state.pendingSteers.filter((pending) => pending.steerId !== event.steerId);
         break;
       case "tool.call.started": {
         const turn = state.turn;
@@ -731,6 +749,7 @@ function seedFrame(state: AgentState, frame: FrameCheckpoint | undefined): void 
   if (frame.agent !== undefined) state.agent = frame.agent;
   if (frame.parentToolCallId !== undefined) state.parentToolCallId = frame.parentToolCallId;
   state.live = frame.live;
+  state.turns = frame.turns ?? 0;
   if (frame.turn !== undefined) {
     state.turn = {
       turnId: frame.turn.turnId,

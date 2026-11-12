@@ -30,7 +30,7 @@
  * fails inside it instead — the same as with no journal.
  */
 import { z } from "zod";
-import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, searchDeferredTools, ToolAccesses } from "operon-agents-core";
+import { asTaskRegistrar, CodeBackgroundTask, defineTool, prepareBackgroundLog, searchDeferredTools, ToolAccesses, writeTextFile } from "operon-agents-core";
 import type { ApprovalResponse, ImageContent, Environment, NestedCallInterrupt, Tool, ToolResult, ToolResultContent, ToolRunContext, ToolSchema } from "operon-agents-core";
 import { briefOf, renderToolDeclarations, scriptNames } from "./declarations.ts";
 import { BACKGROUND_PARAM_DESCRIPTION, CODE_PARAM_DESCRIPTION, DESCRIPTION_PARAM_DESCRIPTION, RUN_CODE_NAME } from "./prompt.ts";
@@ -157,7 +157,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
   return defineTool({
     name: RUN_CODE_NAME,
     description: options.description,
-    params: RunCodeInput,
+    parameters: RunCodeInput,
     // The program is what the `auto`-mode judge should read; each nested call is judged on its own.
     toAutoApprovalInput: (args) => args.code,
     resolve(args) {
@@ -486,7 +486,7 @@ class TaskLog {
     if (!this.dirty) return;
     this.dirty = false;
     const content = `${this.lines.join("\n")}\n`;
-    this.chain = this.chain.then(() => this.environment.writeText(this.path, content)).then(() => undefined, () => undefined);
+    this.chain = this.chain.then(() => writeTextFile(this.environment, this.path, content)).then(() => undefined, () => undefined);
   }
 
   /** Write everything out and wait for it; the log is complete when this resolves. */

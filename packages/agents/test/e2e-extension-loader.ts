@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { createExtensionLoader, createHarness, type Message } from "../src/index.ts";
+import { createExtensionLoader } from "../src/advanced.ts";
+import { createHarness, type Message } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -70,7 +71,10 @@ faux.setResponses([
   fauxAssistantMessage(fauxToolCall("PluginEcho", { value: "hi" }), { stopReason: "toolUse" }),
   fauxAssistantMessage("v2 done", { stopReason: "stop" }),
 ]);
-const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
 const session = await harness.createSession();
 {
   const definition = await loader.load("echo-plugin");

@@ -1,5 +1,6 @@
 import type { Component, Focusable } from 'operon-pi-tui';
-import type { Harness, HarnessSession, ModelRuntime } from 'operon-agents';
+import type { Harness, HarnessSession } from 'operon-agents';
+import type { ModelRuntime } from 'operon-agents/advanced';
 
 import type { ColorToken, ResolvedTheme, ThemeName } from '../theme/index.ts';
 import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/tui.ts';

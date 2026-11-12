@@ -4,7 +4,7 @@
  * The shape this serves is an API-backed agent on a server: no filesystem (`NullEnvironment`),
  * a few tools that call the host's own backend, and the caller's identity in `context`.
  *
- *  A. `tool()` — `execute` sees the run's context, on a session with no environment
+ *  A. `defineTool` with `execute` — sees the run's context, on a session with no environment
  *  B. `defineTool()` — `resolve` sees it too, so a plan (its approval rule) can depend on it
  *  C. a subagent's tools see the root run's context
  *  D. resume — the context is the RESUMING call's, never journaled from the paused one
@@ -12,7 +12,7 @@
  */
 import { strict as assert } from "node:assert";
 import { z } from "zod";
-import { defineAgent, defineTool, getInterruptionState, MemoryStore, NullEnvironment, Runner, tool } from "../index.ts";
+import { defineAgent, defineTool, getInterruptionState, MemoryStore, NullEnvironment, Runner } from "../index.ts";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
 
 interface Caller {
@@ -24,11 +24,11 @@ const model = faux.getChatModel()!;
 
 const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode: "yolo" } }) });
 
-// ── A. tool() execute ────────────────────────────────────────────────────────────
+// ── A. defineTool execute ────────────────────────────────────────────────────────────
 {
   const seen: (Caller | undefined)[] = [];
   let environmentName: string | undefined;
-  const getOrder = tool({
+  const getOrder = defineTool({
     name: "get_order",
     description: "look up an order",
     parameters: z.object({ orderId: z.string() }),
@@ -47,7 +47,7 @@ const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode:
   assert.equal(result.status, "completed", `A status: ${result.status}`);
   assert.deepEqual(seen, [{ userId: "alice" }], "A: execute did not see the run's context");
   assert.equal(environmentName, new NullEnvironment().name, "A: expected the no-filesystem environment");
-  console.log("A OK — tool() execute sees RunOptions.context on a NullEnvironment session");
+  console.log("A OK — defineTool execute sees RunOptions.context on a NullEnvironment session");
 }
 
 // ── B. defineTool() resolve + run, and a typed context ───────────────────────────
@@ -57,7 +57,7 @@ const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode:
   const refund = defineTool<z.ZodObject<{ amount: z.ZodNumber }>, Caller>({
     name: "refund",
     description: "refund the caller",
-    params: z.object({ amount: z.number() }),
+    parameters: z.object({ amount: z.number() }),
     resolve: (args, ctx) => {
       // Typed: `ctx.context` is `Caller | undefined` here, no cast.
       const rule = `refund(${ctx.context?.userId}:${args.amount})`;
@@ -86,7 +86,7 @@ const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode:
 // ── C. a subagent's tools ────────────────────────────────────────────────────────
 {
   const seen: (Caller | undefined)[] = [];
-  const whoami = tool({
+  const whoami = defineTool({
     name: "whoami",
     description: "who is calling",
     parameters: z.object({}),
@@ -118,7 +118,7 @@ const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode:
   const confirm = defineTool({
     name: "confirm",
     description: "ask, then act",
-    params: z.object({}),
+    parameters: z.object({}),
     resolve: () => ({
       approvalRule: "confirm",
       run: async (ctx) => {
@@ -151,7 +151,7 @@ const runner = new Runner<Caller>({ session: () => ({ permissionOptions: { mode:
 // ── E. no context ────────────────────────────────────────────────────────────────
 {
   let hasKey: boolean | undefined;
-  const probe = tool({
+  const probe = defineTool({
     name: "probe",
     description: "probe",
     parameters: z.object({}),

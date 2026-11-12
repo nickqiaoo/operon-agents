@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { createLocalHarness, createModelRuntimeFromConfig, defineModel } from 'operon-agents';
+import { createLocalHarness, defineModel } from 'operon-agents';
+import { createModelRuntimeFromConfig } from 'operon-agents/advanced';
 
 import { getVersion } from './app/version.ts';
 import { helpText, parseCliArgs } from './cli.ts';

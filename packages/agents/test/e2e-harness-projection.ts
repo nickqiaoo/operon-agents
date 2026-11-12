@@ -29,7 +29,6 @@ async function main(): Promise<void> {
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{
       id: "projection-gate",
       session(api) {
@@ -40,6 +39,7 @@ async function main(): Promise<void> {
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
 
   const session = await harness.createSession();
@@ -93,10 +93,10 @@ async function main(): Promise<void> {
   {
     const repository = new MemorySessionRepository();
     const crashHarness = createHarness({
-      infrastructure: () => ({ sessionRepository: repository }),
-      ...faux.harnessModel(),
-      permission: { mode: "yolo" },
-    });
+    infrastructure: () => ({ sessionRepository: repository }),
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     const crashed = await crashHarness.createSession();
     const id = crashed.id;
     await crashed.close();
@@ -185,7 +185,11 @@ async function main(): Promise<void> {
       },
     };
     faux.setResponses([fauxAssistantMessage("counted", { stopReason: "stop" })]);
-    const harness2 = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" }, infrastructure: () => ({ sessionRepository: repo }) });
+    const harness2 = createHarness({
+    ...faux.harnessModel(),
+    infrastructure: () => ({ sessionRepository: repo }),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     const counted = await harness2.createSession();
     const { store } = stores.get(counted.id)!;
     check("open: full-log readRecords happens exactly once", store.reads === 1);

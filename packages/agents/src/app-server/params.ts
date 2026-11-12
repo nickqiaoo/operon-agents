@@ -5,7 +5,7 @@
  * handler touches it. A miss is an `InvalidParams` error that names the field.
  */
 import { z } from "zod";
-import type { Message, QuestionItem } from "operon-agents-core";
+import { SessionConfigSchema, type Message, type QuestionItem, type SessionConfig } from "operon-agents-core";
 import { ErrorCode, INVOKABLE_METHODS } from "./protocol.ts";
 import { RpcError } from "./codec.ts";
 import type {
@@ -35,14 +35,18 @@ export const InitializeParamsSchema = z.object({
   clientCapabilities: z.object({ approval: z.boolean().optional(), question: z.boolean().optional() }).optional(),
 });
 
+/** The one session-configuration schema, as every other entry point validates it. */
+const sessionConfig = SessionConfigSchema.transform((value) => value as SessionConfig).optional();
+
 export const SessionNewParamsSchema = z.object({
   workDir: z.string().optional(),
   title: z.string().optional(),
   model: z.string().optional(),
+  config: sessionConfig,
 });
 
 export const SessionResumeParamsSchema = SessionRefSchema;
-export const SessionForkParamsSchema = z.object({ ...sessionRef, title: z.string().optional() });
+export const SessionForkParamsSchema = z.object({ ...sessionRef, title: z.string().optional(), config: sessionConfig });
 export const SessionCloseParamsSchema = SessionRefSchema;
 export const SessionCancelParamsSchema = SessionRefSchema;
 

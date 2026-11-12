@@ -7,7 +7,7 @@
 import type { Component } from 'operon-pi-tui';
 
 import { BoxPanelComponent } from './box-panel.ts';
-import type { ContextBreakdown } from 'operon-agents';
+import type { ContextBreakdown } from 'operon-agents/advanced';
 
 import { currentTheme } from '../../theme/index.ts';
 import { formatTokenCount, ratioSeverity, renderProgressBar, usagePercent } from '../../app/utils/usage/usage-format.ts';

@@ -1,4 +1,5 @@
-import type { AgentEvent, BackgroundTaskInfo } from 'operon-agents';
+import type { AgentEvent } from 'operon-agents';
+import type { BackgroundTaskInfo } from 'operon-agents/advanced';
 
 import { MAIN_AGENT_ID } from '../constant/tui.ts';
 import type { BackgroundAgentMetadata, ToolCallBlockData, ToolResultBlockData, TranscriptEntry } from '../types.ts';

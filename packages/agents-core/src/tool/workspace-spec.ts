@@ -11,6 +11,7 @@
  * being reimplemented per vendor.
  */
 import type { Environment } from "./environment.ts";
+import { writeTextFile } from "./support/environment-ops.ts";
 
 export type WorkspaceEntry =
   | { readonly type: "dir"; readonly children?: Readonly<Record<string, WorkspaceEntry>> }
@@ -117,7 +118,7 @@ async function materializeEntry(
     }
     case "file": {
       await environment.mkdir(parentOf(environment, target), { parents: true });
-      await environment.writeText(target, entry.content, {
+      await writeTextFile(environment, target, entry.content, {
         ...(entry.lineEndings !== undefined ? { lineEndings: entry.lineEndings } : {}),
       });
       return;
@@ -125,7 +126,7 @@ async function materializeEntry(
     case "host_file": {
       const reader = requireReader(options, target);
       await environment.mkdir(parentOf(environment, target), { parents: true });
-      // writeBytes, not writeText: a host file may be an image, a binary, or text in an
+      // writeBytes, not writeTextFile: a host file may be an image, a binary, or text in an
       // encoding we have no business guessing at. Decoding to UTF-8 here corrupted every
       // one of those, silently.
       await environment.writeBytes(target, await reader.readFile(entry.src));

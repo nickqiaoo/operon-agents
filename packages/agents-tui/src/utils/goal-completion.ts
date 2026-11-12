@@ -1,4 +1,4 @@
-import type { GoalSnapshot } from 'operon-agents';
+import type { GoalSnapshot } from 'operon-agents/advanced';
 
 import { formatTokenCount } from '../app/utils/usage/usage-format.ts';
 

@@ -12,7 +12,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider, type Context, offeredToolNames } from "./faux.ts";
-import { createHarness, createLocalHarness, createMcpServers, defaultCapabilities, mcpServersCapability, type HarnessInfrastructure, type McpServersHandle } from "../src/index.ts";
+import { createHarness, createLocalHarness } from "../src/index.ts";
+import { createMcpServers, defaultCapabilities, mcpServersCapability, type HarnessInfrastructure, type McpServersHandle } from "../src/advanced.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -52,10 +53,8 @@ async function main(): Promise<void> {
     let shared: McpServersHandle | undefined;
 
     const harness = createHarness({
-      ...faux.harnessModel(),
-      workDir: dir,
-      permission: { mode: "yolo" },
-      infrastructure: async () => {
+    ...faux.harnessModel(),
+    infrastructure: async () => {
         const servers = createMcpServers(
           { ws: { transport: "http", url: "http://ws.example" }, dup: { transport: "http", url: "http://dup.example" } },
           { transportFactory: transport("ws_tool", ws) },
@@ -64,15 +63,12 @@ async function main(): Promise<void> {
         shared = servers;
         return { mcpServers: servers, close: async () => { wsShutdowns += 1; await servers.shutdown(); } };
       },
-      // What `localHarnessOptions` wires, minus the transport injection tests need.
-      sessionCapabilities: (ctx) => [
-        ...defaultCapabilities({ shared: shared !== undefined ? { mcpServers: shared } : {} }).filter((c) => c.name !== "mcp"),
-        mcpServersCapability(ctx.mcpServers ?? {}, {
-          transportFactory: transport("own_tool", own),
-          ...(shared !== undefined ? { sharedServers: shared } : {}),
-        }),
-      ],
-    });
+    sessionCapabilities: (ctx) => defaultCapabilities({
+      shared: { mcpServers: shared!, mcpServerConfigs: { ws: { transport: "http", url: "http://ws.example" }, dup: { transport: "http", url: "http://dup.example" } } },
+      mcp: ctx.config.mcp, mcpTransportFactory: transport("own_tool", own),
+    }),
+    config: { workDir: dir, defaults: { ...faux.harnessModel().config.defaults, mcp: { servers: { ws: { transport: "http", url: "http://ws.example" }, dup: { transport: "http", url: "http://dup.example" } } }, permission: { mode: "yolo" } } }
+  });
 
     // ── a session with no servers of its own: the shared view, unchanged ──
     const plain = await harness.createSession({ workDir: dir });
@@ -84,12 +80,12 @@ async function main(): Promise<void> {
     // ── a session that brings its own, one of them shadowing a workspace name ──
     const wsConnectsBefore = ws.connects;
     const overlay = await harness.createSession({
-      workDir: dir,
-      mcpServers: { own: { transport: "http", url: "http://own.example" }, dup: { transport: "http", url: "http://own-dup.example" } },
-    });
+    workDir: dir,
+    config: { mcp: { servers: { own: { transport: "http", url: "http://own.example" }, dup: { transport: "http", url: "http://own-dup.example" } } } }
+  });
     check("overlay: the session's own servers connect for this session", own.connects === 2 && own.closes === 0);
     check("overlay: the shared servers are not reconnected for it", ws.connects === wsConnectsBefore);
-    check("overlay: listMcpServers merges both tiers, each name once", (overlay.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "dup,own,ws");
+    check("overlay: listMcpServers exposes exactly the configured set", (overlay.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "dup,own");
     check("overlay: every merged server reads as connected", (overlay.mcp?.list() ?? []).every((v) => v.status === "connected"));
     check("shadow: a reused name resolves to the session's server", (await overlay.mcp?.listTools("dup") ?? []).some((t) => t.name === "own_tool"));
 
@@ -102,7 +98,7 @@ async function main(): Promise<void> {
     await overlay.prompt("hi");
     check("shadow: the shadowed workspace tools never reach the model", !offered.includes("mcp__dup__ws_tool"));
     check("shadow: the session's tools take that name instead", offered.includes("mcp__dup__own_tool"));
-    check("overlay: unshadowed tools from both tiers reach the model", offered.includes("mcp__ws__ws_tool") && offered.includes("mcp__own__own_tool"));
+    check("overlay: only configured tools reach the model", !offered.includes("mcp__ws__ws_tool") && offered.includes("mcp__own__own_tool"));
 
     const ownConnectsBefore = own.connects;
     await overlay.core.requireService("mcp").reconnect("dup");
@@ -136,20 +132,18 @@ async function main(): Promise<void> {
     };
 
     const pinned = createHarness({
-      ...faux.harnessModel(),
-      workDir: dir,
-      permission: { mode: "yolo" },
-      infrastructure: pinnedParts,
-      // No `sharedServers` passed: this session is pinned to its own, and must not be backfilled.
-      sessionCapabilities: (ctx) => [
+    ...faux.harnessModel(),
+    infrastructure: pinnedParts,
+    sessionCapabilities: (ctx) => [
         ...defaultCapabilities({ shared: {} }).filter((c) => c.name !== "mcp"),
-        mcpServersCapability(ctx.mcpServers ?? {}, { transportFactory: transport("own_tool", pinOwn) }),
+        mcpServersCapability((ctx.config.mcp && ctx.config.mcp.servers) || {}, { transportFactory: transport("own_tool", pinOwn) }),
       ],
-    });
+    config: { workDir: dir, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     const pinnedSession = await pinned.createSession({
-      workDir: dir,
-      mcpServers: { own: { transport: "http", url: "http://own.example" } },
-    });
+    workDir: dir,
+    config: { mcp: { servers: { own: { transport: "http", url: "http://own.example" } } } }
+  });
     check("pin: the session lists only its own servers", (pinnedSession.mcp?.list() ?? []).map((v) => v.name).join(",") === "own");
     check("pin: the shared set connected anyway — it is the harness's, not this session's to skip", pinWs.connects === 1);
 
@@ -172,15 +166,14 @@ async function main(): Promise<void> {
     // than quietly resolving the very set it was told to ignore.
     const misassemblyLogs: string[] = [];
     const misassembled = createHarness({
-      ...faux.harnessModel(),
-      workDir: dir,
-      permission: { mode: "yolo" },
-      infrastructure: () => ({ logger: { log: (_level, message, fields) => misassemblyLogs.push(`${message} ${JSON.stringify(fields ?? {})}`) } }),
-      sessionCapabilities: () => [
+    ...faux.harnessModel(),
+    infrastructure: () => ({ logger: { log: (_level, message, fields) => misassemblyLogs.push(`${message} ${JSON.stringify(fields ?? {})}`) } }),
+    sessionCapabilities: () => [
         ...defaultCapabilities({ shared: {} }).filter((c) => c.name !== "mcp"),
         mcpServersCapability({}),
       ],
-    });
+    config: { workDir: dir, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
     const misassembled2 = await misassembled.createSession({ workDir: dir });
     // A failed provision is fault-isolated: the capability is simply absent for this session.
     // What must NOT happen is the fallback resolving the workspace set we were told to ignore.
@@ -189,19 +182,21 @@ async function main(): Promise<void> {
     await misassembled2.close();
     await misassembled.close();
 
-    // ── the default local preset actually consumes `createSession({ mcpServers })` ──
+    // ── the local preset reads the session's configuration: its servers replace the preset's ──
     const local = await createLocalHarness({
-      ...faux.harnessModel(),
-      workDir: dir,
-      homeDir,
-      permission: { mode: "yolo" },
-      loadDiskProfiles: false,
-      mcpServers: { wsdown: { transport: "http", url: "http://127.0.0.1:1/ws" } },
-    });
-    const session = await local.createSession({ workDir: dir, mcpServers: { sessdown: { transport: "http", url: "http://127.0.0.1:1/sess" } } });
-    // Both are unreachable; what matters is that both TIERS are represented, i.e. the preset's
-    // session factory read `ctx.mcpServers` at all.
-    check("preset: createLocalHarness lists workspace + session servers together", (session.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "sessdown,wsdown");
+    ...faux.harnessModel(),
+    homeDir,
+    loadDiskProfiles: false,
+    mcpServers: { wsdown: { transport: "http", url: "http://127.0.0.1:1/ws" } },
+    config: { workDir: dir, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
+    const session = await local.createSession({
+    workDir: dir,
+    config: { mcp: { servers: { sessdown: { transport: "http", url: "http://127.0.0.1:1/sess" } } } }
+  });
+    // Both are unreachable; what matters is which is listed: the session named its servers, so it
+    // sees exactly those and not the preset's default set.
+    check("preset: createLocalHarness replaces the default servers", (session.mcp?.list() ?? []).map((v) => v.name).sort().join(",") === "sessdown");
     await session.close();
     await local.close();
 

@@ -41,7 +41,7 @@ function steerToolCapability(origin: SteerOrigin): Capability {
       defineTool({
         name: "EnqueueSteer",
         description: "Enqueue a steer message into the bus.",
-        params: z.object({ text: z.string() }),
+        parameters: z.object({ text: z.string() }),
         resolve: (args) => ({
           approvalRule: "EnqueueSteer",
           accesses: ToolAccesses.none(),
@@ -225,7 +225,7 @@ async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<vo
       defineTool({
         name: "EnqueueSteer",
         description: "Enqueue a steer message into the bus.",
-        params: z.object({ text: z.string() }),
+        parameters: z.object({ text: z.string() }),
         resolve: (args) => ({
           approvalRule: "EnqueueSteer",
           accesses: ToolAccesses.none(),

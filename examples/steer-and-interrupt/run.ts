@@ -34,11 +34,15 @@ if (!process.env.ANTHROPIC_API_KEY) {
 mkdirSync(WORK, { recursive: true });
 
 const harness = await createLocalHarness({
-  model: MODEL,
   homeDir: join(process.cwd(), ".agent-home"),
-  workDir: WORK,
-  permission: { mode: "manual" }, // every tool call routes to the approval handler
-  appendSystemPrompt: "Prefer the file tools over shell when possible.",
+  config: {
+    workDir: WORK,
+    defaults: {
+      model: MODEL,
+      permission: { mode: "manual" },
+      appendSystemPrompt: "Prefer the file tools over shell when possible.",
+    },
+  },
 });
 const session = await harness.createSession();
 

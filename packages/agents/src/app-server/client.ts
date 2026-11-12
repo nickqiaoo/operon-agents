@@ -7,7 +7,7 @@
  * in-process for tests.
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, ApprovalRequest, ApprovalResponse, QuestionRequest, QuestionResult, RunResult, SessionSummary } from "operon-agents-core";
+import type { AgentEvent, ApprovalRequest, ApprovalResponse, QuestionRequest, QuestionResult, RunResult, SessionConfig, SessionSummary } from "operon-agents-core";
 import {
   classify,
   isFailure,
@@ -170,13 +170,13 @@ export class AppServerClient {
     });
   }
 
-  newSession(opts: { workDir?: string; title?: string; model?: string } = {}): Promise<SessionInfo> {
+  newSession(opts: { workDir?: string; title?: string; model?: string; config?: SessionConfig } = {}): Promise<SessionInfo> {
     return this.request<SessionInfo>(Method.SessionNew, opts);
   }
   resumeSession(sessionId: string): Promise<SessionInfo> {
     return this.request<SessionInfo>(Method.SessionResume, { sessionId });
   }
-  forkSession(sessionId: string, opts: { title?: string } = {}): Promise<SessionInfo> {
+  forkSession(sessionId: string, opts: { title?: string; config?: SessionConfig } = {}): Promise<SessionInfo> {
     return this.request<SessionInfo>(Method.SessionFork, { sessionId, ...opts });
   }
   listSessions(): Promise<readonly SessionSummary[]> {

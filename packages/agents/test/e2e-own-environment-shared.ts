@@ -11,7 +11,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "./faux.ts";
-import { createHarness, createMcpServers, LocalEnvironment } from "../src/index.ts";
+import { createHarness, LocalEnvironment } from "../src/index.ts";
+import { createMcpServers } from "../src/advanced.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -25,10 +26,8 @@ async function main(): Promise<void> {
   const faux = registerFauxProvider();
   try {
     const harness = createHarness({
-      ...faux.harnessModel(),
-      workDir: dir,
-      permission: { mode: "yolo" },
-      infrastructure: async () => {
+    ...faux.harnessModel(),
+    infrastructure: async () => {
         const servers = createMcpServers(
           { ws: { transport: "http", url: "http://ws.example" } },
           {
@@ -44,12 +43,16 @@ async function main(): Promise<void> {
         await servers.connect({ sessionId: "" });
         return { mcpServers: servers, close: () => servers.shutdown() };
       },
-    });
+    config: { workDir: dir, defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
 
     const onHarness = await harness.createSession({ workDir: dir });
     check("harness env: the session sees the process-shared servers", (onHarness.mcp?.list() ?? []).map((v) => v.name).join(",") === "ws");
 
-    const sandboxed = await harness.createSession({ workDir: sandboxDir, environment: new LocalEnvironment(sandboxDir) });
+    const sandboxed = await harness.createSession({
+    workDir: sandboxDir,
+    bindings: { environment: new LocalEnvironment(sandboxDir) }
+  });
     check("own env: the session does not get the process-shared servers", (sandboxed.mcp?.list() ?? []).length === 0);
 
     check("own env: the shared set still serves the other session", (onHarness.mcp?.list() ?? []).length === 1);

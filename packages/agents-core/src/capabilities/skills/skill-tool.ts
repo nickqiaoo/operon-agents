@@ -40,7 +40,7 @@ export function skillTool(registry: SkillRegistry, options: SkillToolOptions = {
     name: "Skill",
     description:
       "Load a registered skill's instructions into the conversation. Pass the skill `name` (and optional `args`); its body is returned for you to follow. Choose a skill by its description / when-to-use from the available-skills listing. Only inline skills are loadable here.",
-    params: z.object({
+    parameters: z.object({
       skill: z.string().describe("The skill name to load (from the available-skills listing)."),
       args: z.string().optional().describe("Optional free-text arguments passed to the skill."),
     }),

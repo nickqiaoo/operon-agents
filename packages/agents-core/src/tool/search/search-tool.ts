@@ -8,7 +8,7 @@
  * declares them to pi as a `toolsAdded` system message right after the load.
  */
 import { z } from "zod";
-import { tool } from "../define.ts";
+import { defineTool } from "../define.ts";
 import { ToolAccesses } from "../access.ts";
 import type { Tool } from "../types.ts";
 import type { ToolSchema } from "../../protocol/index.ts";
@@ -45,7 +45,7 @@ export function buildSearchTool(
 ): Tool {
   // Neither later catalog mutations nor tool execution may rewrite a recorded definition.
   const catalog = structuredClone(deferred);
-  return tool({
+  return defineTool({
     name: SEARCH_TOOL_NAME,
     description: DESCRIPTION,
     parameters: SearchInput,

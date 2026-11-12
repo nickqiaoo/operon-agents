@@ -1,19 +1,25 @@
-import type { AgentEvent, InterruptAnswer } from "operon-agents";
+/**
+ * A TypeScript client for the managed API, shaped after the Claude SDK's managed-agents surface:
+ * `sessions.create/retrieve/list/update/archive/delete` and
+ * `sessions.events.send/list/stream`.
+ */
 import { parseSse, type SseFrame } from "../protocol/sse.ts";
 import type {
-  CancelManagedSessionResponse,
-  CreateManagedMessageRequest,
   CreateManagedSessionRequest,
-  MessageReceiptResource,
-  InterruptionsResponse,
+  ListManagedSessionsOptions,
+  ListManagedSessionsResponse,
   ListSessionEventsOptions,
   ListSessionEventsResponse,
-  ListManagedSessionsResponse,
-  ManagedSession,
-  ResumeManagedSessionResponse,
+  ManagedEventResource,
+  ManagedPreviewableEventType,
+  ManagedSessionResource,
+  ManagedStreamEvent,
+  SendManagedEventsRequest,
+  SendManagedEventsResponse,
   StreamSessionEventsOptions,
   UpdateManagedSessionRequest,
 } from "../protocol/types.ts";
+import { isManagedPreviewEvent } from "../protocol/types.ts";
 import { ManagedApiClientError, throwApiError } from "./errors.ts";
 
 export interface ManagedAgentsClientOptions {
@@ -23,54 +29,60 @@ export interface ManagedAgentsClientOptions {
   readonly fetch?: typeof globalThis.fetch;
 }
 
-export interface CreateManagedMessageOptions {
+export interface SendManagedEventsOptions {
+  /** Retries with the same key are accepted once. */
   readonly idempotencyKey?: string;
 }
 
-/** Opens one SSE connection, resuming after `after` when given. */
-type StreamConnector = (after: string | undefined) => Promise<AsyncIterator<SseFrame>>;
-
 /** How many delivered event ids to remember for filtering a reconnect's overlap. */
-const DEDUPE_WINDOW = 2048;
+const DEDUPE_WINDOW = 4096;
 const RECONNECT_BACKOFF_MS = [250, 500, 1000, 2000, 5000] as const;
+/** How many history pages a reconnect reads back looking for where it left off. */
+const MAX_GAP_PAGES = 20;
+
+type Connect = () => Promise<AsyncIterator<SseFrame>>;
+type History = (page: string | undefined) => Promise<ListSessionEventsResponse>;
 
 /**
- * A session's events as one continuous iterable, across however many connections it takes.
+ * A session's live events as one continuous iterable, across however many connections it takes.
  *
- * A dropped connection is not the end of the session, so by default it is not the end of the
- * iteration either: the stream reopens after the last durable event it delivered and filters
- * out what the overlap repeats. The cursor is the SSE `id:` the server stamps on durable events
- * only, so resuming never points at a live-only event (a token delta) that the log cannot find.
+ * The server's stream is live-only, so a dropped connection loses whatever was emitted while it
+ * was down. By default this reconnects and fills that gap from the event history — newest first,
+ * back to the last output it delivered — skipping ids it has already delivered.
+ *
+ * Opened with `event_deltas`, it also yields the live previews (`event_start` / `event_delta`)
+ * as they come. Those are never deduplicated or recovered: a drop loses the deltas in flight,
+ * and the buffered `agent.message` they preview arrives complete either way.
  */
-export class ManagedSessionEventStream implements AsyncIterable<AgentEvent> {
-  private readonly connect: StreamConnector;
-  private readonly reconnect: boolean;
-  private readonly signal: AbortSignal | undefined;
+export class ManagedSessionEventStream<E extends ManagedStreamEvent = ManagedEventResource> implements AsyncIterable<E> {
   private frames: AsyncIterator<SseFrame> | undefined;
+  private readonly buffered: ManagedEventResource[] = [];
   private consumed = false;
-  private cursor: string | undefined;
+  /** The newest history event this stream has accounted for — where a gap fill stops. */
+  private anchor: string | undefined;
   private readonly delivered = new Set<string>();
   private attempts = 0;
 
+  private readonly connect: Connect;
+  private readonly history: History;
+  private readonly options: { readonly reconnect: boolean; readonly signal?: AbortSignal };
+
   constructor(
-    connect: StreamConnector,
+    connect: Connect,
+    history: History,
     first: AsyncIterator<SseFrame>,
-    options: { readonly after?: string; readonly reconnect?: boolean; readonly signal?: AbortSignal },
+    anchor: string | undefined,
+    options: { readonly reconnect: boolean; readonly signal?: AbortSignal },
   ) {
     this.connect = connect;
+    this.history = history;
+    this.options = options;
     this.frames = first;
-    this.cursor = options.after;
-    this.reconnect = options.reconnect ?? true;
-    this.signal = options.signal;
+    this.anchor = anchor;
   }
 
-  /** The last resume cursor this stream delivered — pass it as `after` to continue elsewhere. */
-  get lastEventId(): string | undefined {
-    return this.cursor;
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
-    if (this.consumed) throw new Error("managed session event stream can only be consumed once");
+  [Symbol.asyncIterator](): AsyncIterator<E> {
+    if (this.consumed) throw new Error("a session event stream can only be consumed once");
     this.consumed = true;
     return {
       next: () => this.next(),
@@ -79,17 +91,16 @@ export class ManagedSessionEventStream implements AsyncIterable<AgentEvent> {
         this.frames = undefined;
         return { done: true, value: undefined };
       },
-      throw: async (error?: unknown) => {
-        if (this.frames?.throw !== undefined) await this.frames.throw(error);
-        else await this.frames?.return?.(undefined);
-        this.frames = undefined;
-        throw error;
-      },
     };
   }
 
-  private async next(): Promise<IteratorResult<AgentEvent>> {
+  private async next(): Promise<IteratorResult<E>> {
     for (;;) {
+      const queued = this.buffered.shift();
+      if (queued !== undefined) {
+        if (this.accept(queued)) return { done: false, value: queued as E };
+        continue;
+      }
       if (this.frames === undefined) return { done: true, value: undefined };
       let result: IteratorResult<SseFrame>;
       try {
@@ -103,42 +114,64 @@ export class ManagedSessionEventStream implements AsyncIterable<AgentEvent> {
         continue;
       }
       this.attempts = 0;
-      const frame = result.value;
-      if (frame.event !== "session.event") continue;
-      const event = frame.data as AgentEvent;
-      if (this.delivered.has(event.eventId)) continue;
-      this.remember(event.eventId);
-      if (frame.id !== undefined) this.cursor = frame.id;
-      return { done: false, value: event };
+      const event = result.value.data as ManagedStreamEvent;
+      if (typeof event !== "object" || event === null) continue;
+      if (isManagedPreviewEvent(event)) return { done: false, value: event as E };
+      if (typeof event.id !== "string") continue;
+      if (this.accept(event)) return { done: false, value: event as E };
     }
   }
 
-  /** Reconnect after a drop. False when reconnecting is off or the caller has aborted. */
-  private async reopen(): Promise<boolean> {
-    this.frames = undefined;
-    const aborted = (): boolean => this.signal?.aborted === true;
-    if (!this.reconnect || aborted()) return false;
-    const delay = RECONNECT_BACKOFF_MS[Math.min(this.attempts, RECONNECT_BACKOFF_MS.length - 1)]!;
-    this.attempts += 1;
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    if (aborted()) return false;
-    try {
-      this.frames = await this.connect(this.cursor);
-      return true;
-    } catch (error) {
-      // A definite answer — gone, forbidden, malformed — will not change by asking again.
-      if (error instanceof ManagedApiClientError && error.status < 500) throw error;
-      // The server is still away: try again after the next backoff step, not forever at once.
-      return this.reopen();
-    }
-  }
-
-  private remember(eventId: string): void {
-    this.delivered.add(eventId);
+  private accept(event: ManagedEventResource): boolean {
+    if (this.delivered.has(event.id)) return false;
+    this.delivered.add(event.id);
     if (this.delivered.size > DEDUPE_WINDOW) {
       const oldest = this.delivered.values().next().value;
       if (oldest !== undefined) this.delivered.delete(oldest);
     }
+    // Sent events are echoed when processed, out of their place in the history; only what the
+    // session emitted marks how far the history has been seen.
+    if (!event.type.startsWith("user.")) this.anchor = event.id;
+    return true;
+  }
+
+  /** Reconnect after a drop, then queue what the history holds that the drop cost us. */
+  private async reopen(): Promise<boolean> {
+    this.frames = undefined;
+    const aborted = (): boolean => this.options.signal?.aborted === true;
+    for (;;) {
+      if (!this.options.reconnect || aborted()) return false;
+      const delay = RECONNECT_BACKOFF_MS[Math.min(this.attempts, RECONNECT_BACKOFF_MS.length - 1)]!;
+      this.attempts += 1;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (aborted()) return false;
+      try {
+        // Subscribe first, then read back: anything emitted in between is in one or the other.
+        this.frames = await this.connect();
+        this.buffered.push(...await this.gap());
+        return true;
+      } catch (error) {
+        await this.frames?.return?.(undefined).catch(() => undefined);
+        this.frames = undefined;
+        // A definite answer — gone, forbidden, malformed — will not change by asking again.
+        if (error instanceof ManagedApiClientError && error.status < 500) throw error;
+      }
+    }
+  }
+
+  private async gap(): Promise<ManagedEventResource[]> {
+    const missed: ManagedEventResource[] = [];
+    let page: string | undefined;
+    for (let pages = 0; pages < MAX_GAP_PAGES; pages += 1) {
+      const result = await this.history(page);
+      for (const event of result.data) {
+        if (event.id === this.anchor) return missed.reverse();
+        if (!this.delivered.has(event.id)) missed.push(event);
+      }
+      if (result.next_page === null) break;
+      page = result.next_page;
+    }
+    return missed.reverse();
   }
 }
 
@@ -149,87 +182,97 @@ export class ManagedSessionsClient {
     this.root = root;
   }
 
-  create(request: CreateManagedSessionRequest): Promise<ManagedSession> {
+  create(request: CreateManagedSessionRequest): Promise<ManagedSessionResource> {
     return this.root.request("/sessions", { method: "POST", body: request });
   }
 
-  list(): Promise<ListManagedSessionsResponse> {
-    return this.root.request("/sessions");
+  list(options: ListManagedSessionsOptions = {}): Promise<ListManagedSessionsResponse> {
+    return this.root.request(`/sessions${query(options)}`);
   }
 
-  retrieve(sessionId: string): Promise<ManagedSession> {
-    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}`);
+  retrieve(sessionId: string): Promise<ManagedSessionResource> {
+    return this.root.request(path(sessionId));
   }
 
-  /** Rename a session; the new title is durable before this resolves. */
-  update(sessionId: string, request: UpdateManagedSessionRequest): Promise<ManagedSession> {
-    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", body: request });
+  update(sessionId: string, request: UpdateManagedSessionRequest): Promise<ManagedSessionResource> {
+    return this.root.request(path(sessionId), { method: "POST", body: request });
   }
 
-  messages = {
-    create: (
+  archive(sessionId: string): Promise<ManagedSessionResource> {
+    return this.root.request(`${path(sessionId)}/archive`, { method: "POST" });
+  }
+
+  delete(sessionId: string): Promise<{ readonly id: string; readonly type: "session_deleted" }> {
+    return this.root.request(path(sessionId), { method: "DELETE" });
+  }
+
+  readonly events = {
+    send: (
       sessionId: string,
-      request: CreateManagedMessageRequest,
-      options: CreateManagedMessageOptions = {},
-    ): Promise<MessageReceiptResource> =>
-      this.root.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      request: SendManagedEventsRequest,
+      options: SendManagedEventsOptions = {},
+    ): Promise<SendManagedEventsResponse> =>
+      this.root.request(`${path(sessionId)}/events`, {
         method: "POST",
         body: request,
-        ...(options.idempotencyKey !== undefined
-          ? { headers: { "idempotency-key": options.idempotencyKey } }
-          : {}),
+        ...(options.idempotencyKey !== undefined ? { headers: { "idempotency-key": options.idempotencyKey } } : {}),
       }),
-  };
 
-  events = {
-    list: (sessionId: string, options: ListSessionEventsOptions = {}): Promise<ListSessionEventsResponse> => {
-      const query = new URLSearchParams();
-      if (options.limit !== undefined) query.set("limit", String(options.limit));
-      if (options.page !== undefined) query.set("page", options.page);
-      if (options.order !== undefined) query.set("order", options.order);
-      if (options.address !== undefined) query.set("address", options.address);
-      const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-      return this.root.request(`/sessions/${encodeURIComponent(sessionId)}/events${suffix}`);
-    },
-    stream: async (sessionId: string, options: StreamSessionEventsOptions = {}): Promise<ManagedSessionEventStream> => {
-      const connect: StreamConnector = async (after) => {
-        const query = new URLSearchParams();
-        if (options.address !== undefined) query.set("address", options.address);
-        const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-        const response = await this.root.raw(`/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, {
-          signal: options.signal,
-          headers: {
-            accept: "text/event-stream",
-            ...(after !== undefined ? { "last-event-id": after } : {}),
-          },
+    list: (sessionId: string, options: ListSessionEventsOptions = {}): Promise<ListSessionEventsResponse> =>
+      this.root.request(`${path(sessionId)}/events${query(options)}`),
+
+    /**
+     * Follow live events. Open it BEFORE sending: a stream carries only what is emitted after it
+     * opens. Resolves once subscribed.
+     */
+    stream: (async (sessionId: string, options: StreamSessionEventsOptions = {}): Promise<ManagedSessionEventStream<ManagedStreamEvent>> => {
+      const deltas = new URLSearchParams();
+      for (const type of options.event_deltas ?? []) deltas.append("event_deltas[]", type);
+      const search = deltas.size === 0 ? "" : `?${deltas.toString()}`;
+      const connect: Connect = async () => {
+        const response = await this.root.raw(`${path(sessionId)}/events/stream${search}`, {
+          ...(options.signal !== undefined ? { signal: options.signal } : {}),
+          headers: { accept: "text/event-stream" },
         });
         if (!response.ok) return throwApiError(response);
         if (response.body === null) throw new Error("event stream response has no body");
         return parseSse(response.body)[Symbol.asyncIterator]();
       };
-      return new ManagedSessionEventStream(connect, await connect(options.after), {
-        ...(options.after !== undefined ? { after: options.after } : {}),
-        ...(options.reconnect !== undefined ? { reconnect: options.reconnect } : {}),
+      const history: History = (page) => this.events.list(sessionId, { order: "desc", limit: 100, ...(page !== undefined ? { page } : {}) });
+      const reconnect = options.reconnect ?? true;
+      const first = await connect();
+      // Where the history stood when we subscribed: a gap fill after a drop stops here.
+      const anchor = reconnect ? (await history(undefined).catch(() => undefined))?.data.find((e) => !e.type.startsWith("user."))?.id : undefined;
+      return new ManagedSessionEventStream<ManagedStreamEvent>(connect, history, first, anchor, {
+        reconnect,
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       });
-    },
+    }) as StreamEvents,
   };
+}
 
-  cancel(sessionId: string): Promise<CancelManagedSessionResponse> {
-    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
-  }
+/**
+ * `sessions.events.stream`. Typed by whether previews were asked for: without `event_deltas`
+ * the stream carries persisted events only, each with an `id`.
+ */
+export interface StreamEvents {
+  (
+    sessionId: string,
+    options: StreamSessionEventsOptions & { readonly event_deltas: readonly ManagedPreviewableEventType[] },
+  ): Promise<ManagedSessionEventStream<ManagedStreamEvent>>;
+  (sessionId: string, options?: Omit<StreamSessionEventsOptions, "event_deltas">): Promise<ManagedSessionEventStream>;
+}
 
-  delete(sessionId: string): Promise<void> {
-    return this.root.requestVoid(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-  }
+function path(sessionId: string): string {
+  return `/sessions/${encodeURIComponent(sessionId)}`;
+}
 
-  interruptions(sessionId: string): Promise<InterruptionsResponse> {
-    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}/interruptions`);
-  }
-
-  resume(sessionId: string, answers: Readonly<Record<string, InterruptAnswer>>): Promise<ResumeManagedSessionResponse> {
-    return this.root.request(`/sessions/${encodeURIComponent(sessionId)}/resume`, { method: "POST", body: { answers } });
-  }
+function query(options: { readonly limit?: number; readonly page?: string; readonly order?: string }): string {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.page !== undefined) params.set("page", options.page);
+  if (options.order !== undefined) params.set("order", options.order);
+  return params.size === 0 ? "" : `?${params.toString()}`;
 }
 
 interface RequestOptions {
@@ -259,11 +302,6 @@ export class ManagedAgentsClient {
     const response = await this.raw(path, options);
     if (!response.ok) return throwApiError(response);
     return await response.json() as T;
-  }
-
-  async requestVoid(path: string, options: RequestOptions = {}): Promise<void> {
-    const response = await this.raw(path, options);
-    if (!response.ok) return throwApiError(response);
   }
 
   raw(path: string, options: RequestOptions = {}): Promise<Response> {

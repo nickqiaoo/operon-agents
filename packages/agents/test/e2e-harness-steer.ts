@@ -42,6 +42,7 @@ async function skillReceiptsTrackConsumption(): Promise<void> {
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults } }
   });
   try {
     const session = await harness.createSession();
@@ -94,7 +95,6 @@ async function main(): Promise<void> {
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{
       id: "steer-gate",
       session(api) {
@@ -105,6 +105,7 @@ async function main(): Promise<void> {
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];

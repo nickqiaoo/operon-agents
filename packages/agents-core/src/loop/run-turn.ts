@@ -7,7 +7,6 @@ import type { Tool } from "../tool/types.ts";
 import type { Environment } from "../tool/environment.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
-import { FileFreshnessLedger } from "../tool/file-freshness.ts";
 import type { Logger } from "../logging/index.ts";
 import { addUsage, emptyUsage } from "./usage.ts";
 import { isAbortError, MaxStepsExceededError } from "./errors.ts";
@@ -40,8 +39,6 @@ export interface RunTurnInput {
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
-  /** Session-scoped file freshness ledger for this agent line; forwarded to tool contexts. */
-  readonly fileLedger?: FileFreshnessLedger;
   /** Host application context (`RunOptions.context`); forwarded to both tool contexts as `context`. */
   readonly hostContext?: unknown;
   readonly system?: string;
@@ -56,6 +53,7 @@ export interface RunTurnInput {
   readonly onToolsPrepared?: (tools: readonly Tool[]) => void;
   /** Each step's request as it goes to the model, after every hook. */
   readonly onRequestPrepared?: (request: LlmRequest) => void;
+  readonly onResponseReceived?: () => void;
   readonly hooks?: LoopHooks;
   /** Per-step optimistic output guardrail adapter supplied by the active agent layer. */
   readonly createOutputGuardrailMonitor?: OutputGuardrailMonitorFactory;
@@ -69,7 +67,7 @@ export interface RunTurnInput {
   /** Paired with `resumeFrom`: the paused frame's pending entries + input answers, consumed
    *  by the re-run batch (suspended-call continuation and auto re-park). */
   readonly resume?: BatchResume;
-  readonly drainSteering?: () => readonly SteeredInput[];
+  readonly drainSteering?: () => readonly SteeredInput[] | Promise<readonly SteeredInput[]>;
   /** The run's approval answers by tool call id; see `ToolCallStepContext.answers`. */
   readonly answers?: Record<string, ApprovalResponse>;
 }
@@ -90,13 +88,13 @@ const MAX_STEP_RECOVERIES_PER_TURN = 2;
 export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   const toolList = input.tools ?? [];
   const deferredToolNames = input.deferredToolNames ?? new Set<string>();
-  const fileLedger = input.fileLedger ?? new FileFreshnessLedger();
 
   let usage: Usage = emptyUsage();
   let steps = 0;
   let stepRecoveries = 0;
   // Normal exits overwrite this with the completed step's stop reason.
   let stopReason: TurnStopReason = "end_turn";
+  let errorMessage: string | undefined;
   let handoff: HandoffSignal | undefined;
   let pending: readonly PendingInterrupt[] | undefined;
   let suspensions: readonly ToolCallSuspension[] | undefined;
@@ -121,7 +119,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, fileLedger, hostContext: input.hostContext, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, hostContext: input.hostContext, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -149,7 +147,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
 
       // live history before this model step, so the model responds to them this turn.
       if (input.drainSteering) {
-        for (const { message, origin } of input.drainSteering()) input.context.appendMessage(message, origin);
+        for (const { message, origin } of await input.drainSteering()) input.context.appendMessage(message, origin);
       }
 
       if (input.maxSteps !== undefined && input.maxSteps > 0 && steps >= input.maxSteps) {
@@ -168,7 +166,6 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           environment: input.environment,
           background: input.background,
           responder: input.responder,
-          fileLedger,
           hostContext: input.hostContext,
           system: input.system,
           context: input.context,
@@ -179,6 +176,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           refreshTools: input.refreshTools,
           onToolsPrepared: input.onToolsPrepared,
           onRequestPrepared: input.onRequestPrepared,
+          onResponseReceived: input.onResponseReceived,
           hooks: input.hooks,
           createOutputGuardrailMonitor: input.createOutputGuardrailMonitor,
           currentStep: steps,
@@ -227,6 +225,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         // already preserved as an `overflow_dropped` transcript record by executeStep).
         if (error instanceof APIContextOverflowError) {
           stopReason = "error";
+          errorMessage = error.message;
           break;
         }
         throw error;
@@ -266,7 +265,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       // loop for one more step. Follow-ups (cron/background) are a separate channel the Runner
       // drains at the turn boundary, so they intentionally do NOT keep this turn alive.
       if (input.drainSteering) {
-        const late = input.drainSteering();
+        const late = await input.drainSteering();
         if (late.length > 0) {
           for (const { message, origin } of late) input.context.appendMessage(message, origin);
           continue;
@@ -281,7 +280,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     throw error;
   }
 
-  return { stopReason, steps, usage, handoff, pending, suspensions };
+  return { stopReason, steps, usage, handoff, pending, suspensions, ...(errorMessage !== undefined ? { errorMessage } : {}) };
 }
 
 /** Tool results already journaled after the anchored assistant are stable sibling completions. */

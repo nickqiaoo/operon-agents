@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "./faux.ts";
-import { createHarness, tool, type AgentEvent, type ExtensionActions, type ExtensionDefinition, type Message } from "../src/index.ts";
+import { createHarness, defineTool, type AgentEvent, type ExtensionActions, type ExtensionDefinition, type Message } from "../src/index.ts";
 
 const checks: Array<[string, boolean]> = [];
 function check(label: string, ok: boolean): void {
@@ -25,7 +25,10 @@ async function attachLifecycle(): Promise<void> {
     fauxAssistantMessage("used tool", { stopReason: "stop" }),
     fauxAssistantMessage("gone", { stopReason: "stop" }),
   ]);
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -39,7 +42,7 @@ async function attachLifecycle(): Promise<void> {
     id: "hot-ext",
     session(api) {
       stashedActions = api.actions;
-      api.registerTool(tool({
+      api.registerTool(defineTool({
         name: "AttachedEcho",
         description: "Echo a value.",
         parameters: z.object({ value: z.string() }),
@@ -96,7 +99,6 @@ async function midRunDeferred(): Promise<void> {
   const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{
       id: "gate",
       session(api) {
@@ -107,6 +109,7 @@ async function midRunDeferred(): Promise<void> {
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
 
@@ -119,7 +122,7 @@ async function midRunDeferred(): Promise<void> {
     id: "late-ext",
     session(api) {
       setupRan = true;
-      api.registerTool(tool({
+      api.registerTool(defineTool({
         name: "LateTool",
         description: "Arrives late.",
         parameters: z.object({}),
@@ -147,7 +150,10 @@ async function midRunDeferred(): Promise<void> {
 async function errorPaths(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([fauxAssistantMessage("ok", { stopReason: "stop" })]);
-  const harness = createHarness({ ...faux.harnessModel(), permission: { mode: "yolo" } });
+  const harness = createHarness({
+    ...faux.harnessModel(),
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
+  });
   const session = await harness.createSession();
   const events: AgentEvent[] = [];
   session.onEvent((event) => events.push(event));
@@ -186,17 +192,17 @@ async function registryStability(): Promise<void> {
   const perRunToolLists: string[] = [];
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{
       id: "stability-probe",
       session(api) {
-        api.registerTool(tool({ name: "ZTool", description: "z", parameters: z.object({}), execute: () => "z" }));
-        api.registerTool(tool({ name: "ATool", description: "a", parameters: z.object({}), execute: () => "a" }));
+        api.registerTool(defineTool({ name: "ZTool", description: "z", parameters: z.object({}), execute: () => "z" }));
+        api.registerTool(defineTool({ name: "ATool", description: "a", parameters: z.object({}), execute: () => "a" }));
         api.on("model.request", ({ request }) => {
           perRunToolLists.push(JSON.stringify(request.tools ?? []));
         });
       },
     }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   await session.prompt("one");
@@ -216,11 +222,11 @@ async function oneCapabilityPerExtension(): Promise<void> {
   const handle = { ping: () => "pong" };
   const harness = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [
       { id: "ext-one", session: (api) => void api.expose(handle) },
       { id: "ext-two", session: () => undefined },
     ],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   const session = await harness.createSession();
   const names = session.core.capabilities.map((capability) => capability.name);
@@ -240,8 +246,8 @@ async function oneCapabilityPerExtension(): Promise<void> {
 
   const clashing = createHarness({
     ...faux.harnessModel(),
-    permission: { mode: "yolo" },
     extensions: [{ id: "goal", session: () => undefined }],
+    config: { defaults: { ...faux.harnessModel().config.defaults, permission: { mode: "yolo" } } }
   });
   let openError = "";
   try {

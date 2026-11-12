@@ -22,7 +22,7 @@ export function fetchUrlTool(provider: UrlFetchProvider): Tool {
     description:
       "Fetch a single URL and return its main content as text/markdown. Use after WebSearch, or " +
       "for a known link. Returns the extracted readable body, not raw HTML.",
-    params: FetchURLInput,
+    parameters: FetchURLInput,
     resolve: (args) => ({
       accesses: ToolAccesses.none(),
       approvalRule: "FetchURL",

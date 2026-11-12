@@ -92,7 +92,7 @@ function makeConfirmTool(counters: { searches: number; books: number }) {
   return defineTool({
     name: "pick",
     description: "search, ask the user to choose, then book",
-    params: z.object({ topic: z.string() }),
+    parameters: z.object({ topic: z.string() }),
     resolve: (args) => ({
       approvalRule: `pick(${args.topic})`,
       run: async (ctx) => {

@@ -29,11 +29,15 @@ if (!process.env.ANTHROPIC_API_KEY) {
 mkdirSync(WORK, { recursive: true });
 
 const harness = await createLocalHarness({
-  model: MODEL,
   homeDir: join(process.cwd(), ".agent-home"),
-  workDir: WORK,
-  permission: { mode: "workspace" },
-  appendSystemPrompt: "You are working toward a standing goal. Be concise.",
+  config: {
+    workDir: WORK,
+    defaults: {
+      model: MODEL,
+      permission: { mode: "workspace" },
+      appendSystemPrompt: "You are working toward a standing goal. Be concise.",
+    },
+  },
 });
 const session = await harness.createSession();
 
