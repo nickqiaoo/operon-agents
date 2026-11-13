@@ -117,4 +117,7 @@ export type {
 
 // Extending a harness.
 export type { ExtensionActions, ExtensionAPI, ExtensionDefinition } from "./extensions/index.ts";
+// Extension settings — what a host renders and edits through `harness.extensions`.
+export { ExtensionSettingsInvalidError } from "./extensions/index.ts";
+export type { ExtensionSettingsStore, ExtensionSettingsView, ExtensionStatus, SettingsFormat, SettingsIssue, SettingsSchema } from "./extensions/index.ts";
 export type { McpServerConfig } from "operon-agents-core";

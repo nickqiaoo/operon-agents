@@ -33,7 +33,7 @@ import type {
 import { mkdirSync } from "node:fs";
 import { workspaceMcpCapability, type WorkspaceMcpPool } from "./workspace-mcp.ts";
 import { join } from "node:path";
-import { extensionCapability, extensionRuntimeOf, extensionsCapability, HarnessExtensionManager, type ExtensionRuntime, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ServiceOptions, type StagedDefinition } from "./extensions/index.ts";
+import { extensionCapability, extensionRuntimeOf, extensionsCapability, HarnessExtensionManager, type ExtensionRuntime, ServiceRegistry, stageDefinition, type ExtensionDefinition, type ExtensionHost, type ExtensionInheritedSetting, type ExtensionSettingsStore, type ServiceOptions, type StagedDefinition, createFileSettingsStore } from "./extensions/index.ts";
 import { createExtensionCommandRegistry, type CommandRegistry, type CommandResult, type TodoItem } from "operon-agents-core";
 
 export type ApprovalHandler = (
@@ -195,8 +195,10 @@ export interface SessionResolveRequest<TContext = unknown> {
 /**
  * What the host resolves for one open. A `config` returned here is FINAL — the host saw what was
  * requested and what was stored and decided — and is not stored by the harness, so a host that
- * keeps configuration in its own database has exactly one copy. `bindings` are laid over the
- * requested ones key by key.
+ * keeps configuration in its own database has exactly one copy. What IS stored is unchanged by
+ * it: a reopen keeps the setup the session had, and a create stores what it was asked for (its
+ * `requested.config` — for a session an extension creates, that extension's parameters), so the
+ * next open's `stored` still carries it. `bindings` are laid over the requested ones key by key.
  */
 export interface SessionResolution<TContext = unknown> {
   readonly config?: SessionConfig;
@@ -255,8 +257,11 @@ const DEFAULT_PERMISSION_MODE: PermissionMode = "workspace";
 
 /** Every key `createSession` takes — what an extension's options are checked against. */
 const CREATE_SESSION_OPTION_KEYS: ReadonlySet<string> = new Set([
-  "workDir", "ownerKey", "title", "config", "from",
+  "workDir", "ownerKey", "title", "config", "from", "inherit",
 ]);
+
+/** What an extension's `createSession({ from, inherit })` can copy from its source. */
+const INHERITABLE_SETTINGS: ReadonlySet<string> = new Set<ExtensionInheritedSetting>(["model"]);
 
 function definedOnly<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
@@ -744,6 +749,13 @@ export interface HarnessOptions<TContext = unknown> {
    * `undefined`). Kept outside the code folders so an update never touches state.
    */
   readonly extensionDataDir?: string;
+  /**
+   * Where file extensions' settings values are kept (`harness.extensions.setSettings`, read as
+   * `host.settings`). Defaults to one JSON file per extension in `<extensionDir>/.settings` — apart
+   * from the extensions' own data folders, so an extension cannot rewrite its settings past
+   * validation. Replace it to keep settings in the host's own store. Only with `extensionDir`.
+   */
+  readonly extensionSettings?: ExtensionSettingsStore;
   /**
    * Programmatic runtime extensions, registered once here — the by-value twin of `extensionDir`.
    * Every definition's `session` runs in every session; a session varies that with
@@ -1709,6 +1721,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
       : new HarnessExtensionManager({
           directory: options.extensionDir,
           dataDir: this.dataRoot ?? join(options.extensionDir, ".data"),
+          settings: options.extensionSettings ?? createFileSettingsStore(join(options.extensionDir, ".settings")),
           bridge: {
             services: this.services,
             resumeSession: (id, extensionId) => this.resumeFrom(id, undefined, { kind: "extension", extensionId }),
@@ -2125,9 +2138,35 @@ export class Harness<TContext = unknown, TOutput = unknown> {
     if (unknown.length > 0) {
       throw new HarnessConfigError(`createSession from an extension got unknown option${unknown.length > 1 ? "s" : ""} ${unknown.map((key) => `"${key}"`).join(", ")}; per-extension parameters go in config.extensions`);
     }
-    const { from, ...rest } = (sessionOptions ?? {});
+    const { from, inherit, ...rest } = (sessionOptions ?? {});
     if (from !== undefined && typeof from !== "string") throw new HarnessConfigError("createSession from an extension: `from` is the id of the session it is created on behalf of");
-    return this.createFrom({ ...rest, origin: { kind: "extension", extensionId } }, from === undefined ? undefined : await this.sourceOf(from));
+    if (inherit !== undefined) {
+      if (!Array.isArray(inherit) || inherit.some((key) => !INHERITABLE_SETTINGS.has(key))) {
+        throw new HarnessConfigError(`createSession from an extension: \`inherit\` lists settings to copy from \`from\` — any of ${[...INHERITABLE_SETTINGS].map((key) => `"${key}"`).join(", ")}`);
+      }
+      if (from === undefined) throw new HarnessConfigError("createSession from an extension: `inherit` copies from the `from` session, so it needs one");
+    }
+    const source = from === undefined ? undefined : await this.sourceOf(from);
+    let options: CreateSessionOptions<TContext> = rest;
+    if (from !== undefined && inherit?.includes("model") === true && rest.config?.model === undefined) {
+      const model = await this.currentModelOf(from);
+      if (model !== undefined) options = { ...rest, config: { ...(rest.config ?? {}), model } };
+    }
+    return this.createFrom({ ...options, origin: { kind: "extension", extensionId } }, source);
+  }
+
+  /** The model a session runs on right now, by name: the loaded instance's setting (a runtime
+   *  `setModel` included), or — when it is not loaded here — the one stored with it. `undefined`
+   *  when it runs on the harness default or on a model given as a live object. */
+  private async currentModelOf(sessionId: string): Promise<string | undefined> {
+    const live = this.activeSessions.get(sessionId);
+    if (live !== undefined) {
+      const setting = live.modelSetting;
+      return typeof setting === "string" ? setting : undefined;
+    }
+    const handle = await (await this.repository()).open(sessionId);
+    const stored = await handle?.store.getState(SESSION_MODEL_KEY);
+    return typeof stored === "string" ? stored : undefined;
   }
 
   /** The session an extension is acting from, as the source of what it creates: the loaded
@@ -2705,7 +2744,10 @@ export class Harness<TContext = unknown, TOutput = unknown> {
 
       // Store the setup: only what was explicitly configured (never the harness defaults, so a
       // change to those still reaches this session), and never what the host resolves each time.
-      const storedConfig = withoutModel(fromResolver ? inherited : explicit);
+      // A host's config replaces what is stored for THIS open only: a reopen keeps the setup it
+      // had, and a create keeps what it was asked for — so what the caller set (an extension's
+      // parameters for the session it spawns, say) survives a host that resolves every open.
+      const storedConfig = withoutModel(fromResolver ? (operation === "create" ? asked : inherited) : explicit);
       const requires = SESSION_BINDING_KEYS.filter((key) => bindings[key] !== undefined || (operation !== "create" && stored.requires.includes(key)));
       const changed = JSON.stringify({ config: storedConfig, requires }) !== JSON.stringify({ config: stored.config, requires: stored.requires });
       if (changed) {
@@ -2989,7 +3031,7 @@ function isServiceDescriptor(value: unknown): value is { instance: unknown } & S
 /** Every key `createHarness` takes. */
 const HARNESS_OPTION_KEYS: ReadonlySet<string> = new Set([
   "config", "registry", "resolveSession", "context", "autoApprover", "modelManager", "infrastructure",
-  "sessionCapabilities", "telemetry", "services", "extensions", "extensionDir", "extensionDataDir", "extraSubagentProfiles",
+  "sessionCapabilities", "telemetry", "services", "extensions", "extensionDir", "extensionDataDir", "extensionSettings", "extraSubagentProfiles",
 ]);
 
 /** Where each option `createHarness` used to take flat lives now. */

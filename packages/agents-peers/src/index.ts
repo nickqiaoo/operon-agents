@@ -23,7 +23,7 @@
  * never `Team`: it is a member, not a team-former. `session` reaches the network only through the
  * shared handle, which is what lets a reload swap the network under live sessions.
  */
-export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, memberAgentId, LEAD_ALIAS, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";
+export { PeerNetwork, createPeerNetwork, peers, mountTeam, mountHub, memberAgentId, teammateOf, DEFAULT_MEMBER_INSTRUCTIONS, LEAD_ALIAS, PEER_SOURCE, PEERS_SERVICE } from "./network.ts";
 export type { PeerNetworkHandle } from "./network.ts";
 export type { PeerDefinitionOptions, PeerOptionsSource } from "./network.ts";
 export type {
@@ -35,6 +35,7 @@ export type {
   PeerReceipt,
   TeamCaller,
   TeammateFactory,
+  TeammateIdentity,
   TeammateSessionOptions,
   TeammateSpawnRequest,
 } from "./network.ts";
@@ -53,4 +54,8 @@ export type { PeerRepo } from "./repo.ts";
 export { createFilePeerRepo } from "./file-repo.ts";
 
 export { buildTeamTool } from "./team-tool.ts";
+export type { TeammateTypeInfo } from "./team-tool.ts";
 export { buildMemberTool } from "./member-tool.ts";
+
+export { PEERS_SETTINGS_SCHEMA, TEAMMATE_TYPE_KEY_PATTERN, peersOptionsFromSettings } from "./settings.ts";
+export type { PeersSettings, PeersTypeSettings } from "./settings.ts";

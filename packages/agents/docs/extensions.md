@@ -301,4 +301,86 @@ When a definition has a `harness` half, every `session` under it gets a handle t
 `ctx.shared`, and another extension consumes it by naming it in `uses` and receiving it as
 `ctx.services[name]`. The host reaches the same instance with `harness.services.handle(id)`.
 
-The harness half reaches sessions too, for both by-value and file-loaded extensions: `host.resumeSession(id)` is `harness.resumeSession(id)`, `host.readSessionMessages(id, options?)` is `harness.readSessionMessages(id, options?)` — a page of a session's transcript, read without loading it — and `host.createSession(options)` takes `harness.createSession`'s own options (`title`, `workDir`, `ownerKey`, `config`; an unknown key is an error) plus `from` — the id of the session the new one is created on behalf of, which lends it its directory, owner and execution boundary the way a session-side `createSession` does. Every session an extension opens goes through the host's `resolveSession` and `onSessionOpened`, so it is resolved and wired like any other. No named service and no host callback is needed for any of it.
+The harness half reaches sessions too, for both by-value and file-loaded extensions: `host.resumeSession(id)` is `harness.resumeSession(id)`, `host.readSessionMessages(id, options?)` is `harness.readSessionMessages(id, options?)` — a page of a session's transcript, read without loading it — and `host.createSession(options)` takes `harness.createSession`'s own options (`title`, `workDir`, `ownerKey`, `config`; an unknown key is an error) plus `from` — the id of the session the new one is created on behalf of, which lends it its directory, owner and execution boundary the way a session-side `createSession` does — and `inherit`, the settings to copy from that session as it is right now, for each one `config` does not set itself. `inherit: ["model"]` gives the new session the model its source currently runs on (a runtime `setModel` included; read from storage when the source is not loaded); a source on the harness default, or on a model given as a live object, has none to copy. `inherit` needs `from`. Every session an extension opens goes through the host's `resolveSession` and `onSessionOpened`, so it is resolved and wired like any other. No named service and no host callback is needed for any of it.
+
+## Settings
+
+A file extension can declare settings in its `manifest.json`. The framework stores and validates
+them, the extension reads them, and a host renders them with one generic form built from the
+schema. It needs no settings page per extension.
+
+```jsonc
+{
+  "id": "greeter",
+  "entry": "index.js",
+  "settings": {
+    "type": "object",
+    "properties": {
+      "greeting": { "type": "string", "title": "Greeting", "default": "hello", "maxLength": 40 },
+      "model":    { "type": "string", "format": "model", "title": "Model" },
+      "rooms": {
+        "type": "object",
+        "title": "Rooms",
+        "propertyNames": { "pattern": "^[a-z]+$" },
+        "additionalProperties": {
+          "type": "object",
+          "required": ["title"],
+          "properties": { "title": { "type": "string" }, "notes": { "type": "string", "x-multiline": true } }
+        }
+      }
+    }
+  }
+}
+```
+
+The schema is in the manifest, not the code, because the manifest is read before any code is
+imported. That way a host can show and edit settings before the user has approved the extension to
+run. The schema is a subset of JSON Schema. A keyword outside the subset makes the manifest
+unusable (the folder lists as `error`); it is never silently ignored:
+
+| Keyword | |
+|---|---|
+| `type` | `object`, `array`, `string`, `integer`, `number`, `boolean`. Required on every schema; the root is an `object` |
+| `properties`, `required` | an object with fixed fields |
+| `additionalProperties` (a schema) + `propertyNames.pattern` | an object whose keys the user adds and removes: a table |
+| `items` | the elements of an array |
+| `enum`, `default` | allowed values, and the value when unset (checked against the schema itself) |
+| `title`, `description` | labels for the form |
+| `minimum`, `maximum`, `maxLength`, `pattern` | constraints |
+| `format` | a string whose options the host provides: `model` (a `provider/model` id, rendered as the host's model picker, checked only to be a string) or `permission-mode` (a `PermissionMode`, checked against it) |
+| `x-multiline`, `x-order` | rendering hints |
+
+`x-secret` is reserved and not supported yet.
+
+**Reading.** The extension gets its settings as `host.settings` in its `harness` half and as
+`ctx.settings` in its `session` half. Both are frozen, and both are `undefined` when the manifest
+declares no settings. A stored value is resolved against the schema leniently: a missing field
+takes its default (an object without one is built from its fields' defaults), an unknown key is
+dropped, and an invalid field falls back to its default and is reported. A stored table replaces
+its `default` table rather than merging with it, so an entry the user removed stays removed. An
+extension whose stored settings no longer fit (its update changed the schema) still loads.
+
+**Writing.** The host reads and writes through `harness.extensions`:
+
+```ts
+const view = await harness.extensions!.getSettings("greeter"); // { schema, value, issues } | undefined
+await harness.extensions!.setSettings("greeter", { greeting: "hi", rooms: { lab: { title: "Lab" } } });
+(await harness.extensions!.list())[0].settings;                // the same view, for every folder that declares settings
+```
+
+`setSettings` is strict. An invalid value throws `ExtensionSettingsInvalidError`, whose `issues`
+carry each problem at its dotted path (`rooms.lab.title`), and nothing is stored. A valid value is
+stored as given, without the defaults filled in, so a default an update changes still reaches a
+field the user never set. If the extension is loaded, it is then reloaded the coordinated way: its
+sessions meet at their run boundary and none is interrupted. Its `harness` half runs again with the
+new value, and its `session` half is re-attached with it. Writes to one extension run one at a time.
+Neither call needs the extension to be loaded or approved, because only the manifest is read.
+
+**Storage.** By default each extension's value is one JSON file, `<extensionDir>/.settings/<id>.json`,
+written to a temporary file and renamed into place. It is kept apart from the extension's own
+`dataDir` (`<extensionDir>/.data/<id>`), so an extension cannot rewrite its settings past
+validation, and an update of its bundle leaves them alone. A host keeps them elsewhere with
+`createHarness({ extensionSettings })`, an `ExtensionSettingsStore` (`get(id)`, `put(id, value)`).
+
+An extension passed by value has no manifest, so it has no settings: its host gives it options in
+code.

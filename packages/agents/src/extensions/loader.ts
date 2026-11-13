@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { ExtensionDefinition } from "./types.ts";
+import { validateSettingsSchema, type SettingsSchema } from "./settings.ts";
 
 /** The slice of a session the loader swaps extensions on — `HarnessSession` satisfies it. */
 export interface ExtensionAttachTarget {
@@ -80,6 +81,13 @@ export interface ExtensionManifest {
   readonly name?: string;
   /** One line for listings. */
   readonly description?: string;
+  /**
+   * The extension's settings, as a JSON Schema subset (see `settings.ts` for what is supported —
+   * anything else makes the manifest unusable, never silently ignored). Declared here rather than
+   * in code so a host can show and edit them before the extension is loaded or approved; the
+   * extension reads the values as `host.settings` / `ctx.settings`.
+   */
+  readonly settings?: SettingsSchema;
 }
 
 /** The manifest as read from disk: only the fields above are checked; the rest pass through. */
@@ -90,6 +98,7 @@ const ExtensionManifestSchema = z.looseObject({
   engine: z.string().regex(VERSION_RE, 'must be a version like "1.2.0"').optional(),
   name: z.string().optional(),
   description: z.string().optional(),
+  settings: z.unknown().optional(),
 });
 
 export type ExtensionFileState =
@@ -153,22 +162,30 @@ export class ExtensionLoader {
 
   /** Every extension folder under the directory, with its trust/load state. */
   async list(): Promise<ExtensionFileStatus[]> {
+    return (await this.scanAll()).map((entry) => entry.status);
+  }
+
+  /** `list()`, with each usable folder's manifest beside its status. */
+  async scanAll(): Promise<Array<{ readonly status: ExtensionFileStatus; readonly manifest?: ExtensionManifest }>> {
     const approvals = await this.readApprovals();
-    const out: ExtensionFileStatus[] = [];
+    const out: Array<{ readonly status: ExtensionFileStatus; readonly manifest?: ExtensionManifest }> = [];
     for (const entry of await this.readExtensionDirs()) {
       try {
         const scanned = await this.scan(entry);
         out.push({
-          id: scanned.manifest.id,
-          dir: scanned.dir,
-          ...(scanned.manifest.version !== undefined ? { version: scanned.manifest.version } : {}),
-          ...(scanned.manifest.engine !== undefined ? { engine: scanned.manifest.engine } : {}),
-          ...(scanned.manifest.name !== undefined ? { name: scanned.manifest.name } : {}),
-          ...(scanned.manifest.description !== undefined ? { description: scanned.manifest.description } : {}),
-          state: this.stateOf(scanned, approvals),
+          manifest: scanned.manifest,
+          status: {
+            id: scanned.manifest.id,
+            dir: scanned.dir,
+            ...(scanned.manifest.version !== undefined ? { version: scanned.manifest.version } : {}),
+            ...(scanned.manifest.engine !== undefined ? { engine: scanned.manifest.engine } : {}),
+            ...(scanned.manifest.name !== undefined ? { name: scanned.manifest.name } : {}),
+            ...(scanned.manifest.description !== undefined ? { description: scanned.manifest.description } : {}),
+            state: this.stateOf(scanned, approvals),
+          },
         });
       } catch (error) {
-        out.push({ id: entry, dir: join(this.directory, entry), state: "error", error: messageOf(error) });
+        out.push({ status: { id: entry, dir: join(this.directory, entry), state: "error", error: messageOf(error) } });
       }
     }
     return out;
@@ -265,7 +282,13 @@ export class ExtensionLoader {
       const issues = parsed.error.issues.map((issue) => `${issue.path.length > 0 ? `"${issue.path.join(".")}" ` : ""}${issue.message}`);
       throw new Error(`manifest.json: ${issues.join("; ")}`);
     }
-    const manifest: ExtensionManifest = parsed.data;
+    if (parsed.data.settings !== undefined) {
+      const issues = validateSettingsSchema(parsed.data.settings);
+      if (issues.length > 0) {
+        throw new Error(`manifest.json "settings": ${issues.map((issue) => `${issue.path !== "" ? `${issue.path}: ` : ""}${issue.message}`).join("; ")}`);
+      }
+    }
+    const manifest = parsed.data as ExtensionManifest;
     if (manifest.engine !== undefined && compareVersions(FRAMEWORK_VERSION, manifest.engine) < 0) {
       throw new Error(`requires operon-agents >= ${manifest.engine}; this host runs ${FRAMEWORK_VERSION}`);
     }

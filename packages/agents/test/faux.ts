@@ -36,6 +36,12 @@ export function offeredToolNames(context: Pick<Context, "messages">): string[] {
   return getCurrentTools(context.messages).map((tool) => tool.name);
 }
 
+/** The full tool schemas a faux request offers — what the model actually sees, for asserting a
+ *  tool's advertised description or parameter docs, not just its name. */
+export function offeredTools(context: Pick<Context, "messages">): ReturnType<typeof getCurrentTools> {
+  return getCurrentTools(context.messages);
+}
+
 export interface FauxChatProvider extends FauxProviderHandle {
   readonly runtime: ModelManager;
   getChatModel(): ChatModel;

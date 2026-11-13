@@ -45,7 +45,7 @@ const harness = createHarness({
 const lead = await harness.createSession();    // an ordinary session — born holding Team
 ```
 
-`teammates` is the parameter boundary: the host decides what a `coder` teammate *is* — `{ title?, workDir?, config? }`, where `config` is an ordinary `SessionConfig` (agent, model, permission, MCP servers) — and the model only ever picks a type and a name. The extension tags each spawned session `config.extensions.peers = { member }` itself, so a teammate is born a member with `Hub`. Everything else is the agent's:
+`teammates` is the parameter boundary: the host decides what a `coder` teammate *is* — `{ title?, workDir?, config? }`, where `config` is an ordinary `SessionConfig` (agent, model, permission, MCP servers) — and the model only ever picks a type and a name. The `Team` tool lists those types — and what each is for, when a type says — in its description and the spawn `type` parameter, so the model picks from them rather than guessing a type and learning the list from the error. The extension tags each spawned session `config.extensions.peers = { member }` itself, so a teammate is born a member with `Hub`. Everything else is the agent's:
 
 ```
 Team(op: "create", name: "db-migration")
@@ -78,33 +78,77 @@ await harness.extensions!.reload("peers");
 
 `reload` is one coordinated act: every session holding the peers half meets at its next run boundary, the half is swapped, the service is replaced (the old network's `close()` runs), and everyone resumes. No session is reopened and no conversation is interrupted; the repo in the extension's data dir carries the roster and mailbox across, so the same lead reaches the same teammate afterwards. Nothing watches the directory — a changed bundle loads only through an explicit `reload`, so an agent with write access cannot plant code that runs on next open. Two rules the bundle keeps: import the framework as types only (it belongs to the host — this package value-imports nothing from it, which is what keeps the bundle free of the core's native transitive deps), and keep state in the repo under `host.dataDir` (the instance is replaceable; a memory repo is wiped by reload). To ship it, `pnpm release` in `examples/peers-extension` produces the zip, its sha256 and an index entry for a download site.
 
-### Options from the host
+### What a teammate is born as
 
-When what a teammate IS depends on the host — teammate types the user configured in a settings
-screen, a budget read from a file — pass the options as a function of the extension's host, and
-name the host services it reads in `uses`. A reload re-runs the function, so re-reading the
-settings is the config update; sessions already open keep running.
+`teammates` maps each type the model may `Team spawn` to the session options a teammate of that
+type is born with: a constant, or a function of the spawn request. `peers` fills in the rest:
+
+| | Default | Set it with |
+|---|---|---|
+| title | `` `${name} · ${typeTitle}` `` (`typeTitle` defaults to the type's key) | `title`, `typeTitle` |
+| model | the lead's **current** model (a runtime `setModel` included) | `config.model` |
+| prompt | the member protocol (report to `lead` with `Hub send` when done), then the type's `instructions`, appended after any `config.appendSystemPrompt` | `memberInstructions` (a string replaces the protocol, `false` drops it), `instructions` |
+| roster description | none | `description` |
 
 ```ts
-export default peers(async (host) => {
-  const settings = host.services["my-app-teams"];        // registered with createHarness({ services })
-  const config = await settings.config();
-  return {
-    visibility: sharedLabelVisibility,
-    repo: createFilePeerRepo(host.dataDir!),
-    budget: config.budget,
-    team: { type: "lead" },
-    teammates: Object.fromEntries(Object.keys(config.types).map((type) => [type, (request) => settings.teammateOptions(request)])),
-    onTeammateCreated: (sessionId, member) => settings.onTeammateCreated(sessionId, member),
-  };
-}, { uses: ["my-app-teams"] });
+peers({
+  visibility: sharedLabelVisibility,
+  teammates: {
+    coder: { typeTitle: "Coder", description: "Implements a scoped change", config: { permission: { mode: "workspace" } } },
+    reviewer: { typeTitle: "Reviewer", instructions: "Do not modify files.", config: { model: "anthropic/claude-sonnet-5-5" } },
+  },
+});
 ```
 
-`onTeammateCreated(sessionId, member)` runs once a spawned teammate's session exists and holds its
-seat, **before** its assignment is routed — where a host makes its own record of the conversation,
-picks a model, or subscribes, so all of it is in place for the teammate's first turn. A hook that
-throws aborts the spawn rather than leave a half-made teammate running: the session is closed, the
-seat leaves the roster (the name is free for a retry), and `Team spawn` reports the error.
+The prompt goes in as `config.appendSystemPrompt`, so it is stored with the teammate and comes back
+when it is woken. That setting shapes the default agent only. A host whose `resolveSession` binds a
+complete agent for teammates sets `memberInstructions: false` and puts `DEFAULT_MEMBER_INSTRUCTIONS`
+in that agent's own instructions.
+
+The model is inherited through `host.createSession({ from, inherit: ["model"] })`. A lead running on
+the harness default has no model to hand down, so its teammates run on the default too.
+
+### Settings
+
+A file bundle does not need its host to compute options. Its manifest declares
+`PEERS_SETTINGS_SCHEMA` as its `settings`, and the bundle turns the value into options:
+
+```ts
+export default peers((host) => ({
+  visibility: sharedLabelVisibility,
+  repo: createFilePeerRepo(host.dataDir!),
+  team: { type: "lead", description: "Coordinates the team from the user's conversation" },
+  ...peersOptionsFromSettings(host.settings),
+}));
+```
+
+The settings are a `budget` (`maxWakes`, `maxTotalTokens`, `maxTotalCost`) and a table of teammate
+`types` (`title`, `description`, `model`, `permissionMode`, `instructions`). A type with no `model`
+inherits its lead's. The framework stores and validates the value, and a host renders it with its
+generic settings form (`harness.extensions.getSettings("peers")` / `setSettings`). A change
+reloads the extension, so new types and budget apply with no host wiring. No teammate types are
+built in: a product's packaging writes its own as the schema's `default`.
+
+Options can still be a function of the host that reads a host service named in `uses`
+(`peers(async (host) => …, { uses: ["my-host"] })`), but a bundle written that way loads only on a
+host that registers the service.
+
+### Finding teammates from the host
+
+A host that keeps its own record of each teammate (a row in a conversation list, say) finds them in
+`harness.onSessionOpened`, with `teammateOf(session)`:
+
+```ts
+harness.onSessionOpened(async (session, info) => {
+  const member = teammateOf(session); // { agentId, name, team, type, creatorSessionId? } | undefined
+  if (member !== undefined && info.operation === "create") await recordTeammate(session, member);
+});
+```
+
+The listener runs before the teammate can run, so a subscription made there sees its whole first
+turn. If it throws, the spawn is rolled back: the session is closed and its record removed, the
+name is free again, and `Team spawn` reports the error to the lead. A fork of a teammate is an
+ordinary session, so `teammateOf` returns `undefined` for it.
 
 ## Pre-arranged teams
 

@@ -17,8 +17,27 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionDefinition, ExtensionHostContext } from "./types.ts";
-import { ExtensionLoader, type ExtensionFileStatus } from "./loader.ts";
+import { ExtensionLoader, type ExtensionFileStatus, type ExtensionManifest } from "./loader.ts";
 import { ServiceRegistry, type ServiceOptions } from "./services.ts";
+import { resolveSettings, validateSettings, type ExtensionSettingsStore, type ExtensionSettingsView, type SettingsIssue } from "./settings.ts";
+
+/** What `harness.extensions.list()` reports for one extension folder: its file status, and its
+ *  settings when its manifest declares some. */
+export interface ExtensionStatus extends ExtensionFileStatus {
+  readonly settings?: ExtensionSettingsView;
+}
+
+/** `setSettings` was handed a value its schema refuses; nothing was stored. */
+export class ExtensionSettingsInvalidError extends Error {
+  override readonly name = "ExtensionSettingsInvalidError";
+  readonly extensionId: string;
+  readonly issues: readonly SettingsIssue[];
+  constructor(extensionId: string, issues: readonly SettingsIssue[]) {
+    super(`settings for extension "${extensionId}" are invalid: ${issues.map((issue) => `${issue.path !== "" ? `${issue.path}: ` : ""}${issue.message}`).join("; ")}`);
+    this.extensionId = extensionId;
+    this.issues = issues;
+  }
+}
 
 /** The session surface the barrier hands to a swap function. */
 export interface HeldSession {
@@ -46,6 +65,9 @@ export interface ExtensionHostBridge {
 interface LoadedRecord {
   /** Whether this extension's `harness` half published a service under its id. */
   readonly hasService: boolean;
+  /** The definition as imported — what a settings change re-stages, without importing again
+   *  (or approving a file that changed since). */
+  readonly definition: ExtensionDefinition;
 }
 
 /** What staging one `harness`-bearing definition produced, before anything is published. */
@@ -69,6 +91,9 @@ export interface StagingOptions {
   readSessionMessages: ExtensionHostContext["readSessionMessages"];
   /** Resolve one of the definition's `uses` names to its service handle. */
   service(name: string): unknown;
+  /** The extension's resolved settings — `host.settings` and `ctx.settings`. Absent when it
+   *  declares none (and always by value). */
+  readonly settings?: Readonly<Record<string, unknown>>;
   warn(message: string): void;
 }
 
@@ -87,7 +112,9 @@ export function stageDefinition(
   definition: ExtensionDefinition,
   options: StagingOptions,
 ): StagedDefinition | Promise<StagedDefinition> {
-  if (definition.harness === undefined) return { sessionDef: definition };
+  const settings = options.settings;
+  const sessionDef = settings === undefined ? definition : withSessionSettings(definition, settings);
+  if (definition.harness === undefined) return { sessionDef };
   const host: ExtensionHostContext = {
     createSession: (sessionOptions) => options.createSession(sessionOptions),
     resumeSession: (id) => options.resumeSession(id),
@@ -95,14 +122,27 @@ export function stageDefinition(
     services: Object.freeze(Object.fromEntries((definition.uses ?? []).map((name) => [name, options.service(name)]))),
     ...(options.dir !== undefined ? { dir: options.dir } : {}),
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
+    ...(settings !== undefined ? { settings } : {}),
     warn: (message) => options.warn(`[extension ${definition.id}] ${message}`),
   };
   const finish = (instance: unknown): StagedDefinition => ({
     service: { name: definition.id, instance, options: { replaceable: options.defaultReplaceable } },
-    sessionDef: definition,
+    sessionDef,
   });
   const result = definition.harness(host);
   return isPromiseLike(result) ? Promise.resolve(result).then(finish) : finish(result);
+}
+
+/** The definition, its `session` handed `settings` in its context. Everything else is read through
+ *  to the original (a prototype link, so a definition that is a class instance keeps its methods). */
+function withSessionSettings(definition: ExtensionDefinition, settings: Readonly<Record<string, unknown>>): ExtensionDefinition {
+  const wrapped = Object.create(definition) as ExtensionDefinition;
+  Object.defineProperty(wrapped, "session", {
+    enumerable: true,
+    value: (api: Parameters<ExtensionDefinition["session"]>[0], ctx: Parameters<ExtensionDefinition["session"]>[1]) =>
+      definition.session.call(definition, api, { ...ctx, settings }),
+  });
+  return wrapped;
 }
 
 const DEFAULT_BARRIER_TIMEOUT_MS = 30_000;
@@ -116,15 +156,60 @@ export class HarnessExtensionManager {
   private readonly loaded = new Map<string, LoadedRecord>();
   /** Definitions newborn sessions receive: every loaded extension's per-session half. */
   private readonly sessionDefs = new Map<string, ExtensionDefinition>();
+  private readonly settingsStore: ExtensionSettingsStore;
+  /** The tail of each extension's settings writes — one at a time per extension. */
+  private readonly settingsWrites = new Map<string, Promise<unknown>>();
 
-  constructor(options: { readonly directory: string; readonly dataDir: string; readonly bridge: ExtensionHostBridge }) {
+  constructor(options: { readonly directory: string; readonly dataDir: string; readonly settings: ExtensionSettingsStore; readonly bridge: ExtensionHostBridge }) {
     this.loader = new ExtensionLoader({ directory: options.directory });
     this.dataRoot = resolve(options.dataDir);
+    this.settingsStore = options.settings;
     this.bridge = options.bridge;
   }
 
-  list(): Promise<ExtensionFileStatus[]> {
-    return this.loader.list();
+  /** Every extension folder, with its trust/load state and — when it declares them — its settings. */
+  async list(): Promise<ExtensionStatus[]> {
+    const out: ExtensionStatus[] = [];
+    for (const { status, manifest } of await this.loader.scanAll()) {
+      const settings = manifest === undefined ? undefined : await this.settingsView(manifest);
+      out.push(settings === undefined ? status : { ...status, settings });
+    }
+    return out;
+  }
+
+  /**
+   * One extension's settings: the schema its manifest declares, the value it reads (stored, over
+   * the defaults) and the issues found reading it. `undefined` when it declares none. Works for an
+   * extension that is not loaded or not approved — only its manifest is read.
+   */
+  async getSettings(id: string): Promise<ExtensionSettingsView | undefined> {
+    return this.settingsView(await this.loader.manifest(id));
+  }
+
+  /**
+   * Replace one extension's settings. The value is checked against its schema first — on any issue
+   * this throws `ExtensionSettingsInvalidError` and stores nothing. Once stored, a loaded extension
+   * is reloaded the coordinated way (its sessions meet at their run boundary; none is
+   * interrupted), so its `harness` half runs again against the new value. One write at a time per
+   * extension. An extension not loaded just keeps the value for its next load.
+   */
+  async setSettings(id: string, value: unknown, options: { readonly timeoutMs?: number } = {}): Promise<void> {
+    const previous = this.settingsWrites.get(id) ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+      const schema = (await this.loader.manifest(id)).settings;
+      if (schema === undefined) throw new Error(`extension "${id}" declares no settings`);
+      const issues = validateSettings(schema, value);
+      if (issues.length > 0) throw new ExtensionSettingsInvalidError(id, issues);
+      await this.settingsStore.put(id, value);
+      const record = this.loaded.get(id);
+      if (record !== undefined) await this.register(id, record.definition, options);
+    });
+    this.settingsWrites.set(id, write);
+    try {
+      await write;
+    } finally {
+      if (this.settingsWrites.get(id) === write) this.settingsWrites.delete(id);
+    }
   }
 
   /** What every new session is born with. Wire into the harness's extension evaluation. */
@@ -194,7 +279,7 @@ export class HarnessExtensionManager {
   private async register(id: string, definition: ExtensionDefinition, options: { readonly timeoutMs?: number }): Promise<void> {
     const staged = await this.stage(definition);
     const previous = this.loaded.get(id);
-    const record: LoadedRecord = { hasService: staged.service !== undefined };
+    const record: LoadedRecord = { hasService: staged.service !== undefined, definition };
     if (previous === undefined) {
       // First load: register the service, then hand the session half to future sessions.
       // Already-open sessions are not touched (a reload only re-attaches to sessions that hold
@@ -232,7 +317,12 @@ export class HarnessExtensionManager {
     // The data folder exists before `harness` runs, so the extension can use it right away.
     const dataDir = join(this.dataRoot, definition.id);
     if (definition.harness !== undefined) await mkdir(dataDir, { recursive: true });
+    const settings = await this.settingsView(await this.loader.manifest(definition.id));
+    for (const issue of settings?.issues ?? []) {
+      this.bridge.warn(`[extension ${definition.id}] setting ${issue.path !== "" ? `"${issue.path}"` : "(root)"} ${issue.message}`);
+    }
     return stageDefinition(definition, {
+      ...(settings !== undefined ? { settings: deepFreeze(settings.value) } : {}),
       defaultReplaceable: true,
       dir: await this.loader.manifestDir(definition.id),
       dataDir,
@@ -242,6 +332,22 @@ export class HarnessExtensionManager {
       service: (name) => this.bridge.services.handle(name),
       warn: (message) => this.bridge.warn(message),
     });
+  }
+
+  /** The settings an extension reads, from its manifest and the store; `undefined` when it
+   *  declares none. A store that cannot be read is reported, and the defaults are used. */
+  private async settingsView(manifest: ExtensionManifest): Promise<ExtensionSettingsView | undefined> {
+    const schema = manifest.settings;
+    if (schema === undefined) return undefined;
+    let stored: unknown;
+    const issues: SettingsIssue[] = [];
+    try {
+      stored = await this.settingsStore.get(manifest.id);
+    } catch (error) {
+      issues.push({ path: "", message: `the stored settings could not be read (${error instanceof Error ? error.message : String(error)}); using the defaults` });
+    }
+    const resolved = resolveSettings(schema, stored);
+    return { schema, value: resolved.value, issues: [...issues, ...resolved.issues] };
   }
 
   /** Sessions still running an extension that `uses` `id`'s service — read off the attached
@@ -256,4 +362,13 @@ export class HarnessExtensionManager {
     }
     return found;
   }
+}
+
+/** Settings are handed to an extension read-only: every half sees the same value. */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
 }

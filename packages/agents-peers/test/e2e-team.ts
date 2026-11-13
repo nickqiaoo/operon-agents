@@ -57,6 +57,9 @@ async function main(): Promise<void> {
         // The parameter boundary: the HOST decides what a "schema" teammate is; the model only
         // ever picks a type and a name.
         teammates: { schema: { title: "schema" } },
+        // This host binds a complete agent for every teammate (resolveSession above), so the
+        // member protocol is that agent's business — an appended prompt would be refused.
+        memberInstructions: false,
       }),
       spy,
     ],

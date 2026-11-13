@@ -22,11 +22,44 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without waking it (`operon-agents-peers`). A custom extension enables it by passing
   `readSessionMessages` to `createPeerNetwork`; `peers()` wires it.
 - `peers(options, { uses })` takes its options as a function of the extension's host as well as a
-  constant, so a bundle can read teammate types, budget and the rest from a host service named in
-  `uses`; a reload re-runs it (`operon-agents-peers`).
-- `onTeammateCreated(sessionId, member)` on `peers()` / `createPeerNetwork`: runs once a spawned
-  teammate exists and holds its seat, before its assignment is routed. Throwing aborts the spawn —
-  the session is closed, the seat is freed and `Team spawn` reports the error.
+  constant; a reload re-runs it (`operon-agents-peers`).
+- The `Team` tool advertises the spawnable teammate types up front — their keys and what each is
+  for — in its description and the spawn `type` parameter, so a lead picks a configured type
+  instead of guessing one and learning the list from the error (`operon-agents-peers`).
+- Extension settings. A file extension's `manifest.json` can declare `settings`, a JSON Schema
+  subset (`type`, `properties`, `required`, `additionalProperties` + `propertyNames.pattern`,
+  `items`, `enum`, `default`, `title`, `description`, `minimum`, `maximum`, `maxLength`, `pattern`,
+  `format: "model" | "permission-mode"`, `x-multiline`, `x-order`). Any other keyword makes the
+  manifest unusable. The extension reads the value as `host.settings` and `ctx.settings`, resolved
+  against the schema: defaults fill gaps, unknown keys are dropped, and an invalid field falls back
+  to its default and is reported. `harness.extensions.getSettings(id)` and `setSettings(id, value)`
+  read and write it, also for an extension that is not loaded. `list()` includes it. A write is
+  validated (`ExtensionSettingsInvalidError` with per-path `issues`; nothing stored), then reloads a
+  loaded extension without interrupting its sessions. Values live in
+  `<extensionDir>/.settings/<id>.json`, apart from the extension's `dataDir`; replace the store with
+  `createHarness({ extensionSettings })`. `validateSettingsSchema`, `resolveSettings` and
+  `validateSettings` are exported from `operon-agents/advanced`.
+- `host.createSession({ from, inherit: ["model"] })`: the session an extension creates takes the
+  current model of the session it is created from, unless its `config.model` names one.
+- Teammates get their defaults from `peers()` itself (`operon-agents-peers`). The member protocol
+  (`DEFAULT_MEMBER_INSTRUCTIONS`; replace or drop it with `memberInstructions`) and a type's
+  `instructions` are appended to the system prompt. The title defaults to
+  `` `${name} · ${typeTitle}` ``. A type without a model inherits the lead's current one. A type's
+  `description` is shown on the roster.
+- `teammateOf(session)` tells a host whether a session is a teammate and which one
+  (`operon-agents-peers`), so it can find teammates in `harness.onSessionOpened`. A listener there
+  that throws rolls the spawn back.
+- `PEERS_SETTINGS_SCHEMA` and `peersOptionsFromSettings(settings)` let a `peers` bundle be configured
+  by its own settings (budget and teammate types) instead of a host service (`operon-agents-peers`).
+
+### Fixed
+
+- A spawn whose session failed to open no longer keeps the teammate's name taken, so a retry under
+  the same name works (`operon-agents-peers`).
+- A create whose `resolveSession` returned a `config` stored nothing, so a session an extension
+  created lost the extension's parameters (a teammate's seat and prompt) the next time it was
+  opened. A create now stores what it was asked for. The host's resolved config is still not
+  stored, and a reopen still keeps the setup the session had.
 
 ## [0.1.0-alpha.31] — 2026-11-12
 

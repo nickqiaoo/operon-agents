@@ -512,6 +512,25 @@ async function namesAndForkedParameters(): Promise<void> {
   turns = 6;
   check("resolver config: the next open asks again — the harness kept no copy", (await managed.resumeSession(first.id)).config.limits?.maxTurns === 6);
 
+  // What a create was asked for is stored even when the host resolves the open: the next open's
+  // `stored` carries it, so a host layering its own setup over it keeps the caller's.
+  const seenStored: Array<SessionConfig | undefined> = [];
+  const layering = createHarness({
+    ...faux.harnessModel(),
+    resolveSession: (request) => {
+      seenStored.push(request.stored);
+      return { config: { ...(request.operation === "create" ? request.requested.config : request.stored), limits: { maxTurns: 3 } } };
+    },
+    config: { defaults: { ...faux.harnessModel().config.defaults } }
+  });
+  const asked = await layering.createSession({ config: { appendSystemPrompt: "ASKED", limits: { maxTurns: 99 } } });
+  check("resolver config: a create runs on the host's config", asked.config.appendSystemPrompt === "ASKED" && asked.config.limits?.maxTurns === 3);
+  await asked.close();
+  await layering.resumeSession(asked.id);
+  const restoredFrom = seenStored.at(-1);
+  check("resolver config: what the create asked for is what the next open finds stored", restoredFrom?.appendSystemPrompt === "ASKED" && restoredFrom.limits?.maxTurns === 99);
+  await layering.close();
+
   await Promise.all([harness.close(), strictHarness.close(), trusting.close(), managed.close()]);
   void params;
   faux.unregister();

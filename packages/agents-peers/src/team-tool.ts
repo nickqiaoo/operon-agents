@@ -12,29 +12,46 @@ import { defineTool } from "./define-tool.ts";
 import type { AgentRef } from "./directory.ts";
 import type { PeerExtensionOptions, PeerNetworkHandle, TeamCaller } from "./network.ts";
 
-const teamInput = z.discriminatedUnion("op", [
-  z.object({
-    op: z.literal("create").describe("Form a team. Do this once, before spawning members."),
-    name: z.string().describe('Short team name, e.g. "db-migration". Letters, digits, _ and - only.'),
-  }),
-  z.object({
-    op: z.literal("spawn").describe("Create one teammate in your team. It starts on the prompt immediately and reports back by message."),
-    type: z.string().describe("A teammate type configured by the host. An unknown type fails and lists what is available."),
-    name: z.string().describe('The teammate\'s name — unique within the team; it is how you and its teammates address it. "lead" is reserved for you.'),
-    prompt: z.string().describe("Its initial assignment. Plain prose; share paths and ids, not pasted blobs."),
-    team: z.string().optional().describe("Which of your teams it joins. Only needed when you created more than one."),
-  }),
-  z.object({
-    op: z.literal("send").describe("Message one of YOUR team's members. Returns immediately; never waits for a reply."),
-    to: z.string().describe("Member name (or id) from Team list."),
-    message: z.string().describe("Plain prose."),
-    team: z.string().optional().describe("Which of your teams the member is in. Only needed when the same name exists in several of your teams."),
-    replyTo: z.string().optional().describe("messageId you are answering, when this is a reply."),
-    interrupt: z.boolean().optional().describe("Cut into the member's current work instead of waiting for its turn boundary. Reserve for 'stop, you're going the wrong way'."),
-  }),
-  z.object({ op: z.literal("list").describe("List the members of teams you created, with their status.") }),
-  z.object({ op: z.literal("inbox").describe("Read messages routed to you that never reached your conversation.") }),
-]);
+/** One spawnable teammate type as the `Team` tool advertises it: the key the model passes as
+ *  `spawn`'s `type`, and what a teammate of that type is for, when the type says. */
+export interface TeammateTypeInfo {
+  readonly type: string;
+  readonly description?: string;
+}
+
+/** The spawnable types as one line for the `type` parameter: each key, and what it is for when
+ *  said. A type without a description is still listed by key — the model must not have to guess. */
+function describeTypes(types: readonly TeammateTypeInfo[]): string {
+  return types
+    .map((entry) => (entry.description !== undefined && entry.description.trim() !== "" ? `${entry.type} — ${entry.description.trim()}` : entry.type))
+    .join("; ");
+}
+
+function teamInputSchema(typeDescription: string) {
+  return z.discriminatedUnion("op", [
+    z.object({
+      op: z.literal("create").describe("Form a team. Do this once, before spawning members."),
+      name: z.string().describe('Short team name, e.g. "db-migration". Letters, digits, _ and - only.'),
+    }),
+    z.object({
+      op: z.literal("spawn").describe("Create one teammate in your team. It starts on the prompt immediately and reports back by message."),
+      type: z.string().describe(typeDescription),
+      name: z.string().describe('The teammate\'s name — unique within the team; it is how you and its teammates address it. "lead" is reserved for you.'),
+      prompt: z.string().describe("Its initial assignment. Plain prose; share paths and ids, not pasted blobs."),
+      team: z.string().optional().describe("Which of your teams it joins. Only needed when you created more than one."),
+    }),
+    z.object({
+      op: z.literal("send").describe("Message one of YOUR team's members. Returns immediately; never waits for a reply."),
+      to: z.string().describe("Member name (or id) from Team list."),
+      message: z.string().describe("Plain prose."),
+      team: z.string().optional().describe("Which of your teams the member is in. Only needed when the same name exists in several of your teams."),
+      replyTo: z.string().optional().describe("messageId you are answering, when this is a reply."),
+      interrupt: z.boolean().optional().describe("Cut into the member's current work instead of waiting for its turn boundary. Reserve for 'stop, you're going the wrong way'."),
+    }),
+    z.object({ op: z.literal("list").describe("List the members of teams you created, with their status.") }),
+    z.object({ op: z.literal("inbox").describe("Read messages routed to you that never reached your conversation.") }),
+  ]);
+}
 
 function memberRow(ref: AgentRef): Record<string, unknown> {
   return {
@@ -51,13 +68,19 @@ function text(body: string, details?: Record<string, unknown>, isError?: boolean
   return { content: [{ type: "text", text: body }], ...(details !== undefined ? { details } : {}), ...(isError === true ? { isError: true } : {}) };
 }
 
-export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => string | undefined, options: PeerExtensionOptions): Tool {
+export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => string | undefined, options: PeerExtensionOptions, teammateTypes: readonly TeammateTypeInfo[] = []): Tool {
+  const typeDescription = teammateTypes.length === 0
+    ? "A teammate type configured by the host. An unknown type fails and lists what is available."
+    : `A teammate type configured by the host. Available types: ${describeTypes(teammateTypes)}. An unknown type fails and lists what is available.`;
   const description = [
     "Form and run a team of durable agents for work that needs several of them talking to each other.",
     "",
     "- `create` forms a team (do it once).",
     "- `spawn` creates one teammate in it: an independent agent that starts on your prompt right away,",
     "  works in its own session, and reports back by message — which arrives in a LATER turn of yours.",
+    ...(teammateTypes.length > 0
+      ? [`- Spawnable teammate types: ${teammateTypes.map((entry) => entry.type).join(", ")}. What each is for is on the spawn \`type\` parameter.`]
+      : []),
     "- `send` messages one of your members; `list` shows them; `inbox` drains undelivered messages.",
     "",
     "Rules:",
@@ -73,7 +96,7 @@ export function buildTeamTool(network: PeerNetworkHandle, sessionIdOf: () => str
   return defineTool({
     name: "Team",
     description,
-    parameters: teamInput,
+    parameters: teamInputSchema(typeDescription),
     resolve: (args) => ({
       // `spawn` and `send` wake agents and spend budget; reads are cheap.
       approvalRule: `team.${args.op}`,

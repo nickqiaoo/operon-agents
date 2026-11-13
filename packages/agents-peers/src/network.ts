@@ -39,7 +39,7 @@ import {
 import type { PeerLimits, PeerMailbox, PeerMessage } from "./mailbox.ts";
 import { createMemoryPeerRepo, type PeerRepo } from "./repo.ts";
 import { budgetExceeded, UsageDiff, type PeerBudget, type PeerFleetStats, type PeerStatsStore } from "./stats.ts";
-import { buildTeamTool } from "./team-tool.ts";
+import { buildTeamTool, type TeammateTypeInfo } from "./team-tool.ts";
 import { buildMemberTool } from "./member-tool.ts";
 
 /** Marks a peer message on the wire and in the recipient's journal. The message id is handed to
@@ -106,17 +106,6 @@ export interface PeerNetworkOptions {
    * rejects, and nothing else changes.
    */
   readonly readSessionMessages?: (sessionId: string, options?: TranscriptPageOptions) => Promise<TranscriptPage>;
-  /**
-   * Runs once a spawned teammate's session exists and holds its seat on the roster, BEFORE its
-   * assignment is routed — so whatever the host wires here (its own record of the conversation, a
-   * model choice, a subscription) is in place for the teammate's first turn.
-   *
-   * Throwing aborts the spawn instead of leaving a half-made teammate running: the session is
-   * closed, the seat leaves the roster (the name is free for a retry) and `Team spawn` reports the
-   * error to the creator. The closed session stays in storage; records the host made for it
-   * before throwing are the host's to clean up.
-   */
-  readonly onTeammateCreated?: (sessionId: string, member: PeerMemberOptions) => void | Promise<void>;
 }
 
 /** Options for the creator-side extension. No `labels`: an ordinary agent has no peer identity
@@ -140,6 +129,10 @@ export interface PeerMemberOptions {
   readonly team: string;
   readonly type?: string;
   readonly description?: string;
+  /** The session the member was spawned from — set by `Team spawn`, absent for a host-arranged
+   *  member. What `teammateOf` reports, because a team label names its creator by roster id,
+   *  which is a session id only when the creator is a root agent. */
+  readonly creatorSessionId?: string;
 }
 
 let messageCounter = 0;
@@ -234,7 +227,6 @@ export class PeerNetwork {
   private readonly spawnable: Readonly<Record<string, TeammateFactory>> | undefined;
   private readonly resumeSession: PeerNetworkOptions["resumeSession"];
   private readonly readSessionMessages: PeerNetworkOptions["readSessionMessages"];
-  private readonly onTeammateCreated: PeerNetworkOptions["onTeammateCreated"];
   private closed = false;
   /** Per-turn outbound counters, keyed by "<agentId>:<turnId>" so they self-expire. */
   private readonly outbound = new Map<string, number>();
@@ -264,7 +256,6 @@ export class PeerNetwork {
     this.spawnable = options.spawnable;
     this.resumeSession = options.resumeSession;
     this.readSessionMessages = options.readSessionMessages;
-    this.onTeammateCreated = options.onTeammateCreated;
     this.ready = directory.seed().catch(() => undefined);
   }
 
@@ -487,6 +478,11 @@ export class PeerNetwork {
     try {
       session = await factory({ name: args.name, type: args.type, team: label, creatorId, creatorSessionId: creator.sessionId });
     } catch (error) {
+      // The session may have taken its seat at start (`registerMemberSession`) before its open
+      // failed — a host's `onSessionOpened` that threw rolls the open back — and been parked on
+      // close. The name was free a moment ago, so a row under it now is this spawn's: free it, or
+      // the name stays taken and a retry under it is refused.
+      await this.directory.unregister(agentId).catch(() => undefined);
       return { error: `Could not create teammate "${args.name}": ${error instanceof Error ? error.message : String(error)}` };
     }
     // The member was registered at its session start (params.member → Hub); this merge
@@ -504,24 +500,8 @@ export class PeerNetwork {
     });
     const to = await this.directory.get(agentId);
     if (to === undefined) return { error: `Teammate "${args.name}" was created but never appeared on the roster — did the spawn factory set params.member?` };
-    if (this.onTeammateCreated !== undefined) {
-      try {
-        await this.onTeammateCreated(session.id, { name: args.name, team: label, type: args.type });
-      } catch (error) {
-        await this.abandonSpawn(agentId, session.id);
-        return { error: `Teammate "${args.name}" could not be set up, so it was not kept: ${error instanceof Error ? error.message : String(error)}` };
-      }
-    }
     const receipt = await this.dispatch(creator, to, args.prompt, {});
     return { name: args.name, agentId, sessionId: session.id, team: label, receipt };
-  }
-
-  /** Undo a spawn whose host setup failed: close the session (best effort — it may already be
-   *  gone), then free the seat. In that order, so the session's own `session.end` park lands on a
-   *  row that is about to go, never on a fresh one. */
-  private async abandonSpawn(agentId: string, sessionId: string): Promise<void> {
-    await this.resumeSession(sessionId).then((session) => session.close()).catch(() => undefined);
-    await this.directory.unregister(agentId);
   }
 
   /**
@@ -783,7 +763,7 @@ export const PEERS_SERVICE = "peers";
 
 /** Mount the creator side (the `Team` tool) onto a session — what `peers().session` does for an
  *  ordinary session. */
-export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerExtensionOptions = {}): void {
+export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options: PeerExtensionOptions = {}, teammateTypes: readonly TeammateTypeInfo[] = []): void {
   let sessionId: string | undefined;
   api.on("session.start", (event) => {
     sessionId = event.sessionId;
@@ -794,7 +774,7 @@ export function mountTeam(network: PeerNetworkHandle, api: ExtensionAPI, options
   api.onEvent((event) => {
     network.observe(event, sessionId);
   });
-  api.registerTool(buildTeamTool(network, () => sessionId, options));
+  api.registerTool(buildTeamTool(network, () => sessionId, options, teammateTypes));
 }
 
 /** Mount the member side (the `Hub` tool + identity registration) onto a session — what
@@ -831,19 +811,100 @@ export function createPeerNetwork(options: PeerNetworkOptions): PeerNetwork {
 const UNDELIVERABLE_ERRORS = new Set(["SteerTargetNotFoundError", "SessionInterruptedError", "SessionClosedError"]);
 
 /**
- * What a teammate session is born as: a title and its setup as data (`config` — model, tools,
- * permission, MCP, other extensions' parameters), plus a directory or owner when it should not
- * take its lead's. `peers` adds the member's peer identity to `config.extensions`, so the host
+ * What a teammate session is born as: its setup as data (`config` — model, tools, permission,
+ * MCP, other extensions' parameters), what it is called, plus a directory or owner when it should
+ * not take its lead's. `peers` adds the member's peer identity to `config.extensions`, so the host
  * never wires a mount. Live objects (a sandbox, credentials) are not given here: the host's
  * `resolveSession` supplies them, told that the teammate is created from its lead.
+ *
+ * What `peers` fills in when this does not say:
+ * - **title** — `` `${name} · ${typeTitle}` ``, `typeTitle` defaulting to the type's key;
+ * - **model** — the lead's current model (`config.model` absent ⇒ inherited from the session the
+ *   teammate is created from, see `ExtensionHostContext.createSession`'s `inherit`);
+ * - **prompt** — the member protocol (`PeerOptions.memberInstructions`) and then `instructions`,
+ *   appended to the system prompt after whatever `config.appendSystemPrompt` already says.
  */
-export type TeammateSessionOptions = {
+export interface TeammateSessionOptions {
+  /** The session's title. Default: `` `${name} · ${typeTitle}` ``. */
   readonly title?: string;
+  /** What a teammate of this type is called, for the default title. Default: the type's key. */
+  readonly typeTitle?: string;
+  /** One line on what a teammate of this type is for — shown on the roster next to its type. */
+  readonly description?: string;
+  /** This type's own standing orders, appended after the member protocol. */
+  readonly instructions?: string;
   readonly workDir?: string;
   readonly ownerKey?: string;
   readonly config?: SessionConfig;
-  /** Older spelling of `config.extensions`. */
-} & Record<string, unknown>;
+}
+
+/**
+ * The standing orders every teammate is born with, whatever its type (`PeerOptions.memberInstructions`
+ * replaces or drops them). The `Hub` tool tells a member HOW to message; this tells it WHEN —
+ * without it a teammate answers into its own conversation, and the lead, which can only be
+ * reached by a `Hub send`, never hears back.
+ */
+export const DEFAULT_MEMBER_INSTRUCTIONS = [
+  "You are a teammate spawned by a team lead. The lead cannot see this conversation.",
+  "When your assignment is complete (or you are blocked), you MUST report by calling the Hub tool",
+  'with op "send" to "lead", with a concise report: what you did, the result, and paths or ids to look at.',
+  "A reply typed into this conversation is not a report. Send exactly one report per assignment; do not wait for an answer afterwards.",
+].join("\n");
+
+/** Who a teammate session is — read off its configuration, see `teammateOf`. */
+export interface TeammateIdentity {
+  /** Its roster id (`memberAgentId(team, name)`). */
+  readonly agentId: string;
+  readonly name: string;
+  /** Full team label. */
+  readonly team: string;
+  readonly type: string;
+  /** The session it was spawned from; absent for a host-arranged member whose label does not
+   *  name a creator. */
+  readonly creatorSessionId?: string;
+}
+
+/**
+ * Whether `session` is a teammate, and who: what a host needs to treat teammates specially (a row
+ * in its own list, a different notification) without knowing how `peers` tags them. Reads the
+ * session's assembled configuration (`HarnessSession.config`), so it answers the moment the
+ * session exists — in `harness.onSessionOpened`, before its first turn.
+ *
+ * `undefined` for an ordinary session, and for a fork of a teammate: a fork does not take the
+ * member's seat (`forkParams: "drop"`), so it is an ordinary session.
+ */
+export function teammateOf(session: { readonly config: SessionConfig }): TeammateIdentity | undefined {
+  const params = session.config.extensions?.[PEERS_SERVICE];
+  if (params === null || typeof params !== "object") return undefined;
+  const member = (params as PeerParams).member;
+  if (member === undefined || typeof member.name !== "string" || typeof member.team !== "string") return undefined;
+  // Every spawned member records the session it came from. A host-arranged member does not; its
+  // label's creator segment is a roster id, which for a root creator IS its session id.
+  const creatorSessionId = member.creatorSessionId ?? creatorOfLabel(member.team);
+  return {
+    agentId: memberAgentId(member.team, member.name),
+    name: member.name,
+    team: member.team,
+    type: member.type ?? "member",
+    ...(creatorSessionId !== undefined ? { creatorSessionId } : {}),
+  };
+}
+
+/** The pieces of a teammate's appended system prompt, in order, without the empty ones. */
+function joinPrompts(...parts: readonly (string | undefined)[]): string | undefined {
+  const kept = parts.map((part) => part?.trim()).filter((part): part is string => part !== undefined && part.length > 0);
+  return kept.length > 0 ? kept.join("\n\n") : undefined;
+}
+
+/** The spawnable types as the `Team` tool advertises them: each key, and what it is for when the
+ *  type is a constant that says. A function computes its options per spawn, so nothing is known
+ *  up front — its key is still listed, so the model never has to guess a type to discover it. */
+function teammateTypesOf(teammates: PeerOptions["teammates"]): readonly TeammateTypeInfo[] {
+  return Object.entries(teammates ?? {}).map(([type, options]) => ({
+    type,
+    ...(typeof options !== "function" && options.description !== undefined ? { description: options.description } : {}),
+  }));
+}
 
 /**
  * The per-session argument to the `peers` extension (`createSession({ config: { extensions: { peers } } })`).
@@ -878,6 +939,17 @@ export interface PeerOptions extends Omit<PeerNetworkOptions, "spawnable" | "rep
   >;
   /** Creator options (`type`, `description`) for the `Team` an ordinary session is born holding. */
   readonly team?: PeerExtensionOptions;
+  /**
+   * The standing orders every teammate's system prompt starts with: absent → the default
+   * protocol (`DEFAULT_MEMBER_INSTRUCTIONS` — report to `lead` with `Hub send` when done); a
+   * string replaces it; `false` leaves it out. A type's own `instructions` follow either way.
+   *
+   * These go in as the session's `config.appendSystemPrompt`, which shapes the default agent
+   * only. A host whose `resolveSession` binds a complete agent for teammates (`bindings.agent`)
+   * sets `false` here and gives that agent the protocol itself — `DEFAULT_MEMBER_INSTRUCTIONS` —
+   * since the harness refuses an appended prompt it would have to ignore.
+   */
+  readonly memberInstructions?: string | false;
 }
 
 /** What `peers` is configured with: the options themselves, or a function of the extension's host
@@ -906,15 +978,17 @@ export interface PeerDefinitionOptions<TServices extends Readonly<Record<string,
  *   the member `Hub`; every other session gets the creator `Team`. It reaches the network only
  *   through the `shared` handle, so a reload swaps the network under live sessions.
  *
- * Options are a constant, or a function of the host when they depend on it — a bundle that takes
- * its teammate types and budget from a host service (`definition.uses`) reads them there, and
- * because a reload re-runs `harness`, re-reading IS the config update:
+ * Options are a constant, or a function of the host when they depend on it — a file bundle that
+ * takes its teammate types and budget from its own settings (`PEERS_SETTINGS_SCHEMA` in its
+ * manifest) reads them as `host.settings`, and because a settings change reloads the extension,
+ * which re-runs `harness`, re-reading IS the config update:
  *
  * ```ts
- * export default peers(async (host) => {
- *   const settings = host.services["my-host"];
- *   return { visibility: sharedLabelVisibility, ...(await settings.peerOptions()) };
- * }, { uses: ["my-host"] });
+ * export default peers((host) => ({
+ *   visibility: sharedLabelVisibility,
+ *   repo: createFilePeerRepo(host.dataDir!),
+ *   ...peersOptionsFromSettings(host.settings),
+ * }));
  * ```
  *
  * Server: `createHarness({ extensions: [peers({...})] })`. Desktop: a bundle in `extensionDir`
@@ -929,10 +1003,13 @@ export function peers<TServices extends Readonly<Record<string, unknown>> = Read
   // The creator options the `session` half mounts `Team` with: the latest the `harness` half
   // resolved. `harness` always runs before any session mounts, and again on every reload.
   let team: PeerExtensionOptions = typeof options === "function" ? {} : (options.team ?? {});
+  let teammateTypes: readonly TeammateTypeInfo[] = typeof options === "function" ? [] : teammateTypesOf(options.teammates);
 
   function build(host: ExtensionHostContext<TServices>, resolved: PeerOptions): PeerNetwork {
-    const { teammates, team: creator = {}, repo, ...networkOptions } = resolved;
+    const { teammates, team: creator = {}, repo, memberInstructions, ...networkOptions } = resolved;
     team = creator;
+    teammateTypes = teammateTypesOf(teammates);
+    const protocol = memberInstructions === false ? undefined : (memberInstructions ?? DEFAULT_MEMBER_INSTRUCTIONS);
     const resolvedRepo = typeof repo === "function" ? repo(host as ExtensionHostContext) : repo;
     const spawnable =
       teammates === undefined
@@ -942,14 +1019,31 @@ export function peers<TServices extends Readonly<Record<string, unknown>> = Read
               type,
               async (request) => {
                 const base = typeof sessionOptions === "function" ? await sessionOptions(request) : sessionOptions;
-                const member: PeerMemberOptions = { name: request.name, team: request.team, type: request.type };
-                const { config, ...rest } = base;
+                const { config = {}, title, typeTitle, description, instructions, workDir, ownerKey } = base;
+                const member: PeerMemberOptions = {
+                  name: request.name,
+                  team: request.team,
+                  type: request.type,
+                  creatorSessionId: request.creatorSessionId,
+                  ...(description !== undefined ? { description } : {}),
+                };
+                // A type that runs a complete agent of its own carries its own prompt: the
+                // appended one only shapes the default agent, and would be refused with it.
+                const prompt = joinPrompts(config.agent === undefined ? protocol : undefined, config.appendSystemPrompt, instructions);
                 // Born on behalf of its lead: the lead's directory and owner, and — where the
-                // lead runs in a sandbox — one of its own, never the harness's machine.
+                // lead runs in a sandbox — one of its own, never the harness's machine. Its model
+                // is the lead's unless the type names one.
                 return host.createSession({
-                  ...rest,
+                  title: title ?? `${request.name} · ${typeTitle ?? request.type}`,
+                  ...(workDir !== undefined ? { workDir } : {}),
+                  ...(ownerKey !== undefined ? { ownerKey } : {}),
                   from: request.creatorSessionId,
-                  config: { ...(config ?? {}), extensions: { ...(config?.extensions ?? {}), [PEERS_SERVICE]: { member } } },
+                  inherit: ["model"],
+                  config: {
+                    ...config,
+                    ...(prompt !== undefined ? { appendSystemPrompt: prompt } : {}),
+                    extensions: { ...(config.extensions ?? {}), [PEERS_SERVICE]: { member } },
+                  },
                 });
               },
             ]),
@@ -976,7 +1070,7 @@ export function peers<TServices extends Readonly<Record<string, unknown>> = Read
     },
     session(api, { shared: network, params }) {
       if (params?.member !== undefined) mountHub(network, api, params.member);
-      else mountTeam(network, api, team);
+      else mountTeam(network, api, team, teammateTypes);
     },
   };
 }

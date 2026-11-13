@@ -631,6 +631,9 @@ export interface ExtensionAPI {
   readonly actions: ExtensionActions;
 }
 
+/** What `ExtensionHostContext.createSession` can copy from its `from` session. */
+export type ExtensionInheritedSetting = "model";
+
 /**
  * What an extension's `harness` half is handed — the harness reach it needs to build a
  * process-shared instance. Deliberately narrow: session creation (a spawn factory's one
@@ -640,6 +643,7 @@ export interface ExtensionAPI {
  */
 export interface ExtensionHostContext<
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
+  TSettings = unknown,
 > {
   /** Get a session by id, loading it if it is not loaded — `harness.resumeSession(id)`. */
   resumeSession(id: string): Promise<HarnessSessionHandle>;
@@ -656,9 +660,21 @@ export interface ExtensionHostContext<
    * otherwise, the host's `resolveSession` is told its source, and — because it runs for the same
    * party — where that session runs in an environment of its own (a sandbox), the new one must be
    * given one too: it is refused rather than opened on the harness's own machine.
+   *
+   * `inherit` names settings copied from that `from` session as it is right now, for each one
+   * `config` does not set itself — `"model"`: the model it currently runs on (a runtime
+   * `setModel` included). A source on the harness default, or on a model given as a live object,
+   * has no model to copy, and the new session takes the harness default. Requires `from`.
    */
   createSession(
-    options?: { readonly title?: string; readonly workDir?: string; readonly ownerKey?: string; readonly config?: SessionConfig; readonly from?: string },
+    options?: {
+      readonly title?: string;
+      readonly workDir?: string;
+      readonly ownerKey?: string;
+      readonly config?: SessionConfig;
+      readonly from?: string;
+      readonly inherit?: readonly ExtensionInheritedSetting[];
+    },
   ): Promise<{ readonly id: string }>;
   /**
    * Handles to the services named in `uses`, by name — the same handles `session` gets as
@@ -678,6 +694,14 @@ export interface ExtensionHostContext<
    * by value it is opt-in (`createHarness({ extensionDataDir })`).
    */
   readonly dataDir?: string;
+  /**
+   * This extension's settings, as the user set them over the defaults its manifest declares
+   * (`manifest.json` `settings`) — read-only, and checked against that schema: a field that does
+   * not fit reads as its default. A settings change reloads the extension, so this half runs again
+   * with the new value. `undefined` when the manifest declares no settings, and always for an
+   * extension passed by value (its host gives it options in code instead).
+   */
+  readonly settings?: Readonly<TSettings>;
   warn(message: string): void;
 }
 
@@ -692,6 +716,7 @@ export interface ExtensionSessionContext<
   TShared = unknown,
   TParams = unknown,
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
+  TSettings = unknown,
 > {
   /** Handle to this extension's own shared instance — its `harness` result, one per process;
    *  `undefined` when the definition has no `harness` half. */
@@ -704,6 +729,9 @@ export interface ExtensionSessionContext<
    * die with the extension (after detach every call throws `ServiceUnavailableError`).
    */
   readonly services: TServices;
+  /** The same settings the `harness` half was given (`ExtensionHostContext.settings`): the value
+   *  as of the last load or settings change. `undefined` when the manifest declares none. */
+  readonly settings?: Readonly<TSettings>;
 }
 
 /**
@@ -723,7 +751,7 @@ export interface ExtensionSessionContext<
  *   session varies it with `createSession({ config: { extensions: { [id]: … } } })` — `ctx.params` — and opts
  *   out of it entirely with `false`.
  *
- * `TShared`/`TParams`/`TServices` are for the author's own typing (use an object type alias for
+ * `TShared`/`TParams`/`TServices`/`TSettings` are for the author's own typing (use an object type alias for
  * `TServices`, not an interface); the framework holds definitions as `ExtensionDefinition` and
  * every concrete definition is assignable to it.
  */
@@ -731,6 +759,7 @@ export interface ExtensionDefinition<
   TShared = unknown,
   TParams = unknown,
   TServices extends Readonly<Record<string, unknown>> = Readonly<Record<string, unknown>>,
+  TSettings = unknown,
 > {
   readonly id: string;
   /** Per-handler invocation budget. Defaults to 30s for decision points, 1s for observers. */
@@ -742,12 +771,12 @@ export interface ExtensionDefinition<
    */
   readonly forkParams?: "inherit" | "drop";
   /** The process-shared half: once per harness. See above. */
-  harness?(host: ExtensionHostContext<TServices>): TShared | Promise<TShared>;
+  harness?(host: ExtensionHostContext<TServices, TSettings>): TShared | Promise<TShared>;
   /** Services this extension consumes, by name — other extensions' shared-half results (their
    *  `id`s) or host-registered `services`. Resolved into `ctx.services` for `session`. */
   readonly uses?: readonly (keyof TServices & string)[];
   session(
     api: ExtensionAPI,
-    ctx: ExtensionSessionContext<TShared, TParams, TServices>,
+    ctx: ExtensionSessionContext<TShared, TParams, TServices, TSettings>,
   ): void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>;
 }

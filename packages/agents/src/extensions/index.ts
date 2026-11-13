@@ -5,8 +5,10 @@ import { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionRuntime } from "./runtime.ts";
 export { ExtensionLoader, createExtensionLoader } from "./loader.ts";
 export { ServiceRegistry, ServiceUnavailableError, deadServiceHandle } from "./services.ts";
-export { HarnessExtensionManager, stageDefinition } from "./manager.ts";
-export type { ExtensionHostBridge, StagingOptions, HeldSession, StagedDefinition } from "./manager.ts";
+export { HarnessExtensionManager, ExtensionSettingsInvalidError, stageDefinition } from "./manager.ts";
+export type { ExtensionHostBridge, ExtensionStatus, StagingOptions, HeldSession, StagedDefinition } from "./manager.ts";
+export { createFileSettingsStore, resolveSettings, validateSettings, validateSettingsSchema, SETTINGS_PERMISSION_MODES } from "./settings.ts";
+export type { ExtensionSettingsStore, ExtensionSettingsView, SettingsFormat, SettingsIssue, SettingsSchema, SettingsSchemaType } from "./settings.ts";
 export type { ServiceOptions, ServiceUnavailableReason } from "./services.ts";
 export type { ExtensionManifest, ExtensionFileState, ExtensionFileStatus, ExtensionAttachTarget } from "./loader.ts";
 export type {
@@ -18,6 +20,7 @@ export type {
   ExtensionSteerOptions,
   ExtensionDefinition,
   ExtensionHostContext,
+  ExtensionInheritedSetting,
   ExtensionEventContext,
   ExtensionEventMap,
   ExtensionEventName,
