@@ -8,7 +8,7 @@
  * - An extension's `harness` half reaches the same read as `host.readSessionMessages`.
  * - Unknown ids throw `SessionRepositoryNotFoundError`.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "./faux.ts";
@@ -35,6 +35,12 @@ function texts(page: TranscriptPage): string {
 async function main(): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), "operon-read-messages-"));
   try {
+    // A project skill, so the catalog injection happens here and not only on a machine that
+    // happens to have `~/.agents/skills`: the scan's default roots include the user's home, which
+    // a CI runner does not populate.
+    mkdirSync(join(home, ".agents", "skills", "demo"), { recursive: true });
+    writeFileSync(join(home, ".agents", "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: a demo skill\n---\nDo the demo.\n");
+
     const repository = new DiskSessionRepository(home);
     const faux = registerFauxProvider();
     let host: ExtensionHostContext | undefined;
