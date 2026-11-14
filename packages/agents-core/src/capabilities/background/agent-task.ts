@@ -7,6 +7,16 @@ export interface AgentBackgroundTaskInfo extends BackgroundTaskInfoBase {
   readonly subagentType?: string;
   /** The subagent run's own terminal status (finer than the task status), once settled. */
   readonly agentStatus?: string;
+  /** The sub-agent's final answer, carried into the settle notice so the model gets it there,
+   *  as Claude Code's `<result>` does — there is no tool to fetch it afterwards. */
+  readonly result?: string;
+}
+
+/** What a background agent's run resolves with. */
+export interface AgentRunOutcome {
+  readonly agentStatus: string;
+  /** Its final answer, if it gave one. */
+  readonly result?: string;
 }
 
 export interface AgentBackgroundTaskOptions {
@@ -42,11 +52,12 @@ export class AgentBackgroundTask implements BackgroundTask {
   readonly toolCallId?: string;
   readonly outputLocation?: TaskOutputLocation;
   private agentStatus?: string;
-  private readonly run: () => Promise<{ agentStatus: string }>;
+  private result?: string;
+  private readonly run: () => Promise<AgentRunOutcome>;
   private readonly abort?: () => void;
 
   constructor(
-    run: Promise<{ agentStatus: string }> | (() => Promise<{ agentStatus: string }>),
+    run: Promise<AgentRunOutcome> | (() => Promise<AgentRunOutcome>),
     description: string,
     options: AgentBackgroundTaskOptions,
   ) {
@@ -75,7 +86,7 @@ export class AgentBackgroundTask implements BackgroundTask {
     }
 
     const deadlineTimeout: unique symbol = Symbol("background-agent-deadline");
-    const raceInputs: Array<Promise<{ agentStatus: string } | typeof deadlineTimeout>> = [this.run()];
+    const raceInputs: Array<Promise<AgentRunOutcome | typeof deadlineTimeout>> = [this.run()];
     const timeoutMs = this.timeoutMs;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -93,6 +104,7 @@ export class AgentBackgroundTask implements BackgroundTask {
         return;
       }
       this.agentStatus = outcome.agentStatus;
+      if (outcome.result !== undefined && outcome.result.length > 0) this.result = outcome.result;
       await sink.settle({ status: taskStatusFromAgent(outcome.agentStatus) });
     } catch (error: unknown) {
       if (sink.signal.aborted && isAbortError(error)) {
@@ -113,6 +125,7 @@ export class AgentBackgroundTask implements BackgroundTask {
       agentId: this.agentId,
       subagentType: this.subagentType,
       agentStatus: this.agentStatus,
+      ...(this.result !== undefined ? { result: this.result } : {}),
     };
   }
 }

@@ -132,7 +132,7 @@ export interface ResolvePathAccessOptions {
 }
 
 export interface ResolvePathAccessPathOptions {
-  readonly environment: Pick<Environment, "pathClass" | "gethome" | "realpath">;
+  readonly environment: Pick<Environment, "pathClass" | "gethome"> & { readonly files: Pick<Environment["files"], "realpath"> };
   readonly workspace: WorkspaceConfig;
   readonly operation: PathAccessOperation;
   readonly policy?: WorkspaceAccessPolicy;
@@ -151,9 +151,9 @@ export interface ResolvePathAccessPathOptions {
  * swallowing a transient backend failure would silently degrade the guard back to
  * string-only matching — fail closed instead.
  */
-async function resolveRealPath(environment: Pick<Environment, "realpath">, path: string): Promise<string> {
+async function resolveRealPath(environment: { readonly files: Pick<Environment["files"], "realpath"> }, path: string): Promise<string> {
   try {
-    return await environment.realpath(path);
+    return await environment.files.realpath(path);
   } catch (error) {
     if (!isNotFoundError(error)) throw error;
     const parent = pathe.dirname(path);

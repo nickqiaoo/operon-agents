@@ -5,7 +5,7 @@
  * a fabricated process handle could not on this backend: a timeout that really kills, an output cap that stops
  * accumulation, incremental output, and an exit code that admits when it is unknown.
  */
-import { materializeWorkspace, writeTextFile } from "operon-agents-core";
+import { materializeWorkspace, writeTextFile, toBuffer, type FileData } from "operon-agents-core";
 import type { E2BCommandHandle, E2BEntryInfo, E2BRunOpts, E2BSandbox } from "../e2b/e2b-api.ts";
 import { E2BEnvironment } from "../e2b/environment.ts";
 import { E2BWorkspace } from "../e2b/lifecycle.ts";
@@ -170,14 +170,9 @@ class FakeSandbox implements E2BSandbox {
       if (this.dirs.has(path) || this.tree.has(path)) return { name, path, type: "dir", size: 4096, modifiedTime: new Date(this.clock) };
       throw this.notFound(path);
     },
-    // Mirrors the SDK exactly: it accepts `string | ArrayBuffer | Blob | ReadableStream` and
-    // NOT a Uint8Array. Rejecting one here is the point — a Buffer handed straight through
-    // would typecheck against a looser fake while failing against the real backend.
-    write: async (path: string, data: string | ArrayBuffer): Promise<unknown> => {
-      if (typeof data !== "string" && !(data instanceof ArrayBuffer)) {
-        throw new TypeError(`E2B files.write takes string | ArrayBuffer, got ${Object.prototype.toString.call(data)}`);
-      }
-      this.fileData.set(path, typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data));
+    // SDK 2.63 accepts binary views and streaming uploads without exposing Buffer slabs.
+    write: async (path: string, data: FileData): Promise<unknown> => {
+      this.fileData.set(path, await toBuffer(data));
       this.mtimes.set(path, new Date((this.clock += 7)));
       return undefined;
     },
@@ -215,52 +210,52 @@ async function testRunIntents(): Promise<void> {
   sandbox.sdkDefaultTimeoutMs = 60; // the SDK's 60 s default, scaled to test time
   const environment = new E2BEnvironment(() => sandbox, { cwd: "/work" });
 
-  const ok = await environment.run(["echo", "hello"]);
+  const ok = await environment.commands.run(["echo", "hello"]);
   check("run: stdout captured, exit 0", ok.stdout === "hello\n" && ok.exitCode === 0);
   check("run: not timed out / not truncated", !ok.timedOut && !ok.truncated);
 
   // The SDK rejects wait() for a nonzero exit; for run() that is an outcome, not an error.
-  const failed = await environment.run(["fail"]);
+  const failed = await environment.commands.run(["fail"]);
   check("run: nonzero exit surfaced", failed.exitCode === 3 && failed.stderr === "boom");
 
   // No caller timeout = no deadline. Left to the SDK default, a command outliving it failed.
-  const slow = await environment.run(["slow"]);
+  const slow = await environment.commands.run(["slow"]);
   check("run: a command outliving the SDK's default deadline still completes", slow.exitCode === 0 && slow.stdout === "built\n");
   check("run: the SDK deadline is disabled — ours is enforced with a real kill", sandbox.lastRunOpts?.timeoutMs === 0);
-  const slowCapped = await new E2BEnvironment(() => sandbox, { cwd: "/work", defaultTimeoutMs: 40 }).run(["slow"]);
+  const slowCapped = await new E2BEnvironment(() => sandbox, { cwd: "/work", defaultTimeoutMs: 40 }).commands.run(["slow"]);
   check("run: defaultTimeoutMs is enforced by our own timer", slowCapped.timedOut && slowCapped.terminated);
 
   // Incremental delivery — the thing a buffered backend cannot do.
   const seen: string[] = [];
-  await environment.run(["echo", "hello"], { onOutput: (c) => seen.push(c.data) });
+  await environment.commands.run(["echo", "hello"], { onOutput: (c) => seen.push(c.data) });
   check("run: onOutput received chunks incrementally", seen.length === 1 && seen[0] === "hello\n");
 
   // Timeout must actually kill and must NOT report a fabricated exit code.
   const killsBefore = sandbox.killedPids.length;
-  const timed = await environment.run(["hang"], { timeoutMs: 50 });
+  const timed = await environment.commands.run(["hang"], { timeoutMs: 50 });
   check("run: timeout reported", timed.timedOut);
   check("run: timeout actually terminated the process", timed.terminated && sandbox.killedPids.length === killsBefore + 1);
   check("run: exitCode is undefined, not a fabricated 0", timed.exitCode === undefined);
   check("run: partial output before the kill is kept", timed.stdout === "partial");
 
   // Output cap stops accumulation (10 chunks x 10 bytes, capped at 25).
-  const capped = await environment.run(["noisy"], { maxOutputBytes: 25 });
+  const capped = await environment.commands.run(["noisy"], { maxOutputBytes: 25 });
   check("run: truncated flag set", capped.truncated);
   check("run: output stopped at the cap", capped.stdout.length === 25);
 
   // Abort signal cancels a running command.
   const controller = new AbortController();
-  const pending = environment.run(["hang"], { signal: controller.signal });
+  const pending = environment.commands.run(["hang"], { signal: controller.signal });
   setTimeout(() => controller.abort(), 20);
   const aborted = await pending;
   check("run: abort terminated the command", aborted.terminated);
 
-  const preAborted = await environment.run(["echo"], { signal: AbortSignal.abort() });
+  const preAborted = await environment.commands.run(["echo"], { signal: AbortSignal.abort() });
   check("run: pre-aborted signal short-circuits", preAborted.exitCode === undefined && preAborted.stdout === "");
 
   // stdin rides the vendor's sendStdin channel. The regression this locks: it used to be
   // dropped in silence, so a hook fed input saw EOF and "succeeded" on empty data.
-  await environment.run(["cat"], { stdin: "fed-in" });
+  await environment.commands.run(["cat"], { stdin: "fed-in" });
   check("run: stdin opened the vendor's stdin channel", sandbox.lastRunOpts?.stdin === true);
   check("run: stdin payload reached sendStdin", sandbox.stdinLog.length === 1 && sandbox.stdinLog[0]?.data === "fed-in");
   // `cat` exits only at EOF — this run returning at all is the proof stdin was closed.
@@ -271,7 +266,7 @@ async function testRunIntents(): Promise<void> {
   delete (noStdin.commands as { sendStdin?: unknown }).sendStdin;
   let refused = false;
   try {
-    await new E2BEnvironment(noStdin, { cwd: "/work" }).run(["cat"], { stdin: "x" });
+    await new E2BEnvironment(noStdin, { cwd: "/work" }).commands.run(["cat"], { stdin: "x" });
   } catch {
     refused = true;
   }
@@ -289,7 +284,7 @@ async function testFilesAndListing(): Promise<void> {
   const sandbox = new FakeSandbox(() => ({ exitCode: 0 }), tree);
   const environment = new E2BEnvironment(() => sandbox, { cwd: "/work" });
 
-  const entries = [...(await environment.listDir("/work"))];
+  const entries = [...(await environment.files.list("/work"))];
   check("listDir: single round trip carries kinds", sandbox.commandLog.length === 0);
   check(
     "listDir: kinds mapped (absent type → other)",
@@ -317,7 +312,7 @@ async function testPrefixReadPushdown(): Promise<void> {
   );
   const environment = new E2BEnvironment(() => sandbox, { cwd: "/work" });
 
-  const head = await environment.readBytes("/work/img.png", { length: 6 });
+  const head = await environment.files.read("/work/img.png", { range: { length: 6 } });
   check("readBytes(range): cut the window on the far side, not by slicing a whole-file read", sandbox.commandLog.some((c) => c.includes("tail -c +1") && c.includes("head -c 6")));
   check("readBytes(range): binary survives the base64 round trip", head.equals(payload.subarray(0, 6)));
   check("readBytes(range): never touched the whole-file API", sandbox.readWholeFileCount === 0);
@@ -325,7 +320,7 @@ async function testPrefixReadPushdown(): Promise<void> {
   // No `head`/`base64` in the image → fall back to the whole-file read rather than fail.
   const bare = new FakeSandbox(() => ({ exitCode: 127 }));
   bare.seedFile("/work/img.png", payload);
-  const fallback = await new E2BEnvironment(() => bare, { cwd: "/work" }).readBytes("/work/img.png", { length: 6 });
+  const fallback = await new E2BEnvironment(() => bare, { cwd: "/work" }).files.read("/work/img.png", { range: { length: 6 } });
   check("readBytes(range): degrades to a whole-file read when the shell tools are missing", fallback.equals(payload.subarray(0, 6)));
 }
 
@@ -360,7 +355,7 @@ async function testStatParsing(): Promise<void> {
     delete (sandbox.files as { getInfo?: unknown }).getInfo;
     return sandbox;
   };
-  const infoFrom = async (line: string) => await new E2BEnvironment(() => statting(line), { cwd: "/work" }).fileInfo("/work/a.ts");
+  const infoFrom = async (line: string) => await new E2BEnvironment(() => statting(line), { cwd: "/work" }).files.getInfo("/work/a.ts");
 
   const precise = await infoFrom("regular file|1234|1700000000|1700000000.456");
   check(
@@ -400,14 +395,14 @@ async function testSnapshotSwap(): Promise<void> {
   });
   const environment = workspace.environment; // captured BEFORE the restore, as a tool would hold it
 
-  check("workspace: initial sandbox in use", (await environment.run(["x"])).stdout === "first");
+  check("workspace: initial sandbox in use", (await environment.commands.run(["x"])).stdout === "first");
 
   const snapshotId = await workspace.snapshot();
   check("workspace: snapshot id returned", snapshotId === "snap_of_sbx_fake");
 
   await workspace.restore(snapshotId!);
   // The critical property: an environment handed out earlier keeps working after the swap.
-  check("restore: previously-handed-out environment follows the swap", (await environment.run(["x"])).stdout === "second");
+  check("restore: previously-handed-out environment follows the swap", (await environment.commands.run(["x"])).stdout === "second");
   check("restore: old sandbox retired", first.killed);
   check("restore: state reports the new sandbox id", workspace.state().sandboxId === "sbx_restored");
 }
@@ -450,13 +445,13 @@ async function testNativeMetadata(): Promise<void> {
   const environment = new E2BEnvironment(() => sandbox, { cwd: "/work" });
   sandbox.seedFile("/work/a.ts", Buffer.from("hello"));
 
-  const info = await environment.fileInfo("/work/a.ts");
+  const info = await environment.files.getInfo("/work/a.ts");
   check("fileInfo: kind, size and mtime from getInfo", info.kind === "file" && info.size === 5 && typeof info.mtimeMs === "number");
   check("fileInfo: no command was started", sandbox.commandLog.length === 0);
 
   let missingCode: unknown;
   try {
-    await environment.fileInfo("/work/nope.ts");
+    await environment.files.getInfo("/work/nope.ts");
   } catch (error) {
     missingCode = (error as NodeJS.ErrnoException).code;
   }
@@ -464,28 +459,28 @@ async function testNativeMetadata(): Promise<void> {
 
   let readCode: unknown;
   try {
-    await environment.readBytes("/work/nope.ts");
+    await environment.files.read("/work/nope.ts");
   } catch (error) {
     readCode = (error as NodeJS.ErrnoException).code;
   }
   check("readBytes: a missing file is ENOENT (append-to-new-file depends on it)", readCode === "ENOENT");
 
   await writeTextFile(environment, "/work/a.ts", "changed");
-  const after = await environment.fileInfo("/work/a.ts");
+  const after = await environment.files.getInfo("/work/a.ts");
   check("writeBytes: the size reflects the new content", after.size === 7);
   check("writeBytes: the file's mtime moved", after.mtimeMs !== info.mtimeMs);
 
   sandbox.seedSymlink("/work/link.ts", "/work/a.ts");
   const statsBefore = sandbox.commandLog.filter((c) => c.includes("stat")).length;
-  await environment.fileInfo("/work/link.ts").catch(() => undefined);
+  await environment.files.getInfo("/work/link.ts").catch(() => undefined);
   check("fileInfo: a symlink goes to stat(1), whose follow semantics are exact", sandbox.commandLog.filter((c) => c.includes("stat")).length === statsBefore + 1);
 
-  await environment.mkdir("/work/deep/nested/dir", { parents: true });
-  await environment.mkdir("/work/deep/nested/dir", { parents: true });
+  await environment.files.makeDir("/work/deep/nested/dir");
+  await environment.files.makeDir("/work/deep/nested/dir");
   check("mkdir -p: native makeDir, no command, idempotent", sandbox.commandLog.filter((c) => c.includes("mkdir")).length === 0);
   let fileInTheWay: unknown;
   try {
-    await environment.mkdir("/work/a.ts", { parents: true });
+    await environment.files.makeDir("/work/a.ts");
   } catch (error) {
     fileInTheWay = (error as NodeJS.ErrnoException).code;
   }
@@ -495,7 +490,7 @@ async function testNativeMetadata(): Promise<void> {
     { name: "real.ts", path: "/work/real.ts", type: "file" as const },
     { name: "alias.ts", path: "/work/alias.ts", type: "file" as const, symlinkTarget: "/work/real.ts" },
   ]]]));
-  const kinds = (await new E2BEnvironment(() => listing, { cwd: "/work" }).listDir("/work")).map((e) => `${e.name}:${e.kind}`).join(",");
+  const kinds = (await new E2BEnvironment(() => listing, { cwd: "/work" }).files.list("/work")).map((e) => `${e.name}:${e.kind}`).join(",");
   check("listDir: a symlink is reported as a symlink (lstat semantics)", kinds === "real.ts:file,alias.ts:symlink");
 }
 

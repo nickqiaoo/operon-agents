@@ -1,5 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
-import { LocalEnvironment, type Environment, type RunCommandOptions, type RunCommandResult } from "operon-agents-core";
+import { LocalEnvironment, type Environment, type RunCommandOptions, type RunCommandResult, type Command, type CommandStartOptions, type CommandHandle, commandArgv } from "operon-agents-core";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { toSrtInvocation } from "./srt-command.ts";
 
@@ -27,7 +27,7 @@ let commandCounter = 0;
  * before it is spawned, and sandbox denials observed during the run are
  * annotated onto the result's stderr so callers see WHY a command failed.
  *
- * Only `run` changes. Direct file I/O (readBytes/writeBytes/…) is the
+ * Both commands.run and commands.start share this wrapping hook. Direct file I/O (readBytes/writeBytes/…) is the
  * framework's own code path, gated by its path-access policy — the sandbox
  * exists for arbitrary COMMANDS, which have no such gate.
  */
@@ -35,17 +35,22 @@ export class SandboxedLocalEnvironment extends LocalEnvironment {
   private readonly policy: SandboxPolicyContext;
 
   constructor(policy: SandboxPolicyContext, cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[] } = process.cwd()) {
-    super(cwdOrOptions);
+    if (typeof cwdOrOptions !== 'string' && 'pty' in cwdOrOptions && cwdOrOptions.pty !== undefined) throw new Error('os-sandbox: injected PTYs are not supported');
+    super(typeof cwdOrOptions === 'string' ? cwdOrOptions : { cwd: cwdOrOptions.cwd, additionalDirs: cwdOrOptions.additionalDirs });
     this.policy = policy;
   }
 
   /** Re-rooted siblings (subagent worktrees) stay sandboxed — same policy, new cwd. */
   override withCwd(cwd: string): Environment {
     const absolute = isAbsolute(cwd) ? cwd : resolve(this.getcwd(), cwd);
-    return new SandboxedLocalEnvironment(this.policy, { cwd: absolute, additionalDirs: this.additionalDirs() });
+    const clone = new SandboxedLocalEnvironment(this.policy, { cwd: absolute, additionalDirs: this.additionalDirs() });
+    clone.processTable = this.processTable;
+    clone.outputFiles = this.outputFiles;
+    return clone;
   }
 
-  override async run(argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
+  protected override async startCommand(input: Command, options: CommandStartOptions): Promise<CommandHandle> {
+    const argv = commandArgv(input, this.osInfo);
     // The sandbox session died or was never initialized — refuse rather than
     // silently running unsandboxed. Hosts that want no sandbox build a plain
     // LocalEnvironment (OsSandbox.environment already does this when disabled).
@@ -70,7 +75,7 @@ export class SandboxedLocalEnvironment extends LocalEnvironment {
         command,
         binShell,
         this.perCallConfig(),
-        options.signal,
+        undefined,
         this.getcwd(),
         { commandId, commandText: command },
       );
@@ -82,10 +87,19 @@ export class SandboxedLocalEnvironment extends LocalEnvironment {
       throw new Error(`os-sandbox: failed to wrap command for the sandbox: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    const result = await super.run(wrappedArgv, rest);
-    const stderr = await this.annotateViolations(commandId, result);
-    SandboxManager.cleanupAfterCommand();
-    return stderr === result.stderr ? result : { ...result, stderr };
+    const handle = await super.startCommand(wrappedArgv, rest);
+    const wait = handle.wait.bind(handle);
+    const finished = (async () => {
+      try {
+        const result = await wait();
+        const stderr = await this.annotateViolations(commandId, { ...result, timedOut: false, truncated: false, terminated: false });
+        if (stderr !== result.stderr) options.onStderr?.(stderr.slice(result.stderr.length));
+        return { ...result, stderr };
+      } finally { SandboxManager.cleanupAfterCommand(); }
+    })();
+    finished.catch(() => {});
+    handle.wait = () => finished;
+    return handle;
   }
 
   /**

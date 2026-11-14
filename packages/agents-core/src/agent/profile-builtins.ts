@@ -52,7 +52,6 @@ tools:
   - GetGoal
   - SetGoalBudget
   - UpdateGoal
-  - BackgroundOutput
   - BackgroundStop
   - TaskCreate
   - TaskUpdate

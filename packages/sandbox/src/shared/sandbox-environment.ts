@@ -64,7 +64,7 @@ export abstract class SandboxEnvironment extends BaseEnvironment {
     const argv = (options?.followSymlinks ?? true)
       ? ["stat", "-L", "-c", format, "--", target]
       : ["stat", "-c", format, "--", target];
-    const { stdout, exitCode } = await this.run(argv);
+    const { stdout, exitCode } = await this.commands.run(argv);
     if (exitCode !== 0) throw codedError(`No such file or directory: ${target}`, "ENOENT");
     // Last line only: a shell that prepends a banner would otherwise poison the parse.
     const [kindRaw = "", sizeRaw = "", mtimeRaw = "", mtimeFracRaw = ""] = (stdout.trim().split("\n").pop() ?? "").split("|");

@@ -135,7 +135,7 @@ export function buildAgentTool<TContext>(
   const defaultName = spawner.defaultType;
   const backgroundAvailable = asTaskRegistrar(parent.background) !== undefined && parent.store !== undefined;
   const backgroundNote = backgroundAvailable
-    ? "When run_in_background=true, the subagent runs detached from this turn. A metadata-only completion notice arrives automatically; call BackgroundOutput(task_id) when you need the result. You do not need to poll or sleep. Continue with other work. Never fabricate or predict what the result will say."
+    ? "When run_in_background=true, the subagent runs detached from this turn. Its completion notice arrives automatically — between your tool calls if you are still working — and carries its final answer in <result>. You do not need to poll or sleep, and there is no tool to fetch the result early. Continue with other work. Never fabricate or predict what the result will say."
     : "Background execution requires both a BackgroundManager and a durable session store. Do not set run_in_background=true in this session.";
   const description = [
     "Launch a subagent to handle a task. The subagent runs as a same-session loop instance with its own context and journal shard.",
@@ -334,12 +334,12 @@ export function buildAgentTool<TContext>(
             }
             const controller = new AbortController();
             // `agentStatus` rides the task into the settle notification, whose journaled
-            // tag is the durable settle record the subagent fold reads.
-            // Only the status: the run's own answer is already the last message of its shard,
-            // which the task names as its output location rather than carrying a copy of.
+            // tag is the durable settle record the subagent fold reads. The answer rides with
+            // it: the notice is how the model gets it, as Claude Code's `<result>` is.
             const taskId = registrar.registerTask(
               new AgentBackgroundTask(() => runSubagent(controller.signal).then((result) => ({
                 agentStatus: settleStatus(result.status),
+                result: result.output,
               })), args.description, {
                 timeoutMs: AGENT_TIMEOUT_MS,
                 subagentType: sub.name,
@@ -364,7 +364,7 @@ export function buildAgentTool<TContext>(
                     "",
                     `description: ${args.description}`,
                     "",
-                    `next_step: The completion arrives automatically in a later turn. BackgroundOutput(task_id="${taskId}", block=false) to peek; resume later with Agent(resume="${agentId}", prompt=...).`,
+                    `next_step: The completion notice arrives automatically and carries the agent's final answer — do not poll. Resume it later with Agent(resume="${agentId}", prompt=...).`,
                   ].join("\n"),
                 },
               ],
@@ -426,6 +426,7 @@ export function buildAgentTool<TContext>(
             clearTimeout(deadlineTimer);
             const completion = runPromise.then((result) => ({
               agentStatus: settleStatus(result.status),
+              result: result.output,
             }));
             const taskId = fgRegistrar.registerTask(
               new AgentBackgroundTask(() => completion, args.description, {
@@ -452,7 +453,7 @@ export function buildAgentTool<TContext>(
                     "",
                     `description: ${args.description}`,
                     "",
-                    `next_step: The completion arrives automatically in a later turn. BackgroundOutput(task_id="${taskId}", block=false) to peek; resume later with Agent(resume="${agentId}", prompt=...).`,
+                    `next_step: The completion notice arrives automatically and carries the agent's final answer — do not poll. Resume it later with Agent(resume="${agentId}", prompt=...).`,
                   ].join("\n"),
                 },
               ],

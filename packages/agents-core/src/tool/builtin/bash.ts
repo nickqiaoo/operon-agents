@@ -9,7 +9,6 @@ import { extractBashPaths } from "../support/bash-paths.ts";
 import { destructiveWarning } from "../support/bash-destructive.ts";
 import { escapeRuleSubjectLiteral } from "../support/rule-match.ts";
 import type { Environment } from "../environment.ts";
-import { writeTextFile } from "../support/environment-ops.ts";
 import { nonInteractiveShellEnv } from "../shell-env.ts";
 import { runCommandInline, type AttachedOutcome, type AttachedRunOptions, type BackgroundSpawner, type CommandStarter } from "../background.ts";
 import type { ToolResult, ToolUpdate } from "../types.ts";
@@ -56,7 +55,14 @@ const BASH_DESCRIPTION = [
   "**Output:**",
   "The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the output will end with a `Command failed with exit code: N` line stating the non-zero exit code.",
   "",
-  "If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. You will be automatically notified when the task completes. Use BackgroundOutput(task_id) for a non-blocking status/output snapshot, and BackgroundStop(task_id) only if the task must be cancelled. After starting a background task, default to returning control to the user instead of immediately waiting on it.",
+  "If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. You will be notified as soon as it completes — between your tool calls if you are still working, or in a new turn if you have finished — so do not poll it. Read its output_log with Read when you need the output, and use BackgroundStop(task_id) only if the task must be cancelled. After starting a background task, keep working on something else or return control to the user instead of waiting on it.",
+  "",
+  "**Waiting:**",
+  "- Do not sleep between commands that can run immediately — just run them.",
+  "- To be told when a long-running command finishes, use `run_in_background`. No sleep needed.",
+  "- To be told each time something happens in a running process (an ERROR line in a log, a CI step finishing, a file changing), use the Monitor tool: each line its command prints is a notification. For a single \"tell me when it is ready\", use `run_in_background` with a command that exits when the condition holds, e.g. `until grep -q \"Ready\" dev.log; do sleep 0.5; done`.",
+  "- A foreground command that starts with `sleep N` (N ≥ 2) is blocked when Monitor is available. If you need a short delay (rate limiting, deliberate pacing), keep it under 2 seconds.",
+  "- Do not retry failing commands in a sleep loop — diagnose the root cause.",
   "",
   "**Guidelines for safety and security:**",
   "- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.",
@@ -127,7 +133,7 @@ export const bashTool = defineTool({
  * for the same reason. Anything that cannot be resolved is dropped rather than guessed at —
  * see bash-paths.ts on why silence is the correct failure mode here.
  */
-function commandAccesses(args: BashInput, environment: Environment): ToolAccesses {
+export function commandAccesses(args: { readonly command: string; readonly cwd?: string }, environment: Environment): ToolAccesses {
   const found = extractBashPaths(args.command);
   if (found.length === 0) return ToolAccesses.none();
 
@@ -168,32 +174,28 @@ function toAbsolute(path: string, base: string, home: string | undefined, pathCl
 }
 
 /** The argv + env overrides every bash invocation shares, whichever path ends up running it. */
-function shellInvocation(
-  environment: Environment,
-  effectiveCwd: string,
-  command: string,
-): { readonly argv: string[]; readonly env: Record<string, string> } {
-  const isWindowsBash = environment.osInfo.osKind === "Windows";
-  const shellCwd = isWindowsBash ? windowsPathToPosixPath(effectiveCwd) : effectiveCwd;
-  return {
-    argv: [environment.osInfo.shellPath, "-c", `cd ${shellQuote(shellCwd)} && ${command}`],
-    // Non-interactive overrides only; the environment layers these over its ambient env (PATH +
-    // proxy vars ride through), so we don't ship the whole process environment downstream.
-    env: nonInteractiveShellEnv({ shellPath: environment.osInfo.shellPath }),
-  };
-}
-
 /** The same invocation, packaged for a spawner that owns the run's lifecycle (background,
  *  or foreground-attached-then-detachable). No timeout: those runs are bounded by the
  *  spawner's own foreground timer, or not at all once detached. */
-function commandStarter(environment: Environment, effectiveCwd: string, command: string): CommandStarter {
-  const { argv, env } = shellInvocation(environment, effectiveCwd, command);
-  return ({ signal, onOutput }) =>
-    environment.run(argv, {
-      env,
-      signal,
-      ...(onOutput !== undefined ? { onOutput: (chunk) => onOutput(chunk.data) } : {}),
+export function commandStarter(environment: Environment, effectiveCwd: string, command: string, logPath?: string, stderrFile?: string): CommandStarter {
+  return async ({ signal, onOutput, onStart }) => {
+    const handle = await environment.commands.start(command, {
+      cwd: effectiveCwd,
+      env: nonInteractiveShellEnv({ shellPath: environment.osInfo.shellPath }),
+      outputFile: logPath, stderrFile, retainOutput: false,
+      onStdout: onOutput, onStderr: stderrFile ? undefined : onOutput,
     });
+    let stopped: Promise<boolean> | undefined;
+    const abort = () => { stopped ??= handle.kill(); };
+    signal.addEventListener('abort', abort);
+    if (signal.aborted) abort();
+    try {
+      await onStart?.(handle);
+      const result = await handle.wait();
+      const terminated = await stopped ?? false;
+      return { ...result, timedOut: false, truncated: false, terminated };
+    } finally { signal.removeEventListener('abort', abort); }
+  };
 }
 
 async function execute(
@@ -212,6 +214,18 @@ async function execute(
   const isWindowsBash = environment.osInfo.osKind === "Windows";
   const command = isWindowsBash ? rewriteWindowsNullRedirect(args.command) : args.command;
 
+  // Claude Code's rule: a foreground command that opens with a real sleep is someone waiting by
+  // hand. It holds the turn and learns nothing a notification would not have told it. Only where
+  // the alternatives exist — a background run that notifies, a Monitor that streams.
+  if (!args.run_in_background && background?.spawnMonitor !== undefined) {
+    const sleep = leadingSleep(args.command);
+    if (sleep !== undefined) {
+      return errorResult(
+        `Blocked: ${sleep}. To wait for a condition, use Monitor with an until-loop (e.g. \`until <check>; do sleep 2; done\`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.`,
+      );
+    }
+  }
+
   if (args.run_in_background) {
     if (background === undefined) {
       return errorResult("Background execution is not available for this agent (Task tools not enabled).");
@@ -225,9 +239,9 @@ async function execute(
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
-    const wrapped = `{ ${command}\n} > ${shellQuote(logPath)} 2>&1`;
+    const wrapped = command;
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
-    const taskId = background.spawnCommand(commandStarter(environment, args.cwd ?? environment.getcwd(), wrapped), args.command, `bash: ${preview}`, {
+    const taskId = background.spawnCommand(commandStarter(environment, args.cwd ?? environment.getcwd(), wrapped, logPath), args.command, `bash: ${preview}`, {
       logPath,
       environment,
       ...(parentAddress !== undefined ? { parentAddress } : {}),
@@ -240,8 +254,8 @@ async function execute(
           text:
             `Started background task ${taskId}.\n` +
             `output_log: ${logPath}\n` +
-            "Use BackgroundOutput(task_id) to read its output and BackgroundStop(task_id) to stop it." +
-            " The output log file stays readable (e.g. with Read) even after this session's process exits.",
+            "You will be notified when it completes — do not poll it. Read the output log with Read when you need it, and use BackgroundStop(task_id) to stop the task." +
+            " The output log file stays readable even after this session's process exits.",
         },
       ],
     };
@@ -277,14 +291,11 @@ async function execute(
   const drive = attachedDriver !== undefined && logPath !== undefined
     ? attachedDriver
     : (start: CommandStarter, _c: string, _d: string, opts: AttachedRunOptions) => runCommandInline(start, opts);
-  const fgCommand =
-    logPath === undefined
-      ? command
-      : `{ ${command}\n} > ${shellQuote(logPath)} 2>&1`;
+  const fgCommand = command;
 
   const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
   const builder = new ToolResultBuilder();
-  const start = commandStarter(environment, args.cwd ?? environment.getcwd(), fgCommand);
+  const start = commandStarter(environment, args.cwd ?? environment.getcwd(), fgCommand, logPath);
 
   let outcome: AttachedOutcome;
   try {
@@ -311,7 +322,7 @@ async function execute(
   }
 
   if (outcome.kind === "detached") {
-    // Correlation link: the UI re-subscribes this card from tool.progress to BackgroundOutput.
+    // Correlation link: the UI re-subscribes this card from tool.progress to the background task.
     onUpdate?.({ kind: "custom", customKind: "detached", customData: { taskId: outcome.taskId } });
     return {
       content: [
@@ -320,8 +331,9 @@ async function execute(
           text:
             `Moved to background task ${outcome.taskId}.\n` +
             (logPath !== undefined ? `output_log: ${logPath}\n` : "") +
-            "Use BackgroundOutput(task_id) to read its output and BackgroundStop(task_id) to stop it." +
-            (logPath !== undefined ? " The output log file stays readable (e.g. with Read) even after this session's process exits." : ""),
+            "You will be notified when it completes — do not poll it." +
+            (logPath !== undefined ? " Read the output log with Read when you need it; it stays readable even after this session's process exits." : "") +
+            " Use BackgroundStop(task_id) to stop it.",
         },
       ],
       details: { movedToBackground: true, backgroundTaskId: outcome.taskId },
@@ -357,7 +369,7 @@ async function execute(
   }
 }
 
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
@@ -368,50 +380,13 @@ function backgroundLogPath(environment: Environment): string | undefined {
   return dir === undefined ? undefined : `${dir}/bash-${randomBytes(4).toString("hex")}.log`;
 }
 
-/**
- * Task-log directories already created on a given environment. The directory is the same for every
- * command of a session, so creating it once is enough — and on a remote environment that mkdir is a
- * round trip (a whole command on some backends) paid by EVERY Bash call. Keyed by Environment and
- * weak, so an environment that goes away takes its entry with it.
- *
- * Only ever an optimization: the entry is dropped the moment the log write fails, and the next
- * call recreates the directory. So a directory removed mid-session (a `rm -rf`, a tmp reaper)
- * costs one retry, not a broken session.
- */
-const preparedLogDirs = new WeakMap<Environment, Set<string>>();
-
-/** Allocate the canonical command log before the user's process starts. The shell only owns
- * appending command output; directory/file setup failures therefore fail the tool cleanly
- * instead of escaping through an uncaptured outer stderr stream. */
-/** Create an empty task log on the environment and return its path — where a background program or command writes its output. */
+/** Allocate a durable log; files.write also creates missing parent directories. */
 export async function prepareBackgroundLog(environment: Environment): Promise<string> {
   const logPath = backgroundLogPath(environment);
   if (logPath === undefined) {
     throw new Error("Background Bash execution requires a durable output log, but this environment has no safe task-log directory.");
   }
-  const dir = posixDirname(logPath);
-  let known = preparedLogDirs.get(environment);
-  if (known === undefined) {
-    known = new Set<string>();
-    preparedLogDirs.set(environment, known);
-  }
-
-  if (!known.has(dir)) {
-    await environment.mkdir(dir, { parents: true });
-    known.add(dir);
-  }
-  try {
-    await writeTextFile(environment, logPath, "");
-  } catch (error) {
-    // The directory we believed in is gone (or was never writable). Re-create it and try once
-    // more, so the cache can never turn a transient state into a hard failure.
-    known.delete(dir);
-    await environment.mkdir(dir, { parents: true });
-    known.add(dir);
-    await writeTextFile(environment, logPath, "").catch(() => {
-      throw error;
-    });
-  }
+  await environment.files.write(logPath, '');
   return logPath;
 }
 
@@ -451,22 +426,6 @@ function backgroundLogDir(environment: Environment): string | undefined {
   return pathClass === "win32" ? candidate : `/tmp/${OPERON_HOME_DIRNAME}/tasks`;
 }
 
-function posixDirname(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx <= 0 ? "/" : path.slice(0, idx);
-}
-
-function windowsPathToPosixPath(path: string): string {
-  if (path.startsWith("\\\\")) return path.replaceAll("\\", "/");
-  const driveMatch = /^([A-Za-z]):(?:[\\/]|$)/.exec(path);
-  if (driveMatch !== null) {
-    const drive = driveMatch[1]!.toLowerCase();
-    const rest = path.slice(2).replaceAll("\\", "/");
-    return `/${drive}${rest.startsWith("/") ? rest : `/${rest}`}`;
-  }
-  return path.replaceAll("\\", "/");
-}
-
 const WINDOWS_NUL_REDIRECT = /(\d?&?>+\s*)[Nn][Uu][Ll](?=\s|$|[|&;)\n])/g;
 
 function rewriteWindowsNullRedirect(command: string): string {
@@ -475,4 +434,13 @@ function rewriteWindowsNullRedirect(command: string): string {
 
 function errorResult(text: string): ToolResult {
   return { content: [{ type: "text", text }], isError: true };
+}
+
+/** Leading waits of two seconds or longer belong in Monitor when it is available. */
+export function leadingSleep(command: string): string | undefined {
+  const match = /^\s*(sleep\s+(\d+(?:\.\d+)?)([smhd]?))(?=\s|[;&|]|$)/.exec(command);
+  if (!match) return undefined;
+  const unit = match[3] ?? '';
+  const seconds = Number(match[2]) * (unit === 'm' ? 60 : unit === 'h' ? 3600 : unit === 'd' ? 86400 : 1);
+  return seconds >= 2 ? match[1] : undefined;
 }

@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "e2b": "^2.14.1",
+    "e2b": "^2.63.0",
     "operon-agents": "workspace:*",
     "operon-managed-agents": "workspace:*",
     "operon-sandbox": "workspace:*"

@@ -219,7 +219,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
     });
     if (prep?.syntheticResult) return { kind: "result", call, result: prep.syntheticResult };
     if (prep?.block === true) {
-      return { kind: "result", call, result: errorResult(prep.reason ?? "blocked", prep.terminate === true) };
+      return { kind: "result", call, result: errorResult(prep.reason ?? "blocked", prep.terminate === true, prep.blockDetails) };
     }
     if (prep && "updatedArgs" in prep && prep.updatedArgs !== undefined) args = prep.updatedArgs;
   }
@@ -263,7 +263,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
     });
     if (decision?.interrupt) return { kind: "interrupt", call, pending: decision.interrupt };
     if (decision?.syntheticResult) return { kind: "result", call, result: decision.syntheticResult };
-    if (decision?.block === true) return { kind: "result", call, result: errorResult(decision.reason ?? "denied") };
+    if (decision?.block === true) return { kind: "result", call, result: errorResult(decision.reason ?? "denied", false, decision.blockDetails) };
   }
 
   return { kind: "run", call, tool, plan, args, resumed };
@@ -484,8 +484,13 @@ function planOf(p: PreparedCall | undefined): ToolPlan | undefined {
   return p?.kind === "run" ? p.plan : undefined;
 }
 
-function errorResult(text: string, stopTurn = false): ToolResult {
-  return { content: [{ type: "text", text }], isError: true, ...(stopTurn ? { stopTurn: true } : {}) };
+function errorResult(text: string, stopTurn = false, details?: unknown): ToolResult {
+  return {
+    content: [{ type: "text", text }],
+    isError: true,
+    ...(stopTurn ? { stopTurn: true } : {}),
+    ...(details !== undefined ? { details } : {}),
+  };
 }
 
 /**

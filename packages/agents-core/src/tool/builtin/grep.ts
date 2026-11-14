@@ -313,7 +313,7 @@ async function sortFilesWithMatchesByMtime(
     let mtime = 0;
     if (path !== undefined) {
       try {
-        mtime = (await environment.fileInfo(path)).mtimeMs ?? 0;
+        mtime = (await environment.files.getInfo(path)).mtimeMs ?? 0;
       } catch {
         /* mtime=0 → sort after known files */
       }

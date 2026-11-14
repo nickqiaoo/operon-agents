@@ -211,11 +211,11 @@ async function main(): Promise<void> {
     const brokenEnvironment = {
       pathClass: () => environment.pathClass(),
       gethome: () => environment.gethome(),
-      realpath: async (): Promise<string> => {
+      files: { realpath: async (): Promise<string> => {
         const err = new Error("connection lost") as NodeJS.ErrnoException;
         err.code = "ECONNRESET";
         throw err;
-      },
+      } },
     };
     let failedClosed = false;
     try {

@@ -1,17 +1,11 @@
-import type { Environment, RunCommandResult } from "./environment.ts";
+import type { Environment, CommandHandle, RunCommandResult } from "./environment.ts";
 import type { ToolResult } from "./types.ts";
 
-/**
- * Starts ONE command and resolves with how it ended.
- *
- * This — not a process handle — is what a background task actually needs: stop it
- * (`signal`), watch it (`onOutput`), learn how it ended (the resolved result). All three are
- * `run`'s intent fields, so every backend delivers them with its own native means. Demanding
- * a live handle instead would require a capability sandbox transports cannot provide
- * honestly, which is what used to force a fake handle whose `kill()` did nothing.
- */
+/** Start a command and report its result. onStart exposes its handle before waiting so
+ * task owners can persist identity; onOutput is an optional live observation. */
 export type CommandStarter = (opts: {
   readonly signal: AbortSignal;
+  readonly onStart?: (handle: CommandHandle) => void | Promise<void>;
   /** Live pipe tap for an inline foreground run. File-backed background/attached commands omit
    * it because their canonical output is already on the Environment. */
   readonly onOutput?: (chunk: string) => void;
@@ -34,6 +28,31 @@ export interface ProcessSpawnOptions {
    *  reattach the completion to the card that spawned it — the two are otherwise unrelated
    *  events separated by however long the command ran. */
   readonly toolCallId?: string;
+}
+
+/** A Monitor's timing knobs. Defaults are Claude Code's; tests shrink them. */
+export interface MonitorTiming {
+  /** Lines arriving within this window of the first become one notice. */
+  readonly batchMs?: number;
+  /** Token bucket: notices allowed in a burst, and how often one more is earned. */
+  readonly bucketCapacity?: number;
+  readonly bucketRefillMs?: number;
+  /** Suppression lasting this long without a break stops the monitor. */
+  readonly sustainedSuppressionMs?: number;
+}
+
+export interface MonitorSpawnOptions {
+  readonly environment: Environment;
+  /** The command's stdout: the event stream, and the task's output file. */
+  readonly logPath: string;
+  /** The command's stderr. Kept for `Read`; never an event. */
+  readonly stderrPath: string;
+  /** The watch's deadline. The monitor is stopped and reports expiry when it passes. */
+  readonly timeoutMs: number;
+  readonly parentAddress?: string;
+  readonly toolCallId?: string;
+  readonly timing?: MonitorTiming;
+  readonly now?: () => number;
 }
 
 /** Terminal status of an attached run that finished in the foreground (never detached). */
@@ -120,6 +139,12 @@ export type AttachedOutcome =
 
 export interface BackgroundSpawner {
   spawnCommand(start: CommandStarter, command: string, description: string, options?: ProcessSpawnOptions): string;
+  /**
+   * Run a command whose stdout lines are events (the Monitor tool). The starter must already
+   * redirect stdout to `options.logPath` and stderr to `options.stderrPath`. Optional: a spawner
+   * that cannot deliver mid-run notices omits it, and the Monitor tool says so.
+   */
+  spawnMonitor?(start: CommandStarter, command: string, description: string, options: MonitorSpawnOptions): string;
   /**
    * Run an interactive question as a background task (AskUserQuestion `background: true`).
    * The spawner owns task construction and lifecycle; the tool only supplies the run

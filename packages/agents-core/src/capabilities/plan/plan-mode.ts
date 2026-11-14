@@ -141,7 +141,7 @@ export class PlanMode {
   }
 
   private async ensureDir(path: string): Promise<void> {
-    await this.environment?.mkdir(dirname(path), { parents: true, existOk: true });
+    await this.environment?.files.makeDir(dirname(path));
   }
 
   private async writeEmpty(path: string): Promise<void> {

@@ -43,7 +43,7 @@ export { collectGitContext, formatGitContext, sanitizeRemoteUrl, parseProjectNam
 export type { GitContext, GitContextOptions } from "./git-context.ts";
 export { SshEnvironment } from "./environment-ssh.ts";
 export type { SshEnvironmentOptions, SshEnvironmentExtraOptions } from "./environment-ssh.ts";
-export type { BackgroundSpawner } from "./background.ts";
+export type { BackgroundSpawner, MonitorSpawnOptions, MonitorTiming } from "./background.ts";
 export { askUser } from "./ask.ts";
 export { defineTool } from "./define.ts";
 export { globApproval } from "./support/tool-path.ts";
@@ -73,3 +73,14 @@ export * from "./web/index.ts";
 // The keyword search behind SearchTool, for other surfaces that look tools up by intent
 // (Code Mode's `searchTools`).
 export { searchDeferredTools } from "./search/deferral.ts";
+
+export type * from './environment.ts';
+export { runViaHandle, ProcessTable, commandArgv, commandLine, shellQuote, shellJoin, codedError } from './environment-commands.ts';
+export { BaseFiles, toBuffer, sliceRange } from './environment-files.ts';
+export { PlainSandbox } from './environment-sandbox.ts';
+
+export type { NodePtyModule } from './environment-pty.ts';
+
+export { EnvironmentFilesAdapter } from './environment-files.ts';
+
+export { wrapForTaskLog } from './environment-output.ts';

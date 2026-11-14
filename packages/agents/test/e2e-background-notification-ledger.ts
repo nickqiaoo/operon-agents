@@ -133,6 +133,7 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
     startedAt: 1,
     endedAt: 2,
     agentId: "helper-crashed",
+    result: "recovered helper result",
     outputRef: { kind: "conversation", address: "main/helper-crashed" },
     notificationQueuedAt: 3,
   } satisfies PersistedTask);
@@ -150,10 +151,10 @@ async function unconfirmedSettleIsRedelivered(): Promise<void> {
     ? appended.message.content.map((part) => (part.type === "text" ? part.text : "")).join("")
     : "";
   check("unconfirmed: the redelivery names the task", text.includes("helper whose result never landed"));
-  check("unconfirmed: it says the durable output survived", text.includes("durable output is still available"));
-  check("unconfirmed: it names the read that reaches the shard", text.includes("BackgroundOutput(task_id="));
+  check("unconfirmed: it says the output survived", text.includes("output is still available"));
+  check("unconfirmed: it carries the persisted result", text.includes("<result>\nrecovered helper result\n</result>"));
   check(
-    "unconfirmed: the named read returns the recovered result",
+    "unconfirmed: the host read returns the recovered result",
     (await reopened.core.requireService("background").readOutput("agent_lost_notice")).content === "recovered helper result",
   );
   check("unconfirmed: the redelivery woke the idle session on its own", await waitFor(() => events.some((e) => e.type === "turn.ended")));
@@ -224,7 +225,7 @@ async function unconfirmedProcessSettlePointsAtItsLog(): Promise<void> {
     : "";
   check("process resend: carries the exit code", text.includes("(exit code 3)"));
   check("process resend: names the surviving log file", text.includes("/home/agent/.operon/tasks/bash-abc123.log"));
-  check("process resend: points at a read that still works", text.includes("BackgroundOutput(task_id=\"bash_survivor\")"));
+  check("process resend: points at Read for the log", text.includes("Read the log file above") && !text.includes("BackgroundOutput"));
   // The whole point of the change: metadata, not a slab of the command's output.
   check("process resend: carries no output tail", !text.includes("npm ERR"));
 

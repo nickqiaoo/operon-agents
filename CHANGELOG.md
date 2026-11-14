@@ -7,6 +7,110 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Sandbox-first `Environment.files`, `commands`, optional `pty`, and `sandbox` modules.
+  Command handles expose pid, reconnect, streaming output, stdin, disconnect and termination;
+  local environments accept a host-injected `node-pty` module. E2B supports native SDK files,
+  PTY, resource metrics, renewal and native workspace fork.
+- Durable command logs include exit sidecars. Background tasks persist process identity,
+  restore completed results or reconnect verified live commands under their original task id.
+  Foreground and Monitor output use handle subscriptions; local logs use file notifications.
+- Active sessions renew sandbox TTL (`SessionOpenOptions.sandboxTtlMs`, default 10 minutes).
+  Unsupported backends are probed once; renewal errors do not fail the turn.
+
+- `Monitor` tool, part of `backgroundCapability`: a shell command whose stdout lines reach the
+  model as events while it runs, as Claude Code's Monitor does. Lines are trimmed, blank ones
+  dropped, one over 500 characters cut; lines within 200ms become one event, cut at 3000
+  characters. Events are rate-limited by a token bucket (10, one more every 2s); dropped ones are
+  counted in a notice before the next event, and 30s of unbroken suppression stops the monitor.
+  `timeout_ms` defaults to 5 minutes and is capped at 30; expiry ends the task as `timed_out`
+  with the event count. stderr goes to its own log and never becomes an event. The task is a
+  `process` task carrying `monitor` info (`MonitorTaskInfo`); its settle says how the stream
+  ended (`stream ended` / `ended without producing output` / `script failed (exit N)` /
+  `stopped` / expired) and names both logs. Permission is Bash's, under `Monitor(...)` rules.
+- `BackgroundSpawner.spawnMonitor` and `BackgroundTaskSink.notify` (a running task's notice to
+  the model); `BackgroundManager` implements both.
+
+### Changed
+
+- `auto` mode follows Claude Code 2.1.321's classifier. The judge's prompt is that version's base
+  prompt with its rule set. The set has 1 HARD BLOCK rule (Data Exfiltration, which no user
+  request clears), 71 SOFT BLOCK rules, each naming what the user must say to clear it, 16 ALLOW
+  exceptions and 21 environment slots. Claude-only parts of the prompt are left out. The judge's
+  reply also names the rule that matched (`<category>`, carried on `AutoApprovalVerdict.category`).
+- `autoApproval` configuration has four sections: `allow`, `softDeny`, `hardDeny` and
+  `environment`. Each replaces the built-in list, and a `"$defaults"` entry splices the built-in
+  list back in. `deny` still works and is read as `softDeny`. `defaultClassifierRules()` returns
+  the built-in lists.
+- Breaking: when the `auto`-mode judge blocks a call, the call is refused and the reason goes back
+  to the model. No one is asked. `AutoApprovalVerdict.decision` has a new `block` value for this;
+  `escalate` now only means the judge could not decide. A person is asked on the 3rd block in a
+  row or the 20th in all, and both counts then start over (`AUTO_MODE_DENIAL_LIMITS`). Any call
+  that goes ahead resets the run.
+- The judge's transcript has more in it. Each call carries a short id, and an outcome line records
+  how it ended: `ok`, `error`, `rejected-by-user`, `blocked-by-permissions` or `automode-blocked`.
+  The agent's last prose before a user message is included, so a terse "yes" has a referent.
+  AskUserQuestion answers count as the user's words. A tool named like a transcript key
+  (`user`, `assistant`, …) is printed bracketed. Refused calls record how they were refused on
+  their result's `details` (`PermissionDenialDetails`), set through the new
+  `AuthorizeToolExecutionResult.blockDetails`.
+- The judge sees what an `Edit` removes as well as what it adds: `file_path`, `adds`, `removes`
+  (first 4000 characters), `removesTruncated` and `replaceAll`.
+
+- Breaking: `Environment` callers use `files` / `commands` / `sandbox`; flat methods are no
+  longer part of the interface. Existing backend primitives remain on `BaseEnvironment` for
+  subclass compatibility. `readTextFile` and `writeTextFile` now accept a `files` module.
+  The root export keeps slash-command `CommandResult`; environment results are also exported
+  as `EnvironmentCommandResult` (or `CommandResult` from the tools entrypoint).
+- Writes create missing parent directories on every backend. Workspace materialization batches
+  adjacent files while preserving declaration order across directory and git operations.
+  Output limits apply per stream in UTF-8 bytes and no longer terminate commands.
+- OS sandbox wrapping covers both `commands.run` and `commands.start`; sandboxed local
+  environments reject injected PTYs. E2B SDK peer requirement is now `>=2.63.0`.
+
+- A background settle (`background_done`) is queued on the steering channel, so it reaches the
+  model at the next step boundary of the turn in flight — after that step's tool results — rather
+  than when the whole turn ends. A turn that keeps calling tools no longer leaves a finished
+  build unreported for its whole length. One that lands during the terminal step is answered in
+  the same turn instead of starting another. The "waiting for input" stall notice goes the same
+  way.
+- An extension's `steer()` now goes on the steering channel as documented; it was filed as a
+  follow-up, so it waited for the turn to end like `followUp()`.
+- Bash: a foreground command that starts with `sleep N` (N ≥ 2s) is refused with a pointer to
+  `run_in_background` and Monitor, when the background capability is there. The description
+  says to wait for notifications instead of polling, and how to choose between
+  `run_in_background` and Monitor.
+
+- A background task's completion notice now carries what the model would otherwise have had
+  to fetch, as Claude Code's does: a sub-agent's final answer and a workflow's report ride in
+  `<result>` (a workflow's capped at 8000 characters; the whole of a longer one is saved to a
+  task log the cut names); a command's names its log for `Read`; a question's answer rides
+  whole, no longer cut at 8000 characters. `AgentBackgroundTaskInfo` and
+  `WorkflowBackgroundTaskInfo` gain `result`, persisted with the task so a notice resent after a
+  crash carries it too; `AgentRunOutcome` / `WorkflowRunOutcome` are what their runs resolve
+  with. Tool acks and descriptions say to wait for the notice instead of polling.
+
+### Removed
+
+- The `BackgroundOutput` tool and `backgroundOutputTool` — Claude Code dropped its equivalent
+  (`BashOutput` / `TaskOutput`). A running sub-agent or workflow can no longer be peeked at by
+  the model; hosts still read any task's output with `BackgroundManager.readOutput` /
+  `readOutputDelta`.
+
+### Fixed
+
+- A repository could tell the `auto`-mode judge what is safe. `permission.autoApproval` in the
+  project or local `config.toml` (`<repo>/.agents/`) was merged into the judge's rules, so a cloned
+  repo could ship ALLOW exceptions or trusted domains for itself. Only the user tier is read now.
+  The dropped copies are listed on their layer (`ResolvedLayer.ignored`).
+
+- The background e2e deleted the real `~/.operon/tasks` (its log-directory test removes the
+  directory on purpose), taking the logs of background commands running in other sessions with
+  it. It runs on a throwaway home now.
+
 ## [0.1.0-alpha.32] — 2026-11-13
 
 ### Added

@@ -111,8 +111,7 @@ export const askUserQuestionTool = defineTool({
             `description: ${questionDescription(args.questions)}`,
             `status: ${task.status}`,
             "automatic_notification: true",
-            "next_step: Continue your current work; the answer will arrive automatically when the user responds.",
-            "next_step: Use BackgroundOutput with this task_id for a non-blocking status/answer snapshot.",
+            "next_step: Continue your current work; the answer will arrive automatically when the user responds — do not poll.",
           ].join("\n"),
         );
       }

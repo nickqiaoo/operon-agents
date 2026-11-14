@@ -73,6 +73,20 @@ export interface FileResolverOptions extends ConfigLayerOptions {
 
 export interface ResolvedLayer extends ConfigLayer {
   readonly loaded: boolean;
+  /** Settings this layer set that were not applied, by dotted key (e.g. `permission.autoApproval`). */
+  readonly ignored?: readonly string[];
+}
+
+/**
+ * Settings only the user tier may carry. The project and local tiers are files inside the
+ * repository the agent works on — a cloned repo can ship them — so a setting that decides what
+ * the `auto`-mode judge treats as safe (its allow exceptions, its trusted environment) would let
+ * a repository vouch for itself. Those layers' copies are dropped, not merged.
+ */
+function withoutUserOnlySettings(tier: ConfigLayer["tier"], cfg: AgentFrameworkConfig): { config: Partial<AgentFrameworkConfig>; ignored: string[] } {
+  if (tier === "user" || cfg.permission?.autoApproval === undefined) return { config: cfg, ignored: [] };
+  const { autoApproval: _dropped, ...permission } = cfg.permission;
+  return { config: { ...cfg, permission }, ignored: ["permission.autoApproval"] };
 }
 
 export interface ResolvedFromFiles {
@@ -88,8 +102,13 @@ export async function resolveFromFiles(options: FileResolverOptions = {}): Promi
   const parts: Partial<AgentFrameworkConfig>[] = [];
   for (const layer of paths.ordered) {
     const cfg = await loadConfigFile(layer.path, format);
-    layers.push({ ...layer, loaded: cfg !== undefined });
-    if (cfg !== undefined) parts.push(cfg);
+    if (cfg === undefined) {
+      layers.push({ ...layer, loaded: false });
+      continue;
+    }
+    const { config, ignored } = withoutUserOnlySettings(layer.tier, cfg);
+    layers.push({ ...layer, loaded: true, ...(ignored.length > 0 ? { ignored } : {}) });
+    parts.push(config);
   }
   if (options.overrides !== undefined) parts.push(options.overrides);
   const config = parseConfig(parts.length > 0 ? mergeConfigs(...parts) : {});

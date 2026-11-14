@@ -9,10 +9,15 @@ export const PermissionRuleConfigSchema = z.object({
   reason: z.string().optional(),
 });
 
-// `auto`-mode judge tuning: extra allow/deny/environment sections injected into the classifier
-// prompt (user values replace the template defaults), plus which classifier stages to run.
+// `auto`-mode judge tuning: the classifier's rule sections (each one, when set, replaces the
+// built-in list — a `"$defaults"` entry splices the built-in list back in), plus which classifier
+// stages to run. Honoured from the user tier only: the project and local tiers live in the
+// repository, and a repository must not get to tell the judge what is safe (see resolveFromFiles).
 export const AutoApprovalConfigSchema = z.object({
   allow: z.array(z.string()).default([]),
+  softDeny: z.array(z.string()).default([]),
+  hardDeny: z.array(z.string()).default([]),
+  /** @deprecated read as `softDeny`. */
   deny: z.array(z.string()).default([]),
   environment: z.array(z.string()).default([]),
   twoStageMode: z.enum(["both", "fast", "thinking"]).optional(),

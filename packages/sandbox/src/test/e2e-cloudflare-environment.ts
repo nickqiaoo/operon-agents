@@ -159,14 +159,14 @@ async function testCheapPath(): Promise<void> {
   const client = new FakeClient(() => ok([{ stream: "stdout", data: "hi\n" }]));
   const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
-  const result = await environment.run(["echo", "hi"]);
+  const result = await environment.commands.run(["echo", "hi"]);
   check("cheap path: plain run uses commands.execute (one round trip)", client.executed.length === 1 && client.started.length === 0);
   check("cheap path: stdout returned", result.stdout === "hi\n");
   check("cheap path: exit code reported", result.exitCode === 0);
   check("cheap path: argv is quoted into one command string", client.executed[0] === "echo hi");
   check("cheap path: cwd passed to the vendor", client.lastExecOptions?.cwd === "/workspace");
 
-  await environment.run(["sleep", "9"], { timeoutMs: 4_000 });
+  await environment.commands.run(["sleep", "9"], { timeoutMs: 4_000 });
   check("cheap path: timeout handed to the vendor natively", client.lastExecOptions?.timeoutMs === 4_000);
 }
 
@@ -181,16 +181,16 @@ async function testStreamingAndCap(): Promise<void> {
   const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
   const seen: string[] = [];
-  const streamed = await environment.run(["build"], { onOutput: (c) => seen.push(`${c.stream}:${c.data}`) });
+  const streamed = await environment.commands.run(["build"], { onOutput: (c) => seen.push(`${c.stream}:${c.data}`) });
   check("stream: onOutput takes the process path, not execute", client.started.length === 1 && client.executed.length === 0);
   check("stream: output arrives incrementally, in order", seen.join("|") === "stdout:one|stderr:warn|stdout:two");
   check("stream: streams stay separated", streamed.stdout === "onetwo" && streamed.stderr === "warn");
   check("stream: exit code read from the exit event", streamed.exitCode === 0);
 
-  const capped = await environment.run(["build"], { maxOutputBytes: 4 });
-  check("cap: output cut at the limit", capped.stdout === "one" && capped.truncated);
-  check("cap: the command is actually killed, not just trimmed", client.killed.length === 1);
-  check("cap: a killed run reports no exit code", capped.exitCode === undefined && capped.terminated);
+  const capped = await environment.commands.run(["build"], { maxOutputBytes: 4 });
+  check("cap: output cut at the limit", capped.stdout === "onet" && capped.stderr === "warn" && capped.truncated);
+  check("cap: the command keeps running after capture is capped", client.killed.length === 0);
+  check("cap: natural exit remains available", capped.exitCode === 0 && !capped.terminated);
 }
 
 async function testTimeoutAndAbort(): Promise<void> {
@@ -198,7 +198,7 @@ async function testTimeoutAndAbort(): Promise<void> {
 
   const timeoutClient = new FakeClient(hanging);
   const timeoutEnvironment = new CloudflareEnvironment(timeoutClient, { cwd: "/workspace" });
-  const timedOut = await timeoutEnvironment.run(["sleep", "60"], { timeoutMs: 40, onOutput: () => {} });
+  const timedOut = await timeoutEnvironment.commands.run(["sleep", "60"], { timeoutMs: 40, onOutput: () => {} });
   check("timeout: reported as timed out", timedOut.timedOut);
   check("timeout: the process was really killed", timedOut.terminated && timeoutClient.killed.length === 1);
   check("timeout: partial output is kept", timedOut.stdout === "partial");
@@ -208,7 +208,7 @@ async function testTimeoutAndAbort(): Promise<void> {
   const abortEnvironment = new CloudflareEnvironment(abortClient, { cwd: "/workspace" });
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 40);
-  const aborted = await abortEnvironment.run(["sleep", "60"], { signal: controller.signal });
+  const aborted = await abortEnvironment.commands.run(["sleep", "60"], { signal: controller.signal });
   check("abort: the process was really killed", aborted.terminated && abortClient.killed.length === 1);
   check("abort: exit code is undefined", aborted.exitCode === undefined);
 }
@@ -219,26 +219,26 @@ async function testFilesAndListing(): Promise<void> {
 
   // Binary round trip: base64 is the only byte-safe route over this transport.
   const payload = Buffer.from([0x00, 0xff, 0x10, 0x80]);
-  await environment.writeBytes("/workspace/blob.bin", payload);
-  const read = await environment.readBytes("/workspace/blob.bin");
+  await environment.files.write("/workspace/blob.bin", payload);
+  const read = await environment.files.read("/workspace/blob.bin");
   check("files: binary survives the base64 round trip", read.equals(payload));
 
   await writeTextFile(environment, "/workspace/note.txt", "hello");
   check("files: text write lands in the sandbox", client.written.get("/workspace/note.txt")?.toString("utf8") === "hello");
 
-  const entries = await environment.listDir("/workspace");
+  const entries = await environment.files.list("/workspace");
   check("listDir: one round trip carries kinds", entries.length === 3);
   check("listDir: directory flag mapped", entries[0]?.kind === "dir" && entries[0]?.name === "src");
   check("listDir: plain file mapped", entries[1]?.kind === "file");
 
-  const info = await environment.fileInfo("/workspace/note.txt");
+  const info = await environment.files.getInfo("/workspace/note.txt");
   check("fileInfo: kind/size/mtime parsed from one stat", info.kind === "file" && info.size === 11 && info.mtimeMs === 1_700_000_000_000);
 
-  check("ports: exposedPortUrl is honestly undefined on this transport", (await environment.exposedPortUrl()) === undefined);
+  check("ports: exposedPortUrl is honestly undefined on this transport", (await environment.sandbox.getUrl(3000)) === undefined);
 }
 
 async function testWorkspaceLifecycle(): Promise<void> {
-  const client = new FakeClient(() => ok([{ stream: "stdout", data: "" }]));
+  const client = new FakeClient(command => command.includes("stat ") ? ok([{ stream: "stdout", data: "directory|0|1700000000|1700000000" }]) : ok([{ stream: "stdout", data: "" }]));
   const workspace = await CloudflareWorkspace.open({ client, cwd: "/workspace", sessionId: "user-42" });
 
   check("workspace: id is the vendor session id", workspace.id === "user-42");
@@ -249,14 +249,14 @@ async function testWorkspaceLifecycle(): Promise<void> {
   check("workspace: snapshot ids are distinct", (await workspace.snapshot()) !== snapshotId);
 
   await workspace.restore(snapshotId!);
-  check("workspace: environment stays usable across restore (no instance swap)", (await workspace.environment.run(["true"])).exitCode === 0);
+  check("workspace: environment stays usable across restore (no instance swap)", (await workspace.environment.commands.run(["true"])).exitCode === 0);
 
   const cloned = await workspace.checkout("https://example.com/app.git", { branch: "main" });
   check("workspace: native git checkout used, shallow by default", cloned && client.clones[0]?.depth === 1 && client.clones[0]?.branch === "main");
 }
 
 async function testWorkspaceSpec(): Promise<void> {
-  const client = new FakeClient(() => ok([{ stream: "stdout", data: "" }]));
+  const client = new FakeClient(command => command.includes("stat ") ? ok([{ stream: "stdout", data: "directory|0|1700000000|1700000000" }]) : ok([{ stream: "stdout", data: "" }]));
   const environment = new CloudflareEnvironment(client, { cwd: "/workspace" });
 
   await materializeWorkspace(environment, {

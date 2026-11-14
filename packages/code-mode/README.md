@@ -134,8 +134,7 @@ returns a task id at once; a program already running can be moved with `session.
 (the tool announces `tool.detachable`, the cue a UI uses to offer "move to background"). Either
 way it becomes a `code` background task: its `console.log` lines, each nested call's outcome and
 the final result go to a log file on the environment — where a background command's output goes. The
-model `Read`s that file (the result names its path) and asks `BackgroundOutput` for the task's
-status; a completion notice reaches it on its own. A host reads the same file through
+model `Read`s that file (the result names its path); a completion notice reaches it on its own. A host reads the same file through
 `session.readBackgroundTaskOutput` / `readBackgroundTaskOutputDelta`. A program in the background
 has no turn to pause, so an approval nobody can give fails inside it instead of pausing.
 

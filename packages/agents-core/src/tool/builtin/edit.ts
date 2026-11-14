@@ -31,6 +31,9 @@ const EditInput = z.object({
 
 type EditInput = z.infer<typeof EditInput>;
 
+/** How much of the replaced text the auto-mode judge is shown. */
+const EDIT_REMOVAL_CAP = 4_000;
+
 const EDIT_DESCRIPTION = [
   "Perform exact string replacements against the text view returned by Read.",
   "",
@@ -56,7 +59,18 @@ export const editTool = defineTool({
   description: EDIT_DESCRIPTION,
   parameters: EditInput,
   // The replacement text is what lands in the file — that's the security-relevant part.
-  toAutoApprovalInput: (args) => `${args.path}: ${args.new_string}`,
+  // The judge weighs what an edit removes as seriously as what it adds (dropping a guard is a
+  // behaviour change even when the new text is innocuous), so it sees both sides.
+  toAutoApprovalInput: (args) => {
+    const truncated = args.old_string.length > EDIT_REMOVAL_CAP;
+    return {
+      file_path: args.path,
+      adds: args.new_string,
+      removes: truncated ? args.old_string.slice(0, EDIT_REMOVAL_CAP) : args.old_string,
+      removesTruncated: truncated,
+      ...(args.replace_all === true ? { replaceAll: true } : {}),
+    };
+  },
   async resolve(args, ctx) {
     const path = await resolveToolPath(args.path, ctx.environment, "write");
     return {

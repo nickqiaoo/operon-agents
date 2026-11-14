@@ -72,7 +72,7 @@ export async function runRipgrep(
 
   let result;
   try {
-    result = await environment.run(rgArgs, {
+    result = await environment.commands.run(rgArgs, {
       timeoutMs: options.timeoutMs,
       maxOutputBytes: options.maxOutputBytes,
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),

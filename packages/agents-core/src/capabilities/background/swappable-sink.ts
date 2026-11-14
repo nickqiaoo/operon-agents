@@ -2,6 +2,7 @@ import type { BackgroundTaskSettlement, BackgroundTaskSink } from "./task.ts";
 
 /** The mutable half of a {@link SwappableSink}: where settlement currently goes. */
 interface SinkDownstream {
+  update?(): Promise<void>;
   settle(settlement: BackgroundTaskSettlement): Promise<boolean>;
 }
 
@@ -22,6 +23,8 @@ export class SwappableSink implements BackgroundTaskSink {
   setDownstream(downstream: SinkDownstream): void {
     this.#downstream = downstream;
   }
+
+  async update(): Promise<void> { await this.#downstream?.update?.(); }
 
   settle(settlement: BackgroundTaskSettlement): Promise<boolean> {
     return this.#downstream === undefined ? Promise.resolve(false) : this.#downstream.settle(settlement);

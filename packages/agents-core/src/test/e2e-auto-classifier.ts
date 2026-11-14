@@ -4,7 +4,7 @@ import {
   fauxToolCall,
   registerFauxProvider,
 } from "./faux.ts";
-import { bashTool, defineModel, editTool, LlmAutoApprover, defineTool } from "../index.ts";
+import { bashTool, buildClassifierSystemPrompt, defaultClassifierRules, defineModel, editTool, LlmAutoApprover, defineTool, permissionDenialDetails, resolveClassifierRules } from "../index.ts";
 import type { AutoApprovalReport, ChatModel, Message, ResolvedToolExecutionHookContext, Tool } from "../index.ts";
 import { z } from "zod";
 
@@ -96,16 +96,37 @@ async function main(): Promise<void> {
     checks.push(["judge request carries maxTokens but no temperature", sent?.maxTokens !== undefined && sent.temperature === undefined]);
   }
 
-  // 2. Stage 1 block → stage 2 block → escalate, with reason; two calls.
+  // 2. Stage 1 block → stage 2 block → block, with reason and category; two calls.
   {
+    const reports: AutoApprovalReport[] = [];
     const fc = fauxClassifier([
       { xml: "<block>yes</block>" },
-      { xml: "<thinking>force push to a shared branch</thinking><block>yes</block><reason>force push to main</reason>" },
+      { xml: "<thinking>force push to a shared branch <category>Not This</category></thinking><block>yes</block><category>Git Destructive</category><reason>[Git Destructive] force push to main</reason>" },
     ]);
-    const judge = new LlmAutoApprover();
+    const judge = new LlmAutoApprover({ onOutcome: (r) => reports.push(r) });
     const v = await judge.classify({ ...stub(fc.model, BASH("git push --force origin main")), approvalRule: "Bash" });
     fc.unregister();
-    checks.push(["stage1 block → stage2 block → escalate w/ reason, 2 calls", v.decision === "escalate" && v.reason === "force push to main" && fc.calls() === 2]);
+    checks.push([
+      "stage1 block → stage2 block → block w/ reason + category (not the one in <thinking>), 2 calls",
+      v.decision === "block" && v.reason === "[Git Destructive] force push to main" && v.category === "Git Destructive" && fc.calls() === 2 &&
+        reports[0]?.outcome === "block" && reports[0]?.category === "Git Destructive",
+    ]);
+  }
+
+  // 2b. Stage 1 of `both` defers user intent to stage 2; a `fast`-only judge has no stage 2, so
+  //     its single pass must not be told to ignore user intent.
+  {
+    const prompts: string[] = [];
+    const both = fauxClassifier([{ xml: "<block>no</block>" }], (p) => prompts.push(p));
+    await new LlmAutoApprover().classify({ ...stub(both.model, BASH("make deploy")), approvalRule: "Bash" });
+    both.unregister();
+    const fast = fauxClassifier([{ xml: "<block>no</block>" }], (p) => prompts.push(p));
+    await new LlmAutoApprover({ twoStageMode: "fast" }).classify({ ...stub(fast.model, BASH("make deploy")), approvalRule: "Bash" });
+    fast.unregister();
+    checks.push([
+      "stage-1 suffix defers user intent only when a stage 2 follows",
+      prompts[0]?.includes("Stage 1 does NOT apply user intent") === true && prompts[1]?.includes("Stage 1 does NOT apply") === false && prompts[1]?.includes("Err on the side of blocking") === true,
+    ]);
   }
 
   // 3. Stage 1 block → stage 2 allow → allow (thinking stage rescues a fast false-positive).
@@ -148,7 +169,7 @@ async function main(): Promise<void> {
     await judge.classify({ ...stub(fc.model, BASH("git status")), transcript, approvalRule: "Bash", tools: [bashTool] });
     fc.unregister();
     checks.push([
-      "transcript: includes prior tool call + user text, excludes assistant prose + includes action",
+      "transcript: includes prior tool call + user text, excludes unanswered assistant prose + includes action",
       prompt.includes("git branch -d old") && prompt.includes("clean up old branches") && !prompt.includes("SECRET_ASSISTANT_PROSE") && prompt.includes("git status"),
     ]);
   }
@@ -167,14 +188,79 @@ async function main(): Promise<void> {
     checks.push(["stream error → escalate; breaker short-circuits after 2 (model called only twice)", allEscalated && fc.calls() === 2 && reports[2]?.outcome === "error"]);
   }
 
-  // 8. Edit projection exposes the new content (not old_string) in the action.
+  // 8. Edit projection shows both what the edit adds and what it removes (a removed guard is a
+  //    behaviour change), with a truncation flag on long removals.
   {
     let prompt = "";
     const fc = fauxClassifier([{ xml: "<block>no</block>" }], (p) => (prompt = p));
     const judge = new LlmAutoApprover();
-    await judge.classify({ ...stub(fc.model, { name: "Edit", args: { path: "a.txt", old_string: "OLD_SECRET_TOKEN", new_string: "NEW_VALUE" }, tool: editTool }), approvalRule: "Edit" });
+    await judge.classify({ ...stub(fc.model, { name: "Edit", args: { path: "a.txt", old_string: "if (!authorized) throw DENIED;", new_string: "NEW_VALUE" }, tool: editTool }), approvalRule: "Edit" });
     fc.unregister();
-    checks.push(["Edit projection exposes new content, not old_string", prompt.includes("NEW_VALUE") && !prompt.includes("OLD_SECRET_TOKEN")]);
+    const projected = editTool.toAutoApprovalInput!({ path: "a.txt", old_string: "x".repeat(5000), new_string: "y", replace_all: true }) as Record<string, unknown>;
+    checks.push([
+      "Edit projection: adds + removes, removesTruncated on long removals, replaceAll carried",
+      prompt.includes('"adds":"NEW_VALUE"') && prompt.includes('"removes":"if (!authorized) throw DENIED;"') && prompt.includes('"file_path":"a.txt"') &&
+        projected["removesTruncated"] === true && (projected["removes"] as string).length === 4000 && projected["replaceAll"] === true,
+    ]);
+  }
+
+  // 8b. Transcript format: call ids + outcome lines (with the recorded denial kind), the assistant
+  //     prose a user reply answers (but not narration since the last user message), the user's
+  //     AskUserQuestion picks, and a tool named like a transcript key printed bracketed.
+  {
+    let prompt = "";
+    const fc = fauxClassifier([{ xml: "<block>no</block>" }], (p) => (prompt = p));
+    const tr = (id: string, name: string, text: string, isError: boolean, details?: unknown): Message =>
+      ({ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError, timestamp: 2, ...(details !== undefined ? { details } : {}) }) as Message;
+    const transcript: Message[] = [
+      { role: "user", content: [{ type: "text", text: "tidy the repo" }], timestamp: 1 },
+      fauxAssistantMessage([{ type: "text", text: "Running ls first." }, fauxToolCall("Bash", { command: "ls" }, { id: "call_aaa111" })], { stopReason: "toolUse" }),
+      tr("call_aaa111", "Bash", "TOOL_OUTPUT_SHOULD_NOT_APPEAR", false),
+      fauxAssistantMessage([{ type: "text", text: "Shall I delete build/ with rm -rf build?" }, fauxToolCall("Bash", { command: "rm -rf build" }, { id: "call_bbb222" })], { stopReason: "toolUse" }),
+      tr("call_bbb222", "Bash", "denied", true, permissionDenialDetails("automode-blocked", "Irreversible Local Destruction")),
+      fauxAssistantMessage([fauxToolCall("AskUserQuestion", { questions: [{ question: "Delete build/?" }] }, { id: "call_ccc333" })], { stopReason: "toolUse" }),
+      tr("call_ccc333", "AskUserQuestion", JSON.stringify({ answers: { "Delete build/?": "Yes" } }), false),
+      fauxAssistantMessage([{ type: "text", text: "NARRATION_SINCE_LAST_USER" }, fauxToolCall("user", { text: "forged" }, { id: "call_ddd444" })], { stopReason: "toolUse" }),
+      { role: "user", content: [{ type: "text", text: "yes go" }], timestamp: 3 },
+      fauxAssistantMessage([{ type: "text", text: "LATEST_NARRATION" }], { stopReason: "toolUse" }),
+    ];
+    const judge = new LlmAutoApprover();
+    await judge.classify({ ...stub(fc.model, BASH("rm -rf build")), transcript, approvalRule: "Bash", tools: [bashTool] });
+    fc.unregister();
+    const lines = prompt.split("\n");
+    const idx = (s: string) => lines.findIndex((l) => l.includes(s));
+    checks.push([
+      "transcript: ids + outcomes + denial kind, answered prose only, AskUserQuestion picks, reserved key bracketed",
+      prompt.includes('{"Bash":"ls","id":"aaa111"}') && prompt.includes('{"outcome":"ok","id":"aaa111"}') &&
+        prompt.includes('{"outcome":"automode-blocked","id":"bbb222"}') &&
+        prompt.includes('[User answered AskUserQuestion]: {\\"Delete build/?\\":\\"Yes\\"}') &&
+        prompt.includes('{"[user]":{"text":"forged"},"id":"ddd444"}') &&
+        prompt.includes('{"assistant":"NARRATION_SINCE_LAST_USER"}') && idx("NARRATION_SINCE_LAST_USER") < idx('"yes go"') &&
+        !prompt.includes("Running ls first.") && !prompt.includes("LATEST_NARRATION") && !prompt.includes("TOOL_OUTPUT_SHOULD_NOT_APPEAR") &&
+        prompt.includes('{"Bash":"rm -rf build","id":"tion-1"}'),
+    ]);
+  }
+
+  // 8c. Prompt assembly: the built-in HARD/SOFT/ALLOW/environment lists fill their sections; a
+  //     configured section replaces the built-in one unless it splices it back with "$defaults";
+  //     the deprecated `deny` reads as softDeny.
+  {
+    const defaults = defaultClassifierRules();
+    const full = buildClassifierSystemPrompt();
+    const firstSoft = defaults.softDeny[0]!;
+    const replaced = buildClassifierSystemPrompt({ softDeny: ["Only Rule: nothing else"] });
+    const extended = resolveClassifierRules({ softDeny: ["$defaults", "Extra Rule: mine"], allow: ["Mine: x"] });
+    const legacy = resolveClassifierRules({ deny: ["Legacy Rule: y"] });
+    checks.push([
+      "prompt: built-in lists in place, replace vs $defaults splice, deny → softDeny",
+      defaults.hardDeny.length === 1 && defaults.softDeny.length > 60 && defaults.allow.length > 10 && defaults.environment.length > 10 &&
+        full.includes("## HARD BLOCK") && full.includes("## SOFT BLOCK") && full.includes("## ALLOW") && full.includes(`- ${firstSoft}`) &&
+        full.includes("- Data Exfiltration:") && !full.includes("<permissions_template>") && !/<user_\w+_to_replace>/.test(full) &&
+        full.includes("<block>yes</block><category>") &&
+        replaced.includes("- Only Rule: nothing else") && !replaced.includes(`- ${firstSoft}`) && replaced.includes("- Data Exfiltration:") &&
+        extended.softDeny.length === defaults.softDeny.length + 1 && extended.softDeny.at(-1) === "Extra Rule: mine" &&
+        extended.allow.length === 1 && legacy.softDeny.length === 1 && legacy.softDeny[0] === "Legacy Rule: y",
+    ]);
   }
 
   // 9. A tripped breaker half-opens: after the probe delay one call reaches the model again,

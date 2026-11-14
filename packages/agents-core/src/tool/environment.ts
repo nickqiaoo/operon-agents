@@ -1,66 +1,3 @@
-/** One increment of command output. `stream` keeps stdout and stderr distinguishable —
- *  a PTY would merge them, which is why tool execution deliberately does not use one. */
-export interface OutputChunk {
-  readonly stream: "stdout" | "stderr";
-  readonly data: string;
-}
-
-/**
- * What the caller WANTS from a command run. Every field is an intent the backend fulfils
- * with its own native means — local spawn + signals, SSH channel teardown, a vendor's
- * `timeoutMs` + `kill(pid)`. The alternative this replaced was handing back POSIX process
- * MACHINERY and making the caller assemble timeout/capping around it — an assembly that
- * only ever worked on local backends, and silently did nothing everywhere else.
- */
-export interface RunCommandOptions {
-  readonly cwd?: string;
-  /** Overrides layered over the ambient environment, not a replacement. */
-  readonly env?: Record<string, string>;
-  readonly stdin?: string;
-  /** Kill the command after this long. `RunCommandResult.timedOut` reports whether it fired. */
-  readonly timeoutMs?: number;
-  /**
-   * Cap on captured output. Backends should stop the command at the source when they can
-   * rather than transferring everything and trimming after.
-   */
-  readonly maxOutputBytes?: number;
-  readonly signal?: AbortSignal;
-  /**
-   * Incremental output. Backends that can stream call this as output arrives; backends
-   * that cannot call it once at the end. Degradation lives in the contract, so a caller
-   * writes one code path and never queries a capability.
-   */
-  readonly onOutput?: (chunk: OutputChunk) => void;
-}
-
-export interface RunCommandResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  /**
-   * `undefined` means the backend cannot confirm the command finished (e.g. a sandbox that
-   * yielded while it kept running). The type forces callers to face that case instead of
-   * receiving a fabricated 0.
-   */
-  readonly exitCode: number | undefined;
-  readonly timedOut: boolean;
-  /** Output hit `maxOutputBytes` and was cut. */
-  readonly truncated: boolean;
-  /**
-   * Whether the command was actually stopped when a timeout or abort demanded it. `false`
-   * means the backend could only walk away — surface it to the user, never pretend.
-   */
-  readonly terminated: boolean;
-}
-
-/** A byte window of a file. Both ends optional: `{}` is the whole file, `{length}` a prefix,
- *  `{offset}` everything from there on, both a slice. Reads past EOF return what exists. */
-export interface ByteRange {
-  /** 0-based byte to start at. Default 0. */
-  readonly offset?: number;
-  /** Maximum bytes to return. Omit to read to EOF. */
-  readonly length?: number;
-}
-
 export type DecodeErrors = "strict" | "replace" | "ignore";
 
 export type OsKind = "Linux" | "Darwin" | "Windows" | (string & {});
@@ -74,180 +11,208 @@ export interface OsInfo {
   readonly shellPath: string;
 }
 
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+/** string = shell 命令行（E2B 原生形态）；string[] = 精确 argv，不经 shell 解析（本地原生形态）。 */
+export type Command = string | readonly string[];
+
+export interface OutputChunk { readonly stream: "stdout" | "stderr"; readonly data: string }
+
+/** commands.run 的意图式选项。现有类型，语义不变。 */
+export interface RunCommandOptions {
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;      // 覆盖项，叠加在环境变量之上
+  readonly stdin?: string;                    // 写入后发 EOF
+  readonly timeoutMs?: number;                // 到时杀进程
+  readonly maxOutputBytes?: number;           // 每个流的累计上限；只停止累计，不杀进程
+  readonly signal?: AbortSignal;
+  readonly onOutput?: (chunk: OutputChunk) => void;
+}
+
+export interface RunCommandResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | undefined;      // undefined = 无法确认结束
+  readonly timedOut: boolean;
+  readonly truncated: boolean;
+  readonly terminated: boolean;               // 要求停止时是否确认停住
+}
+
+export interface CommandStartOptions {
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+  readonly stdin?: boolean;                   // 默认 false：命令立刻看到 EOF
+  readonly onStdout?: (data: string) => void;
+  readonly onStderr?: (data: string) => void;
+  readonly retainOutput?: boolean;            // false = 句柄上不累计输出
+  /** 输出同时写入环境上的这个文件，并在自然结束时把退出码写进 `${outputFile}.exit`。
+   *  未给 stderrFile 时 stdout 与 stderr 合并写入，并合并经 onStdout 推送。见 5.2。 */
+  readonly outputFile?: string;
+  readonly stderrFile?: string;               // stderr 单独落盘，不经 onStdout 推送
+}
+
+export interface CommandResult {
+  readonly exitCode: number | undefined;      // undefined = 被杀或未观察到结束
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error?: string;
+}
+
+export interface CommandHandle {
+  readonly pid: number;                       // 有 OS pid 的后端就是 OS pid
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | undefined;      // 运行中为 undefined
+  /** 非零退出是结果，不抛异常。只有后端在未被要求停止的情况下丢失命令才 reject。 */
+  wait(): Promise<CommandResult>;
+  /** 用后端最强的原生手段停掉命令及其子进程。true = 确认已停。 */
+  kill(): Promise<boolean>;
+  /** 不再接收输出，命令继续运行。之后可用 commands.connect 重连。 */
+  disconnect(): Promise<void>;
+  sendStdin(data: string | Uint8Array): Promise<void>;   // 需要 start 时 stdin: true
+  closeStdin(): Promise<void>;
+}
+
+export interface ProcessInfo {
+  readonly pid: number;
+  readonly tag?: string;
+  readonly cmd: string;
+  readonly args: readonly string[];
+  readonly envs: Readonly<Record<string, string>>;
+  readonly cwd?: string;
+}
+
+export type CommandConnectOptions = Pick<CommandStartOptions, "onStdout" | "onStderr" | "retainOutput">;
+
+export interface EnvironmentCommands {
+  run(command: Command, options?: RunCommandOptions): Promise<RunCommandResult>;
+  start(command: Command, options?: CommandStartOptions): Promise<CommandHandle>;
+  list(): Promise<readonly ProcessInfo[]>;
+  /** 找不到时以 code = "ESRCH" reject。 */
+  connect(pid: number, options?: CommandConnectOptions): Promise<CommandHandle>;
+  kill(pid: number): Promise<boolean>;
+  sendStdin(pid: number, data: string | Uint8Array): Promise<void>;
+  closeStdin(pid: number): Promise<void>;
+}
+
+// ── PTY ──────────────────────────────────────────────────────────────────────
+
+export interface PtySize { readonly cols: number; readonly rows: number }
+export interface PtyCreateOptions extends PtySize {
+  readonly onData: (data: Uint8Array) => void;
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+}
+export interface PtyHandle {
+  readonly pid: number;
+  wait(): Promise<{ readonly exitCode: number | undefined }>;
+  sendInput(data: string | Uint8Array): Promise<void>;
+  resize(size: PtySize): Promise<void>;
+  kill(): Promise<boolean>;
+  disconnect(): Promise<void>;
+}
+export interface EnvironmentPty {
+  create(options: PtyCreateOptions): Promise<PtyHandle>;
+  connect(pid: number, options: Pick<PtyCreateOptions, "onData">): Promise<PtyHandle>;
+  sendInput(pid: number, data: string | Uint8Array): Promise<void>;
+  resize(pid: number, size: PtySize): Promise<void>;
+  kill(pid: number): Promise<boolean>;
+}
+
+// ── Files ────────────────────────────────────────────────────────────────────
+
+export interface ByteRange { readonly offset?: number; readonly length?: number }
 export type FileKind = "file" | "dir" | "symlink" | "other";
+export interface FileInfo { readonly kind: FileKind; readonly size: number; readonly mtimeMs?: number }
+export interface DirEntry { readonly name: string; readonly kind: FileKind }   // kind 是 lstat 语义
 
-/**
- * The metadata tools actually consume — the honest cross-backend subset of stat.
- * Backends without an mtime (some sandbox vendors) leave `mtimeMs` undefined;
- * there is no 0-sentinel anywhere in the new surface.
- */
-export interface FileInfo {
-  readonly kind: FileKind;
-  /** File size in bytes. */
-  readonly size: number;
-  /** stat mtime in milliseconds. undefined = backend does not provide one. */
-  readonly mtimeMs?: number;
+/** FileInfo 与 DirEntry 的超集，所以旧调用方迁移时字段名不变。 */
+export interface EntryInfo extends FileInfo, DirEntry {
+  readonly path: string;                      // 绝对路径
+  readonly mode?: number;
+  readonly permissions?: string;
+  readonly owner?: string;
+  readonly group?: string;
+  readonly symlinkTarget?: string;
+  readonly metadata?: Readonly<Record<string, string>>;
+}
+export interface WriteInfo { readonly name: string; readonly path: string }
+export type FileData = string | Uint8Array | ArrayBuffer | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
+export interface WriteEntry { readonly path: string; readonly data: FileData }
+export interface FilesystemEvent {
+  readonly name: string;                      // 相对被监听目录的路径
+  readonly type: "create" | "write" | "remove" | "rename" | "chmod";
+}
+export interface WatchOptions { readonly recursive?: boolean; readonly onExit?: (error?: Error) => void }
+export interface WatchHandle { stop(): Promise<void> }
+
+/** 相对路径基于 getcwd()。路径不存在时，所有后端都以 code = "ENOENT" reject。 */
+export interface EnvironmentFiles {
+  read(path: string, options?: { readonly range?: ByteRange }): Promise<Buffer>;
+  readStream(path: string): Promise<ReadableStream<Uint8Array>>;
+  /** 整文件写入；创建文件、覆盖已有文件、创建缺失的父目录。 */
+  write(path: string, data: FileData): Promise<WriteInfo>;
+  writeFiles(files: readonly WriteEntry[]): Promise<readonly WriteInfo[]>;
+  list(path: string, options?: { readonly depth?: number }): Promise<readonly EntryInfo[]>;
+  /** mkdir -p。true = 新建，false = 目录已存在。非目录占位时以 EEXIST reject。 */
+  makeDir(path: string): Promise<boolean>;
+  rename(oldPath: string, newPath: string): Promise<EntryInfo>;
+  /** 删除文件或整个目录。路径不存在不算错误。 */
+  remove(path: string): Promise<void>;
+  exists(path: string): Promise<boolean>;
+  getInfo(path: string, options?: { readonly followSymlinks?: boolean }): Promise<EntryInfo>;
+  /** 没有变更通知的后端不提供此成员。 */
+  watchDir?(path: string, onEvent: (event: FilesystemEvent) => void, options?: WatchOptions): Promise<WatchHandle>;
+  realpath(path: string): Promise<string>;
 }
 
-/**
- * One entry of a directory listing, with the kind the backend already knew.
- *
- * `kind` is LSTAT semantics — a symlink reads as `"symlink"`, never as its target's
- * kind. That is what `opendir`/`readdir` hand back for free on every backend, so a
- * listing costs one round trip instead of one-per-entry. A caller that needs the
- * target kind resolves just the `"symlink"` entries with `fileInfo` (which follows
- * by default), paying a stat only for the entries that actually need one.
- */
-export interface DirEntry {
-  /** Entry basename, as `listDir` would return it. */
-  readonly name: string;
-  readonly kind: FileKind;
+// ── Sandbox（机器本身）────────────────────────────────────────────────────────
+
+export interface SandboxInfo {
+  readonly id: string;
+  readonly state: "running" | "paused";
+  readonly templateId?: string;
+  readonly startedAt?: Date;
+  readonly endAt?: Date;                      // 不续期就会在这个时间被回收
+  readonly cpuCount?: number;
+  readonly memoryMB?: number;
+  readonly metadata?: Readonly<Record<string, string>>;
+}
+export interface SandboxMetrics {
+  readonly timestamp: Date;
+  readonly cpuCount: number; readonly cpuUsedPct: number;
+  readonly memUsed: number;  readonly memTotal: number;
+  readonly diskUsed: number; readonly diskTotal: number;
+}
+export interface EnvironmentSandbox {
+  readonly id: string;                        // 厂商沙箱 id；本地为 hostname。恢复快照后可能变化
+  getHost(port: number): Promise<string | undefined>;
+  getUrl(port: number): Promise<string | undefined>;
+  isRunning(): Promise<boolean>;
+  getInfo(): Promise<SandboxInfo>;
+  getMetrics(): Promise<SandboxMetrics | undefined>;
+  /** 续期。false = 该后端没有生命周期可续。 */
+  setTimeout(timeoutMs: number): Promise<boolean>;
+  uploadUrl(path?: string): Promise<string | undefined>;
+  downloadUrl(path: string): Promise<string | undefined>;
 }
 
-/**
- * Handle to the environment the workspace lives on.
- *
- * Not a filesystem abstraction: files, processes and path/OS semantics are one
- * contract precisely because they must agree — a command started by `run` sees
- * the same files `readBytes` reads. Every member is defined at the altitude
- * each backend (local / SSH / sandbox vendor) can implement honestly:
- *
- * - `run` is the universal primitive — the single way anything executes, from a
- *   one-shot `git status` to a background build. Search-shaped operations (grep,
- *   glob) run a uniform binary through it rather than getting their own member.
- * - File I/O is bytes in, bytes out: `readBytes` (whole file or a byte window) and
- *   `writeBytes` (unconditional whole-file write). Text is a caller concern, composed
- *   on top by `readTextFile` / `writeTextFile` — encoding and line endings are the
- *   same on every backend, so no backend implements them. There is deliberately NO
- *   compare-and-swap write: no backend but the local one can make the compare and
- *   the write one step — a CAS member could only promise what it does not deliver.
- * - `realpath` exists for symlink anti-bypass: path-access
- *   checks canonicalize before prefix-matching. The threat model is the tool
- *   call escaping the workspace, not the backend lying — so a `readlink -f` run
- *   through `run` is as authoritative as the backend's own FS view.
- *
- * Implementations extend {@link BaseEnvironment} (environment-base.ts):
- * it derives `run` and `realpath` from a small SPI so a new backend only
- * writes the dumb primitives, and overrides them only where it can do better
- * (single round trip, native kill, exact symlink resolution).
- *
- * Agent bookkeeping (cron/background task state, plans, plugin registries)
- * does NOT belong here — that is SessionStore's job. The rule: content owned
- * by the user's workspace goes through the host; content owned by the agent's
- * session goes through the store.
- */
 export interface Environment {
   readonly name: string;
   readonly osInfo: OsInfo;
 
-  // Identity & path semantics (sync, no I/O).
+  readonly files: EnvironmentFiles;
+  readonly commands: EnvironmentCommands;
+  readonly pty?: EnvironmentPty;
+  readonly sandbox: EnvironmentSandbox;
+
   pathClass(): "posix" | "win32";
   normpath(path: string): string;
   gethome(): string;
   getcwd(): string;
-  /**
-   * Extra workspace roots granted the same path access as the cwd tree (the
-   * `--add-dir` equivalent). Consumed by the path-access policy: a path inside any of these
-   * resolves like an in-workspace path instead of tripping the outside-workspace guard.
-   * Optional — absent means "cwd only".
-   */
   additionalDirs?(): readonly string[];
-  /**
-   * Return a sibling environment rooted at `cwd`, sharing this environment's backend
-   * resources (the same ssh connection / sandbox session / local environment) — only
-   * the working directory differs. Purely structural and cheap (no I/O); the
-   * symmetric counterpart of `getcwd()`. Callers that need an isolated workspace
-   * (e.g. a git worktree for a subagent) build it on top of this rather than the
-   * environment knowing anything about isolation. A relative `cwd` resolves against
-   * the current one. Never mutates this environment, so re-rooting one copy can't
-   * clobber the cwd of another that shares the same connection.
-   */
   withCwd(cwd: string): Environment;
 
-  /**
-   * Public URL for a port listening inside this environment, or `undefined` when the backend
-   * has no way to expose one (local, ssh, a sandbox without port forwarding). A dev server
-   * the agent just started is only useful if someone can reach it, and only the backend
-   * knows the mapping — E2B's `getHost`, a vendor tunnel, and so on.
-   *
-   * This is an OPERATION on a running environment, not workspace lifecycle: it answers a
-   * question about an environment we were handed, and never creates or destroys anything.
-   * `undefined` rather than a throw, so a caller writes one code path.
-   */
-  exposedPortUrl?(port: number): Promise<string | undefined>;
-
-  /**
-   * Run a command to completion — the ONE way callers execute anything.
-   *
-   * Everything a caller might want from a running command is stated here as INTENT
-   * (timeout / output cap / cancellation / incremental output / stdin) and fulfilled by the
-   * backend natively. There is deliberately no "give me a process handle" alternative: a
-   * handle is POSIX machinery only local backends implement honestly, so callers built on
-   * one end up with timeouts and kills that silently do nothing over a sandbox transport.
-   *
-   * Long-running work is this same call, not-awaited: cancel through `signal`, watch through
-   * `onOutput`, learn how it ended from the resolved result. That is exactly what the
-   * background-task machinery does.
-   *
-   * `BaseEnvironment` derives it from a process-spawning SPI, so local and SSH backends get it
-   * for free; backends with native support (a vendor `timeoutMs` + `kill`) override it.
-   */
-  run(argv: readonly string[], options?: RunCommandOptions): Promise<RunCommandResult>;
-
-  // Directories & metadata.
-  /** Metadata for one  path. Follows symlinks by default; `followSymlinks: false` = lstat semantics. */
-  fileInfo(path: string, options?: { followSymlinks?: boolean }): Promise<FileInfo>;
-  /**
-   * Shallow listing: one entry per child, no `.`/`..`. Maps 1:1 to opendir / SFTP readdir /
-   * vendor listDir.
-   *
-   * Entries carry their `kind` because every backend's readdir already knows it — handing
-   * back bare names would force callers into a stat per entry, which is free locally and
-   * seconds of serial round trips on a remote environment. `kind` is lstat semantics; resolve
-   * `"symlink"` entries with `fileInfo` when the target kind matters (see `DirEntry`).
-   */
-  listDir(path: string): Promise<readonly DirEntry[]>;
-  /**
-   * Create a directory. Option contract:
-   *  - `parents: true` — `mkdir -p`: missing ancestors are created and an existing
-   *    directory is always OK (`existOk` is implied and effectively ignored).
-   *  - `existOk: true` (with `parents` unset/false) — an existing DIRECTORY at `path` is
-   *    OK; anything else occupying the path (a file) must still throw EEXIST.
-   *  - neither — plain mkdir: throws if `path` exists or its parent is missing.
-   */
-  mkdir(path: string, options?: { parents?: boolean; existOk?: boolean }): Promise<void>;
-
-  // Files.
-  /**
-   * Raw bytes, optionally a byte RANGE of them. Omit `range` for the whole file.
-   *
-   * The range is a genuine pushdown, not a convenience: every backend can read a slice
-   * without moving the rest (local `read(fd, …, position)`, SFTP `read` at an offset, a
-   * sandbox's `tail -c +N | head -c L`). That is what makes two very different callers cheap
-   * on every backend — sniffing a media header off the front of a 500 MB file, and following
-   * a growing log by reading only what is new since the last offset.
-   */
-  readBytes(path: string, range?: ByteRange): Promise<Buffer>;
-  /**
-   * Unconditional whole-file write of the exact bytes — no encoding, no line-ending
-   * rewriting, no stat. The one write primitive: text goes through `writeTextFile`, which
-   * encodes and then calls this. The parent directory must exist (ENOENT otherwise).
-   *
-   * Whether the file lands all-at-once is a BACKEND property, not a promise of this
-   * contract: LocalEnvironment swaps a sibling temp file into place (free there, and it
-   * keeps symlink/mode semantics), remote backends write straight to the target
-   * because staging a temp file and renaming it costs round trips on every write to
-   * narrow a window nothing in the tool path depends on.
-   */
-  writeBytes(path: string, data: Buffer): Promise<void>;
-
-  /**
-   * Canonicalize symlinks (security: path-access checks must canonicalize before
-   * prefix-matching). Derived default is `readlink -f` on posix / normpath on
-   * win32; hosts with a native resolver (local fs.realpath, SFTP realpath)
-   * override for exactness.
-   */
-  realpath(path: string): Promise<string>;
 
 }
 

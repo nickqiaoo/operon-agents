@@ -287,14 +287,14 @@ async function testEnvironmentFactoryIsFactoryOnly(environment: LocalEnvironment
 // degrades to undefined on backends that cannot expose a port (local, ssh, null).
 async function testExposedPortForwarding(environment: LocalEnvironment): Promise<void> {
   const withPort = Object.create(environment) as LocalEnvironment & { exposedPortUrl(p: number): Promise<string | undefined> };
-  withPort.exposedPortUrl = async (p: number) => `https://sbx-${String(p)}.example.dev`;
+  Object.defineProperty(withPort, "sandbox", { value: Object.assign(Object.create(environment.sandbox), { getUrl: async (p: number) => `https://sbx-${String(p)}.example.dev` }) });
 
   const exposing = await openTestSession({ environment: withPort });
   check("exposed-port: forwarded to the environment", (await exposing.resolveExposedPort(3000)) === "https://sbx-3000.example.dev");
   await exposing.close();
 
   const plain = await openTestSession({ environment });
-  check("exposed-port: undefined when the backend has no mapping", (await plain.resolveExposedPort(3000)) === undefined);
+  check("exposed-port: local environment exposes localhost", (await plain.resolveExposedPort(3000)) === "http://localhost:3000");
   await plain.close();
 }
 

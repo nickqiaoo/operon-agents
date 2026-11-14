@@ -81,7 +81,7 @@ async function testWorktree(): Promise<void> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Part B — Background execution: run_in_background returns a task_id, the workflow
-// runs detached on the BackgroundManager, and BackgroundOutput yields the result.
+// runs detached on the BackgroundManager, and its completion notice carries the result.
 // ─────────────────────────────────────────────────────────────────────────────
 function taskIdFrom(messages: readonly Message[]): string | undefined {
   const blob = JSON.stringify(messages);

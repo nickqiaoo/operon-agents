@@ -130,6 +130,9 @@ export interface ResolvedToolExecutionHookContext extends ToolExecutionHookConte
 export interface AuthorizeToolExecutionResult {
   readonly block?: boolean;
   readonly reason?: string;
+  /** With `block`: the refused call's error result carries this as its `details` (e.g. the
+   *  permission layer records how the call was refused — see `PermissionDenialDetails`). */
+  readonly blockDetails?: unknown;
   readonly syntheticResult?: ToolResult;
   readonly executionMetadata?: unknown;
   readonly interrupt?: PendingApprovalInterrupt;

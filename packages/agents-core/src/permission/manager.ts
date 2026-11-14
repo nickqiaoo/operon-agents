@@ -6,7 +6,33 @@ import type { GitWorkTreeEnvironment } from "../tool/support/git-worktree.ts";
 import type { Logger } from "../logging/index.ts";
 import { createPolicies, type PermissionState } from "./policies.ts";
 import { permissionPatternError } from "./matches-rule.ts";
-import type { AutoApprover, PermissionMode, PermissionPolicy, PermissionPolicyResult, PermissionRule, Responder } from "./types.ts";
+import { permissionDenialDetails } from "./denial.ts";
+import type {
+  AutoApprovalVerdict,
+  AutoApprover,
+  PermissionMode,
+  PermissionPolicy,
+  PermissionPolicyResult,
+  PermissionRule,
+  Responder,
+} from "./types.ts";
+
+/**
+ * How many `auto`-mode blocks go back to the model before a person is asked instead. A block is
+ * refused with its reason so the agent can take another route; but an agent that keeps hitting
+ * blocks — the same thing three times running, or twenty times in all — needs a human to look,
+ * so that block becomes an approval prompt and both counts start over. Any call that goes ahead
+ * resets the consecutive count.
+ */
+export const AUTO_MODE_DENIAL_LIMITS = { maxConsecutive: 3, maxTotal: 20 } as const;
+
+/** What the model reads when the judge blocks a call: the reason, and what to do instead. */
+function autoModeBlockMessage(reason: string): string {
+  return [
+    `Permission for this action was denied by the auto mode safety classifier. Reason: ${reason}`,
+    "Do not try to work around this denial — rephrasing, encoding, or reaching the same effect another way is blocked too. If other parts of the task don't need this action, continue with those. If it is genuinely needed, tell the user exactly what you want to run and why, and let them decide: their explicit go-ahead naming this action and its target clears most blocks, or they can approve it outside auto mode.",
+  ].join("\n");
+}
 
 export interface PermissionManagerOptions {
   readonly mode?: PermissionMode;
@@ -54,6 +80,8 @@ export class PermissionManager {
   private readonly getTranscript: (() => readonly Message[]) | undefined;
   private readonly getTools: (() => readonly Tool[]) | undefined;
   private readonly logger: Logger | undefined;
+  private consecutiveBlocks = 0;
+  private totalBlocks = 0;
 
   constructor(options: PermissionManagerOptions = {}) {
     this.currentMode = options.mode ?? "manual";
@@ -134,9 +162,9 @@ export class PermissionManager {
       }
     }
 
-    if (!result || result.kind === "approve") return undefined; // proceed
+    if (!result || result.kind === "approve") return this.proceed();
     if (result.kind === "deny") {
-      return { block: true, reason: result.message ?? "Denied by permission policy." };
+      return { block: true, reason: result.message ?? "Denied by permission policy.", blockDetails: permissionDenialDetails("blocked-by-permissions") };
     }
 
     // `auto` mode: hand this would-prompt action to the model judge instead of a human.
@@ -145,26 +173,26 @@ export class PermissionManager {
     // which is what keeps the judge honest. `classifierApprovable === false` (e.g. an
     // explicit user ask rule) stays human-only. Fail-closed: a thrown judge escalates.
     if (this.currentMode === "auto" && this.autoApprover && result.classifierApprovable !== false) {
-      let allow = false;
+      let verdict: AutoApprovalVerdict | undefined;
       const startedAt = Date.now();
       try {
-        const verdict = await this.autoApprover.classify({
+        verdict = await this.autoApprover.classify({
           ctx,
           transcript: (providers?.getTranscript ?? this.getTranscript)?.() ?? [],
           approvalRule: ctx.plan.approvalRule,
           tools: (providers?.getTools ?? this.getTools)?.(),
         });
-        allow = verdict.decision === "allow";
         // Without this trail, a mis-tuned or dead judge is indistinguishable from "auto
         // mode just always asks" — every escalation looks like a normal approval prompt.
-        this.logger?.log(allow ? "debug" : "info", `auto-approval judge: ${verdict.decision}`, {
+        this.logger?.log(verdict.decision === "allow" ? "debug" : "info", `auto-approval judge: ${verdict.decision}`, {
           toolName: ctx.toolCall.name,
           approvalRule: ctx.plan.approvalRule,
           durationMs: Date.now() - startedAt,
           ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+          ...(verdict.category !== undefined ? { category: verdict.category } : {}),
         });
       } catch (error) {
-        allow = false; // judge unavailable → escalate to the human path below
+        // judge unavailable → escalate to the human path below
         this.logger?.log("warn", "auto-approval judge threw; escalating to approval", {
           toolName: ctx.toolCall.name,
           approvalRule: ctx.plan.approvalRule,
@@ -172,8 +200,30 @@ export class PermissionManager {
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      if (allow) return undefined; // judge cleared it → proceed, no prompt
-      // escalate → fall through to the responder / interrupt handling below
+      if (verdict?.decision === "allow") return this.proceed(); // judge cleared it → no prompt
+      if (verdict?.decision === "block") {
+        const reason = verdict.reason ?? "Blocked by the auto-approval judge.";
+        this.consecutiveBlocks += 1;
+        this.totalBlocks += 1;
+        const limits = AUTO_MODE_DENIAL_LIMITS;
+        if (this.consecutiveBlocks < limits.maxConsecutive && this.totalBlocks < limits.maxTotal) {
+          return {
+            block: true,
+            reason: autoModeBlockMessage(reason),
+            blockDetails: permissionDenialDetails("automode-blocked", verdict.category),
+          };
+        }
+        this.logger?.log("warn", "auto-mode denial limit reached; asking for approval instead", {
+          toolName: ctx.toolCall.name,
+          approvalRule: ctx.plan.approvalRule,
+          consecutiveBlocks: this.consecutiveBlocks,
+          totalBlocks: this.totalBlocks,
+          reason,
+        });
+        this.consecutiveBlocks = 0;
+        this.totalBlocks = 0;
+      }
+      // escalate, or a block past the denial limit → the responder / interrupt handling below
     }
 
     //   • no Responder injected here (the Runner-driven / durable path) → reify + bubble
@@ -202,13 +252,23 @@ export class PermissionManager {
     );
     const resolved = result.resolveApproval?.(response);
     if (resolved?.kind === "deny") {
-      return { block: true, reason: resolved.message ?? "Denied." };
+      return { block: true, reason: resolved.message ?? "Denied.", blockDetails: permissionDenialDetails("blocked-by-permissions") };
     }
     if (response.decision === "approved") {
       if (response.scope === "session") this.sessionPatterns.add(ctx.plan.approvalRule);
-      return undefined; // proceed
+      return this.proceed();
     }
-    return { block: true, reason: response.feedback ?? `Tool ${ctx.toolCall.name} was ${response.decision} by the user.` };
+    return {
+      block: true,
+      reason: response.feedback ?? `Tool ${ctx.toolCall.name} was ${response.decision} by the user.`,
+      blockDetails: permissionDenialDetails("rejected-by-user"),
+    };
+  }
+
+  /** The call goes ahead: the agent made progress, so its run of auto-mode blocks is over. */
+  private proceed(): undefined {
+    this.consecutiveBlocks = 0;
+    return undefined;
   }
 
   applyApproval(approvalRule: string, response: { decision: "approved" | "rejected" | "cancelled"; scope?: "session" }): boolean {

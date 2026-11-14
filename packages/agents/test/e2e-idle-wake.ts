@@ -45,7 +45,7 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
   session.onEvent((event) => events.push(event));
 
   const manager = session.core.requireService("background");
-  const settle = Promise.withResolvers<{ agentStatus: string }>();
+  const settle = Promise.withResolvers<{ agentStatus: string; result?: string }>();
   manager.registerTask(new AgentBackgroundTask(settle.promise, "delayed helper", { agentId: "helper-1", address: "main/helper-1" }));
 
   await session.prompt("kick off some background work");
@@ -53,7 +53,7 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
   check("wake: exactly one turn so far", turnsStarted(events) === 1);
 
   // The task settles with nobody running — before this fix, nothing would ever drain it.
-  settle.resolve({ agentStatus: "completed" });
+  settle.resolve({ agentStatus: "completed", result: "helper finished its work" });
 
   const woke = await waitFor(() => events.some((event) => event.type === "turn.ended" && turnsStarted(events) === 2));
   check("wake: the settle started a second turn on its own", woke);
@@ -73,11 +73,10 @@ async function backgroundSettleWakesIdleSession(): Promise<void> {
     ? appended.message.content.map((part) => (part.type === "text" ? part.text : "")).join("")
     : "";
   check("wake: the model sees the rendered settle tag", text.includes("<background-task-done") && text.includes("delayed helper completed"));
-  // The settle is a notice, not a delivery: the sub-agent's own result ("helper finished its
-  // work") stays in the task's output for `BackgroundOutput` to serve, so waking the session
-  // costs the same few bytes whether the helper returned a word or a megabyte.
-  check("wake: the notice does not carry the helper's result", !text.includes("helper finished its work"));
-  check("wake: it names the read that would fetch it", text.includes("BackgroundOutput(task_id="));
+  // The settle delivers the sub-agent's answer, as Claude Code's `<result>` does: no model tool
+  // reads the session store it lives in.
+  check("wake: the notice carries the helper's result", text.includes("<result>\nhelper finished its work\n</result>"));
+  check("wake: it names no fetch tool", !text.includes("BackgroundOutput"));
   check("wake: the woken turn actually ran the model", events.some((event) => event.type === "turn.ended" && turnsStarted(events) >= 2));
 
   await session.close();
@@ -118,7 +117,9 @@ async function concurrentSettlesFoldIntoOneTurn(): Promise<void> {
   faux.unregister();
 }
 
-/** A settle during a live run is the run's own business — it must not spawn a competing turn. */
+/** A settle during a live run is the run's own business — it must not spawn a competing turn.
+ *  It reaches the model at the run's next step boundary: here the step in flight is the turn's
+ *  last, so the turn re-drains and answers it in one more step of the same turn. */
 async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
   const faux = registerFauxProvider();
   faux.setResponses([
@@ -159,7 +160,13 @@ async function settleDuringRunUsesBoundaryDrain(): Promise<void> {
   await running;
 
   await waitFor(() => session.status.state === "idle" && !session.core.steer.hasItems());
-  check("mid-run: the settle was consumed by the run itself", turnsStarted(events) === 2);
+  const runs = events.filter((event) => event.type === "agent.started").length;
+  check("mid-run: the settle was consumed by the run itself", runs === 1);
+  check("mid-run: within the turn in flight (no second turn)", turnsStarted(events) === 1);
+  check(
+    "mid-run: the model answered it",
+    events.some((event) => event.type === "message.appended" && JSON.stringify(event).includes("saw the mid-run settle")),
+  );
   check("mid-run: nothing was left queued", !session.core.steer.hasItems());
 
   await session.close();

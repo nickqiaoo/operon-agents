@@ -51,7 +51,14 @@ export type BackgroundTaskInfo =
 
 export interface BackgroundTaskSink {
   readonly signal: AbortSignal;
+  update?(): Promise<void>;
   settle(settlement: BackgroundTaskSettlement): Promise<boolean>;
+  /**
+   * Tell the model something while the task is still running (a Monitor's event). Delivered at
+   * the next step boundary. Not a settle: the task keeps running, and the settle-notification
+   * ledger is untouched. Absent where nothing can deliver it.
+   */
+  notify?(text: string, options: { readonly housekeeping: boolean }): void;
 }
 
 /**

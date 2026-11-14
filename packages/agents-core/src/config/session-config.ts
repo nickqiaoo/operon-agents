@@ -41,7 +41,11 @@ export const SessionMcpConfigSchema = z.union([
 export const SessionPermissionConfigSchema = z.strictObject({
   mode: z.enum(["manual", "workspace", "yolo", "auto"]).optional(),
   autoApproval: z.strictObject({
-    allow: z.array(z.string()).optional(), deny: z.array(z.string()).optional(),
+    allow: z.array(z.string()).optional(),
+    softDeny: z.array(z.string()).optional(),
+    hardDeny: z.array(z.string()).optional(),
+    /** @deprecated read as `softDeny`. */
+    deny: z.array(z.string()).optional(),
     environment: z.array(z.string()).optional(), twoStageMode: z.enum(["both", "fast", "thinking"]).optional(),
   }).optional(),
   rules: z.array(PermissionRuleConfigSchema).optional(),

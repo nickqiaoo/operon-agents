@@ -7,6 +7,17 @@ export interface WorkflowBackgroundTaskInfo extends BackgroundTaskInfoBase {
   readonly runId?: string;
   /** The workflow run's own terminal status (finer than the task status), once settled. */
   readonly runStatus?: string;
+  /** What the run reported (its value, or its error and failures), at most 8000 characters —
+   *  carried into the settle notice as Claude Code does. A longer one is cut, and the cut says
+   *  where the whole of it was written. */
+  readonly result?: string;
+}
+
+/** What a background workflow's run resolves with. */
+export interface WorkflowRunOutcome {
+  readonly runStatus: "completed" | "failed";
+  /** The report for the model; see {@link WorkflowBackgroundTaskInfo.result}. */
+  readonly result?: string;
 }
 
 export interface WorkflowBackgroundTaskOptions {
@@ -41,11 +52,12 @@ export class WorkflowBackgroundTask implements BackgroundTask {
   readonly toolCallId?: string;
   readonly outputLocation?: TaskOutputLocation;
   private runStatus?: string;
-  private readonly run: (sink: BackgroundTaskSink) => Promise<{ runStatus: "completed" | "failed" }>;
+  private result?: string;
+  private readonly run: (sink: BackgroundTaskSink) => Promise<WorkflowRunOutcome>;
   private readonly abort?: () => void;
 
   constructor(
-    run: (sink: BackgroundTaskSink) => Promise<{ runStatus: "completed" | "failed" }>,
+    run: (sink: BackgroundTaskSink) => Promise<WorkflowRunOutcome>,
     description: string,
     options: WorkflowBackgroundTaskOptions,
   ) {
@@ -74,7 +86,7 @@ export class WorkflowBackgroundTask implements BackgroundTask {
     }
 
     const deadlineTimeout: unique symbol = Symbol("background-workflow-deadline");
-    const raceInputs: Array<Promise<{ runStatus: "completed" | "failed" } | typeof deadlineTimeout>> = [this.run(sink)];
+    const raceInputs: Array<Promise<WorkflowRunOutcome | typeof deadlineTimeout>> = [this.run(sink)];
     const timeoutMs = this.timeoutMs;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -94,6 +106,7 @@ export class WorkflowBackgroundTask implements BackgroundTask {
         return;
       }
       this.runStatus = outcome.runStatus;
+      if (outcome.result !== undefined && outcome.result.length > 0) this.result = outcome.result;
       await sink.settle({ status: outcome.runStatus === "completed" ? "completed" : "failed" });
     } catch (error: unknown) {
       if (sink.signal.aborted && isAbortError(error)) {
@@ -114,6 +127,7 @@ export class WorkflowBackgroundTask implements BackgroundTask {
       workflowName: this.workflowName,
       runId: this.runId,
       runStatus: this.runStatus,
+      ...(this.result !== undefined ? { result: this.result } : {}),
     };
   }
 }

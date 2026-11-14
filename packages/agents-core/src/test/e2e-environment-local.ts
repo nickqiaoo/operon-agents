@@ -66,12 +66,12 @@ async function ok(label: string, fn: () => Promise<unknown>): Promise<void> {
 async function stdinToADeafChild(): Promise<void> {
   const environment = new LocalEnvironment();
   const big = "x".repeat(1024 * 1024);
-  const result = await environment.run(["sh", "-c", "exit 0"], { stdin: big });
+  const result = await environment.commands.run(["sh", "-c", "exit 0"], { stdin: big });
   check("stdin: a child that never reads it does not take the process down", result.exitCode === 0);
   check("stdin: and the command's own result still comes back", !result.timedOut && !result.terminated);
 
   // Same shape, but the child writes something — the result must survive the broken pipe intact.
-  const echoed = await environment.run(["sh", "-c", "echo done; exit 0"], { stdin: big });
+  const echoed = await environment.commands.run(["sh", "-c", "echo done; exit 0"], { stdin: big });
   check("stdin: output is unaffected by the unread stdin", echoed.stdout.trim() === "done");
 }
 
@@ -86,7 +86,7 @@ async function stopReachesTheWholeTree(): Promise<void> {
   const marker = `operon-tree-${String(process.pid)}`;
 
   const environment = new LocalEnvironment();
-  const wrapped = await environment.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
+  const wrapped = await environment.commands.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
     timeoutMs: 300,
   });
   await sleepMs(100);
@@ -97,10 +97,7 @@ async function stopReachesTheWholeTree(): Promise<void> {
     protected override sigtermGraceMs = 300;
   }
   const started = Date.now();
-  const stubborn = await new QuickGraceEnvironment().run(
-    ["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`],
-    { timeoutMs: 200 },
-  );
+  const stubborn = await new QuickGraceEnvironment().commands.run(["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`], { timeoutMs: 200 });
   await sleepMs(100);
   check("tree: a child that ignores SIGTERM is escalated to SIGKILL", processesMatching(`${marker}-b`) === "");
   // The shell died of SIGTERM straight away, so the grace it was given is already over for
@@ -160,10 +157,10 @@ async function main(): Promise<void> {
     "EEXIST",
   );
   await ok("mkdir: parents=true, existOk=true, dir exists → succeeds", () =>
-    environment.mkdir("existing", { parents: true, existOk: true }),
+    environment.files.makeDir("existing"),
   );
   await ok("mkdir: parents=true, existOk=false, dir exists → still succeeds (recursive mkdir semantics)", () =>
-    environment.mkdir("existing", { parents: true, existOk: false }),
+    environment.files.makeDir("existing"),
   );
   await ok("mkdir: parents=false, dir does not exist yet → succeeds", () => environment.mkdir("fresh-dir", { parents: false }));
   await throwsWithCode(
@@ -181,7 +178,7 @@ async function main(): Promise<void> {
   );
   await throwsWithCode(
     "mkdir: parents=true, existOk=true, FILE at path → still EEXIST",
-    () => environment.mkdir("afile", { parents: true, existOk: true }),
+    () => environment.files.makeDir("afile"),
     "EEXIST",
   );
 
@@ -194,23 +191,23 @@ async function main(): Promise<void> {
       Buffer.concat([Buffer.from("HEAD"), Buffer.from([0xff, 0xfe, 0xff]), Buffer.from("TAIL"), Buffer.alloc(4096, 0x41)]),
     );
 
-    const head = await environment.readBytes("window.bin", { length: 4 });
+    const head = await environment.files.read("window.bin", { range: { length: 4 } });
     check("readBytes({length}): prefix only", head.byteLength === 4 && head.toString("utf8") === "HEAD");
 
-    const slice = await environment.readBytes("window.bin", { offset: 7, length: 4 });
+    const slice = await environment.files.read("window.bin", { range: { offset: 7, length: 4 } });
     check("readBytes({offset,length}): window from the middle", slice.toString("utf8") === "TAIL");
 
     // Offset with no length = "everything appended since here" — the log-follower shape.
-    const rest = await environment.readBytes("window.bin", { offset: 11 });
+    const rest = await environment.files.read("window.bin", { range: { offset: 11 } });
     check("readBytes({offset}): reads to EOF", rest.byteLength === 4096 && rest[0] === 0x41);
 
     await writeFile(join(root, "short.bin"), "hi");
-    const overshoot = await environment.readBytes("short.bin", { length: 100 });
+    const overshoot = await environment.files.read("short.bin", { range: { length: 100 } });
     check("readBytes: length past EOF returns only what exists", overshoot.toString("utf8") === "hi");
-    const pastEof = await environment.readBytes("short.bin", { offset: 99 });
+    const pastEof = await environment.files.read("short.bin", { range: { offset: 99 } });
     check("readBytes: offset past EOF returns empty", pastEof.byteLength === 0);
 
-    const whole = await environment.readBytes("window.bin");
+    const whole = await environment.files.read("window.bin");
     check("readBytes(): no range still reads the whole file", whole.byteLength === 4107);
   }
 

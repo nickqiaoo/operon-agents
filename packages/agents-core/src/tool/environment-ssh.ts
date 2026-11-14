@@ -541,6 +541,8 @@ export class SshEnvironment extends BaseEnvironment {
       name: this.name,
       injectedEnv: this.injectedEnv,
     });
+    clone.processTable = this.processTable;
+    clone.outputFiles = this.outputFiles;
     return clone;
   }
 

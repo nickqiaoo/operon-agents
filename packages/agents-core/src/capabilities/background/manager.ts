@@ -1,8 +1,8 @@
+import type { Environment } from '../../tool/environment.ts';
 import { taskToSubagentRecord, taskToWorkflowSnapshot } from "./projections.ts";
 import type { SubagentRecord } from "../../agent/subagent.ts";
 import type { WorkflowSnapshot } from "../../agent/workflow/snapshot.ts";
 import { randomBytes } from "node:crypto";
-import { StringDecoder } from "node:string_decoder";
 
 import { errorMessage } from "../../loop/errors.ts";
 import type { AgentEvent, EventSink } from "../../events/index.ts";
@@ -10,9 +10,10 @@ import type { SteerBus } from "../../loop/steer.ts";
 import { reduceHistory, type AgentRecord, type SessionStore } from "../../store/index.ts";
 import type { Message, TextContent } from "../../protocol/index.ts";
 import { STALL_THRESHOLD_MS, startStallWatchdog, type StallWatchdogTiming } from "./stall-watchdog.ts";
-import type { AttachedOutcome, AttachedRunOptions, AttachedSettleStatus, BackgroundSpawner, CommandStarter, ProcessSpawnOptions, QuestionSpawnOptions } from "../../tool/background.ts";
+import type { AttachedOutcome, AttachedRunOptions, AttachedSettleStatus, BackgroundSpawner, CommandStarter, MonitorSpawnOptions, ProcessSpawnOptions, QuestionSpawnOptions } from "../../tool/background.ts";
 import type { ToolResult } from "../../tool/types.ts";
-import { CommandBackgroundTask } from "./command-task.ts";
+import { CommandBackgroundTask, COMMAND_NOT_STOPPED_REASON } from "./command-task.ts";
+import { isMonitorInfo, MonitorBackgroundTask, monitorTerminalHead } from "./monitor-task.ts";
 import { QuestionBackgroundTask } from "./question-task.ts";
 import { SwappableSink } from "./swappable-sink.ts";
 import { isPersistedTaskTerminal, type BackgroundTaskPersistence, type PersistedTask } from "./persist.ts";
@@ -180,10 +181,10 @@ function textSnapshot(text: string, maxBytes: number): BackgroundTaskOutputSnaps
  */
 async function tailFileSnapshot(file: { environment: TaskFileLocation["environment"]; path: string }, maxBytes: number): Promise<BackgroundTaskOutputSnapshot> {
   try {
-    const size = (await file.environment.fileInfo(file.path)).size;
+    const size = (await file.environment.files.getInfo(file.path)).size;
     const windowBytes = Math.min(maxBytes, size);
     if (windowBytes === 0) return { content: "", sizeBytes: size, contentBytes: 0, truncated: size > 0 };
-    const bytes = await file.environment.readBytes(file.path, { offset: size - windowBytes, length: windowBytes });
+    const bytes = await file.environment.files.read(file.path, { range: { offset: size - windowBytes, length: windowBytes } });
     const aligned = bytes.subarray(utf8AlignStart(bytes));
     return {
       content: aligned.toString("utf-8"),
@@ -198,139 +199,18 @@ async function tailFileSnapshot(file: { environment: TaskFileLocation["environme
   }
 }
 
-/** How often a WATCHED output file is checked for new bytes. Only ticks while someone is
- *  attached with a live tap; a detached task nobody is looking at costs nothing. */
-const FOLLOW_INTERVAL_MS = 1_000;
-
-/** Longest a WATCHED file waits between checks once its output has gone quiet. */
-const FOLLOW_QUIET_MAX_INTERVAL_MS = 5_000;
-
 /** How long a foreground run must last before the user is offered "move to background". */
 const DETACHABLE_AFTER_MS = 2_000;
-
-interface OutputFollower {
-  /** Read whatever is left, then stop. Idempotent. */
-  drain(): Promise<void>;
-  stop(): void;
-}
-
-/** Cadence of the live output tail (see {@link followOutputFile}). */
-export interface OutputFollowTiming {
-  /** Between checks while output is flowing. */
-  readonly intervalMs?: number;
-  /** Ceiling the interval backs off to while output is quiet. */
-  readonly quietMaxIntervalMs?: number;
-}
-
-/**
- * Tail an output file for a watcher, reading only what was appended since the last tick — so
- * a tick costs what was WRITTEN, not what the file has accumulated. A decoder spans ticks
- * because a multi-byte character can straddle two reads.
- *
- * A tick is not free on a remote environment: no vendor file API takes a byte range, so reading an
- * increment means running `tail -c +N | base64` over there — a whole process tree per tick, even
- * for the ticks that find nothing. So once the output goes quiet the follower stops reading and
- * starts ASKING (one `fileInfo`, which the sandbox backends answer with a metadata call rather
- * than a command), at an interval that backs off while the silence lasts. Output that is
- * actually flowing is read straight away at the base interval — the probe would be pure
- * overhead there, and the watcher is a human waiting to see the next line.
- */
-function followOutputFile(
-  file: { environment: TaskFileLocation["environment"]; path: string },
-  emit: (chunk: string) => void,
-  timing: OutputFollowTiming = {},
-): OutputFollower {
-  const baseIntervalMs = timing.intervalMs ?? FOLLOW_INTERVAL_MS;
-  const maxIntervalMs = Math.max(baseIntervalMs, timing.quietMaxIntervalMs ?? FOLLOW_QUIET_MAX_INTERVAL_MS);
-  const decoder = new StringDecoder("utf8");
-  let offset = 0;
-  let stopped = false;
-  /** Set by the last pass that came back empty-handed: the next one probes before reading. */
-  let quiet = false;
-  let intervalMs = baseIntervalMs;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  /** Nothing new: wait longer before looking again, up to the ceiling. */
-  const backOff = (): void => {
-    quiet = true;
-    intervalMs = Math.min(intervalMs * 2, maxIntervalMs);
-  };
-
-  const pass = async (probe: boolean): Promise<void> => {
-    try {
-      if (probe) {
-        // Not created yet, or no bigger than what we have already consumed — either way there
-        // is nothing to read, and the expensive part never runs.
-        const { size } = await file.environment.fileInfo(file.path);
-        if (size <= offset) {
-          backOff();
-          return;
-        }
-      }
-      const bytes = await file.environment.readBytes(file.path, { offset });
-      if (bytes.byteLength === 0) {
-        backOff();
-        return;
-      }
-      offset += bytes.byteLength;
-      quiet = false;
-      intervalMs = baseIntervalMs;
-      const text = decoder.write(bytes);
-      if (text.length > 0) emit(text);
-    } catch {
-      // Not created yet (the redirect is part of the command) or gone after a kill. The
-      // live tap is best-effort; the command's own result is what settles the task.
-      backOff();
-    }
-  };
-
-  // One pass at a time, in order: two overlapping reads would take the same bytes twice, and
-  // the drain must see everything the passes before it left. `pass` never rejects.
-  let queue: Promise<void> = Promise.resolve();
-  const pump = (probe: boolean): Promise<void> => {
-    queue = queue.then(() => pass(probe));
-    return queue;
-  };
-
-  const schedule = (): void => {
-    if (stopped) return;
-    timer = setTimeout(() => {
-      void pump(quiet).finally(schedule);
-    }, intervalMs);
-    if (typeof timer.unref === "function") timer.unref();
-  };
-  schedule();
-
-  const halt = (): void => {
-    stopped = true;
-    if (timer !== undefined) clearTimeout(timer);
-    timer = undefined;
-  };
-
-  return {
-    async drain(): Promise<void> {
-      if (stopped) return;
-      halt();
-      // Read outright: the command has ended, so a probe would only add a round trip before
-      // the read that has to happen anyway.
-      await pump(false);
-      const tail = decoder.end();
-      if (tail.length > 0) emit(tail);
-    },
-    stop: halt,
-  };
-}
 
 export interface BackgroundManagerOptions {
   readonly maxRunningTasks?: number;
   readonly now?: () => number;
   /** Timing of the stuck-on-a-prompt check for command tasks (see stall-watchdog.ts). */
   readonly stallDetection?: StallWatchdogTiming;
-  /** Cadence of the live output tail while a run is attached (see followOutputFile). */
-  readonly outputFollow?: OutputFollowTiming;
 }
 
 export interface BackgroundManagerRuntime {
+  readonly environment?: Environment;
   readonly steer?: SteerBus;
   readonly events?: EventSink;
   readonly sessionId?: string;
@@ -391,16 +271,17 @@ export class BackgroundManager implements BackgroundSpawner {
   /** Serialize the whole task store, including the KV backend's shared task index. */
   private persistenceChain: Promise<void> = Promise.resolve();
   private readonly stallDetection: StallWatchdogTiming;
-  private readonly outputFollow: OutputFollowTiming;
 
   constructor(options: BackgroundManagerOptions = {}) {
     this.maxRunningTasks = options.maxRunningTasks;
     this.now = options.now ?? Date.now;
     this.stallDetection = options.stallDetection ?? {};
-    this.outputFollow = options.outputFollow ?? {};
   }
 
+  private environment?: Environment;
+
   attach(runtime: BackgroundManagerRuntime): void {
+    this.environment = runtime.environment;
     this.steer = runtime.steer;
     this.events = runtime.events;
     this.sessionId = runtime.sessionId ?? "";
@@ -452,6 +333,7 @@ export class BackgroundManager implements BackgroundSpawner {
     const lost: BackgroundTaskInfo[] = [];
     for (const [id, task] of this.ghosts) {
       if (!isPersistedTaskTerminal(task.status)) {
+        if (await this.restoreCommand(task)) continue;
         const updated: PersistedTask = {
           ...task,
           status: "lost",
@@ -479,6 +361,10 @@ export class BackgroundManager implements BackgroundSpawner {
 
   spawnCommand(start: CommandStarter, command: string, description: string, options?: ProcessSpawnOptions): string {
     return this.registerTask(new CommandBackgroundTask(start, command, description, options));
+  }
+
+  spawnMonitor(start: CommandStarter, command: string, description: string, options: MonitorSpawnOptions): string {
+    return this.registerTask(new MonitorBackgroundTask(start, command, description, options));
   }
 
   spawnQuestion(
@@ -577,21 +463,11 @@ export class BackgroundManager implements BackgroundSpawner {
     // echo comes from reading the file. The poll exists ONLY while someone is watching: it
     // starts because `onLive` was supplied, and stops the moment the run detaches or settles.
     // Nobody watching → not a single read, which is the whole reason the file is the store.
-    const follow =
-      task.outputLocation?.kind === "file" && opts.onLive !== undefined
-        ? followOutputFile(
-            task.outputLocation,
-            (chunk) => {
-              if (!detached) opts.onLive?.(chunk);
-            },
-            this.outputFollow,
-          )
-        : undefined;
-
+    const unsubscribeOutput = task instanceof CommandBackgroundTask
+      ? task.subscribeOutput(chunk => { if (!detached) opts.onLive?.(chunk); }) : undefined;
     sink.setDownstream({
       settle: async (settlement) => {
         // Final read first: the command may have written between the last tick and its exit.
-        await follow?.drain();
         resolveSettled(settlement);
         return true;
       },
@@ -637,8 +513,9 @@ export class BackgroundManager implements BackgroundSpawner {
       if (detached) return;
       detached = true;
       // The watcher is gone; the task keeps running and its file keeps growing, but nobody
-      // is looking, so nobody reads. BackgroundOutput windows the file on demand instead.
-      follow?.stop();
+      // is looking, so nobody reads. Whoever wants it reads the file on demand instead.
+      unsubscribeOutput?.();
+      if (task instanceof CommandBackgroundTask) void task.disconnectOutput();
       opts.foregroundSignal.removeEventListener("abort", onForegroundAbort);
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       const taskId = this.adoptRunning(task, controller, sink, startPromise);
@@ -666,7 +543,8 @@ export class BackgroundManager implements BackgroundSpawner {
       if (status === "killed" && cause === "timeout") status = "timed_out";
       return { kind: "settled", status, exitCode: opts.getExitCode?.() ?? null, ...(stillRunning ? { stillRunning: true } : {}) };
     } finally {
-      follow?.stop();
+      unsubscribeOutput?.();
+      if (task instanceof CommandBackgroundTask) void task.disconnectOutput();
       if (detachableTimer !== undefined) clearTimeout(detachableTimer);
       opts.foregroundSignal.removeEventListener("abort", onForegroundAbort);
       opts.detachSignal?.removeEventListener("abort", onDetach);
@@ -704,6 +582,7 @@ export class BackgroundManager implements BackgroundSpawner {
     // Hand the still-running task's eventual settlement to this manager entry. Its output
     // continues writing to the same durable location it had while attached.
     sink.setDownstream({
+      update: () => this.persistLive(entry),
       settle: (settlement) => this.settleTask(entry, settlement),
     });
     this.emitStarted(this.toInfo(entry));
@@ -712,19 +591,19 @@ export class BackgroundManager implements BackgroundSpawner {
     return taskId;
   }
 
-  registerTask(task: BackgroundTask): string {
+  registerTask(task: BackgroundTask, restored?: PersistedTask): string {
     this.assertDurableOutput(task);
-    this.assertCanRegister();
-    const taskId = generateTaskId(task.idPrefix);
+    if (!restored) this.assertCanRegister();
+    const taskId = restored?.taskId ?? generateTaskId(task.idPrefix);
     const entry: ManagedTask = {
       taskId,
       task,
       status: "running",
-      startedAt: this.now(),
+      startedAt: restored?.startedAt ?? this.now(),
       endedAt: null,
       waiters: [],
       terminalFired: false,
-      revision: 0,
+      revision: restored?.revision ?? 0,
       abortController: new AbortController(),
       lifecyclePromise: Promise.resolve(),
     };
@@ -739,7 +618,9 @@ export class BackgroundManager implements BackgroundSpawner {
       .then(() =>
         task.start({
           signal: entry.abortController.signal,
+          update: () => this.persistLive(entry),
           settle: (settlement) => this.settleTask(entry, settlement),
+          notify: (text, options) => this.steerTaskNotice(entry, text, options),
         }),
       )
       .catch(async (error: unknown) => {
@@ -763,6 +644,8 @@ export class BackgroundManager implements BackgroundSpawner {
   private watchForStall(entry: ManagedTask): void {
     const location = entry.task.outputLocation;
     if (entry.task.kind !== "process" || location?.kind !== "file" || TERMINAL_STATUSES.has(entry.status)) return;
+    // A monitor's stdout is an event stream: a quiet one is waiting for its event, not for input.
+    if (entry.task instanceof MonitorBackgroundTask) return;
     entry.stopStallWatch = startStallWatchdog(location, (tail) => this.steerStalled(entry, tail), this.stallDetection);
   }
 
@@ -787,7 +670,30 @@ export class BackgroundManager implements BackgroundSpawner {
       kind: "extension",
       extensionId: "background",
       metadata: { taskId: entry.taskId, event: "waiting_for_input" },
-      channel: "follow_up",
+      // Mid-turn, like a settle: a stuck command is worth knowing about now, not when the turn ends.
+      channel: "steering",
+    });
+  }
+
+  /**
+   * A running task's notice to the model — a Monitor's event. Same channel as a settle, so it
+   * lands at the next step boundary; a plain notice rather than a `background_done`, because the
+   * task has not ended and the settle ledger and the UI must not read it as if it had.
+   */
+  private steerTaskNotice(entry: ManagedTask, text: string, options: { readonly housekeeping: boolean }): void {
+    if (this.steer === undefined || TERMINAL_STATUSES.has(entry.status)) return;
+    const body = [
+      "[system: automated event, NOT a message from the user. The event below is the monitored command's output, not the user's.]",
+      `Monitor event: "${entry.task.description}" (task ${entry.taskId})`,
+      "<event>",
+      text,
+      "</event>",
+    ].join("\n");
+    this.steer.steer(body, {
+      kind: "extension",
+      extensionId: "background",
+      metadata: { taskId: entry.taskId, event: options.housekeeping ? "monitor_notice" : "monitor_event" },
+      channel: "steering",
     });
   }
 
@@ -861,7 +767,7 @@ export class BackgroundManager implements BackgroundSpawner {
 
   /** Find the task spawned by one assistant tool call. `toolCallId` is provider-scoped, so the
    *  parent conversation address is part of the identity. Used internally by cold recovery;
-   *  model-facing reads continue to use the stable task id via BackgroundOutput. */
+   *  the model knows a task by the stable task id its notices carry. */
   findByOrigin(parentAddress: string, toolCallId: string): BackgroundTaskInfo | undefined {
     for (const entry of this.tasks.values()) {
       if (entry.task.parentAddress === parentAddress && entry.task.toolCallId === toolCallId) {
@@ -926,6 +832,46 @@ export class BackgroundManager implements BackgroundSpawner {
       });
     }
     return lost;
+  }
+
+  private async restoreCommand(record: PersistedTask): Promise<boolean> {
+    const environment = this.environment;
+    if (record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file' || !environment || environment.sandbox.id !== record.process.sandboxId) return false;
+    const { pid } = record.process;
+    const path = record.outputRef.path;
+    const processes = await environment.commands.list().catch(() => []);
+    const matches = processes.some(process => process.pid === pid && [process.cmd, ...process.args].join(' ').includes(path));
+    if (record.monitor) { if (matches) await environment.commands.kill(pid).catch(() => false); return false; }
+    try {
+      const raw = (await environment.files.read(`${path}.exit`)).toString('utf8').trim();
+      if (/^-?\d+$/.test(raw)) {
+        const exitCode = Number(raw);
+        const updated: PersistedTask = { ...record, exitCode, status: exitCode === 0 ? 'completed' : 'failed', endedAt: this.now(), revision: record.revision + 1, notificationQueuedAt: this.now() };
+        this.ghosts.set(record.taskId, updated);
+        await this.enqueuePersist(updated);
+        this.emitTerminated(publicTaskInfo(updated));
+        this.steerUnconfirmed(updated);
+        return true;
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+    if (!matches) return false;
+    try {
+      const handle = await environment.commands.connect(pid, { retainOutput: false });
+      const task = new CommandBackgroundTask(async ({ signal, onStart }) => {
+        let stopping: Promise<boolean> | undefined;
+        const abort = () => { stopping ??= handle.kill(); };
+        signal.addEventListener('abort', abort);
+        if (signal.aborted) abort();
+        try {
+          await onStart?.(handle);
+          const result = await handle.wait();
+          return { ...result, timedOut: false, truncated: false, terminated: await stopping ?? false };
+        } finally { signal.removeEventListener('abort', abort); }
+      }, record.command, record.description, { environment, logPath: path, parentAddress: record.parentAddress, toolCallId: record.toolCallId });
+      this.registerTask(task, record);
+      this.ghosts.delete(record.taskId);
+      return true;
+    } catch { return false; }
   }
 
   list(activeOnly = true, limit?: number): BackgroundTaskInfo[] {
@@ -1059,7 +1005,7 @@ export class BackgroundManager implements BackgroundSpawner {
     if (location?.kind !== "file") return { content: "", nextCursor: from, followable: false };
     const file = location;
     try {
-      const bytes = await file.environment.readBytes(file.path, { offset: from, length: Math.max(0, Math.trunc(maxBytes)) });
+      const bytes = await file.environment.files.read(file.path, { range: { offset: from, length: Math.max(0, Math.trunc(maxBytes)) } });
       // Leave a trailing partial sequence behind and advance the cursor only past what was
       // decodable: the next tick re-reads those bytes and completes the character.
       const whole = bytes.subarray(0, utf8AlignEnd(bytes));
@@ -1078,7 +1024,20 @@ export class BackgroundManager implements BackgroundSpawner {
 
   async stop(taskId: string, reason?: string): Promise<BackgroundTaskInfo | undefined> {
     const entry = this.tasks.get(taskId);
-    if (!entry) return undefined;
+    if (!entry) {
+      const record = this.ghosts.get(taskId);
+      const environment = this.environment;
+      if (!record || record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file' || !environment || record.process.sandboxId !== environment.sandbox.id) return undefined;
+      if (isPersistedTaskTerminal(record.status) && record.status !== 'lost') return publicTaskInfo(record);
+      const processes = await environment.commands.list();
+      const pid = record.process.pid;
+      const path = record.outputRef.path;
+      if (!processes.some(process => process.pid === pid && [process.cmd, ...process.args].join(' ').includes(path))) return publicTaskInfo(record);
+      const terminated = await environment.commands.kill(pid);
+      const updated: PersistedTask = { ...record, status: terminated ? 'killed' : 'failed', stopReason: terminated ? reason : COMMAND_NOT_STOPPED_REASON, endedAt: this.now(), revision: record.revision + 1, notificationQueuedAt: this.now() };
+      this.ghosts.set(taskId, updated); await this.enqueuePersist(updated);
+      const info = publicTaskInfo(updated); this.emitTerminated(info); this.steerUnconfirmed(updated); return info;
+    }
     const trimmedReason = reason?.trim();
     const stopReason = trimmedReason === undefined || trimmedReason.length === 0 ? undefined : trimmedReason;
 
@@ -1106,7 +1065,8 @@ export class BackgroundManager implements BackgroundSpawner {
 
     // `graceful: false` adds no second escalation step here — the task's own backend already
     // escalated when the signal fired. What is left is to record the terminal status.
-    await this.settleTask(entry, { status: "killed", stopReason });
+    const unconfirmed = !graceful && entry.task.kind === "process";
+    await this.settleTask(entry, { status: unconfirmed ? "failed" : "killed", stopReason: unconfirmed ? COMMAND_NOT_STOPPED_REASON : stopReason });
     return this.toInfo(entry);
   }
 
@@ -1294,13 +1254,15 @@ export class BackgroundManager implements BackgroundSpawner {
   private steerUnconfirmed(task: PersistedTask): void {
     if (this.steer === undefined) return;
     const answer = task.kind === "question" && task.status === "completed" ? task.answer : undefined;
+    // The notice itself carries an answer or a result (they were persisted with the record), and
+    // a log file outlives the process that wrote it. Nothing else survives to be told about.
     const readable =
       answer !== undefined ||
       task.outputRef?.kind === "file" ||
-      ((task.outputRef?.kind === "conversation" || task.outputRef?.kind === "workflow-run") && this.store !== undefined);
+      ((task.kind === "agent" || task.kind === "workflow") && task.result !== undefined);
     const note = readable
-      ? "(Settled in an earlier process; its durable output is still available.)"
-      : "(Settled in an earlier process; no durable output reference is available.)";
+      ? "(Settled in an earlier process; its output is still available.)"
+      : "(Settled in an earlier process; its output was not recorded.)";
     const summary = `${buildTerminalSummary(task, { outputReadable: readable, answer })}\n${note}`;
     this.steer.steer(summary, { kind: "background_done", taskId: task.taskId, summary, ...settleIdentity(task) });
     this.stampNotificationQueued(task.taskId);
@@ -1366,35 +1328,24 @@ function workflowStatusFromTask(status: BackgroundTaskStatus): string {
   return status === "completed" ? "completed" : status === "killed" || status === "lost" ? "aborted" : "failed";
 }
 
-/** Generous by design: a hand-typed answer never approaches it, so the cap only ever fires on
- *  something pathological, and the notice stays the whole record in every real case. */
-const QUESTION_ANSWER_MAX_CHARS = 8_000;
-
 interface TerminalSummaryOptions {
-  /** False when the output no longer exists to be fetched — an earlier process's in-memory
-   *  tail died with it, so naming a read would send the model after nothing. */
+  /** False when the log no longer exists to be read, so naming it would send the model after
+   *  nothing. */
   readonly outputReadable?: boolean;
-  /** A completed question's answer. The lone exception to metadata-only; see
-   *  {@link BackgroundManager.answeredQuestionOutput} for why this kind and no other. */
+  /** A completed question's answer: the user's own words, carried whole. */
   readonly answer?: string;
 }
 
 /**
- * The settle notification: METADATA ONLY, with one exception.
+ * The settle notification. There is no tool to fetch a task's output afterwards — as in Claude
+ * Code — so the notice carries whatever the model cannot reach on its own:
  *
- * A terminal notice arrives unbidden. Nobody asked for it, and it lands in the recipient's
- * context whether or not the substance is wanted — so it carries what only the settle knows
- * (how it ended, the exit code, where the log lives) and stops there. The output is a
- * resource, fetched deliberately, paid for at the moment the model decides it needs it.
- * Attaching a fixed tail instead would charge every task the same bytes regardless: too few
- * to conclude anything on a long run, pure waste on one whose exit code already said it all.
- *
- * The exception is a question's answer, which is not output but conversation — the user's own
- * words, held nowhere else. It rides along in full, and the read instruction is dropped with
- * it: there is nothing left to go fetch.
- *
- * The task id is already an attribute of the enclosing `<background-task-done>` tag; it is
- * repeated in the read instruction so that line can be copied straight into a call.
+ * - a command (and a code program) wrote its output to a file on the environment; the notice
+ *   says how it ended and names the file, and the model `Read`s it, paging as it likes;
+ * - a sub-agent's final answer and a workflow's report live in the session store, which no
+ *   model tool reads, so they ride in `<result>` (a workflow's capped at 8000 characters, the
+ *   rest saved to a file the cut names);
+ * - a question's answer is the user's own words, held nowhere else, and rides whole.
  */
 /** The last thing the assistant said, which is a sub-agent's answer. Mirrors `finalText` in
  *  run-support, kept local so the capability does not depend on the agent layer. */
@@ -1411,6 +1362,7 @@ function lastAssistantText(messages: readonly Message[]): string {
 }
 
 function buildTerminalSummary(info: BackgroundTaskInfo, options: TerminalSummaryOptions = {}): string {
+  if (isMonitorInfo(info)) return buildMonitorSummary(info);
   // Exit code is a process fact; the other kinds report their outcome through `status`.
   const exit = info.kind === "process" && info.exitCode !== null ? ` (exit code ${String(info.exitCode)})` : "";
   const head =
@@ -1423,25 +1375,30 @@ function buildTerminalSummary(info: BackgroundTaskInfo, options: TerminalSummary
   const lines = [head];
   if (logPath !== undefined) lines.push(`output_log: ${logPath}`);
 
-  // Character-truncated, not byte-windowed: the answer is a JSON string, and slicing it at a
-  // byte offset would split a multi-byte character — the very defect the byte-window readers
-  // elsewhere in this file still carry.
   const answer = options.answer;
   if (answer !== undefined) {
-    const truncated = answer.length > QUESTION_ANSWER_MAX_CHARS;
-    lines.push(truncated ? "[answer, truncated]" : "[answer]", truncated ? answer.slice(0, QUESTION_ANSWER_MAX_CHARS) : answer);
-    // Only a truncated answer leaves anything behind to fetch.
-    if (truncated) lines.push(`Read the full answer with BackgroundOutput(task_id="${info.taskId}").`);
+    lines.push("[answer]", answer);
     return lines.join("\n");
   }
 
-  if (options.outputReadable ?? true) {
-    lines.push(
-      logPath !== undefined
-        ? `Read its output with BackgroundOutput(task_id="${info.taskId}"), or Read the log file above for the full, never-truncated record.`
-        : `Read its output with BackgroundOutput(task_id="${info.taskId}").`,
-    );
+  const result = info.kind === "agent" || info.kind === "workflow" ? info.result : undefined;
+  if (result !== undefined) {
+    // The result is the sub-agent's or the script's text, not ours: it must not be able to
+    // close the tag it sits in.
+    lines.push(`<result>\n${result.replaceAll("</result>", "&lt;/result>")}\n</result>`);
+    return lines.join("\n");
   }
+
+  if (logPath !== undefined && (options.outputReadable ?? true)) lines.push("Read the log file above for its output.");
+  return lines.join("\n");
+}
+
+/** A monitor's events already reached the conversation; its settle says how the stream ended
+ *  and where its stdout and stderr are, for `Read`. */
+function buildMonitorSummary(info: Parameters<typeof monitorTerminalHead>[0]): string {
+  const lines = [monitorTerminalHead(info)];
+  if (info.outputRef?.kind === "file") lines.push(`output_log: ${info.outputRef.path}`);
+  lines.push(`stderr_log: ${info.monitor.stderrPath}`);
   return lines.join("\n");
 }
 

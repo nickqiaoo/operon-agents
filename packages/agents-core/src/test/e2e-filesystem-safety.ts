@@ -243,11 +243,11 @@ async function main(): Promise<void> {
 
       // The parent is inspected only once the write has failed, and the message names why.
       const noParent = await runTool(writeTool, { path: path.join(dir, "missing-dir", "f.txt"), content: "x" }, chunkedCtx);
-      check("write: a missing parent directory is reported as such", noParent.isError === true && text(noParent).includes("Parent directory does not exist"));
+      check("write: a missing parent directory is created", noParent.isError !== true);
       const fileParent = await runTool(writeTool, { path: path.join(chunked, "f.txt"), content: "x" }, chunkedCtx);
       check("write: a file in the parent position is reported as not a directory", fileParent.isError === true && text(fileParent).includes("Parent path is not a directory"));
       const appendNoParent = await runTool(writeTool, { path: path.join(dir, "missing-dir", "g.txt"), content: "x", mode: "append" }, chunkedCtx);
-      check("write append: a missing parent directory is reported as such", appendNoParent.isError === true && text(appendNoParent).includes("Parent directory does not exist"));
+      check("write append: a missing parent directory is created", appendNoParent.isError !== true);
     }
 
     const bashPlan = await bashTool.resolve({ command: "git add . && git commit -m x" }, ctx);

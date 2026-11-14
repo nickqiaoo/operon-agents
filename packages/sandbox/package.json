@@ -36,7 +36,7 @@
   },
   "peerDependencies": {
     "@cloudflare/sandbox": ">=0.12",
-    "e2b": ">=1.4"
+    "e2b": ">=2.63.0"
   },
   "peerDependenciesMeta": {
     "@cloudflare/sandbox": {

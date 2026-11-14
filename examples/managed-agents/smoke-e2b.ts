@@ -32,22 +32,22 @@ async function main(): Promise<void> {
 
     // `run()` is the intent-shaped entry point: it carries the timeout, the output cap and
     // the kill that a bare exec on this backend could not.
-    await probe("run (echo)", async () => (await environment.run(["echo", "hello-from-e2b"])).stdout.trim());
+    await probe("run (echo)", async () => (await environment.commands.run(["echo", "hello-from-e2b"])).stdout.trim());
     await probe("writeBytes+readBytes roundtrip", async () => {
-      await environment.writeBytes("note.txt", Buffer.from("hi e2b 🚀", "utf8"));
-      const back = (await environment.readBytes("note.txt")).toString("utf8");
+      await environment.files.write("note.txt", Buffer.from("hi e2b 🚀", "utf8"));
+      const back = (await environment.files.read("note.txt")).toString("utf8");
       return back === "hi e2b 🚀" ? "match" : `MISMATCH: ${back}`;
     });
     // A byte window is taken on the far side (tail/head/base64), so only these bytes travel.
-    await probe("readBytes window", async () => JSON.stringify((await environment.readBytes("note.txt", { offset: 3, length: 3 })).toString("utf8")));
-    await probe("listDir", async () => await environment.listDir("."));
-    await probe("fileInfo (stat)", async () => (await environment.fileInfo("note.txt")).size);
+    await probe("readBytes window", async () => JSON.stringify((await environment.files.read("note.txt", { range: { offset: 3, length: 3 } })).toString("utf8")));
+    await probe("listDir", async () => await environment.files.list("."));
+    await probe("fileInfo (stat)", async () => (await environment.files.getInfo("note.txt")).size);
     await probe("ripgrep present in base image", async () => {
-      const { stdout } = await environment.run(["sh", "-c", "command -v rg || echo NO"]);
+      const { stdout } = await environment.commands.run(["sh", "-c", "command -v rg || echo NO"]);
       return stdout.trim();
     });
     await probe("timeout really kills", async () => {
-      const r = await environment.run(["sh", "-c", "sleep 30"], { timeoutMs: 2_000 });
+      const r = await environment.commands.run(["sh", "-c", "sleep 30"], { timeoutMs: 2_000 });
       return r.timedOut ? "timed out as asked" : `NOT honoured (exit ${String(r.exitCode)})`;
     });
   } finally {

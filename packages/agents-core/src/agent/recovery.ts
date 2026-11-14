@@ -55,7 +55,10 @@ export async function withToolCallRecoveryContext<TContext>(
         `  recovered_task_id: ${task.taskId}`,
         `  task_kind: ${task.kind}`,
         `  persisted_status: ${task.status}`,
-        `  action: Inspect it with BackgroundOutput(task_id=\"${task.taskId}\", block=false) before retrying or resuming anything.`,
+        ...(task.outputRef?.kind === "file" ? [`  output_log: ${task.outputRef.path}`] : []),
+        task.outputRef?.kind === "file"
+          ? "  action: Read its output log before retrying or resuming anything; a task still running reports its completion on its own."
+          : "  action: Go by its persisted status before retrying or resuming anything; a task still running reports its completion on its own.",
       );
       continue;
     }

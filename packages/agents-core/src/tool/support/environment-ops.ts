@@ -5,7 +5,7 @@
  * line endings are the same on every backend, so they live here once instead of in each
  * backend.
  */
-import type { DecodeErrors, Environment } from "../environment.ts";
+import type { DecodeErrors, EnvironmentFiles } from "../environment.ts";
 import { materializeModelText } from "../builtin/line-endings.ts";
 
 /** Decode with the shared contract: strict UTF-8 throws on invalid bytes (binary detection). */
@@ -20,11 +20,11 @@ export function decodeText(data: Buffer, options?: { encoding?: BufferEncoding; 
 
 /** Whole-file text read: `readBytes` + {@link decodeText} (strict UTF-8 by default). */
 export async function readTextFile(
-  environment: Pick<Environment, "readBytes">,
+  environment: { readonly files: Pick<EnvironmentFiles, "read"> },
   path: string,
   options?: { encoding?: BufferEncoding; errors?: DecodeErrors },
 ): Promise<string> {
-  return decodeText(await environment.readBytes(path), options);
+  return decodeText(await environment.files.read(path), options);
 }
 
 export interface WriteTextFileOptions {
@@ -41,11 +41,11 @@ export interface WriteTextFileOptions {
 
 /** Unconditional whole-file UTF-8 write: encode, then `writeBytes`. */
 export async function writeTextFile(
-  environment: Pick<Environment, "writeBytes">,
+  environment: { readonly files: Pick<EnvironmentFiles, "write"> },
   path: string,
   text: string,
   options: WriteTextFileOptions = {},
 ): Promise<void> {
   const payload = options.lineEndings === "CRLF" ? materializeModelText(text, "crlf") : text;
-  await environment.writeBytes(path, Buffer.from(payload, "utf8"));
+  await environment.files.write(path, Buffer.from(payload, "utf8"));
 }

@@ -1,0 +1,93 @@
+import { BackgroundManager, StoreBackgroundTaskPersistence } from '../capabilities/background/index.ts';
+import { MemoryStore } from '../store/index.ts';
+import { SteerBus } from '../loop/steer.ts';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { LocalEnvironment } from '../tool/environment-local.ts';
+import { wrapForTaskLog } from '../tool/environment-output.ts';
+import { SandboxKeepalive } from '../agent/sandbox-keepalive.ts';
+const root = await mkdtemp(join(tmpdir(), 'operon-env-modules-'));
+try {
+  const env = new LocalEnvironment(root);
+  await env.files.writeFiles([{ path: 'a/b.txt', data: 'hello' }, { path: 'a/c.txt', data: new Uint8Array([0,255]) }]);
+  assert.equal((await env.files.read('a/b.txt', { range: { offset: 1, length: 2 } })).toString(), 'el');
+  assert.equal((await env.files.list(root, { depth: 2 })).length, 3);
+  assert.equal(await env.files.makeDir('a'), false);
+  assert.equal(await env.files.makeDir('new'), true);
+  await assert.rejects(env.files.makeDir('a/b.txt'), { code: 'EEXIST' });
+  await symlink('missing', join(root, 'dangling'));
+  assert.equal(await env.files.exists('dangling'), true);
+  await env.files.rename('a/b.txt', 'a/renamed');
+  await assert.rejects(env.files.readStream('missing'), { code: 'ENOENT' });
+  const reader = (await env.files.readStream('a/renamed')).getReader();
+  assert.equal(Buffer.from((await reader.read()).value!).toString(), 'hello');
+  await reader.cancel();
+  const child = await env.commands.start('cat', { stdin: true });
+  assert.ok((await env.commands.list()).some(p => p.pid === child.pid));
+  let pushed = '';
+  const connected = await env.withCwd(root).commands.connect(child.pid, { onStdout: text => { pushed += text; } });
+  await child.sendStdin('one\n');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(pushed, 'one\n');
+  await connected.disconnect();
+  await child.sendStdin('two\n'); await child.closeStdin();
+  const result = await child.wait();
+  assert.equal(result.stdout, 'one\ntwo\n'); assert.equal(pushed, 'one\n');
+  await assert.rejects(child.sendStdin('three'), { code: 'EPIPE' });
+  await assert.rejects(env.commands.connect(999999), { code: 'ESRCH' });
+  let log = '';
+  const handle = await env.commands.start("printf 'out'; printf 'err' >&2; exit 3", { outputFile: join(root, 'task.log'), onStdout: text => { log += text; } });
+  assert.equal((await handle.wait()).exitCode, 3);
+  assert.equal(log, 'outerr');
+  assert.equal((await env.files.read('task.log.exit')).toString(), '3');
+  const capped = await env.commands.run("printf 'abcdef'; sleep 0.02; printf 'done' > completed", { maxOutputBytes: 2 });
+  assert.equal(capped.stdout, 'ab'); assert.equal(capped.truncated, true); assert.equal(capped.exitCode, 0);
+  assert.equal(await env.files.exists('completed'), true);
+  const sleeper = await env.commands.start('sleep 20');
+  assert.equal(await env.commands.kill(sleeper.pid), true); await sleeper.wait();
+  assert.equal(await env.sandbox.getUrl(1234), 'http://localhost:1234');
+  let renewals = 0;
+  const keep = new SandboxKeepalive({ ...env.sandbox, setTimeout: async () => { renewals++; return true; } } as typeof env.sandbox, 30, () => true, error => { throw error; });
+  await keep.renew(); await new Promise(resolve => setTimeout(resolve, 65)); keep.close(); assert.ok(renewals >= 3);
+  renewals = 0;
+  const plain = new SandboxKeepalive({ ...env.sandbox, setTimeout: async () => { renewals++; return false; } } as typeof env.sandbox, 30, () => true, () => {});
+  await plain.renew(); await plain.renew(); plain.close(); assert.equal(renewals, 1);
+  for (const shell of ['/bin/bash', '/bin/zsh', '/bin/dash']) {
+    if (!await env.files.exists(shell)) continue;
+    const path = join(root, `shell-${shell.split('/').at(-1)}.log`);
+    for (const command of ['true', 'false', 'exit 3']) {
+      const run = await env.commands.run([shell, '-c', wrapForTaskLog(command, path)]);
+      assert.equal(Number((await env.files.read(`${path}.exit`)).toString()), run.exitCode);
+    }
+    await env.files.remove(`${path}.exit`);
+    const running = await env.commands.start([shell, '-c', wrapForTaskLog('sleep 20', path)]);
+    assert.equal(await running.kill(), true); await running.wait();
+    if (await env.files.exists(`${path}.exit`)) assert.notEqual((await env.files.read(`${path}.exit`)).toString(), '0');
+  }
+  const persistence = new StoreBackgroundTaskPersistence(new MemoryStore());
+  const bus = new SteerBus();
+  // Persist only a running record, then recover from a durable exit sidecar (no live owner).
+  const natural = await env.commands.start('sleep 0.05; exit 3', { outputFile: join(root, 'recover.log'), retainOutput: false });
+  const record = { schemaVersion: 2 as const, revision: 1, taskId: 'bash-recover', kind: 'process' as const, command: 'exit 3', description: 'recover', status: 'running' as const, startedAt: Date.now(), endedAt: null, exitCode: null, outputRef: { kind: 'file' as const, path: join(root, 'recover.log') }, process: { pid: natural.pid, sandboxId: env.sandbox.id } };
+  await persistence.writeTask(record);
+  await natural.wait();
+  const manager = new BackgroundManager();
+  manager.attach({ environment: env, persistence, steer: bus });
+  await manager.loadFromDisk(); await manager.reconcile();
+  const recovered = manager.getTask(record.taskId);
+  assert.equal(recovered?.status, 'failed');
+  assert.equal(recovered?.kind === 'process' ? recovered.exitCode : undefined, 3);
+  assert.ok(bus.drainSteering().length > 0);
+  // Reconnect an active command, preserving identity, then kill it via the new owner.
+  const ongoing = await env.commands.start('sleep 20', { outputFile: join(root, 'active.log'), retainOutput: false });
+  const active = { ...record, taskId: 'bash-active', outputRef: { kind: 'file' as const, path: join(root, 'active.log') }, process: { pid: ongoing.pid, sandboxId: env.sandbox.id } };
+  await persistence.writeTask(active);
+  const owner = new BackgroundManager(); owner.attach({ environment: env, persistence });
+  await owner.loadFromDisk(); await owner.reconcile();
+  assert.equal(owner.getTask(active.taskId)?.status, 'running');
+  assert.equal((await owner.stop(active.taskId))?.status, 'killed');
+  await ongoing.wait();
+  console.log('Environment modules: files, handles, reconnect, stdin, durable output, capping and keepalive passed');
+} finally { await rm(root, { recursive: true, force: true }); }

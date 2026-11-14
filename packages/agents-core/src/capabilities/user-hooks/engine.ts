@@ -79,7 +79,7 @@ export class HookEngine {
     if (!this.environment) throw new Error("HookEngine has no environment attached.");
     const timeoutMs = hook.timeout ?? DEFAULT_HOOK_TIMEOUT_MS;
     const shell = this.environment.osInfo.shellPath || "/bin/sh";
-    const result = await this.environment.run([shell, "-c", hook.command], {
+    const result = await this.environment.commands.run([shell, "-c", hook.command], {
       stdin: JSON.stringify(args.inputData ?? {}),
       timeoutMs,
       ...(args.signal !== undefined ? { signal: args.signal } : {}),

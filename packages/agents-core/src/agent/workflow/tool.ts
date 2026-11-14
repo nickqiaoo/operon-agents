@@ -13,7 +13,11 @@ import { resolveToolPath } from "../../tool/support/tool-path.ts";
 import { readTextFile, writeTextFile } from "../../tool/support/environment-ops.ts";
 import type { Environment } from "../../tool/environment.ts";
 import { joinAddress } from "../../events/index.ts";
-import { WorkflowBackgroundTask } from "../../capabilities/background/workflow-task.ts";
+import { WorkflowBackgroundTask, type WorkflowRunOutcome } from "../../capabilities/background/workflow-task.ts";
+import { prepareBackgroundLog } from "../../tool/builtin/bash.ts";
+
+/** Claude Code's cap on a workflow result carried in its completion notice. */
+const WORKFLOW_RESULT_MAX_CHARS = 8_000;
 import type { BackgroundTaskSink } from "../../capabilities/background/task.ts";
 import { asTaskRegistrar } from "../../capabilities/background/registrar.ts";
 import type { RunState, SubagentSpawner } from "../runner.ts";
@@ -180,7 +184,7 @@ export function buildWorkflowTool<TContext>(
     args: z.unknown().optional().describe("Value exposed to the script as the global `args` (pass real JSON, not a stringified value)."),
     resumeFromRunId: z.string().optional().describe("Resume a prior run; unchanged agent() calls return cached results instantly."),
     tokenBudget: z.number().optional().describe("Output-token target for the run; enables budget.remaining()-guarded loops in the script."),
-    run_in_background: z.boolean().optional().describe("Run detached and return a task_id immediately (recommended for long workflows). A completion notice arrives on its own; BackgroundOutput(task_id, block=false) reads progress or the result meanwhile. Requires a BackgroundManager."),
+    run_in_background: z.boolean().optional().describe("Run detached and return a task_id immediately (recommended for long workflows). A completion notice arrives on its own and carries the run's result — do not poll. Requires a BackgroundManager."),
   });
 
   return defineTool({
@@ -334,6 +338,22 @@ export function buildWorkflowTool<TContext>(
             // Editable via Write/Edit; pass back as `scriptPath` to re-run without resending.
             scriptPath: persistedScriptPath,
           });
+        // What a background run's settle notice carries: the same payload the foreground call
+        // returns, cut at Claude Code's 8000 characters. The whole of a longer one goes to a task
+        // log on the environment, and the cut names it, so `Read` reaches the rest.
+        const settleReportOf = async (outcome: RunWorkflowResult): Promise<string> => {
+          const payload = payloadOf(outcome);
+          if (payload.length <= WORKFLOW_RESULT_MAX_CHARS) return payload;
+          const kept = payload.slice(0, WORKFLOW_RESULT_MAX_CHARS);
+          const cut = payload.length - kept.length;
+          try {
+            const path = await prepareBackgroundLog(ctx.environment);
+            await writeTextFile(ctx.environment, path, payload);
+            return `${kept}\n... (truncated ${String(cut)} chars, full result in ${path})`;
+          } catch {
+            return `${kept}\n... (truncated ${String(cut)} chars; the full result could not be saved)`;
+          }
+        };
 
         // ── Background path: register a task, return task_id, run detached ──
         if (args.run_in_background === true) {
@@ -343,15 +363,15 @@ export function buildWorkflowTool<TContext>(
           }
           const controller = new AbortController();
           // `runStatus` rides the task into the settle notification, whose journaled tag
-          // is the durable settle record the workflow fold reads.
-          const run = async (_sink: BackgroundTaskSink): Promise<{ runStatus: "completed" | "failed" }> => {
+          // is the durable settle record the workflow fold reads; the run's report rides with it.
+          const run = async (_sink: BackgroundTaskSink): Promise<WorkflowRunOutcome> => {
             const journal = mkJournal(runId);
             const usageBox = { usage: emptyUsage() };
             // Public workflow.progress events come from the journal's publication-aware
             // append. Background execution has no attached courtesy update outlet.
             const hooks = buildHooks(() => undefined, controller.signal, tokenBudget, usageBox, ctx.toolCallId);
             const outcome = await executeJournaled(journal, hooks);
-            return { runStatus: outcome.ok ? "completed" : "failed" };
+            return { runStatus: outcome.ok ? "completed" : "failed", result: await settleReportOf(outcome) };
           };
           const taskId = registrar.registerTask(
             new WorkflowBackgroundTask(run, meta.name, {
@@ -380,7 +400,7 @@ export function buildWorkflowTool<TContext>(
                   ...(meta.phases ? [`phases: ${meta.phases.map((p) => p.title).join(" → ")}`] : []),
                   ...(persistedScriptPath !== undefined ? [`persisted_script: ${persistedScriptPath} (edit with Write/Edit, re-run via scriptPath)`] : []),
                   "",
-                  `next_step: A completion notice arrives automatically. BackgroundOutput(task_id="${taskId}", block=false) reads live progress or the final result; re-run cached with resumeFromRunId="${runId}".`,
+                  `next_step: A completion notice arrives automatically with the run's result — do not poll. Re-run cached with resumeFromRunId="${runId}".`,
                 ].join("\n"),
               },
             ],
@@ -458,7 +478,7 @@ export function buildWorkflowTool<TContext>(
             new WorkflowBackgroundTask(
               async () => {
                 const oc = await outcomePromise;
-                return { runStatus: oc.ok ? "completed" : "failed" };
+                return { runStatus: oc.ok ? "completed" : "failed", result: await settleReportOf(oc) };
               },
               meta.name,
               {
@@ -483,7 +503,7 @@ export function buildWorkflowTool<TContext>(
                   `workflow: ${meta.name}`,
                   "automatic_notification: true",
                   "",
-                  `next_step: A completion notice arrives automatically. BackgroundOutput(task_id="${taskId}", block=false) reads live progress or the final result; re-run cached with resumeFromRunId="${runId}".`,
+                  `next_step: A completion notice arrives automatically with the run's result — do not poll. Re-run cached with resumeFromRunId="${runId}".`,
                 ].join("\n"),
               },
             ],
@@ -545,7 +565,7 @@ async function persistRunScript(
   const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^\.+/, "") || "workflow";
   const rel = `${WORKFLOW_RUNS_DIR}/${safeName}.${runId}.js`;
   try {
-    await environment.mkdir(await resolveToolPath(WORKFLOW_RUNS_DIR, environment, "write"), { parents: true, existOk: true });
+    await environment.files.makeDir(await resolveToolPath(WORKFLOW_RUNS_DIR, environment, "write"));
     await writeTextFile(environment, await resolveToolPath(rel, environment, "write"), script);
     return rel;
   } catch {

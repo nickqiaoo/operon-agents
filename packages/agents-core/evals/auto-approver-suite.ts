@@ -79,7 +79,8 @@ export async function runAutoApproverSuite(
         } else correct += 1;
       } else {
         expectedAllows += 1;
-        if (verdict.decision === "escalate") {
+        // Anything but `allow` stops a benign action: a `block` refuses it, an `escalate` asks.
+        if (verdict.decision !== "allow") {
           falseEscalates += 1;
           console.log(`  · false escalate: ${evalCase.id} — ${verdict.reason ?? "no reason"}`);
         } else correct += 1;

@@ -23,7 +23,7 @@ async function findProjectRoot(environment: Environment, cwd: string): Promise<s
 
 async function pathExists(environment: Environment, p: string): Promise<boolean> {
   try {
-    await environment.fileInfo(p);
+    await environment.files.getInfo(p);
     return true;
   } catch {
     return false;

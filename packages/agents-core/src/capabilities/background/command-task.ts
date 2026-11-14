@@ -1,7 +1,9 @@
+import { stopOutputSubscription } from '../../tool/environment-output.ts';
 import { errorMessage } from "../../loop/errors.ts";
 import type { CommandStarter, ProcessSpawnOptions } from "../../tool/background.ts";
-import type { Environment } from "../../tool/environment.ts";
+import type { Environment, CommandHandle } from "../../tool/environment.ts";
 import type { BackgroundTask, BackgroundTaskInfoBase, BackgroundTaskSink, TaskOutputLocation } from "./task.ts";
+import type { MonitorTaskInfo } from "./monitor-task.ts";
 
 /** Why a command task that was asked to stop settled as failed rather than killed. */
 export const COMMAND_NOT_STOPPED_REASON =
@@ -10,24 +12,15 @@ export const COMMAND_NOT_STOPPED_REASON =
 export interface CommandBackgroundTaskInfo extends BackgroundTaskInfoBase {
   /** Wire value kept as "process" — persisted task records use it. */
   readonly kind: "process";
+  readonly process?: { readonly pid: number; readonly sandboxId: string };
   readonly command: string;
   readonly exitCode: number | null;
+  /** Present on a Monitor's task: its stdout is an event stream, not a result. */
+  readonly monitor?: MonitorTaskInfo;
 }
 
-/**
- * A shell command running as a background task.
- *
- * Driven by a {@link CommandStarter}, NOT by a process handle. The distinction is the whole
- * point: a background task needs to stream output, be stopped, and report how it ended —
- * all three of which are `run`'s intent fields, and all three of which every backend can
- * deliver natively. Requiring a live process handle instead would demand a capability that
- * sandbox transports cannot provide honestly, which is what used to force a fake handle
- * whose `kill()` did nothing.
- *
- * No `forceStop`: SIGTERM → grace → SIGKILL escalation belongs to the Environment layer, which
- * is where killing is real. Aborting the signal is the whole stop protocol — and the result's
- * `terminated` is the answer: only a confirmed stop settles as `killed`.
- */
+/** A durable command task. The starter exposes its handle before waiting; identity is
+ * persisted immediately and the environment owns log capture and process termination. */
 export class CommandBackgroundTask implements BackgroundTask {
   readonly kind = "process" as const;
   readonly idPrefix = "bash";
@@ -42,6 +35,14 @@ export class CommandBackgroundTask implements BackgroundTask {
   private readonly start_: CommandStarter;
   readonly parentAddress?: string;
   readonly toolCallId?: string;
+  private handle?: CommandHandle;
+  async disconnectOutput(): Promise<void> {
+    // SDK disconnect also abandons wait(); retain lifecycle ownership until settlement.
+    if (this.handle) await stopOutputSubscription(this.handle);
+  }
+  private processValue?: { readonly pid: number; readonly sandboxId: string };
+  private outputListeners = new Set<(data: string) => void>();
+  subscribeOutput(listener: (data: string) => void): () => void { this.outputListeners.add(listener); return () => { this.outputListeners.delete(listener); }; }
   private exitCodeValue: number | null = null;
   private stopUnconfirmedValue = false;
 
@@ -82,6 +83,13 @@ export class CommandBackgroundTask implements BackgroundTask {
       // shape this replaced — there is no trailing output to race a drain timer against.
       const result = await this.start_({
         signal: controller.signal,
+        onStart: async handle => {
+          this.handle = handle;
+          const location = this.outputLocation;
+          if (location?.kind === 'file') this.processValue = { pid: handle.pid, sandboxId: location.environment.sandbox.id };
+          await sink.update?.();
+        },
+        onOutput: this.outputListeners.size ? data => { for (const cb of this.outputListeners) cb(data); } : undefined,
       });
       this.exitCodeValue = result.exitCode ?? null;
       if (sink.signal.aborted && !result.terminated) {
@@ -109,6 +117,7 @@ export class CommandBackgroundTask implements BackgroundTask {
       ...base,
       kind: "process",
       command: this.command,
+      process: this.processValue,
       exitCode: this.exitCodeValue,
     };
   }

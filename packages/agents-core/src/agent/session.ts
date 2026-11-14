@@ -1,3 +1,4 @@
+import { SandboxKeepalive } from './sandbox-keepalive.ts';
 import { recoverOrphanedTurns } from "./lifecycle-recovery.ts";
 import { readSessionTails } from "../events/projection.ts";
 import type { Environment } from "../tool/environment.ts";
@@ -147,6 +148,7 @@ export interface SessionOpenOptions {
    * outlives any one session, so closing a session must not pull it out from under the others.
    */
   readonly environment?: Environment | EnvironmentFactory;
+  readonly sandboxTtlMs?: number;
   readonly events?: EventSink;
   readonly steer?: SteerBus;
   /** Answers permission prompts live (as opposed to the interrupt/resume path). */
@@ -353,6 +355,13 @@ export class Session implements SessionPort {
     this.signal = signal;
     this.ownController = ownController;
     this.environment = environment;
+    this.sandboxKeepalive = new SandboxKeepalive(environment.sandbox, opts.sandboxTtlMs ?? 600_000,
+      () => this.turnActive || (this.background?.list().some(task => task.kind === 'process') ?? false),
+      error => {
+        const message = `sandbox renewal failed: ${messageOf(error)}`;
+        this.pendingDiagnostics.push({ capability: 'sandbox', phase: 'start', level: 'warn', message });
+        this.logger.log('warn', message);
+      });
     this.eventPublisher = publisher;
     // The publishing wrapper around the host's store: record-backed events surface on `events` when
     // the append commits, so everything in the session writes through THIS store. Beneath it, the
@@ -1137,14 +1146,20 @@ export class Session implements SessionPort {
     return this.pendingDiagnostics.splice(0, this.pendingDiagnostics.length);
   }
 
+  private readonly sandboxKeepalive: SandboxKeepalive;
+  private turnActive = false;
+
   async withRunLock<T>(body: () => Promise<T>): Promise<T> {
     const prev = this.runChain;
     let release!: () => void;
     this.runChain = new Promise<void>((resolve) => (release = resolve));
     await prev;
+    this.turnActive = true;
     try {
+      await this.sandboxKeepalive.renew();
       return await body();
     } finally {
+      this.turnActive = false;
       release();
     }
   }
@@ -1166,6 +1181,7 @@ export class Session implements SessionPort {
   }
 
   private async runClose(): Promise<void> {
+    this.sandboxKeepalive.close();
     this.isOpen = false;
     // Nothing queued will be applied now; one already being applied finishes first, so the
     // capability it opens is on the list the teardown below walks.
@@ -1217,7 +1233,7 @@ export class Session implements SessionPort {
 
   /** Public URL for a port inside the environment, or undefined when the backend can't expose one. */
   async resolveExposedPort(port: number): Promise<string | undefined> {
-    return await this.environment.exposedPortUrl?.(port);
+    return await this.environment.sandbox.getUrl(port);
   }
 }
 

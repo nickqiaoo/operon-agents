@@ -23,9 +23,9 @@ export interface CodeBackgroundTaskOptions {
  *
  * Holds no output of its own: the program's owner writes its console lines, each nested tool
  * call's outcome and the final result to a log file on the environment as they happen, the same
- * place a background command's bytes go, and this task names that file. `BackgroundOutput`
- * reads it like any other file-backed task; a detached program's progress is the same thing
- * an attached one's was, in the same place.
+ * place a background command's bytes go, and this task names that file. The model `Read`s it
+ * like any other task log; a detached program's progress is the same thing an attached one's
+ * was, in the same place.
  */
 export class CodeBackgroundTask implements BackgroundTask {
   readonly kind = "code" as const;

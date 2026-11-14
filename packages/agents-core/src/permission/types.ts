@@ -86,7 +86,16 @@ export interface PermissionPolicy {
 
 /** Input handed to the `auto`-mode judge for a single would-prompt action. */
 export interface AutoApprovalInput {
-  readonly autoApproval?: { readonly allow?: readonly string[]; readonly deny?: readonly string[]; readonly environment?: readonly string[]; readonly twoStageMode?: "both" | "fast" | "thinking" };
+  /** Per-session classifier rules (see `ClassifierRules`): each section replaces the built-in one, `"$defaults"` splices it in. */
+  readonly autoApproval?: {
+    readonly allow?: readonly string[];
+    readonly softDeny?: readonly string[];
+    readonly hardDeny?: readonly string[];
+    /** @deprecated read as `softDeny`. */
+    readonly deny?: readonly string[];
+    readonly environment?: readonly string[];
+    readonly twoStageMode?: "both" | "fast" | "thinking";
+  };
   /** The action under review (tool name / args / tool / model / signal). */
   readonly ctx: ResolvedToolExecutionHookContext;
   /** Conversation so far. The judge sanitises this (user text + tool calls only). */
@@ -98,15 +107,22 @@ export interface AutoApprovalInput {
 }
 
 export interface AutoApprovalVerdict {
-  /** `allow` proceeds without a human; `escalate` falls back to the normal approval prompt. */
-  readonly decision: "allow" | "escalate";
+  /**
+   * `allow` proceeds without a human. `block` is a judgment that the action is dangerous: the call
+   * is refused and the reason goes back to the model, which can take another route (the manager
+   * asks a human only once too many calls have been blocked). `escalate` means the judge could not
+   * decide — unavailable, unparseable, not confident — and falls back to the normal approval prompt.
+   */
+  readonly decision: "allow" | "block" | "escalate";
   readonly reason?: string;
+  /** With `block`: the BLOCK rule that matched, when the judge names one. */
+  readonly category?: string;
 }
 
 /**
  * The `auto`-mode judge. Consulted by the PermissionManager only for actions the static
  * policy chain would otherwise prompt on (and that are `classifierApprovable`). Implementations
- * must be fail-closed — return `escalate` on any uncertainty rather than `allow`.
+ * must be fail-closed — return `block` or `escalate` on any uncertainty rather than `allow`.
  */
 export interface AutoApprover {
   classify(input: AutoApprovalInput): Promise<AutoApprovalVerdict>;

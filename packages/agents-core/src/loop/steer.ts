@@ -122,12 +122,13 @@ let steerTurnCounter = 0;
 /**
  * Two channels, split by when they may enter the conversation:
  *
- * - **steering** — genuine mid-turn interruptions (`origin.kind === "user"`, incl. skill
- *   slash-activations). Drained by `runTurn` at every step boundary AND again after the
- *   terminal step, so a user steer is always consumed WITHIN the active turn, never deferred
- *   to a fresh one.
- * - **followUp** — user follow-ups plus external events that surface after the current work
- *   (`cron_*`, `background_done`). Drained only after a turn has run, because it is a new prompt,
+ * - **steering** — what the model should see before its next step: the user's own mid-turn
+ *   words (`origin.kind === "user"`, incl. skill slash-activations), background settles
+ *   (`background_done`), and any extension or external message filed here. Drained by
+ *   `runTurn` at every step boundary AND again after the terminal step, so it is always
+ *   consumed WITHIN the active turn, never deferred to a fresh one.
+ * - **followUp** — user follow-ups plus events that surface after the current work (a cron
+ *   fire, an extension's `followUp`). Drained only after a turn has run, because it is a new prompt,
  *   not an interruption of the turn in flight. An external event forces one more turn of the
  *   current run. With a driver to start the next run, a user's follow-up ends the current run and
  *   takes one of its own, so that run's result stays its own.
@@ -332,11 +333,7 @@ export function buildSteerMessage(
   options: { readonly id?: string; readonly now?: NowFn } = {},
 ): SteerMessage {
   const id = options.id ?? newSteerId();
-  const channel: SteerChannel = origin.kind === "user"
-    ? "steering"
-    : origin.kind === "external"
-      ? origin.channel
-      : "follow_up";
+  const channel = steerChannelFor(origin);
   const parts = normalizeContent(content);
   const bodyText = parts
     .filter((p): p is TextContent => p.type === "text")
@@ -351,6 +348,29 @@ export function buildSteerMessage(
     origin: steerOriginToPromptOrigin(origin, id),
     message: { role: "user", content: out, timestamp: (options.now ?? Date.now)() },
   };
+}
+
+/**
+ * Which queue a message goes into.
+ *
+ * A background settle goes on `steering`: it reaches the model at the next step boundary,
+ * right after the tool results of the step in flight, instead of waiting for the whole turn to
+ * end. A turn that keeps calling tools can run for half an hour, and a build that failed in
+ * minute two should not stay unknown until then: the model would poll for it or work on
+ * without it. It is appended after the tool results, never between a call and its result, so
+ * the request prefix stays as it was.
+ */
+function steerChannelFor(origin: SteerOrigin): SteerChannel {
+  switch (origin.kind) {
+    case "user":
+    case "background_done":
+      return "steering";
+    case "user_follow_up":
+      return "follow_up";
+    case "extension":
+    case "external":
+      return origin.channel;
+  }
 }
 
 /**

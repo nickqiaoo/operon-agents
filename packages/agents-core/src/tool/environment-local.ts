@@ -1,6 +1,10 @@
+import type { Command, CommandStartOptions, CommandHandle } from './environment.ts';
+import { LocalPty, type NodePtyModule } from './environment-pty.ts';
+import type { EnvironmentPty } from './environment.ts';
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, type Dirent, type Stats } from "node:fs";
+import { existsSync, watch, type Dirent, type Stats } from "node:fs";
 import {
+  rm, statfs,
   chmod as fsChmod,
   lstat as fsLstat,
   mkdir as fsMkdir,
@@ -14,7 +18,7 @@ import {
   unlink as fsUnlink,
   writeFile,
 } from "node:fs/promises";
-import { arch, homedir, release } from "node:os";
+import { arch, homedir, release, hostname, cpus, totalmem, freemem } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import {
   type DecodeErrors,
@@ -26,6 +30,10 @@ import {
   type FileKind,
   type OsKind,
 } from "./environment.ts";
+import { Readable } from 'node:stream';
+import { EnvironmentFilesAdapter, toBuffer } from './environment-files.ts';
+import { PlainSandbox } from './environment-sandbox.ts';
+import type { FileData, EntryInfo, FilesystemEvent, WatchOptions, WatchHandle, EnvironmentFiles, EnvironmentSandbox } from './environment.ts';
 import { BaseEnvironment, type SpawnedProcess } from "./environment-base.ts";
 
 function fileKindFromStats(s: Stats): FileKind {
@@ -136,18 +144,25 @@ export class LocalEnvironment extends BaseEnvironment {
   readonly name = "local";
   readonly osInfo: OsInfo = detectOsInfo();
   private cwd: string;
+  override readonly pty: EnvironmentPty | undefined = undefined;
+  private readonly ptyModule?: NodePtyModule;
   private readonly extraDirs: readonly string[];
 
-  constructor(cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[] } = process.cwd()) {
+  constructor(cwdOrOptions: string | { cwd?: string; additionalDirs?: readonly string[]; pty?: NodePtyModule } = process.cwd()) {
     super();
     if (typeof cwdOrOptions === "string") {
       this.cwd = cwdOrOptions;
       this.extraDirs = [];
     } else {
+      this.ptyModule = cwdOrOptions.pty;
+      if (this.ptyModule) this.pty = new LocalPty(this.ptyModule, this.osInfo.shellPath, () => this.getcwd());
       this.cwd = cwdOrOptions.cwd ?? process.cwd();
       this.extraDirs = cwdOrOptions.additionalDirs ?? [];
     }
   }
+
+  override readonly files: EnvironmentFiles = new LocalFiles(this);
+  override readonly sandbox: EnvironmentSandbox = new LocalSandbox(this);
 
   pathClass(): "posix" | "win32" {
     return process.platform === "win32" ? "win32" : "posix";
@@ -167,14 +182,17 @@ export class LocalEnvironment extends BaseEnvironment {
 
   // Session-granted extra roots survive a re-root (a worktree environment keeps its grants).
   withCwd(cwd: string): Environment {
-    return new LocalEnvironment({ cwd: this.abs(cwd), additionalDirs: this.extraDirs });
+    const clone = new LocalEnvironment({ cwd: this.abs(cwd), additionalDirs: this.extraDirs, pty: this.ptyModule });
+    clone.processTable = this.processTable;
+    clone.outputFiles = this.outputFiles;
+    return clone;
   }
 
   override additionalDirs(): readonly string[] {
     return this.extraDirs;
   }
 
-  private abs(path: string): string {
+  abs(path: string): string {
     return isAbsolute(path) ? path : resolve(this.cwd, path);
   }
 
@@ -239,6 +257,15 @@ export class LocalEnvironment extends BaseEnvironment {
     return await fsRealpath(this.abs(path));
   }
 
+  protected override async startCommand(command: Command, options: CommandStartOptions): Promise<CommandHandle> {
+    // Native cwd preserves argv literally and avoids a second shell (including on Windows).
+    if (options.cwd !== undefined) {
+      const sibling = this.withCwd(options.cwd) as LocalEnvironment;
+      return sibling.startCommand(command, { ...options, cwd: undefined });
+    }
+    return super.startCommand(command, options);
+  }
+
   protected override spawn(argv: readonly string[], env?: Record<string, string>): Promise<SpawnedProcess> {
     const [command, ...rest] = argv;
     if (command === undefined) return Promise.reject(new Error("spawn requires at least one argument"));
@@ -267,6 +294,8 @@ class LocalProcess implements SpawnedProcess {
     this.child = child;
     this.group = group;
   }
+
+  get pid(): number | undefined { return this.child.pid; }
 
   get stdin() {
     return this.child.stdin!;
@@ -307,4 +336,60 @@ class LocalProcess implements SpawnedProcess {
     this.child.kill(signal);
   }
 
+}
+
+class LocalFiles extends EnvironmentFilesAdapter {
+  private local: LocalEnvironment;
+  constructor(local: LocalEnvironment) { super(local); this.local = local; }
+  override async write(path: string, data: FileData) {
+    const target = this.local.abs(path);
+    await fsMkdir(dirname(target), { recursive: true });
+    await writeFileAtomic(target, await toBuffer(data));
+    return { path: target, name: basename(target) };
+  }
+  override async makeDir(path: string): Promise<boolean> {
+    return await fsMkdir(this.local.abs(path), { recursive: true }) !== undefined;
+  }
+  override async getInfo(path: string, options?: { followSymlinks?: boolean }): Promise<EntryInfo> {
+    const target = this.local.abs(path);
+    const stat = options?.followSymlinks === false ? await fsLstat(target) : await fsStat(target);
+    return { path: target, name: basename(target), kind: fileKindFromStats(stat), size: stat.size, mtimeMs: stat.mtimeMs, mode: stat.mode,
+      ...(stat.isSymbolicLink() ? { symlinkTarget: await fsReadlink(target) } : {}) };
+  }
+  override async readStream(path: string): Promise<ReadableStream<Uint8Array>> {
+    const file = await fsOpen(this.local.abs(path), 'r');
+    return Readable.toWeb(file.createReadStream({ autoClose: true })) as ReadableStream<Uint8Array>;
+  }
+  override async rename(oldPath: string, newPath: string): Promise<EntryInfo> {
+    await fsRename(this.local.abs(oldPath), this.local.abs(newPath)); return this.getInfo(newPath, { followSymlinks: false });
+  }
+  override async remove(path: string): Promise<void> { await rm(this.local.abs(path), { recursive: true, force: true }); }
+  async watchOutputFile(path: string, onChange: () => void): Promise<WatchHandle> {
+    const watcher = watch(this.local.abs(path), onChange);
+    watcher.on('error', () => { watcher.close(); });
+    return { stop: async () => { watcher.close(); } };
+  }
+  async watchDir(path: string, onEvent: (event: FilesystemEvent) => void, options?: WatchOptions): Promise<WatchHandle> {
+    const target = this.local.abs(path);
+    const watcher = watch(target, { recursive: options?.recursive }, (event, name) => {
+      if (name === null) return;
+      const relative = String(name);
+      if (event === 'change') onEvent({ name: relative, type: 'write' });
+      else void fsLstat(join(target, relative)).then(() => onEvent({ name: relative, type: 'create' }), () => onEvent({ name: relative, type: 'remove' }));
+    });
+    watcher.on('error', error => { watcher.close(); options?.onExit?.(error); });
+    return { stop: async () => { watcher.close(); } };
+  }
+}
+class LocalSandbox extends PlainSandbox {
+  private local: LocalEnvironment;
+  constructor(local: LocalEnvironment) { super(hostname()); this.local = local; }
+  override async getHost(port: number) { return `localhost:${port}`; }
+  override async getUrl(port: number) { return `http://localhost:${port}`; }
+  override async getInfo() { return { id: this.id, state: 'running' as const, cpuCount: cpus().length, memoryMB: totalmem() / 1048576 }; }
+  override async getMetrics() {
+    const disk = await statfs(this.local.getcwd());
+    const cpu = cpus(); const total = cpu.reduce((n, c) => n + Object.values(c.times).reduce((a,b) => a+b, 0), 0);
+    return { timestamp: new Date(), cpuCount: cpu.length, cpuUsedPct: total === 0 ? 0 : 100 * (1 - cpu.reduce((n,c) => n+c.times.idle, 0)/total), memUsed: totalmem()-freemem(), memTotal: totalmem(), diskUsed: (disk.blocks-disk.bfree)*disk.bsize, diskTotal: disk.blocks*disk.bsize };
+  }
 }

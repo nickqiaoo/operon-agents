@@ -4,13 +4,13 @@ import { BackgroundManager } from "./manager.ts";
 import type { BackgroundTaskPersistence } from "./persist.ts";
 import { StoreBackgroundTaskPersistence } from "./persist.ts";
 import { DiskBackgroundTaskPersistence } from "./persist-disk.ts";
-import { backgroundListTool, backgroundOutputTool, backgroundStopTool } from "./tools.ts";
+import { backgroundStopTool } from "./tools.ts";
+import { monitorTool } from "./monitor-tool.ts";
 
 export { BackgroundManager } from "./manager.ts";
 export type {
   BackgroundManagerOptions,
   BackgroundManagerRuntime,
-  OutputFollowTiming,
   BackgroundTaskOutputDelta,
   BackgroundTaskOutputSnapshot,
 } from "./manager.ts";
@@ -30,7 +30,10 @@ export type { BackgroundTaskRegistrar } from "./registrar.ts";
 export { StoreBackgroundTaskPersistence, isPersistedTaskTerminal, isValidPersistedTask } from "./persist.ts";
 export type { BackgroundTaskPersistence, PersistedTask } from "./persist.ts";
 export { DiskBackgroundTaskPersistence } from "./persist-disk.ts";
-export { backgroundListTool, backgroundOutputTool, backgroundStopTool } from "./tools.ts";
+export { backgroundListTool, backgroundStopTool } from "./tools.ts";
+export { monitorTool } from "./monitor-tool.ts";
+export { MonitorBackgroundTask, LineBatcher, EventLimiter, MONITOR_DEFAULT_TIMING } from "./monitor-task.ts";
+export type { MonitorTaskInfo } from "./monitor-task.ts";
 export {
   TERMINAL_STATUSES,
   isBackgroundTaskTerminal,
@@ -54,7 +57,7 @@ export function backgroundCapability(manager: BackgroundManager = new Background
     // Enumeration stays a host API (`session.listBackgroundTasks()`). The model already owns
     // every task id it successfully spawned, while cold recovery injects ids whose ack was lost;
     // exposing an unbounded list invites unrelated historical tasks into the reasoning path.
-    tools: [backgroundOutputTool(manager), backgroundStopTool(manager)],
+    tools: [backgroundStopTool(manager), monitorTool()],
     service: manager,
     openSession: async (ctx) => {
       {
@@ -65,6 +68,7 @@ export function backgroundCapability(manager: BackgroundManager = new Background
           // + reconcile happen in the store-cutover step; here we attach the persistence so live
           // spawns start recording. Without a durable store the manager stays purely in memory.
         manager.attach({
+          environment: ctx.environment,
           steer,
           events,
           sessionId: ctx.sessionId,

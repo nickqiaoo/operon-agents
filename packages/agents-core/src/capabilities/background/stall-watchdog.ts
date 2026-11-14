@@ -68,7 +68,7 @@ export function startStallWatchdog(
   let checking = false;
 
   const check = async (): Promise<void> => {
-    const { size } = await file.environment.fileInfo(file.path);
+    const { size } = await file.environment.files.getInfo(file.path);
     if (size !== lastSize) {
       lastSize = size;
       lastGrowth = Date.now();
@@ -76,7 +76,7 @@ export function startStallWatchdog(
     }
     if (Date.now() - lastGrowth < thresholdMs || size === 0) return;
     const offset = Math.max(0, size - STALL_TAIL_BYTES);
-    const tail = (await file.environment.readBytes(file.path, { offset, length: size - offset })).toString("utf8");
+    const tail = (await file.environment.files.read(file.path, { range: { offset, length: size - offset } })).toString("utf8");
     if (stopped) return;
     if (!looksLikePrompt(tail)) {
       // Quiet but not asking anything: look again after another full threshold, not every tick.

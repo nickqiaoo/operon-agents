@@ -19,6 +19,9 @@ export function layeredResolver(...layers: Partial<AgentFrameworkConfig>[]): Con
 
 export interface AutoApprovalOptions {
   readonly allow: readonly string[];
+  readonly softDeny: readonly string[];
+  readonly hardDeny: readonly string[];
+  /** @deprecated read as `softDeny`. */
   readonly deny: readonly string[];
   readonly environment: readonly string[];
   readonly twoStageMode?: "both" | "fast" | "thinking";
@@ -60,6 +63,8 @@ export function toCoreOptions(config: AgentFrameworkConfig): CoreOptions {
         ? {
             autoApproval: {
               allow: autoApproval.allow,
+              softDeny: autoApproval.softDeny,
+              hardDeny: autoApproval.hardDeny,
               deny: autoApproval.deny,
               environment: autoApproval.environment,
               twoStageMode: autoApproval.twoStageMode,

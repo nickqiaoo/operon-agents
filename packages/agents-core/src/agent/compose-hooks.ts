@@ -16,6 +16,7 @@ import { toolInputGuardrailHook, toolOutputGuardrailHook } from "./guardrail.ts"
 import { runCtxFor } from "./run-support.ts";
 import type { RunState } from "./runner.ts";
 import { withToolCallRecoveryContext } from "./recovery.ts";
+import { permissionDenialDetails } from "../permission/denial.ts";
 
 /**
  * The loop hooks for one turn of `active` under a frame: capability hook parts
@@ -119,7 +120,11 @@ function buildAuthorizer<TContext>(
       const ok = state.permission.applyApproval(ctx.plan.approvalRule, answer);
       if (grants) state.session.persistPermissionState();
       if (ok) return undefined;
-      return { block: true, reason: answer.feedback ?? `Tool ${ctx.toolCall.name} was ${answer.decision}.` };
+      return {
+        block: true,
+        reason: answer.feedback ?? `Tool ${ctx.toolCall.name} was ${answer.decision}.`,
+        blockDetails: permissionDenialDetails("rejected-by-user"),
+      };
     }
     return base(ctx);
   };

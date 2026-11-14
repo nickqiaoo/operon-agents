@@ -67,7 +67,7 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
       // tool's occasional appends; high-frequency log appends belong elsewhere.
       let prior = "";
       try {
-        prior = (await environment.readBytes(safePath)).toString("utf8");
+        prior = (await environment.files.read(safePath)).toString("utf8");
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
@@ -91,7 +91,7 @@ async function execute(args: WriteInput, safePath: string, ctx: ToolRunContext):
     return textResult(`${mode === "append" ? "Appended" : "Wrote"} ${String(bytesWritten)} bytes to ${args.path}`);
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EEXIST") {
       const parentError = await checkParentDirectory(safePath, environment);
       return errorResult(parentError ?? `Failed to write ${args.path}: parent directory does not exist.`);
     }
@@ -103,10 +103,10 @@ async function checkParentDirectory(safePath: string, environment: Environment):
   const parent = dirname(safePath);
   let info;
   try {
-    info = await environment.fileInfo(parent);
+    info = await environment.files.getInfo(parent);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return `Parent directory does not exist: ${parent}. Create it before writing this file.`;
+      return undefined;
     }
     return undefined;
   }

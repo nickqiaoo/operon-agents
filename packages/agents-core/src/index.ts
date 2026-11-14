@@ -67,3 +67,6 @@ export type {
 // workspace + plugin servers (it lives under the ./mcp subtree, not the main capabilities barrel).
 export { mcpServersCapability, createMcpServers, assertMcpTransportsPermitted, McpOAuthService, JsonFileStore, MemoryMcpCredentialStore, McpTransportNotPermittedError } from "./mcp/index.ts";
 export type { McpServersCapabilityOptions, McpOAuthServiceOptions, McpCredentialStore, McpTransportKind, McpServersHandle, McpServerView, McpCredential, McpCredentialProvider, McpCredentialRequest } from "./mcp/index.ts";
+
+export type { CommandResult } from "./commands/index.ts";
+export type { CommandResult as EnvironmentCommandResult } from "./tool/environment.ts";

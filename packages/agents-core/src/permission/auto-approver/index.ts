@@ -13,7 +13,11 @@ export {
 } from "./decision-auto-approver.ts";
 export {
   buildClassifierSystemPrompt,
+  defaultClassifierRules,
+  resolveClassifierRules,
   CLASSIFIER_BASE_PROMPT,
   CLASSIFIER_PERMISSIONS_TEMPLATE,
+  DEFAULT_RULES_TOKEN,
   type ClassifierRules,
+  type ResolvedClassifierRules,
 } from "./prompts.ts";

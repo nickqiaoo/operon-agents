@@ -355,7 +355,7 @@ async function main(): Promise<void> {
 
   check("ssh-environment: name + posix path class", environment.name === "ssh:test" && environment.pathClass() === "posix" && environment.gethome() === "/work");
 
-  const infoA = await environment.fileInfo("/work/a.ts");
+  const infoA = await environment.files.getInfo("/work/a.ts");
   check("ssh-environment: fileInfo returns size + file kind", infoA.size === 3 && infoA.kind === "file");
 
   const readA = await readTextFile(environment, "a.ts"); // relative → resolved against cwd (/work)
@@ -368,7 +368,7 @@ async function main(): Promise<void> {
   await writeTextFile(environment, "/work/new.txt", "fresh+more");
   check("ssh-environment: overwrite", (await readTextFile(environment, "/work/new.txt")) === "fresh+more");
 
-  const entries = [...(await environment.listDir("/work"))].toSorted((a, b) => a.name.localeCompare(b.name));
+  const entries = [...(await environment.files.list("/work"))].toSorted((a, b) => a.name.localeCompare(b.name));
   check("ssh-environment: listDir yields basenames", entries.map((e) => e.name).join(",") === "a.ts,b.ts,new.txt,sub");
   // SFTP readdir carries attrs per entry, so kinds cost no extra round trip.
   check(
@@ -381,13 +381,13 @@ async function main(): Promise<void> {
   check("ssh-environment: withCwd shares the connection (reads via new cwd)", (await readTextFile(scoped, "c.ts")) === "ccccc");
   check("ssh-environment: withCwd does not mutate the original environment", environment.getcwd() === "/work");
 
-  await environment.mkdir("/work/x/y/z", { parents: true });
-  const infoZ = await environment.fileInfo("/work/x/y/z");
+  await environment.files.makeDir("/work/x/y/z");
+  const infoZ = await environment.files.getInfo("/work/x/y/z");
   check("ssh-environment: mkdir parents creates nested dirs", infoZ.kind === "dir");
 
   let enoent = false;
   try {
-    await environment.fileInfo("/work/missing");
+    await environment.files.getInfo("/work/missing");
   } catch (error) {
     enoent = (error as NodeJS.ErrnoException).code === "ENOENT";
   }
@@ -405,16 +405,16 @@ async function main(): Promise<void> {
     }
   };
   check("ssh-environment: mkdir existOk on a FILE occupant throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts", { existOk: true })));
-  check("ssh-environment: mkdir parents with a FILE at the final path throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts", { parents: true })));
-  check("ssh-environment: mkdir parents with a FILE mid-path throws EEXIST", await eexistOf(() => environment.mkdir("/work/a.ts/deeper", { parents: true })));
+  check("ssh-environment: mkdir parents with a FILE at the final path throws EEXIST", await eexistOf(() => environment.files.makeDir("/work/a.ts")));
+  check("ssh-environment: mkdir parents with a FILE mid-path throws EEXIST", await eexistOf(() => environment.files.makeDir("/work/a.ts/deeper")));
 
   // ── readBytes: a real SFTP byte window (open + bounded read at an offset), not a
   //    whole-file transfer that gets sliced — same contract LocalEnvironment honours ──
   await writeTextFile(environment, "/work/lines.txt", "l1\nl2\nl3\nl4\nl5\n");
-  check("ssh-environment: readBytes({length}) reads a prefix", (await environment.readBytes("/work/lines.txt", { length: 5 })).toString("utf8") === "l1\nl2");
-  check("ssh-environment: readBytes({offset,length}) reads a middle window", (await environment.readBytes("/work/lines.txt", { offset: 3, length: 2 })).toString("utf8") === "l2");
-  check("ssh-environment: readBytes({offset}) reads to EOF", (await environment.readBytes("/work/lines.txt", { offset: 9 })).toString("utf8") === "l4\nl5\n");
-  check("ssh-environment: readBytes() with no range reads the whole file", (await environment.readBytes("/work/lines.txt")).byteLength === 15);
+  check("ssh-environment: readBytes({length}) reads a prefix", (await environment.files.read("/work/lines.txt", { range: { length: 5 } })).toString("utf8") === "l1\nl2");
+  check("ssh-environment: readBytes({offset,length}) reads a middle window", (await environment.files.read("/work/lines.txt", { range: { offset: 3, length: 2 } })).toString("utf8") === "l2");
+  check("ssh-environment: readBytes({offset}) reads to EOF", (await environment.files.read("/work/lines.txt", { range: { offset: 9 } })).toString("utf8") === "l4\nl5\n");
+  check("ssh-environment: readBytes() with no range reads the whole file", (await environment.files.read("/work/lines.txt")).byteLength === 15);
 
   // ── writeBytes: SFTP writes land straight on the target. There is no tmp staging
   //    any more — the CAS that needed it is gone, and a swap costs round trips on
@@ -436,33 +436,34 @@ async function main(): Promise<void> {
     await writeTextFile(environment, wPath, "v3");
     check("ssh-write: the target's mode survives a write", (sftp._modes.get(wPath)! & 0o7777) === 0o600 && (await readTextFile(environment, wPath)) === "v3");
 
-    await environment.writeBytes("/work/raw.bin", Buffer.from([0x00, 0xff]));
-    check("ssh-write: writeBytes is byte-exact", (await environment.readBytes("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
+    await environment.files.write("/work/raw.bin", Buffer.from([0x00, 0xff]));
+    check("ssh-write: writeBytes is byte-exact", (await environment.files.read("/work/raw.bin")).equals(Buffer.from([0x00, 0xff])));
   }
 
   // ── writeTextFile composition: text encoding over the one write primitive ──
   {
     class InMemEnvironment extends NullEnvironment {
-      readonly files = new Map<string, Buffer>();
+      override async mkdir(): Promise<void> {}
+      readonly storedFiles = new Map<string, Buffer>();
       override async writeBytes(p: string, data: Buffer): Promise<void> {
         await new Promise((r) => setImmediate(r));
-        this.files.set(p, data);
+        this.storedFiles.set(p, data);
       }
     }
 
     const mem = new InMemEnvironment();
     await writeTextFile(mem, "/f.txt", "a\nb\n", { lineEndings: "CRLF" });
-    check("text-write: the CRLF contract is applied by the composition", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n");
+    check("text-write: the CRLF contract is applied by the composition", mem.storedFiles.get("/f.txt")!.toString() === "a\r\nb\r\n");
     await writeTextFile(mem, "/f.txt", "a\r\nb\n", { lineEndings: "CRLF" });
-    check("text-write: CRLF already present is not doubled", mem.files.get("/f.txt")!.toString() === "a\r\nb\r\n");
+    check("text-write: CRLF already present is not doubled", mem.storedFiles.get("/f.txt")!.toString() === "a\r\nb\r\n");
     await writeTextFile(mem, "/f.txt", "héllo");
-    check("text-write: text is encoded as UTF-8", mem.files.get("/f.txt")!.equals(Buffer.from("héllo", "utf8")));
+    check("text-write: text is encoded as UTF-8", mem.storedFiles.get("/f.txt")!.equals(Buffer.from("héllo", "utf8")));
 
     // No per-path lock: two writers of the same file both complete and the last one
     // wins. Deliberate — conflicting tool calls are serialized a layer up by the tool
     // scheduler (ToolAccesses.conflict).
     await Promise.all([writeTextFile(mem, "/h.txt", "AAAA"), writeTextFile(mem, "/h.txt", "BBBB")]);
-    check("text-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.files.get("/h.txt")!.toString()));
+    check("text-write: concurrent writers both land, last write wins", ["AAAA", "BBBB"].includes(mem.storedFiles.get("/h.txt")!.toString()));
   }
 
   // ── BaseEnvironment.realpath: a HUNG readlink times out (throws) instead of silently
@@ -483,7 +484,7 @@ async function main(): Promise<void> {
     let timedOut = false;
     const startedAt = Date.now();
     try {
-      await new HangingRunEnvironment().realpath("/some/path");
+      await new HangingRunEnvironment().files.realpath("/some/path");
     } catch (error) {
       timedOut = (error as NodeJS.ErrnoException).code === "ETIMEDOUT";
     }
@@ -496,7 +497,7 @@ async function main(): Promise<void> {
   // ── BaseEnvironment.run: a process that survives the kill escalation must not hold the call
   //    open forever through pipes it never closes. ──
   {
-    class UnkillableEnvironment extends NullEnvironment {
+    class UnkillableEnvironment extends LocalEnvironment {
       protected override spawn(): Promise<SpawnedProcess> {
         return Promise.resolve({
           stdin: new PassThrough(),
@@ -513,7 +514,7 @@ async function main(): Promise<void> {
       }
       protected override sigtermGraceMs = 10;
     }
-    const result = await new UnkillableEnvironment().run(["sleep", "forever"], { timeoutMs: 20 });
+    const result = await new UnkillableEnvironment().commands.run(["sleep", "forever"], { timeoutMs: 20 });
     check("base-environment: run returns even when the killed process never closes its pipes", result.timedOut);
     check("base-environment: an unkillable process is reported as NOT terminated", !result.terminated);
   }
@@ -531,18 +532,18 @@ async function main(): Promise<void> {
     });
     (sshTree as unknown as { sigtermGraceMs: number }).sigtermGraceMs = 300;
 
-    const plain = await sshTree.run(["sh", "-c", "echo out; echo err >&2; exit 3"]);
+    const plain = await sshTree.commands.run(["sh", "-c", "echo out; echo err >&2; exit 3"]);
     check("ssh-tree: the group report is stripped from stderr", plain.stderr === "err\n" && plain.stdout === "out\n");
     check("ssh-tree: the command's own exit code comes through", plain.exitCode === 3);
 
-    const wrapped = await sshTree.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
+    const wrapped = await sshTree.commands.run(["sh", "-c", `cd /tmp && { tail -f /dev/null ${marker}-a 2>/dev/null; echo done\n} > /dev/null 2>&1`], {
       timeoutMs: 300,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
     check("ssh-tree: timeout reports the command stopped", wrapped.timedOut && wrapped.terminated);
     check("ssh-tree: the command under the login shell does not survive the stop", pgrepMatches(`${marker}-a`) === "");
 
-    const stubborn = await sshTree.run(["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`], {
+    const stubborn = await sshTree.commands.run(["bash", "-c", `(trap '' TERM; exec tail -f /dev/null ${marker}-b 2>/dev/null) & wait`], {
       timeoutMs: 200,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));

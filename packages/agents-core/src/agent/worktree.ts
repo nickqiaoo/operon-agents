@@ -67,6 +67,6 @@ export async function createWorktree(environment: Environment, options?: { label
 /** Run `git <args>` on the environment's host; `ok` is stdout on exit 0, undefined otherwise. */
 async function runGit(environment: Environment, args: string[]): Promise<{ ok?: string }> {
   // `.catch` covers git-not-found / the backend refusing to spawn at all.
-  const result = await environment.run(["git", ...args]).catch(() => undefined);
+  const result = await environment.commands.run(["git", ...args]).catch(() => undefined);
   return result?.exitCode === 0 ? { ok: result.stdout } : {};
 }

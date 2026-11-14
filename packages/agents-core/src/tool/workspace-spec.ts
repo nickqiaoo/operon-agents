@@ -10,8 +10,7 @@
  * Written against `Environment`, so it works on local, SSH and sandbox backends alike rather than
  * being reimplemented per vendor.
  */
-import type { Environment } from "./environment.ts";
-import { writeTextFile } from "./support/environment-ops.ts";
+import type { Environment, WriteEntry } from "./environment.ts";
 
 export type WorkspaceEntry =
   | { readonly type: "dir"; readonly children?: Readonly<Record<string, WorkspaceEntry>> }
@@ -47,23 +46,6 @@ export interface HostReader {
   listFiles(dir: string): Promise<readonly string[]>;
 }
 
-/** Concurrent host→environment file writes. Latency-bound work, so this is well above CPU count. */
-const HOST_DIR_CONCURRENCY = 8;
-
-/** Run `body` over every item, at most `limit` in flight. The first rejection propagates. */
-async function inParallel<T>(items: readonly T[], limit: number, body: (item: T) => Promise<void>): Promise<void> {
-  if (items.length === 0) return;
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) {
-        const item = items[next++]!;
-        await body(item);
-      }
-    }),
-  );
-}
-
 export class WorkspaceMaterializeError extends Error {
   readonly path: string;
   constructor(message: string, path: string, options?: { cause?: unknown }) {
@@ -83,7 +65,7 @@ export async function materializeWorkspace(
   options: MaterializeOptions = {},
 ): Promise<void> {
   const root = environment.normpath(spec.root);
-  await environment.mkdir(root, { parents: true });
+  await environment.files.makeDir(root);
   await materializeEntries(environment, root, root, spec.entries, options);
 }
 
@@ -94,63 +76,55 @@ async function materializeEntries(
   entries: Readonly<Record<string, WorkspaceEntry>>,
   options: MaterializeOptions,
 ): Promise<void> {
+  let batch: WriteEntry[] = [];
+  let bytes = 0;
+  const flush = async () => {
+    if (!batch.length) return;
+    options.signal?.throwIfAborted();
+    await environment.files.writeFiles(batch);
+    batch = []; bytes = 0;
+  };
+  const enqueue = async (path: string, data: Buffer) => {
+    if (batch.length >= 64 || bytes + data.length > 8 * 1024 * 1024) await flush();
+    batch.push({ path, data }); bytes += data.length;
+  };
   for (const [relative, entry] of Object.entries(entries)) {
     options.signal?.throwIfAborted();
     const target = safeJoin(environment, root, base, relative);
-    await materializeEntry(environment, root, target, entry, options);
+    if (entry.type === 'file') {
+      const content = entry.lineEndings === 'CRLF' ? entry.content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n') : entry.content;
+      await enqueue(target, Buffer.from(content));
+    } else if (entry.type === 'host_file') {
+      await enqueue(target, await requireReader(options, target).readFile(entry.src));
+    } else if (entry.type === 'host_dir') {
+      const reader = requireReader(options, target);
+      const files = await reader.listFiles(entry.src);
+      if (!files.length) { await flush(); await environment.files.makeDir(target); }
+      for (const relative of files) {
+        options.signal?.throwIfAborted();
+        await enqueue(safeJoin(environment, root, target, relative), await reader.readFile(`${entry.src}/${relative}`));
+      }
+    } else {
+      await flush();
+      await materializeEntry(environment, root, target, entry, options);
+    }
   }
+  await flush();
 }
 
 async function materializeEntry(
   environment: Environment,
   root: string,
   target: string,
-  entry: WorkspaceEntry,
+  entry: Extract<WorkspaceEntry, { type: "dir" | "git_repo" }>,
   options: MaterializeOptions,
 ): Promise<void> {
   switch (entry.type) {
     case "dir": {
-      await environment.mkdir(target, { parents: true });
+      await environment.files.makeDir(target);
       if (entry.children !== undefined) {
         await materializeEntries(environment, root, target, entry.children, options);
       }
-      return;
-    }
-    case "file": {
-      await environment.mkdir(parentOf(environment, target), { parents: true });
-      await writeTextFile(environment, target, entry.content, {
-        ...(entry.lineEndings !== undefined ? { lineEndings: entry.lineEndings } : {}),
-      });
-      return;
-    }
-    case "host_file": {
-      const reader = requireReader(options, target);
-      await environment.mkdir(parentOf(environment, target), { parents: true });
-      // writeBytes, not writeTextFile: a host file may be an image, a binary, or text in an
-      // encoding we have no business guessing at. Decoding to UTF-8 here corrupted every
-      // one of those, silently.
-      await environment.writeBytes(target, await reader.readFile(entry.src));
-      return;
-    }
-    case "host_dir": {
-      const reader = requireReader(options, target);
-      await environment.mkdir(target, { parents: true });
-      const files = (await reader.listFiles(entry.src)).map((relative) => ({
-        relative,
-        dest: safeJoin(environment, root, target, relative),
-      }));
-      // Create each parent directory once rather than once per file it holds.
-      for (const dir of new Set(files.map(({ dest }) => parentOf(environment, dest)))) {
-        options.signal?.throwIfAborted();
-        await environment.mkdir(dir, { parents: true });
-      }
-      // Copy with bounded concurrency. Serially, every file cost a full round trip, so on a
-      // remote environment a directory of any size was seconds of pure latency; the cap keeps a
-      // large tree from opening an unbounded number of writes at once.
-      await inParallel(files, HOST_DIR_CONCURRENCY, async ({ relative, dest }) => {
-        options.signal?.throwIfAborted();
-        await environment.writeBytes(dest, await reader.readFile(`${entry.src}/${relative}`));
-      });
       return;
     }
     case "git_repo": {
@@ -158,7 +132,7 @@ async function materializeEntry(
       if (entry.depth !== 0) argv.push("--depth", String(entry.depth ?? 1));
       if (entry.ref !== undefined) argv.push("--branch", entry.ref);
       argv.push("--", entry.repo, target);
-      const result = await environment.run(argv, {
+      const result = await environment.commands.run(argv, {
         ...(options.gitTimeoutMs !== undefined ? { timeoutMs: options.gitTimeoutMs } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       });

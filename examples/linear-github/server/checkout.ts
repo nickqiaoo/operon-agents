@@ -31,7 +31,7 @@ export interface WorkspaceMarker {
 
 async function exists(environment: Environment, path: string): Promise<boolean> {
   try {
-    await environment.fileInfo(path);
+    await environment.files.getInfo(path);
     return true;
   } catch {
     return false;
@@ -39,7 +39,7 @@ async function exists(environment: Environment, path: string): Promise<boolean> 
 }
 
 async function git(environment: Environment, args: readonly string[], options: { cwd: string; env?: Record<string, string> }): Promise<string> {
-  const result = await environment.run(["git", ...args], { ...options, timeoutMs: 10 * 60_000 });
+  const result = await environment.commands.run(["git", ...args], { ...options, timeoutMs: 10 * 60_000 });
   if (result.exitCode !== 0) {
     throw new Error(`git ${args[0]} failed (exit ${result.exitCode ?? "?"}): ${result.stderr.trim() || result.stdout.trim()}`);
   }
@@ -55,13 +55,13 @@ export async function ensureCheckout(environment: Environment, root: string, ses
   const join = environment.pathClass() === "posix" ? posix.join : (await import("node:path")).join;
   const repoDir = join(root, CHECKOUT_DIR);
   if (!(await exists(environment, join(repoDir, ".git")))) {
-    await environment.mkdir(root, { parents: true });
+    await environment.files.makeDir(root);
     const base = await github.defaultBranch(repo);
     await git(environment, ["clone", "--quiet", "--branch", base, github.cloneUrl(repo), repoDir], { cwd: root, env: await github.gitEnv() });
     await git(environment, ["config", "user.name", GIT_USER], { cwd: repoDir });
     await git(environment, ["config", "user.email", GIT_EMAIL], { cwd: repoDir });
     const marker: WorkspaceMarker = { sessionId, repo: formatRepo(repo), base };
-    await environment.writeBytes(join(root, MARKER_FILE), Buffer.from(JSON.stringify(marker, null, 2), "utf8"));
+    await environment.files.write(join(root, MARKER_FILE), Buffer.from(JSON.stringify(marker, null, 2), "utf8"));
   }
   return environment.withCwd(repoDir);
 }
@@ -75,7 +75,7 @@ export function openLocalCheckout(root: string, sessionId: string, repo: RepoRef
 export async function readMarker(environment: Environment): Promise<WorkspaceMarker> {
   const p = environment.pathClass() === "posix" ? posix : (await import("node:path")).default;
   const path = p.join(p.dirname(environment.getcwd()), MARKER_FILE);
-  const raw = JSON.parse((await environment.readBytes(path)).toString("utf8")) as Partial<WorkspaceMarker>;
+  const raw = JSON.parse((await environment.files.read(path)).toString("utf8")) as Partial<WorkspaceMarker>;
   if (typeof raw.sessionId !== "string" || typeof raw.repo !== "string" || typeof raw.base !== "string") {
     throw new Error(`${path} is not a workspace marker`);
   }

@@ -76,7 +76,7 @@ async function execute(args: GlobInput, root: string, environment: Environment, 
   // Probe the root so a missing/non-dir root reports clearly. rg would otherwise emit a
   // terse stderr; this single fileInfo gives the same ENOENT/ENOTDIR message Read/Grep do.
   try {
-    const info = await environment.fileInfo(root);
+    const info = await environment.files.getInfo(root);
     if (info.kind !== "dir") return err(`${root} is not a directory`);
   } catch (error) {
     const code = errorCode(error);

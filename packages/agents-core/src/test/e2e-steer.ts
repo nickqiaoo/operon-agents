@@ -193,14 +193,48 @@ async function testFollowUpDrain(environment: LocalEnvironment): Promise<void> {
     if (e.type === "turn.started") turnStarts += 1;
   });
 
-  const cap = oneShotAfterStepCapability({ kind: "background_done", taskId: "bg9", summary: "BG SUMMARY" }, "ignored-body");
+  const cap = oneShotAfterStepCapability({ kind: "extension", extensionId: "cron", channel: "follow_up" }, "CRON FIRED");
   const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
   const result = await runner.run(agent, "go");
   faux.unregister();
 
   check("follow-up: a post-turn steer forced exactly one more turn (2 total)", turnStarts === 2);
-  check("follow-up: steered summary drained in turn 2", userTexts(result.messages).includes("BG SUMMARY"));
+  check("follow-up: steered summary drained in turn 2", userTexts(result.messages).includes("CRON FIRED"));
   check("follow-up: final output is turn 2's response", result.output.includes("after bg"));
+}
+
+/**
+ * A background settle is not a follow-up: it reaches the model at the next step boundary of the
+ * turn in flight (Claude Code's `next` priority), so one landing during the terminal step is
+ * answered within the same turn rather than forcing a new one.
+ */
+async function testBackgroundSettleInTurn(environment: LocalEnvironment): Promise<void> {
+  const faux = registerFauxProvider();
+  faux.setResponses([
+    fauxAssistantMessage("first response", { stopReason: "stop" }), // terminal step; afterStep settles a task
+    fauxAssistantMessage("after bg: done", { stopReason: "stop" }), // same turn, next step
+    fauxAssistantMessage("should not happen", { stopReason: "stop" }),
+  ]);
+  const model = faux.getChatModel()!;
+  const agent = defineAgent({ name: "a", model, instructions: "x" });
+
+  const events = new ListenerSink();
+  let turnStarts = 0;
+  const channels: string[] = [];
+  events.subscribe((e: AgentEvent) => {
+    if (e.type === "turn.started") turnStarts += 1;
+    if (e.type === "steer.queued") channels.push(e.channel);
+  });
+
+  const cap = oneShotAfterStepCapability({ kind: "background_done", taskId: "bg9", summary: "BG SUMMARY" }, "ignored-body");
+  const runner = testRunner({ environment, events, capabilities: [cap], permission: { mode: "yolo" }, maxTurns: 10 });
+  const result = await runner.run(agent, "go");
+  faux.unregister();
+
+  check("background settle: queued on the steering channel", channels.length === 1 && channels[0] === "steering");
+  check("background settle: answered within the same turn (1 total)", turnStarts === 1);
+  check("background settle: summary reached the model", userTexts(result.messages).includes("BG SUMMARY"));
+  check("background settle: final output responds to it", result.output.includes("after bg"));
 }
 
 async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<void> {
@@ -240,7 +274,7 @@ async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<vo
       afterStep: async () => {
         if (!fired) {
           fired = true;
-          receipts.bg = bus?.steer("bg body", { kind: "background_done", taskId: "bg1", summary: "BG DONE" }).steerId;
+          receipts.bg = bus?.steer("cron body", { kind: "extension", extensionId: "cron", channel: "follow_up" }).steerId;
         }
         return undefined;
       },
@@ -266,11 +300,11 @@ async function testSteerIdCorrelation(environment: LocalEnvironment): Promise<vo
   const queuedBg = queued.find((q) => q.channel === "follow_up");
   check("correlation: mid-run enqueues emit steer.queued for both channels", queued.length === 2 && queuedUser !== undefined && queuedBg !== undefined);
   check("correlation: steer.queued ids match the producers' receipts", queuedUser?.steerId === receipts.user && queuedBg?.steerId === receipts.bg);
-  check("correlation: steer.queued carries the mapped PromptOrigin kind", queuedUser?.kind === "user" && queuedBg?.kind === "background_task");
+  check("correlation: steer.queued carries the mapped PromptOrigin kind", queuedUser?.kind === "user" && queuedBg?.kind === "extension");
   const consumedUser = consumed.find((c) => c.steerId === receipts.user);
   const consumedBg = consumed.find((c) => c.steerId === receipts.bg);
   check("correlation: consuming message.appended carries origin.steerId (steering)", consumedUser?.kind === "user");
-  check("correlation: consuming message.appended carries origin.steerId (follow-up)", consumedBg?.kind === "background_task");
+  check("correlation: consuming message.appended carries origin.steerId (follow-up)", consumedBg?.kind === "extension");
 }
 
 function testOriginFraming(): void {
@@ -321,6 +355,7 @@ async function main(): Promise<void> {
   await testMidTurnSteer(environment);
   await testFinalStepSteerStaysInTurn(environment);
   await testFollowUpDrain(environment);
+  await testBackgroundSettleInTurn(environment);
   await testSteerIdCorrelation(environment);
   testOriginFraming();
   testIdleGate();

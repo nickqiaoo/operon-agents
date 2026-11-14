@@ -29,6 +29,16 @@ export class NullEnvironment extends BaseEnvironment {
     );
   }
 
+  override readonly commands = {
+    run: async (): Promise<RunCommandResult> => { throw this.disabled('run'); },
+    start: async (): Promise<never> => { throw this.disabled('start'); },
+    list: async (): Promise<never> => { throw this.disabled('list'); },
+    connect: async (): Promise<never> => { throw this.disabled('connect'); },
+    kill: async (): Promise<never> => { throw this.disabled('kill'); },
+    sendStdin: async (): Promise<never> => { throw this.disabled('sendStdin'); },
+    closeStdin: async (): Promise<never> => { throw this.disabled('closeStdin'); },
+  };
+
   // Path operations — pure computation, no I/O, safe to answer.
   pathClass(): "posix" | "win32" {
     return "posix";

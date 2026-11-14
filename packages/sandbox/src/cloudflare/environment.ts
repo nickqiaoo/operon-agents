@@ -1,3 +1,5 @@
+import { commandLine, runViaHandle, wrapForTaskLog, codedError as processError } from 'operon-agents-core';
+import type { Command, CommandHandle, CommandStartOptions, CommandConnectOptions, EnvironmentCommands, ProcessInfo } from 'operon-agents-core';
 import { posix } from "node:path";
 import type {
   DirEntry,
@@ -110,19 +112,65 @@ export class CloudflareEnvironment extends SandboxEnvironment {
    * asked for cancellation, incremental output or an output cap takes the process path. The
    * caller states intent once; which mechanism delivers it stays in here.
    */
-  override async run(argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
-    if (options.signal?.aborted) {
-      return { stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: true };
+  private live = new Map<number, { id: string; info: ProcessInfo }>();
+  private nextPid = -1;
+  override readonly commands: EnvironmentCommands = {
+    run: (command, options = {}) => {
+      if (options.stdin !== undefined) return Promise.reject(new Error('CloudflareEnvironment: this transport has no stdin channel'));
+      if (!options.signal && !options.onOutput && options.maxOutputBytes === undefined) return this.runViaExecute(typeof command === 'string' ? [this.osInfo.shellPath, '-c', command] : command, options);
+      return runViaHandle((cmd, opts) => this.startCommand(cmd, opts), command, { ...options, timeoutMs: options.timeoutMs ?? this.defaultTimeoutMs });
+    },
+    start: (cmd, opts) => this.startCommand(cmd, opts ?? {}),
+    list: async () => [...this.live.values()].map(entry => entry.info),
+    connect: async (pid, opts) => {
+      const entry = this.live.get(pid); if (!entry) throw processError(`No such process: ${pid}`, 'ESRCH');
+      return this.connectProcess(pid, entry.id, opts ?? {});
+    },
+    kill: async pid => { const entry = this.live.get(pid); return entry ? this.kill(entry.id) : false; },
+    sendStdin: async () => { throw new Error('CloudflareEnvironment: stdin unavailable'); },
+    closeStdin: async () => { throw new Error('CloudflareEnvironment: stdin unavailable'); },
+  };
+  protected override async startCommand(command: Command, options: CommandStartOptions): Promise<CommandHandle> {
+    if (options.stdin) throw new Error('CloudflareEnvironment: this transport has no stdin channel');
+    if (options.outputFile) {
+      await this.files.write(options.outputFile, '');
+      await this.files.remove(`${options.outputFile}.exit`);
+      if (options.stderrFile) await this.files.write(options.stderrFile, '');
+      command = wrapForTaskLog(commandLine(command), options.outputFile, options.stderrFile, true);
     }
-    // The route transport has no stdin channel at all — neither `commands.execute` nor
-    // `processes.startProcess` accepts one. Refuse rather than drop it: a command fed no
-    // input would see EOF and "succeed" on empty data.
-    if (options.stdin !== undefined) {
-      throw new Error("CloudflareEnvironment: this transport has no stdin channel, so run({ stdin }) cannot be honored.");
-    }
-    const needsHandle =
-      options.onOutput !== undefined || options.signal !== undefined || options.maxOutputBytes !== undefined;
-    return needsHandle ? await this.runViaProcess(argv, options) : await this.runViaExecute(argv, options);
+    const started = await this.client.processes.startProcess(commandLine(command), this.sessionId, { cwd: options.cwd === undefined ? this.cwd : this.resolve(options.cwd), env: options.env });
+    const pid = started.pid ?? this.nextPid--;
+    this.live.set(pid, { id: started.processId, info: { pid, cmd: commandLine(command), args: [], envs: options.env ?? {}, cwd: options.cwd ?? this.cwd } });
+    return this.connectProcess(pid, started.processId, options);
+  }
+  private async connectProcess(pid: number, id: string, options: CommandConnectOptions): Promise<CommandHandle> {
+    let stdout = '', stderr = '', exitCode: number | undefined;
+    let disconnected = false, stopped = false;
+    const controller = new AbortController();
+    const stream = await this.client.processes.streamProcessLogs(id);
+    const done = (async () => {
+      try {
+        for await (const event of readLogEvents(stream, controller.signal)) {
+          if (event.type === 'exit') exitCode = event.exitCode;
+          else if (!disconnected && (event.type === 'stdout' || event.type === 'stderr')) {
+            const data = event.data ?? '';
+            if (event.type === 'stdout') { if (options.retainOutput !== false) stdout += data; options.onStdout?.(data); }
+            else { if (options.retainOutput !== false) stderr += data; options.onStderr?.(data); }
+          } else if (event.type === 'error' && !stopped) throw new Error(event.data ?? 'Cloudflare command stream failed');
+        }
+        if (exitCode === undefined && !stopped && !disconnected) exitCode = await this.exitCodeOf(id);
+        return { stdout, stderr, exitCode: stopped ? undefined : exitCode };
+      } finally { if (!disconnected) this.live.delete(pid); }
+    })();
+    done.catch(() => {});
+    return {
+      pid, get stdout() { return stdout; }, get stderr() { return stderr; }, get exitCode() { return exitCode; },
+      wait: () => done,
+      kill: async () => { stopped = true; return this.kill(id); },
+      disconnect: async () => { disconnected = true; controller.abort(); await done; },
+      sendStdin: async () => { throw new Error('CloudflareEnvironment: stdin unavailable'); },
+      closeStdin: async () => { throw new Error('CloudflareEnvironment: stdin unavailable'); },
+    };
   }
 
   /** Cheap path: one request, native timeout, no cancellation. */
@@ -142,81 +190,6 @@ export class CloudflareEnvironment extends SandboxEnvironment {
       truncated: false,
       terminated: false,
     };
-  }
-
-  /** Cancellable path: a processId to kill, plus an SSE log stream for incremental output. */
-  private async runViaProcess(argv: readonly string[], options: RunCommandOptions): Promise<RunCommandResult> {
-    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
-    const started = await this.client.processes.startProcess(shellJoin(argv), this.sessionId, {
-      cwd: options.cwd !== undefined ? this.resolve(options.cwd) : this.cwd,
-      ...(options.env !== undefined ? { env: options.env } : {}),
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    });
-    const processId = started.processId;
-
-    const cap = options.maxOutputBytes ?? Number.POSITIVE_INFINITY;
-    let out = "";
-    let err = "";
-    let bytes = 0;
-    let truncated = false;
-    let exitCode: number | undefined;
-    let timedOut = false;
-    let terminated = false;
-    let stopping: Promise<void> | undefined;
-
-    const stop = (): Promise<void> => (stopping ??= this.kill(processId).then((ok) => void (terminated = ok)));
-
-    const collect = (stream: "stdout" | "stderr", data: string): void => {
-      options.onOutput?.({ stream, data });
-      if (truncated) return;
-      const room = cap - bytes;
-      if (data.length >= room) {
-        const kept = data.slice(0, Math.max(0, room));
-        if (stream === "stdout") out += kept;
-        else err += kept;
-        bytes = cap;
-        truncated = true;
-        // Cap reached; stop the command rather than let it keep producing output nobody reads.
-        void stop();
-        return;
-      }
-      bytes += data.length;
-      if (stream === "stdout") out += data;
-      else err += data;
-    };
-
-    const onAbort = (): void => void stop();
-    options.signal?.addEventListener("abort", onAbort);
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
-      timedOut = true;
-      void stop();
-    }, timeoutMs);
-
-    try {
-      const stream = await this.client.processes.streamProcessLogs(processId);
-      for await (const event of readLogEvents(stream)) {
-        if (event.type === "stdout" || event.type === "stderr") collect(event.type, event.data ?? "");
-        else if (event.type === "exit") exitCode = event.exitCode;
-      }
-      // A kill makes the log stream end at once, so without joining the in-flight stop here
-      // we would read `terminated` before it resolved and under-report every termination.
-      await stopping;
-      // The stream can end without an `exit` event (killed, or the transport dropped it);
-      // ask the process registry rather than assume success.
-      if (exitCode === undefined && !terminated && !timedOut) exitCode = await this.exitCodeOf(processId);
-      return {
-        stdout: out,
-        stderr: err,
-        // A killed or timed-out command has no meaningful completion status.
-        exitCode: timedOut || terminated ? undefined : exitCode,
-        timedOut,
-        truncated,
-        terminated,
-      };
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-    }
   }
 
   /** Real termination, reported honestly: `false` means the command may still be running. */
@@ -308,10 +281,13 @@ export class CloudflareEnvironment extends SandboxEnvironment {
 }
 
 /** Decode an SSE byte stream into the `LogEvent`s the process log endpoint emits. */
-async function* readLogEvents(stream: ReadableStream<Uint8Array>): AsyncGenerator<CloudflareLogEvent> {
+async function* readLogEvents(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<CloudflareLogEvent> {
   const decoder = new TextDecoder();
   let buffer = "";
   const reader = stream.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', cancel);
+  if (signal?.aborted) cancel();
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -329,6 +305,7 @@ async function* readLogEvents(stream: ReadableStream<Uint8Array>): AsyncGenerato
     const last = parseSseFrame(buffer);
     if (last !== undefined) yield last;
   } finally {
+    signal?.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
 }

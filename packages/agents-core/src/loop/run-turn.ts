@@ -262,8 +262,10 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       // pi `getSteeringMessages` semantics: a user steer that landed DURING this terminal step
       // must be answered in THIS turn, not deferred to a fresh one. The top-of-loop drain only
       // runs before a step, so re-drain here before breaking — if anything queued, inject it and
-      // loop for one more step. Follow-ups (cron/background) are a separate channel the Runner
-      // drains at the turn boundary, so they intentionally do NOT keep this turn alive.
+      // loop for one more step. A background settle rides the same channel, so one that landed
+      // during the terminal step is answered here too. Follow-ups (cron, a user's queued
+      // follow-up) are a separate channel the Runner drains at the turn boundary, so they
+      // intentionally do NOT keep this turn alive.
       if (input.drainSteering) {
         const late = await input.drainSteering();
         if (late.length > 0) {

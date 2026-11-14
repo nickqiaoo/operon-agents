@@ -33,7 +33,7 @@ export async function readWindowViaShell(
   // The path goes through `$0` rather than string interpolation, so no quoting scheme has to
   // be trusted with a filename containing quotes, spaces or newlines. The numbers are ours.
   const result = await environment
-    .run(["sh", "-c", `tail -c +${String(offset + 1)} -- "$0"${cut} | base64`, absPath])
+    .commands.run(["sh", "-c", `tail -c +${String(offset + 1)} -- "$0"${cut} | base64`, absPath])
     .catch(() => undefined);
   if (result === undefined || result.exitCode !== 0) return undefined;
   // base64(1) wraps its output; strip every kind of whitespace before decoding.

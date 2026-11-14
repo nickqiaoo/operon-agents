@@ -24,7 +24,7 @@
  *
  * A long program (polling, many slow tool calls) need not hold the turn. Started with
  * `run_in_background`, or moved there while running (the session's `detachTool`), it becomes a
- * background task the model reads with `BackgroundOutput`; its console lines, each nested call's
+ * background task whose log the model `Read`s; its console lines, each nested call's
  * outcome and the final result go to a log file on the environment, the way a background command's
  * bytes do. A program in the background has no turn to pause, so an approval nobody can give
  * fails inside it instead — the same as with no journal.
@@ -242,7 +242,7 @@ export function createRunCodeTool(options: RunCodeToolOptions): Tool {
               "",
               `output_log: ${log!.path}`,
               "",
-              `next_step: A completion notice arrives automatically. Read ${log!.path} for the program's console output so far and, once it ends, its result; BackgroundOutput(task_id="${taskId}") reports its status.`,
+              `next_step: A completion notice arrives automatically. Read ${log!.path} for the program's console output so far and, once it ends, its result. Do not poll.`,
             ].join("\n"),
           },
         ],

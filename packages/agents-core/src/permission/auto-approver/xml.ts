@@ -20,6 +20,13 @@ export function parseXmlReason(text: string): string | null {
   return matches[0]![1]!.trim();
 }
 
+/** The matched BLOCK rule's name, from `<category>` (letters, digits and spaces by contract). */
+export function parseXmlCategory(text: string): string | null {
+  const match = /<category>([\s\S]*?)<\/category>/.exec(stripThinking(text));
+  const category = match?.[1]?.trim();
+  return category ? category : null;
+}
+
 export function parseXmlThinking(text: string): string | null {
   const match = /<thinking>([\s\S]*?)<\/thinking>/.exec(text);
   return match ? match[1]!.trim() : null;

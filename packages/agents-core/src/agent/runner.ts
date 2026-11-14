@@ -623,7 +623,7 @@ export class Runner<TContext = unknown> {
     assertGraphUnambiguous(rootAgent);
     // A normal post-crash continuation is a fresh prompt (for example "continue"), not the
     // HITL-specific Runner.resume path. Reconcile durable task ghosts before request recovery
-    // inspects them so BackgroundOutput is given the truthful terminal `lost` status.
+    // inspects them so the recovery note states the truthful terminal `lost` status.
     await session.background?.reconcileSubagents() ?? [];
     if (session.store && (await session.store.getState(INTERRUPTION_STATE_KEY)) !== null) {
       throw new SessionInterruptedError(session.id);
@@ -1155,7 +1155,7 @@ class Engine<TContext> {
 
       // Terminal stop reasons.
       if (r.stopReason === "end_turn") {
-        // A follow-up that landed during this turn (a background task finished, a cron fired)
+        // A follow-up that landed during this turn (a cron fired, an extension's follow-up)
         // makes the agent run one more turn to consume it instead of stopping — the boundary
         // drain above injects it. A user's follow-up ends this run instead, and the idle wake
         // starts its own. User steers can't reach here: runTurn keeps them in-turn.

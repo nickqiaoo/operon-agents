@@ -131,7 +131,7 @@ function tryUrlPath(remoteUrl: string): string | null {
  * without pretending it stopped anything).
  */
 async function runGit(environment: Environment, cwd: string, args: readonly string[]): Promise<string | null> {
-  const result = await environment.run(["git", "-C", cwd, ...args], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
+  const result = await environment.commands.run(["git", "-C", cwd, ...args], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined);
   if (result === undefined || result.timedOut || result.exitCode !== 0) return null;
   return result.stdout.trim();
 }

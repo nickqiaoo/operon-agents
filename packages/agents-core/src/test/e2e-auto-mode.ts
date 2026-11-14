@@ -2,15 +2,37 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type ToolCall } from "./faux.ts";
-import { bashTool, ConversationContext, defineModel, LocalEnvironment, PermissionManager, writeTool } from "../index.ts";
+import { AUTO_MODE_DENIAL_LIMITS, bashTool, ConversationContext, defineModel, LocalEnvironment, PermissionManager, permissionDenialOf, writeTool } from "../index.ts";
 import { runTurn } from "../internal.ts";
-import type { AutoApprover, Logger, PermissionRule, Responder, ToolResultMessage } from "../index.ts";
+import type { AutoApprover, AutoApprovalVerdict, Logger, PermissionRule, ResolvedToolExecutionHookContext, Responder, ToolResultMessage } from "../index.ts";
 
 // A stub judge that records how many times it was consulted, so each scenario can assert
 // whether the static chain short-circuited (judge skipped) or actually reached the judge.
-function judge(decision: "allow" | "escalate"): { approver: AutoApprover; calls: () => number } {
+function judge(decision: "allow" | "escalate" | "block"): { approver: AutoApprover; calls: () => number } {
   let n = 0;
-  return { approver: { classify: async () => ((n += 1), { decision }) }, calls: () => n };
+  const verdict: AutoApprovalVerdict =
+    decision === "block" ? { decision, reason: "[Irreversible Local Destruction] deletes files", category: "Irreversible Local Destruction" } : { decision };
+  return { approver: { classify: async () => ((n += 1), verdict) }, calls: () => n };
+}
+
+/** A responder that counts the approval prompts it gets and answers them all the same way. */
+function countingResponder(decision: "approved" | "rejected"): { responder: Responder; prompts: () => number } {
+  let n = 0;
+  return { responder: { requestApproval: async () => ((n += 1), { decision }) }, prompts: () => n };
+}
+
+/** An authorize context for `pm.authorize` directly — for scenarios that drive many calls. */
+function authCtx(toolName: string, args: unknown): ResolvedToolExecutionHookContext {
+  return {
+    turnId: "t",
+    stepNumber: 1,
+    signal: new AbortController().signal,
+    model: undefined as never,
+    toolCall: fauxToolCall(toolName, args as Record<string, unknown>),
+    tool: undefined,
+    args,
+    plan: { approvalRule: toolName, run: async () => ({ content: [] }) },
+  };
 }
 
 const reject = (feedback: string): Responder => ({ requestApproval: async () => ({ decision: "rejected", feedback }) });
@@ -19,7 +41,7 @@ async function runScenario(
   opts: { rules?: PermissionRule[]; mode?: "manual" | "workspace" | "yolo" | "auto"; responder?: Responder; gitInit?: boolean; autoApprover?: AutoApprover; logger?: Logger },
   call: ToolCall,
   tools = [bashTool, writeTool],
-): Promise<{ text: string; isError: boolean }> {
+): Promise<{ text: string; isError: boolean; details?: unknown }> {
   const dir = mkdtempSync(join(tmpdir(), "agent-fw-auto-"));
   const { gitInit, autoApprover, ...pmOpts } = opts;
   if (gitInit) mkdirSync(join(dir, ".git")); // a bare `.git` dir marks the work tree
@@ -48,7 +70,7 @@ async function runScenario(
   faux.unregister();
   rmSync(dir, { recursive: true, force: true });
   const tr = messages.find((m): m is ToolResultMessage => m.role === "toolResult");
-  return { text: tr?.content.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "", isError: tr?.isError ?? true };
+  return { text: tr?.content.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "", isError: tr?.isError ?? true, details: tr?.details };
 }
 
 const bash = (cmd: string): ToolCall => fauxToolCall("Bash", { command: cmd });
@@ -108,6 +130,46 @@ async function main(): Promise<void> {
     { mode: "auto", autoApprover: boomJudge, responder: reject("human-after-boom"), logger: captureLogger },
     bash(NEEDS_JUDGE),
   );
+  // BLOCK → refused with the reason, straight back to the model: no human is asked.
+  const jBlock = judge("block");
+  const blockPrompts = countingResponder("approved");
+  const blocked = await runScenario({ mode: "auto", autoApprover: jBlock.approver, responder: blockPrompts.responder }, bash(NEEDS_JUDGE));
+
+  // DENIAL LIMIT: blocks go back to the model until the 3rd in a row, which asks a human
+  // instead; both counts then start over. A call that goes ahead resets the consecutive count.
+  const limitJudge = judge("block");
+  const limitPrompts = countingResponder("rejected");
+  const limitPm = new PermissionManager({ mode: "auto", autoApprover: limitJudge.approver, responder: limitPrompts.responder });
+  const risky = () => limitPm.authorize(authCtx("Bash", { command: "rm -rf build" }));
+  const r1 = await risky();
+  const r2 = await risky();
+  const promptsBefore3rd = limitPrompts.prompts();
+  const r3 = await risky(); // 3rd consecutive → human (who rejects)
+  const r4 = await risky(); // counts restarted → back to the model
+  const afterRestart = limitPrompts.prompts();
+  await risky(); // 2nd consecutive since the restart
+  await limitPm.authorize(authCtx("Read", { path: "a" })); // goes ahead → consecutive count resets
+  const r7 = await risky();
+  const r8 = await risky();
+  const promptsAfterReset = limitPrompts.prompts();
+  const blockedReason = (r: Awaited<ReturnType<typeof risky>>) => r?.block === true && permissionDenialOf(r.blockDetails) === "automode-blocked";
+
+  // TOTAL LIMIT: blocks broken up by calls that go ahead never hit the consecutive limit, but
+  // the 20th block in all asks a human.
+  const totalJudge = judge("block");
+  const totalPrompts = countingResponder("approved");
+  const totalPm = new PermissionManager({ mode: "auto", autoApprover: totalJudge.approver, responder: totalPrompts.responder });
+  const promptsAt: number[] = [];
+  for (let i = 1; i <= AUTO_MODE_DENIAL_LIMITS.maxTotal; i++) {
+    await totalPm.authorize(authCtx("Bash", { command: `rm -rf build${i}` }));
+    promptsAt.push(totalPrompts.prompts());
+    await totalPm.authorize(authCtx("Read", { path: "a" }));
+  }
+
+  // DENIAL KINDS on the refused result: a deny rule, a person's "no".
+  const ruleDenied = await runScenario({ mode: "manual", rules: [{ decision: "deny", scope: "user", pattern: "Bash" }] }, bash("echo hi"));
+  const userRejected = await runScenario({ mode: "manual", responder: reject("no thanks") }, bash(NEEDS_JUDGE));
+
   const allowEntry = logged.find((e) => e.message === "auto-approval judge: allow");
   const errorEntry = logged.find((e) => e.message.includes("judge threw"));
 
@@ -120,6 +182,26 @@ async function main(): Promise<void> {
     ["safety-floor (.git) ask reaches judge → allow runs", !floor.isError && floor.text.includes("bytes") && jFloor.calls() === 1],
     ["judge verdict logged with toolName + duration", allowEntry !== undefined && allowEntry.level === "debug" && allowEntry.fields?.["toolName"] === "Bash" && typeof allowEntry.fields?.["durationMs"] === "number"],
     ["thrown judge logs a warn with the error and still escalates to the human", errorEntry !== undefined && errorEntry.level === "warn" && errorEntry.fields?.["error"] === "boom" && thrown.isError && thrown.text.includes("human-after-boom")],
+    [
+      "judge block → refused with reason + guidance, recorded as automode-blocked, no human asked",
+      blocked.isError && blocked.text.includes("denied by the auto mode safety classifier") && blocked.text.includes("[Irreversible Local Destruction] deletes files") &&
+        blocked.text.includes("Do not try to work around") && permissionDenialOf(blocked.details) === "automode-blocked" &&
+        (blocked.details as { category?: string }).category === "Irreversible Local Destruction" && blockPrompts.prompts() === 0 && jBlock.calls() === 1,
+    ],
+    [
+      "3rd consecutive block asks a human, counts restart, a call that goes ahead resets the run",
+      blockedReason(r1) && blockedReason(r2) && promptsBefore3rd === 0 && limitPrompts.prompts() >= 1 && r3?.block === true &&
+        permissionDenialOf(r3.blockDetails) === "rejected-by-user" && blockedReason(r4) && afterRestart === 1 &&
+        blockedReason(r7) && blockedReason(r8) && promptsAfterReset === 1,
+    ],
+    [
+      "20th block in all asks a human even with no consecutive run",
+      promptsAt.slice(0, AUTO_MODE_DENIAL_LIMITS.maxTotal - 1).every((n) => n === 0) && promptsAt.at(-1) === 1,
+    ],
+    [
+      "refusals record their kind: deny rule → blocked-by-permissions, person → rejected-by-user",
+      permissionDenialOf(ruleDenied.details) === "blocked-by-permissions" && permissionDenialOf(userRejected.details) === "rejected-by-user" && userRejected.text.includes("no thanks"),
+    ],
   ];
   const ok = checks.every(([, pass]) => pass);
   for (const [label, pass] of checks) console.log(pass ? "✅" : "❌", label);

@@ -45,7 +45,7 @@ export class CloudflareWorkspace implements SandboxWorkspace {
 
   static async open(options: CloudflareWorkspaceOptions): Promise<CloudflareWorkspace> {
     const workspace = new CloudflareWorkspace(options);
-    await workspace.environment.mkdir(workspace.root, { parents: true });
+    await workspace.environment.files.makeDir(workspace.root);
     if (options.prepare !== undefined) await options.prepare(workspace.environment);
     return workspace;
   }
@@ -81,7 +81,7 @@ export class CloudflareWorkspace implements SandboxWorkspace {
     // millisecond cannot collide onto one archive.
     this.snapshotSeq += 1;
     const archivePath = `${SNAPSHOT_DIR}/snap-${String(this.snapshotSeq)}.sqfs`;
-    await this.environment.mkdir(SNAPSHOT_DIR, { parents: true });
+    await this.environment.files.makeDir(SNAPSHOT_DIR);
     await backup.createArchive(this.root, archivePath, this.id, { gitignore: false });
     return archivePath;
   }

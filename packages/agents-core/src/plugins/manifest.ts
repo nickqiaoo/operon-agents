@@ -271,7 +271,7 @@ function isWithin(child: string, parent: string): boolean {
 
 async function isFile(environment: Environment, p: string): Promise<boolean> {
   try {
-    return (await environment.fileInfo(p)).kind === "file";
+    return (await environment.files.getInfo(p)).kind === "file";
   } catch {
     return false;
   }
@@ -279,7 +279,7 @@ async function isFile(environment: Environment, p: string): Promise<boolean> {
 
 async function isDir(environment: Environment, p: string): Promise<boolean> {
   try {
-    return (await environment.fileInfo(p)).kind === "dir";
+    return (await environment.files.getInfo(p)).kind === "dir";
   } catch {
     return false;
   }

@@ -221,7 +221,7 @@ happened (compacted messages included) in pages newest first. A peer delivery ca
 
 **A teammate and a delegation are different things.** A teammate is an independent session: its own store, permissions, and lifetime, addressable by name, wakeable by message. A delegation shares everything with its parent and reports through its tool result (or task notification). The two compose: a delegation holds the `Team` tool like any frame of its session, so delegated work can form a team of its own.
 
-**`send` never blocks.** There is no `wait` op, deliberately: a teammate answers by being woken, background work already has `BackgroundOutput(block)`, and a blocking op would introduce the one thing this design otherwise has none of — a way for two agents to deadlock.
+**`send` never blocks.** There is no `wait` op, deliberately: a teammate answers by being woken, background work reports its own completion, and a blocking op would introduce the one thing this design otherwise has none of — a way for two agents to deadlock.
 
 **Failures are explicit.** A `failed` receipt names its cause (`unknown_agent`, `ambiguous`, `not_visible`, `mailbox_full`, `quota_exceeded`, `unreachable`) so a model can tell "wrong name" from "you sent too much" and stop retrying what cannot succeed. A full mailbox rejects rather than dropping the oldest message.
 

@@ -1,3 +1,4 @@
+import type { FileData, FilesystemEvent, WatchHandle, WatchOptions, ProcessInfo, CommandConnectOptions, PtySize, PtyCreateOptions, SandboxInfo, SandboxMetrics } from 'operon-agents-core';
 /**
  * The slice of the E2B SDK this adapter uses, described structurally rather than imported.
  *
@@ -28,6 +29,7 @@ export interface E2BCommandHandle extends E2BCommandResult {
 }
 
 export interface E2BRunOpts {
+  retainOutput?: boolean;
   background?: boolean;
   cwd?: string;
   envs?: Record<string, string>;
@@ -41,17 +43,19 @@ export interface E2BRunOpts {
 }
 
 export interface E2BCommandsApi {
+  list?(): Promise<readonly ProcessInfo[]>;
+  connect?(pid: number, options?: CommandConnectOptions & { timeoutMs?: number }): Promise<E2BCommandHandle>;
   run(command: string, opts?: E2BRunOpts): Promise<E2BCommandResult | E2BCommandHandle>;
   /** Real SIGKILL by pid; resolves to whether a process was actually killed. */
   kill?(pid: number, opts?: { requestTimeoutMs?: number }): Promise<boolean>;
-  sendStdin?(pid: number, data: string, opts?: { requestTimeoutMs?: number }): Promise<void>;
+  sendStdin?(pid: number, data: string | Uint8Array, opts?: { requestTimeoutMs?: number }): Promise<void>;
   /** EOF on the command's stdin. */
   closeStdin?(pid: number, opts?: { requestTimeoutMs?: number }): Promise<void>;
 }
 
 /** `type` is only ever file or dir. A symlink is marked by `symlinkTarget` instead, and
  *  `list()` drops entries of any other kind altogether. */
-export type E2BFileType = "file" | "dir";
+export type E2BFileType = "file" | "dir" | "symlink";
 
 /** SDK `EntryInfo`, as returned by both `files.getInfo` and `files.list`. */
 export interface E2BEntryInfo {
@@ -63,17 +67,25 @@ export interface E2BEntryInfo {
   readonly modifiedTime?: Date;
   /** Present when the entry is a symlink. */
   readonly symlinkTarget?: string;
+  readonly mode?: number;
+  readonly permissions?: string;
+  readonly owner?: string;
+  readonly group?: string;
+  readonly metadata?: Record<string, string>;
 }
 
 export interface E2BFilesystemApi {
+  writeFiles?(files: { path: string; data: FileData }[]): Promise<unknown>;
+  rename?(oldPath: string, newPath: string): Promise<E2BEntryInfo>;
+  watchDir?(path: string, onEvent: (event: FilesystemEvent) => void, options?: WatchOptions & { timeoutMs?: number }): Promise<WatchHandle>;
   list(path: string, opts?: Record<string, unknown>): Promise<readonly E2BEntryInfo[]>;
-  read(path: string, opts?: { format?: "text" | "bytes" }): Promise<string | Uint8Array>;
+  read(path: string, opts?: { format?: "text" | "bytes" | "stream" }): Promise<string | Uint8Array | ReadableStream<Uint8Array>>;
   /**
    * `data` is deliberately NOT `Uint8Array`: the SDK takes `string | ArrayBuffer | Blob |
    * ReadableStream`, so declaring the wider type here would let a `Buffer` typecheck against
    * a signature that rejects it. See `E2BEnvironment.writeBytes` for the conversion.
    */
-  write(path: string, data: string | ArrayBuffer, opts?: Record<string, unknown>): Promise<unknown>;
+  write(path: string, data: FileData, opts?: Record<string, unknown>): Promise<unknown>;
   /** Creates missing parents too. `false` = the path already existed (the SDK maps AlreadyExists). */
   makeDir?(path: string): Promise<boolean>;
   /** One envd stat RPC. Rejects with `FileNotFoundError` for a missing path. */
@@ -82,8 +94,23 @@ export interface E2BFilesystemApi {
   exists?(path: string): Promise<boolean>;
 }
 
+export interface E2BPtyApi {
+  create(options: PtySize & { onData: (data: Uint8Array) => void; cwd?: string; envs?: Record<string, string>; user?: string; timeoutMs?: number }): Promise<E2BCommandHandle>;
+  connect(pid: number, options?: { onData?: (data: Uint8Array) => void; timeoutMs?: number }): Promise<E2BCommandHandle>;
+  sendInput(pid: number, data: Uint8Array): Promise<void>;
+  resize(pid: number, size: PtySize): Promise<void>;
+  kill(pid: number): Promise<boolean>;
+}
 export interface E2BSandbox {
+  readonly pty?: E2BPtyApi;
   readonly sandboxId: string;
+  isRunning?(): Promise<boolean>;
+  getInfo?(): Promise<Omit<SandboxInfo, "id"> & { sandboxId: string }>;
+  getMetrics?(): Promise<SandboxMetrics[]>;
+  setTimeout?(timeoutMs: number): Promise<void>;
+  uploadUrl?(path?: string): Promise<string>;
+  downloadUrl?(path: string): Promise<string>;
+  fork?(options?: { count?: number }): Promise<(E2BSandbox | Error)[]>;
   readonly commands: E2BCommandsApi;
   readonly files: E2BFilesystemApi;
   /** Public URL for a port exposed inside the sandbox. */

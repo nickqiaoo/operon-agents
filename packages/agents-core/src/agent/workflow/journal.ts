@@ -32,7 +32,7 @@ import type { AgentHookOptions } from "./types.ts";
  * resume strictly needs:
  *
  * - RESUME reads `started` / `result` by key, exactly as before.
- * - EVERYONE ELSE (the model via BackgroundOutput, a UI seeding its progress view, someone
+ * - EVERYONE ELSE (a host reading a run's progress, a UI seeding its progress view, someone
  *   asking why a run came back empty) reads them in append order as the run's story. That
  *   audience needs the labels a human recognises, the phases the script declared, its own
  *   narration, and — most of all — the failures, which used to be emitted to a live progress

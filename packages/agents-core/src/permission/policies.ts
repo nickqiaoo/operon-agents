@@ -31,7 +31,7 @@ export interface PermissionState {
 const USER_CONFIGURED_SCOPES = new Set<PermissionRuleScope>(["turn-override", "project", "user"]);
 
 const DEFAULT_APPROVE_TOOLS = new Set([
-  "Read", "Grep", "Glob", "SetTodoList", "TodoList", "BackgroundList", "BackgroundOutput",
+  "Read", "Grep", "Glob", "SetTodoList", "TodoList", "BackgroundList",
   "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
   "CronList", "WebSearch", "FetchURL", "Agent", "AskUserQuestion", "Skill",
   "GetGoal", "SetGoalBudget", "UpdateGoal",

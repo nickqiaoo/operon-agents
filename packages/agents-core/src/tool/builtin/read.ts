@@ -241,7 +241,7 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
   try {
     let info: FileInfo;
     try {
-      info = await environment.fileInfo(safePath);
+      info = await environment.files.getInfo(safePath);
     } catch (error) {
       if (isFileNotFoundError(error)) return err(`"${args.path}" does not exist.`);
       throw error;
@@ -256,8 +256,8 @@ async function execute(args: ReadInput, safePath: string, ctx: ToolRunContext): 
     // same bytes. Sniffing first meant two reads of every text file — free locally, but a second
     // round trip (on a sandbox, a whole extra command) on every remote Read. A large file still
     // gets the sniff alone first, so a binary is refused without pulling all of it across.
-    const whole = info.size <= MAX_UNPAGED_FILE_BYTES ? await environment.readBytes(safePath) : undefined;
-    const header = whole?.subarray(0, MEDIA_SNIFF_BYTES) ?? (await environment.readBytes(safePath, { length: MEDIA_SNIFF_BYTES }));
+    const whole = info.size <= MAX_UNPAGED_FILE_BYTES ? await environment.files.read(safePath) : undefined;
+    const header = whole?.subarray(0, MEDIA_SNIFF_BYTES) ?? (await environment.files.read(safePath, { range: { length: MEDIA_SNIFF_BYTES } }));
     const fileType = detectFileType(safePath, header);
     if (fileType.kind === "image") return readImageFile(args, safePath, info, environment, fileType.mimeType, whole);
     if (fileType.kind === "unknown") return err(notReadableFileOutput(args.path));
@@ -301,7 +301,7 @@ async function readImageFile(
     );
   }
 
-  const data = preloaded ?? (await environment.readBytes(safePath));
+  const data = preloaded ?? (await environment.files.read(safePath));
   // Downsample/re-encode oversized images before sending to the model (best
   // effort; the original bytes are returned unchanged on any failure).
   const compressed = await compressImageForModel(data, mimeType);

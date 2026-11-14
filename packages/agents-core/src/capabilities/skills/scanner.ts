@@ -37,7 +37,7 @@ type EntryKind = "file" | "dir" | "none";
 
 async function statKind(environment: Environment, p: string): Promise<EntryKind> {
   try {
-    const kind = (await environment.fileInfo(p)).kind;
+    const kind = (await environment.files.getInfo(p)).kind;
     if (kind === "dir") return "dir";
     if (kind === "file") return "file";
     return "none";
@@ -48,7 +48,7 @@ async function statKind(environment: Environment, p: string): Promise<EntryKind>
 
 async function listDir(environment: Environment, p: string): Promise<readonly DirEntry[]> {
   // Sorted so first-wins collision resolution across siblings is deterministic.
-  return (await environment.listDir(p)).toSorted((a, b) => a.name.localeCompare(b.name));
+  return (await environment.files.list(p)).toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 /**

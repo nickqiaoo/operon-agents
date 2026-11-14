@@ -1,3 +1,5 @@
+import { wrapForTaskLog, attachFileOutput } from './environment-output.ts';
+import { commandLine } from './environment-commands.ts';
 /**
  * Implementer-side base for Environment backends.
  *
@@ -9,7 +11,10 @@
  *   a native resolver (fs.realpath, SFTP realpath) override for exactness.
  */
 import type { Readable, Writable } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
+import { ProcessTable, commandArgv, runViaHandle } from './environment-commands.ts';
+import { EnvironmentFilesAdapter } from './environment-files.ts';
+import { PlainSandbox } from './environment-sandbox.ts';
+import type { Command, CommandStartOptions, CommandHandle, EnvironmentCommands, EnvironmentFiles, EnvironmentSandbox, EnvironmentPty } from './environment.ts';
 import { posix, win32 } from "node:path";
 import {
   type RunCommandResult,
@@ -32,9 +37,10 @@ const REALPATH_TIMEOUT_MS = 10_000;
  * its `SIG` prefix, splits exit across `exit`/`close`, and drops output emitted before a
  * consumer attaches. Each backend absorbs its own quirks here.
  *
- * No `pid`: nothing consumes one, and SSH could only ever have invented it.
+ * Native pid is optional; transports without one use a process-table identifier.
  */
 export interface SpawnedProcess {
+  readonly pid?: number;
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
@@ -71,63 +77,7 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * Read a stream, stopping accumulation at `maxBytes`. Chunks are handed to `onData` as they
- * arrive (that is what makes `RunCommandOptions.onOutput` incremental on streaming backends), and
- * accumulation stops at the cap while the stream is still drained, so the writer never
- * blocks on a full pipe.
- */
-async function readCapped(
-  stream: Readable,
-  maxBytes: number,
-  onData?: (data: string) => void,
-): Promise<{ text: string; truncated: boolean }> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  let truncated = false;
-  // Incremental delivery decodes through a StringDecoder: a multi-byte character split across
-  // two chunks would otherwise reach the caller as mojibake. The accumulated `text` below is
-  // immune (it concatenates buffers first), so only this path needs it.
-  const decoder = onData === undefined ? undefined : new StringDecoder("utf8");
-  try {
-    for await (const chunk of stream) {
-      const buf: Buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : (chunk as Buffer);
-      if (onData !== undefined && decoder !== undefined && !truncated) {
-        const decoded = decoder.write(buf);
-        if (decoded.length > 0) onData(decoded);
-      }
-      if (truncated) continue;
-      if (total + buf.length > maxBytes) {
-        const room = maxBytes - total;
-        if (room > 0) chunks.push(buf.subarray(0, room));
-        total = maxBytes;
-        truncated = true;
-        continue;
-      }
-      chunks.push(buf);
-      total += buf.length;
-    }
-  } catch {
-    // The stream died mid-read — most often because `run` destroyed it deliberately to stop a
-    // process that survived being killed. Whatever arrived before that is still the honest
-    // output; the caller learns how the command ended from exitCode/timedOut/terminated.
-  }
-  if (decoder !== undefined && onData !== undefined && !truncated) {
-    // Flush whatever bytes were left mid-character; replacement chars only if truly malformed.
-    const tail = decoder.end();
-    if (tail.length > 0) onData(tail);
-  }
-  return { text: Buffer.concat(chunks).toString("utf8"), truncated };
-}
-
-async function collectStream(stream: NodeJS.ReadableStream): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
+/** Shared process-table commands and compatibility primitives for backend implementers. */
 export abstract class BaseEnvironment implements Environment {
   abstract readonly name: string;
   abstract readonly osInfo: OsInfo;
@@ -196,80 +146,47 @@ export abstract class BaseEnvironment implements Environment {
    * Backends without a process handle override this wholesale; the throw below is the
    * contract's other half made loud rather than silent.
    */
-  async run(argv: readonly string[], options: RunCommandOptions = {}): Promise<RunCommandResult> {
-    const { timeoutMs, maxOutputBytes = Number.POSITIVE_INFINITY, signal, onOutput } = options;
-    if (signal?.aborted) {
-      return { stdout: "", stderr: "", exitCode: undefined, timedOut: false, truncated: false, terminated: true };
+  protected outputFiles = new Map<number, string>();
+  protected processTable = new ProcessTable();
+  readonly files: EnvironmentFiles = new EnvironmentFilesAdapter(this);
+  readonly sandbox: EnvironmentSandbox = new PlainSandbox();
+  readonly pty?: EnvironmentPty;
+  readonly commands: EnvironmentCommands = {
+    run: (command, options) => this.runCommand(command, options),
+    start: (command, options) => this.startCommand(command, options ?? {}),
+    list: () => this.processTable.list(),
+    connect: async (pid, options) => {
+      const handle = await this.processTable.connect(pid, options);
+      const path = this.outputFiles.get(pid);
+      return path ? attachFileOutput(handle, this.files, path, options?.onStdout, options?.retainOutput !== false) : handle;
+    },
+    kill: pid => this.processTable.kill(pid),
+    sendStdin: (pid, data) => this.processTable.sendStdin(pid, data),
+    closeStdin: pid => this.processTable.closeStdin(pid),
+  };
+  protected async startCommand(command: Command, options: CommandStartOptions): Promise<CommandHandle> {
+    if (!this.spawn) throw new Error(`${this.name}: backend must implement startCommand`);
+    const output = options.outputFile;
+    if (output) {
+      await this.files.write(output, '');
+      await this.files.remove(`${output}.exit`);
+      if (options.stderrFile) await this.files.write(options.stderrFile, '');
+      command = wrapForTaskLog(commandLine(command), output, options.stderrFile);
     }
-    if (this.spawn === undefined) {
-      throw new Error(`${this.name}: a backend with no process SPI must override run().`);
+    const proc = await this.spawn(this.withCwdArgv(commandArgv(command, this.osInfo), options.cwd), options.env);
+    const handle = await this.processTable.start(proc, command, options, () => this.escalatingKill(proc));
+    if (output) {
+      this.outputFiles.set(handle.pid, output);
+      void handle.wait().finally(() => this.outputFiles.delete(handle.pid)).catch(() => {});
+      return attachFileOutput(handle, this.files, output, options.onStdout, options.retainOutput !== false);
     }
-    const proc = await this.spawn(this.withCwdArgv(argv, options.cwd), options.env);
-
-    // A child that exits without draining stdin makes the write fail with EPIPE, and that
-    // failure arrives as an 'error' event rather than a throw — the try/catch below cannot see
-    // it. With no listener node treats it as an uncaught exception and takes the whole process
-    // down, which is how a hook script that ignores its stdin killed a CI run. The command's
-    // exit code and output are the real result, so a stdin that nobody read is not our error.
-    proc.stdin.on("error", () => {});
-    if (options.stdin !== undefined) proc.stdin.write(options.stdin);
-    try {
-      proc.stdin.end();
-    } catch {
-      /* already closed */
-    }
-
-    let timedOut = false;
-    let terminated = false;
-    let killing: Promise<void> | undefined;
-    // Resolves only when the kill escalation ran out of options — the process is still alive,
-    // so neither its pipes nor its exit status will ever arrive on their own. Without this
-    // escape hatch a timeout or an abort would hang forever on a process that ignores signals.
-    let abandonHung!: () => void;
-    const abandoned = new Promise<void>((resolve) => {
-      abandonHung = resolve;
-    });
-    const stop = (): Promise<void> =>
-      (killing ??= this.escalatingKill(proc).then((ok) => {
-        terminated = ok;
-        if (!ok) {
-          proc.stdout.destroy(); // ends the reads below (readCapped treats this as EOF)
-          proc.stderr.destroy();
-          abandonHung();
-        }
-      }));
-
-    const onAbort = (): void => void stop();
-    signal?.addEventListener("abort", onAbort);
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
-      timedOut = true;
-      void stop();
-    }, timeoutMs);
-
-    try {
-      const [out, err, code] = await Promise.all([
-        readCapped(proc.stdout, maxOutputBytes, onOutput && ((data) => onOutput({ stream: "stdout", data }))),
-        readCapped(proc.stderr, maxOutputBytes, onOutput && ((data) => onOutput({ stream: "stderr", data }))),
-        Promise.race([proc.wait().catch(() => undefined), abandoned.then(() => undefined)]),
-      ]);
-      // A cap hit means we stop reading, but the process may still be writing — stop it so
-      // it cannot keep producing output nobody will read.
-      if ((out.truncated || err.truncated) && proc.exitCode === null) await stop();
-      // A kill makes wait() settle immediately, so without joining the in-flight kill here we
-      // would read `terminated` before it resolved and under-report every termination.
-      await killing;
-      return {
-        stdout: out.text,
-        stderr: err.text,
-        exitCode: timedOut ? undefined : code,
-        timedOut,
-        truncated: out.truncated || err.truncated,
-        terminated,
-      };
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-    }
+    return handle;
+  }
+  protected runCommand(command: Command, options?: RunCommandOptions): Promise<RunCommandResult> {
+    return runViaHandle((cmd, opts) => this.startCommand(cmd, opts), command, options);
+  }
+  async run(argv: readonly string[], options?: RunCommandOptions): Promise<RunCommandResult> {
+    return this.commands.run(argv, options);
   }
 
   /** How long SIGTERM gets before SIGKILL, and SIGKILL before we give up. Overridable so a

@@ -5,7 +5,7 @@ import { readTextFile } from "./environment-ops.ts";
 
 const MAX_WALK_DEPTH = 256;
 
-export type GitWorkTreeEnvironment = Pick<Environment, "fileInfo" | "readBytes">;
+export type GitWorkTreeEnvironment = Pick<Environment, "files">;
 
 export interface GitWorkTreeMarker {
   readonly dotGitPath: string;
@@ -33,7 +33,7 @@ async function probeGitMarker(
 ): Promise<GitWorkTreeMarker | null> {
   let kind: string;
   try {
-    kind = (await environment.fileInfo(dotGitPath)).kind;
+    kind = (await environment.files.getInfo(dotGitPath)).kind;
   } catch {
     return null;
   }

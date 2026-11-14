@@ -25,7 +25,7 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "chat": "4.40.0",
-    "e2b": "^2.31",
+    "e2b": "^2.63.0",
     "hono": "^4",
     "operon-agents": "workspace:*",
     "operon-managed-agents": "workspace:*",

@@ -48,8 +48,8 @@ export const DEFAULT_DIRECT_TOOLS: readonly string[] = [
   "Agent",
   "Workflow",
   "BackgroundList",
-  "BackgroundOutput",
   "BackgroundStop",
+  "Monitor",
 ];
 
 export interface CodeModeOptions {

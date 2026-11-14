@@ -4,14 +4,15 @@ import { completeWithRetry } from "../../llm/retry.ts";
 import type { AssistantMessage, TextContent } from "../../protocol/index.ts";
 import type { AutoApprovalInput, AutoApprovalVerdict, AutoApprover } from "../types.ts";
 import { buildClassifierSystemPrompt, type ClassifierRules } from "./prompts.ts";
-import { buildToolLookup, buildTranscriptText, projectToolCall } from "./transcript.ts";
-import { parseXmlBlock, parseXmlReason } from "./xml.ts";
+import { buildToolLookup, buildTranscriptText, projectToolCall, serializeProjectedCall } from "./transcript.ts";
+import { parseXmlBlock, parseXmlCategory, parseXmlReason } from "./xml.ts";
 
 export type TwoStageMode = "both" | "fast" | "thinking";
 
 export type AutoApprovalOutcome =
   | "allow" // judge cleared the action — proceeds without a prompt
-  | "escalate" // judge blocked — falls back to the human approval path
+  | "block" // judge blocked — refused, the reason goes back to the model
+  | "escalate" // judge not confident enough to allow — falls back to the human approval path
   | "no-relevance" // tool declared no security-relevant input (allowed)
   | "parse_failure" // model output unparseable — failed closed (escalate)
   | "error" // model/stream error — failed closed (escalate)
@@ -23,6 +24,8 @@ export interface AutoApprovalReport {
   readonly toolName: string;
   readonly stage?: "fast" | "thinking" | "decision";
   readonly reason?: string;
+  /** With `block`: the BLOCK rule the judge named. */
+  readonly category?: string;
   readonly durationMs: number;
 }
 
@@ -47,14 +50,21 @@ export interface LlmAutoApproverOptions {
   readonly onOutcome?: (report: AutoApprovalReport) => void;
 }
 
-// Stage suffixes. Stage 1 nudges an immediate verdict; stage 2 asks for
-// chain-of-thought before the verdict to cut false positives.
-const XML_S1_SUFFIX = "\nErr on the side of blocking. <block> immediately.";
+// Stage suffixes. In `both`, stage 1 is a cheap over-blocking screen that ignores user intent and
+// ALLOW exceptions (anything it passes is clearly fine); stage 2 reasons first and applies them,
+// which is where false positives are cleared. `fast` has no stage 2 to defer to, so its single
+// pass must weigh user intent and exceptions itself — it gets the plain immediate-verdict suffix.
+const XML_FAST_ONLY_SUFFIX =
+  "\nErr on the side of blocking. Your ENTIRE response MUST begin with <block>. Do NOT output any analysis, reasoning, or commentary before <block>. No \"Looking at...\" or similar preamble.";
+const XML_S1_SUFFIX =
+  "\nErr on the side of blocking. Stage 1 does NOT apply user intent or ALLOW exceptions \u2014 stage 2 will handle those. Judge the action by its full effect \u2014 what it runs, sends, publishes, or enables \u2014 not its surface form. Block if ANY rule could apply. Your ENTIRE response MUST begin with <block>. Do NOT output any analysis, reasoning, or commentary before <block>. No \"Looking at...\" or similar preamble.";
 const XML_S2_SUFFIX =
-  "\nReview the classification process and follow it carefully, making sure you deny actions that should be blocked. As a reminder, explicit (not suggestive or implicit) user confirmation is required to override blocks. Use <thinking> before responding with <block>.";
+  "\nReview the classification process and follow it carefully, making sure you deny actions that should be blocked. As a reminder, explicit (not suggestive or implicit) user confirmation is required to override blocks. Use <thinking> before responding with <block>. Think longer on ambiguous or borderline actions; keep reasoning brief for clear-cut ones.";
 
 const DEFAULT_STAGE1_MAX_TOKENS = 512;
 const DEFAULT_STAGE2_MAX_TOKENS = 4096;
+/** Distinct session rule sets whose assembled (~130KB) system prompts are kept. */
+const MAX_CACHED_PROMPTS = 8;
 /** A tool call is waiting on this verdict, so it gets seconds of retries, not minutes. */
 const CLASSIFIER_RETRY_POLICY = { maxRetries: 5, maxDelayMs: 8_000 };
 
@@ -79,14 +89,14 @@ function textOf(message: AssistantMessage): string {
  * and asks the classifier whether to block. Stage 1 is a cheap fast pass that resolves the common
  * "allow" case in a few tokens; only a block escalates to the slower thinking stage.
  *
- * Fail-closed everywhere: a stream error, abort, or unparseable response all return `escalate`,
- * so uncertainty falls back to the human rather than silently allowing. `shouldBlock` maps to
- * `escalate` (not a hard block) because this framework always has a human fallback — the judge's
- * job is only deciding whether a human prompt can be skipped.
+ * A block returns `block`: the manager refuses the call and hands the reason back to the model.
+ * Fail-closed everywhere else: a stream error, abort, or unparseable response all return
+ * `escalate`, so a judge that could not decide falls back to the human rather than allowing.
  */
 export class LlmAutoApprover implements AutoApprover {
   private readonly options: LlmAutoApproverOptions;
   private systemPrompt: string | undefined;
+  private readonly sessionPrompts = new Map<string, string>();
   private consecutiveErrors = 0;
   private lastErrorAt = 0;
 
@@ -94,20 +104,36 @@ export class LlmAutoApprover implements AutoApprover {
     this.options = options;
   }
 
-  private system(): string {
-    this.systemPrompt ??= buildClassifierSystemPrompt(this.options.rules);
-    return this.systemPrompt;
+  private system(rules: AutoApprovalInput["autoApproval"]): string {
+    if (rules === undefined) {
+      this.systemPrompt ??= buildClassifierSystemPrompt(this.options.rules);
+      return this.systemPrompt;
+    }
+    const key = JSON.stringify([rules.allow, rules.softDeny, rules.hardDeny, rules.deny, rules.environment]);
+    let prompt = this.sessionPrompts.get(key);
+    if (prompt === undefined) {
+      prompt = buildClassifierSystemPrompt(rules);
+      if (this.sessionPrompts.size >= MAX_CACHED_PROMPTS) this.sessionPrompts.delete(this.sessionPrompts.keys().next().value!);
+      this.sessionPrompts.set(key, prompt);
+    }
+    return prompt;
   }
 
   async classify(input: AutoApprovalInput): Promise<AutoApprovalVerdict> {
     const startedAt = Date.now();
     const toolName = input.ctx.toolCall.name;
-    const report = (outcome: AutoApprovalOutcome, extra?: { stage?: "fast" | "thinking"; reason?: string }): void => {
+    const report = (outcome: AutoApprovalOutcome, extra?: { stage?: "fast" | "thinking"; reason?: string; category?: string }): void => {
       this.options.onOutcome?.({ outcome, toolName, durationMs: Date.now() - startedAt, ...extra });
     };
     const escalate = (outcome: AutoApprovalOutcome, reason: string, stage?: "fast" | "thinking"): AutoApprovalVerdict => {
       report(outcome, { stage, reason });
       return { decision: "escalate", reason };
+    };
+    const blocked = (text: string, fallback: string, stage: "fast" | "thinking"): AutoApprovalVerdict => {
+      const reason = parseXmlReason(text) ?? fallback;
+      const category = parseXmlCategory(text) ?? undefined;
+      report("block", { stage, reason, ...(category !== undefined ? { category } : {}) });
+      return { decision: "block", reason, ...(category !== undefined ? { category } : {}) };
     };
 
     const lookup = buildToolLookup(input.tools);
@@ -121,18 +147,19 @@ export class LlmAutoApprover implements AutoApprover {
       return escalate("error", "Auto-approval judge repeatedly unavailable — asking for confirmation.");
     }
 
-    const actionLine = `${JSON.stringify({ [toolName]: action })}\n`;
+    const actionLine = serializeProjectedCall(toolName, action, input.ctx.toolCall.id);
     const transcript = buildTranscriptText(input.transcript, lookup, input.ctx.toolCall.id);
     const content = `<transcript>\n${transcript}${actionLine}</transcript>\n`;
     const model = this.options.model ?? input.ctx.model;
     const signal = input.ctx.signal;
     const mode = input.autoApproval?.twoStageMode ?? this.options.twoStageMode ?? "both";
-    const system = input.autoApproval !== undefined ? buildClassifierSystemPrompt(input.autoApproval) : this.system();
+    const system = this.system(input.autoApproval);
 
     try {
       if (mode !== "thinking") {
         const max = this.options.stage1MaxTokens ?? DEFAULT_STAGE1_MAX_TOKENS;
-        const text = await this.runStage(model, content + XML_S1_SUFFIX, max, signal, system);
+        const suffix = mode === "fast" ? XML_FAST_ONLY_SUFFIX : XML_S1_SUFFIX;
+        const text = await this.runStage(model, content + suffix, max, signal, system);
         const block = parseXmlBlock(text);
         if (block === false) {
           report("allow", { stage: "fast" });
@@ -140,7 +167,7 @@ export class LlmAutoApprover implements AutoApprover {
         }
         if (mode === "fast") {
           if (block === null) return escalate("parse_failure", "Fast classifier response was unparseable.", "fast");
-          return escalate("escalate", parseXmlReason(text) ?? "Blocked by fast classifier.", "fast");
+          return blocked(text, "Blocked by the fast classifier.", "fast");
         }
         // mode "both": a block (or unparseable) stage 1 escalates to the thinking stage.
       }
@@ -153,7 +180,7 @@ export class LlmAutoApprover implements AutoApprover {
         report("allow", { stage: "thinking" });
         return ALLOW;
       }
-      return escalate("escalate", parseXmlReason(text) ?? "Blocked by the auto-approval judge.", "thinking");
+      return blocked(text, "Blocked by the auto-approval judge.", "thinking");
     } catch (error) {
       if (signal.aborted) return escalate("aborted", "Auto-approval judge aborted — asking for confirmation.");
       this.consecutiveErrors += 1;

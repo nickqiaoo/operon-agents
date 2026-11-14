@@ -45,6 +45,6 @@ export async function readInstalled(environment: Environment, homeDir: string): 
 }
 
 export async function writeInstalled(environment: Environment, homeDir: string, data: InstalledFile): Promise<void> {
-  await environment.mkdir(path.join(homeDir, "plugins"), { parents: true, existOk: true });
+  await environment.files.makeDir(path.join(homeDir, "plugins"));
   await writeTextFile(environment, installedPath(homeDir), JSON.stringify(data, null, 2));
 }

@@ -93,6 +93,12 @@ export class E2BWorkspace implements SandboxWorkspace {
 
   /** Fork the workspace: snapshot, then start an independent sandbox from that snapshot. */
   async fork(): Promise<{ environment: E2BEnvironment; dispose: () => Promise<void> } | undefined> {
+    if (this.current.fork) {
+      const [clone] = await this.current.fork({ count: 1 });
+      if (clone instanceof Error) throw clone;
+      if (!clone) throw new Error('E2B fork returned no sandbox');
+      return { environment: new E2BEnvironment(() => clone, this.options), dispose: async () => { await clone.kill(); } };
+    }
     const snapshotId = await this.snapshot();
     if (snapshotId === undefined) return undefined;
     const clone = await this.factory.create({
