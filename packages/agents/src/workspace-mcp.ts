@@ -44,7 +44,7 @@ import {
 /** How long a directory's connections outlive its last session by default: five minutes. */
 export const DEFAULT_WORKSPACE_MCP_IDLE_MS = 5 * 60_000;
 
-export interface WorkspaceMcpPoolOptions extends Omit<McpServersCapabilityOptions, "sharedServers"> {
+export interface WorkspaceMcpPoolOptions extends Omit<McpServersCapabilityOptions, "sharedServers" | "roots"> {
   /**
    * How long a directory's connections stay up after the last session using them closes, in ms.
    * A session opened there within the window reuses them. `0` closes them at once. Defaults to
@@ -107,7 +107,9 @@ export class WorkspaceMcpPool {
     let generation = generations.get(fingerprint);
     if (generation === undefined) {
       const { idleMs: _idleMs, ...serverOptions } = this.options;
-      const servers = createMcpServers(configs, serverOptions);
+      // A generation serves one directory, so that directory is its servers' workspace root (and
+      // the cwd of an stdio server that names none).
+      const servers = createMcpServers(configs, { ...serverOptions, roots: [key] });
       // Pooled connections belong to no session: their failures reach each borrower through
       // `onStatusChange`, which the MCP capability subscribes to when it opens.
       generation = { key, fingerprint, servers, ready: servers.connect({ sessionId: "" }), leases: 0 };

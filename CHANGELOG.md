@@ -7,6 +7,20 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- MCP servers were never told the workspace. The client declared no capabilities, so a server
+  that checks paths against MCP `roots` (chrome-devtools-mcp ≥ 1.6 saving a screenshot) fell back
+  to the OS temp directory and refused every project path; and an stdio server with no `cwd`
+  inherited the host's (`/` for an app launched from the Finder), so `test-results/shot.png`
+  meant `/test-results/shot.png`. `McpServersCapabilityOptions.roots` (absolute directories) now
+  declares the `roots` capability and answers `roots/list`, and an stdio server with no `cwd`
+  starts in the first root. `WorkspaceMcpPool` passes each generation its directory;
+  `defaultCapabilities` takes `mcpRoots` for the session's own servers (default:
+  `workspaceMcp.workDir`). A process-wide set gets no roots, as before.
+
 ## [0.1.0-alpha.33] — 2026-11-14
 
 ### Added

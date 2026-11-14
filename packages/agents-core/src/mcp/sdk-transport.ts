@@ -2,6 +2,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { basename } from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   MCPCallToolOptions,
   MCPListResourcesResult,
@@ -36,8 +39,24 @@ interface SdkClient {
   ): Promise<MCPToolResult>;
   listResources(params?: { cursor?: string }): Promise<MCPListResourcesResult>;
   readResource(params: { uri: string }): Promise<MCPReadResourceResult>;
+  setRequestHandler(schema: typeof ListRootsRequestSchema, handler: () => McpRootsResult): void;
   onclose?: (() => void) | undefined;
   onerror?: ((error: Error) => void) | undefined;
+}
+
+interface McpRootsResult {
+  roots: { uri: string; name?: string }[];
+}
+
+/**
+ * The client side of MCP `roots`: the directories a server may treat as the workspace. A server
+ * that checks paths against roots (chrome-devtools-mcp writing a screenshot, a filesystem server)
+ * otherwise falls back to its own default — usually the OS temp directory only — so a client that
+ * never declares the capability gets "path is not within any of the configured workspace roots"
+ * for every path in the project it is working on.
+ */
+function rootsResult(roots: readonly string[]): McpRootsResult {
+  return { roots: roots.map((dir) => ({ uri: pathToFileURL(dir).href, name: basename(dir) || dir })) };
 }
 
 interface SdkTransportConfig {
@@ -46,6 +65,8 @@ interface SdkTransportConfig {
   readonly toolTimeoutMs?: number;
   readonly captureStderr: boolean;
   readonly isTerminalError?: (error: Error) => boolean;
+  /** Absolute directories answered to `roots/list`. Omitted: the client declares no `roots` capability. */
+  readonly roots?: readonly string[];
 }
 
 class SdkMcpTransport implements MCPTransport {
@@ -80,7 +101,11 @@ class SdkMcpTransport implements MCPTransport {
     const sdkTransport = this.cfg.makeSdkTransport();
     if (this.cfg.captureStderr) this.attachStderr(sdkTransport);
 
-    const client = new Client(CLIENT_INFO, { capabilities: {} }) as unknown as SdkClient;
+    const roots = this.cfg.roots;
+    // The roots are fixed for the transport's lifetime, so `listChanged` is never sent.
+    const capabilities = roots !== undefined ? { roots: { listChanged: false } } : {};
+    const client = new Client(CLIENT_INFO, { capabilities }) as unknown as SdkClient;
+    if (roots !== undefined) client.setRequestHandler(ListRootsRequestSchema, () => rootsResult(roots));
     this.client = client;
     // Hooks BEFORE the handshake so an onclose firing between handshake completion and our
     // wiring is never lost; the hooks themselves gate on `ready`.
@@ -236,12 +261,15 @@ export interface MCPStdioConfig {
   readonly env?: Record<string, string>;
   readonly cwd?: string;
   readonly toolTimeoutMs?: number;
+  /** Absolute directories the server may treat as the workspace (MCP `roots`). */
+  readonly roots?: readonly string[];
 }
 
 export function mcpStdioTransport(config: MCPStdioConfig): MCPTransport {
   return new SdkMcpTransport({
     name: config.name,
     captureStderr: true,
+    ...(config.roots !== undefined ? { roots: config.roots } : {}),
     ...(config.toolTimeoutMs !== undefined ? { toolTimeoutMs: config.toolTimeoutMs } : {}),
     makeSdkTransport: () =>
       new StdioClientTransport({
@@ -271,6 +299,8 @@ export interface MCPHttpConfig {
   readonly toolTimeoutMs?: number;
   readonly oauthProvider?: OAuthClientProvider;
   readonly envLookup?: (name: string) => string | undefined;
+  /** Absolute directories the server may treat as the workspace (MCP `roots`). */
+  readonly roots?: readonly string[];
 }
 
 export function mcpStreamableHttpTransport(config: MCPHttpConfig): MCPTransport {
@@ -280,6 +310,7 @@ export function mcpStreamableHttpTransport(config: MCPHttpConfig): MCPTransport 
     name: config.name,
     captureStderr: false,
     isTerminalError: isTerminalTransportError,
+    ...(config.roots !== undefined ? { roots: config.roots } : {}),
     ...(config.toolTimeoutMs !== undefined ? { toolTimeoutMs: config.toolTimeoutMs } : {}),
     makeSdkTransport: () =>
       new StreamableHTTPClientTransport(new URL(config.url), {

@@ -367,6 +367,13 @@ export interface DefaultCapabilitiesOptions {
     readonly servers?: Record<string, McpServerConfig>;
   };
   /**
+   * The workspace directories this session's own MCP servers are told about (MCP `roots`; an
+   * stdio server with no `cwd` also starts in the first). Defaults to `workspaceMcp.workDir`.
+   * Servers borrowed from `workspaceMcp.pool` always get their directory; a process-wide set
+   * (`shared.mcpServers`) serves every directory and gets none.
+   */
+  readonly mcpRoots?: readonly string[];
+  /**
    * Installed-plugin manager. When set, the framework self-drives the plugin's contributions into
    * this capability set: its skills (merged into the skills capability), its MCP servers (merged
    * into the MCP capability), its shell hooks (merged into user-hooks), and its session-start skill
@@ -472,11 +479,13 @@ export function defaultCapabilities(given: DefaultCapabilitiesOptions = {}): Cap
   ];
   // Cron is a local-only capability (Invariant 7): the server host doesn't install it.
   const sessionMcp = options.sessionMcpServers ?? {};
+  const mcpRoots = options.mcpRoots ?? (options.workspaceMcp !== undefined ? [options.workspaceMcp.workDir] : undefined);
   const mcpOptions = {
     ...(oauthService !== undefined ? { oauthService } : {}),
     ...(allowedMcpTransports !== undefined ? { allowedTransports: allowedMcpTransports } : {}),
     ...(options.mcpCredentials !== undefined ? { credentials: options.mcpCredentials } : {}),
     ...(options.mcpTransportFactory !== undefined ? { transportFactory: options.mcpTransportFactory } : {}),
+    ...(mcpRoots !== undefined ? { roots: mcpRoots } : {}),
   };
   // Everything this session would connect that is not private to it: the directory's servers
   // last, so they win over a same-named plugin server the way they did as a session overlay.

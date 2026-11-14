@@ -118,6 +118,8 @@ export interface ServerFromConfigOptions {
   readonly transport?: MCPTransport;
   /** A provider's answer for this connect. Takes the place of the OAuth service. */
   readonly credential?: McpCredential;
+  /** The workspace directories the server is told about (MCP `roots`). See {@link McpServersCapabilityOptions.roots}. */
+  readonly roots?: readonly string[];
 }
 
 /**
@@ -145,7 +147,7 @@ function normalizeServerConfig(name: string, raw: unknown): { readonly config: M
 export function serverFromConfig(name: string, rawConfig: McpServerConfig, opts: ServerFromConfigOptions = {}): TransportMCPServer {
   const { config, error } = normalizeServerConfig(name, rawConfig);
   if (error !== undefined) throw new Error(error);
-  const transport = opts.transport ?? transportFromConfig(name, config, opts.oauthService, opts.credential);
+  const transport = opts.transport ?? transportFromConfig(name, config, opts.oauthService, opts.credential, opts.roots);
   const filter = staticFilterFromConfig(config);
   return new TransportMCPServer({
     name,
@@ -166,16 +168,27 @@ function staticFilterFromConfig(config: McpServerConfig): MCPToolFilterStatic | 
   };
 }
 
-function transportFromConfig(name: string, config: McpServerConfig, oauthService?: McpOAuthService, credential?: McpCredential): MCPTransport {
+function transportFromConfig(
+  name: string,
+  config: McpServerConfig,
+  oauthService?: McpOAuthService,
+  credential?: McpCredential,
+  roots?: readonly string[],
+): MCPTransport {
   if (config.transport === "stdio") {
     if (config.command === undefined) throw new Error(`MCP server "${name}": stdio transport requires "command".`);
+    // A server with no cwd of its own runs in the workspace: it resolves a relative path the
+    // model hands it against its process cwd, and the host's cwd (`/` for an app launched from
+    // the Finder) is no place to write `test-results/shot.png` to.
+    const cwd = config.cwd ?? roots?.[0];
     return mcpStdioTransport({
       name,
       command: config.command,
       ...(config.args !== undefined ? { args: config.args } : {}),
       ...(config.env !== undefined ? { env: config.env } : {}),
-      ...(config.cwd !== undefined ? { cwd: config.cwd } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
       ...(config.toolTimeoutMs !== undefined ? { toolTimeoutMs: config.toolTimeoutMs } : {}),
+      ...(roots !== undefined ? { roots } : {}),
     });
   }
   if (config.url === undefined) throw new Error(`MCP server "${name}": http transport requires "url".`);
@@ -188,6 +201,7 @@ function transportFromConfig(name: string, config: McpServerConfig, oauthService
     ...(config.bearerTokenEnvVar !== undefined ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
     ...(config.toolTimeoutMs !== undefined ? { toolTimeoutMs: config.toolTimeoutMs } : {}),
     ...(oauthProvider !== undefined ? { oauthProvider } : {}),
+    ...(roots !== undefined ? { roots } : {}),
   });
 }
 
@@ -227,6 +241,7 @@ interface ControllerOptions {
   readonly credentials?: McpCredentialProvider;
   readonly cacheToolsList: boolean;
   readonly transportFactory?: McpTransportFactory;
+  readonly roots?: readonly string[];
   readonly onStatusChange?: McpStatusListener;
   readonly reconnectPolicy?: ReconnectPolicy;
   readonly keepAlivePolicy?: KeepAlivePolicy;
@@ -241,6 +256,7 @@ class McpServerController {
   private readonly credentials: McpCredentialProvider | undefined;
   private readonly cacheToolsList: boolean;
   private readonly transportFactory: McpTransportFactory | undefined;
+  private readonly roots: readonly string[] | undefined;
   private readonly onStatusChange: McpStatusListener | undefined;
   private readonly reconnectPolicy: ReconnectPolicy | undefined;
   private readonly keepAlivePolicy: KeepAlivePolicy | undefined;
@@ -263,6 +279,7 @@ class McpServerController {
     this.credentials = opts.credentials;
     this.cacheToolsList = opts.cacheToolsList;
     this.transportFactory = opts.transportFactory;
+    this.roots = opts.roots;
     this.onStatusChange = opts.onStatusChange;
     this.reconnectPolicy = opts.reconnectPolicy;
     this.keepAlivePolicy = opts.keepAlivePolicy;
@@ -324,6 +341,7 @@ class McpServerController {
         ...(this.oauthService !== undefined ? { oauthService: this.oauthService } : {}),
         cacheToolsList: this.cacheToolsList,
         ...(credential !== undefined ? { credential } : {}),
+        ...(this.roots !== undefined ? { roots: this.roots } : {}),
         ...(this.transportFactory !== undefined ? { transport: this.transportFactory(this.name, this.config, credential) } : {}),
       });
       const mine = server;
@@ -547,6 +565,14 @@ export interface McpServersCapabilityOptions {
   readonly allowedTransports?: readonly McpTransportKind[];
   readonly cacheToolsList?: boolean;
   readonly transportFactory?: McpTransportFactory;
+  /**
+   * The workspace these servers serve, as absolute directories. Each server is told about them
+   * through MCP `roots` (the client declares the capability and answers `roots/list`), and an
+   * stdio server with no `cwd` of its own is started in the first one. Omitted: no `roots`
+   * capability, and an stdio server inherits the host's cwd — right for a process-wide set that
+   * serves every directory, wrong for one bound to a workspace.
+   */
+  readonly roots?: readonly string[];
   readonly reconnectPolicy?: ReconnectPolicy;
   readonly keepAlive?: KeepAlivePolicy;
   readonly timer?: McpTimer;
@@ -646,6 +672,7 @@ export function createMcpServers(
       ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
       cacheToolsList: options.cacheToolsList ?? DEFAULT_CACHE_TOOLS,
       ...(options.transportFactory !== undefined ? { transportFactory: options.transportFactory } : {}),
+      ...(options.roots !== undefined ? { roots: options.roots } : {}),
       ...(options.reconnectPolicy !== undefined ? { reconnectPolicy: options.reconnectPolicy } : {}),
       ...keepAliveOptions(config, options.keepAlive),
       onStatusChange: notify,
