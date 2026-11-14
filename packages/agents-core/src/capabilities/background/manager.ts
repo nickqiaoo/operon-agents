@@ -877,7 +877,11 @@ export class BackgroundManager implements BackgroundSpawner {
   list(activeOnly = true, limit?: number): BackgroundTaskInfo[] {
     const result: BackgroundTaskInfo[] = [];
     for (const entry of this.tasks.values()) {
-      if (activeOnly && TERMINAL_STATUSES.has(entry.status)) continue;
+      // A settled task stays on the active list until its terminal effects fire: between the
+      // status flip and the settle steer sits a persist await, and a holder that released the
+      // session in that window would close it before the notice was queued — the wake run would
+      // then speak to a closed session, its answer journaled but never told.
+      if (activeOnly && TERMINAL_STATUSES.has(entry.status) && entry.terminalFired) continue;
       result.push(this.toInfo(entry));
       if (limit !== undefined && result.length >= limit) return result;
     }

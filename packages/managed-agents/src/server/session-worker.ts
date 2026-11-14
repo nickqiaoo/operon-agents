@@ -424,7 +424,18 @@ class SessionDriver<TContext> {
         // The final look: clear the wake first, so a send landing after this read wakes the
         // row for the next claim instead of being stranded by our release.
         await this.lease.clearWake();
-        if (!(await this.actionable(await this.work.pending(session.id)))) return;
+        if (!(await this.actionable(await this.work.pending(session.id)))) {
+          // A settle can land during that final look: its notice is queued and its wake run is
+          // starting. Release now and the run speaks to an unsubscribed session — its answer is
+          // journaled but never told. Hold while a run is in flight or a notice waits for one;
+          // an interrupted session still releases, its answer comes through the table.
+          const status = session.status;
+          if (status.state === "running" || (status.state === "idle" && status.hasQueuedMessages)) {
+            await this.wake.wait();
+            continue;
+          }
+          return;
+        }
       }
     } finally {
       clearInterval(poll);

@@ -111,6 +111,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory on purpose), taking the logs of background commands running in other sessions with
   it. It runs on a throwaway home now.
 
+- A managed worker could release its session in the window between a background task settling
+  and its notice being queued (a persist await sits between the two), stranding the notice in a
+  closed session — the wake run's answer was journaled but never told. A settled task now stays
+  on the active list until its terminal effects fire, and the worker re-checks for a queued
+  notice or a starting wake run before it releases.
+
 ## [0.1.0-alpha.32] — 2026-11-13
 
 ### Added
