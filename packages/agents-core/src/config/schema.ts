@@ -189,6 +189,8 @@ export const AgentFrameworkConfigSchema = z.object({
   agent: z.string().min(1).optional(),
   /** Names of the registered tools the default agent may draw on by default (see `SessionConfig.tools`). */
   tools: z.array(z.string().min(1)).optional(),
+  /** Tools sessions never offer by default (see `SessionConfig.disabledTools`). */
+  disabledTools: z.array(z.string().min(1)).optional(),
   appendSystemPrompt: z.string().optional(),
   /** Per-extension session parameters by extension id; `false` skips that extension. */
   extensions: z.record(z.string(), z.unknown()).optional(),

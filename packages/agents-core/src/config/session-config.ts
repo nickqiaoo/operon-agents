@@ -69,6 +69,11 @@ export const SessionConfigSchema = z.strictObject({
    *  uses by name and those names resolve against this set, so naming fewer narrows the agent; a
    *  tool the profile does not list is not added by naming it here. */
   tools: z.array(z.string().min(1)).optional(),
+  /** Tools this session never offers, by name, wherever they come from: built-in, a capability's
+   *  (`CronCreate`, `Skill`…), an MCP server's (`mcp__server__tool`), `Agent`/`Workflow`. A disabled
+   *  tool is left out of every request and cannot be called, from a program either; the permission
+   *  mode does not bring it back. Applies to the session's subagents too. */
+  disabledTools: z.array(z.string().min(1)).optional(),
   appendSystemPrompt: z.string().optional(),
   mcp: SessionMcpConfigSchema.optional(),
   skills: SkillsConfigSchema.optional(),
@@ -124,7 +129,7 @@ function keyed<T extends Record<string, unknown>>(base: T | undefined, over: T |
 
 /**
  * The configuration a session runs on: `explicit` over `defaults`. A field the session gives wins
- * whole — collections (`tools`, `hooks`, `mcp.servers`, `permission.rules`) are replaced, never
+ * whole — collections (`tools`, `disabledTools`, `hooks`, `mcp.servers`, `permission.rules`) are replaced, never
  * concatenated. Three sections are settings rather than collections and are overridden one key at a
  * time: `permission` (`mode` and `rules` separately), `limits`, and `extensions` (per extension id).
  */
@@ -216,6 +221,7 @@ export function normalizeHarnessConfig(raw: unknown): HarnessConfig {
     model: file.model,
     agent: file.agent,
     tools: file.tools,
+    disabledTools: file.disabledTools,
     appendSystemPrompt: file.appendSystemPrompt,
     thinking: thinkingLevelOf(file.thinking),
     mcp: Object.keys(file.mcpServers).length > 0 ? { servers: file.mcpServers } : undefined,

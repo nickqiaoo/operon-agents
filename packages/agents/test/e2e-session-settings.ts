@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHarness, defineAgent, type HarnessOptions } from "../src/index.ts";
-import { filesystemTools } from "../src/tools.ts";
+import { defineTool, filesystemTools } from "../src/tools.ts";
+import { z } from "zod";
 import { fauxAssistantMessage, fauxToolCall, offeredToolNames, registerFauxProvider, type Context } from "./faux.ts";
 
 let failed = 0;
@@ -138,6 +139,102 @@ async function subagentSettingsAreOneSessionEach(): Promise<void> {
   await closed.close();
 }
 
+async function disabledToolsAreGone(): Promise<void> {
+  const faux = provider();
+  const seen = script(faux, [
+    stop("a"),
+    fauxAssistantMessage(fauxToolCall("Bash", { command: "echo ran", description: "Echo" }), { stopReason: "toolUse" }),
+    stop("b"),
+    stop("c"),
+    stop("d"),
+    fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "coder", prompt: "look", description: "look" }), { stopReason: "toolUse" }),
+    stop("child"),
+    stop("e"),
+  ]);
+  const harness = harnessOn(faux, {
+    config: { defaults: { disabledTools: ["Monitor"] } }
+  });
+
+  await (await harness.createSession()).prompt("hi");
+  check("disabledTools: the harness's apply by default", seen[0]?.tools.includes("Monitor") === false && seen[0]?.tools.includes("Bash") === true);
+
+  const narrowed = await harness.createSession({
+    config: { disabledTools: ["Bash", "Workflow"] }
+  });
+  await narrowed.prompt("go");
+  const offered = seen[1]?.tools ?? [];
+  check("disabledTools: a session's leave its tools out of the request", !offered.includes("Bash") && !offered.includes("Workflow") && offered.includes("Read") && offered.includes("Agent"), offered.join(","));
+  check("disabledTools: a session's replace the harness's whole", offered.includes("Monitor"));
+  check("disabledTools: a call to one fails as unknown, even in yolo mode", seen[2]?.lastMessage.includes("unknown tool: Bash") === true, seen[2]?.lastMessage);
+
+  await narrowed.close();
+  await (await harness.resumeSession(narrowed.id)).prompt("hi");
+  check("disabledTools: a resumed session keeps them", seen[3]?.tools.includes("Bash") === false);
+
+  await (await harness.createSession({
+    config: { disabledTools: [] }
+  })).prompt("hi");
+  check("disabledTools: an empty list brings everything back", seen[4]?.tools.includes("Monitor") === true);
+
+  await (await harness.createSession({
+    config: { disabledTools: ["Bash"] }
+  })).prompt("go");
+  check("disabledTools: a subagent inherits them", seen[6] !== undefined && !seen[6].tools.includes("Bash") && seen[6].tools.includes("Read"), seen[6]?.tools.join(","));
+  await harness.close();
+}
+
+async function extraToolsAreTheRootAgents(): Promise<void> {
+  const faux = provider();
+  const calls: string[] = [];
+  const ping = defineTool({
+    name: "ping_host",
+    description: "Tell the host something.",
+    parameters: z.object({ text: z.string() }),
+    execute: async ({ text }) => {
+      calls.push(text);
+      return `pong ${text}`;
+    },
+  });
+  const seen = script(faux, [
+    fauxAssistantMessage(fauxToolCall("ping_host", { text: "one" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "coder", prompt: "look", description: "look" }), { stopReason: "toolUse" }),
+    stop("child"),
+    stop("a"),
+    stop("b"),
+    fauxAssistantMessage(fauxToolCall("ping_host", { text: "two" }), { stopReason: "toolUse" }),
+    stop("c"),
+  ]);
+  const harness = harnessOn(faux);
+  const session = await harness.createSession({ bindings: { extraTools: [ping] } });
+  await session.prompt("go");
+  check("extraTools: offered to the root agent beside its profile's", seen[0]?.tools.includes("ping_host") === true && seen[0]?.tools.includes("Read") === true);
+  check("extraTools: run in process", calls[0] === "one" && seen[1]?.lastMessage.includes("pong one") === true, seen[1]?.lastMessage);
+  check("extraTools: not handed to its subagents", seen[2] !== undefined && !seen[2].tools.includes("ping_host"), seen[2]?.tools.join(","));
+
+  await (await harness.createSession({ config: { disabledTools: ["ping_host"] }, bindings: { extraTools: [ping] } })).prompt("hi");
+  check("extraTools: disabledTools still applies", seen[4]?.tools.includes("ping_host") === false);
+
+  await session.close();
+  let missing = "";
+  try {
+    await harness.resumeSession(session.id);
+  } catch (error) {
+    missing = error instanceof Error ? error.name : String(error);
+  }
+  check("extraTools: a restore must hand them in again", missing === "SessionDependencyMissingError", missing);
+  await (await harness.resumeSession(session.id, { bindings: { extraTools: [ping] } })).prompt("again");
+  check("extraTools: handed in again, they work after a restore", calls[1] === "two");
+
+  let clash = "";
+  try {
+    await harness.createSession({ bindings: { extraTools: [defineTool({ name: "Read", description: "", parameters: z.object({}), execute: async () => "" })] } });
+  } catch (error) {
+    clash = error instanceof Error ? error.message : String(error);
+  }
+  check("extraTools: a name the profile already uses is an error", clash.includes('extra tool "Read"'), clash);
+  await harness.close();
+}
+
 /** How many child requests overlapped when a parent spawned two at once. */
 async function peakConcurrency(session: { prompt(input: string): Promise<unknown> }, faux: Faux): Promise<number> {
   let active = 0;
@@ -227,6 +324,8 @@ try {
   await modelReplacesTheHarnessDefault();
   await settingsReplaceWholeNotMerge();
   await subagentSettingsAreOneSessionEach();
+  await disabledToolsAreGone();
+  await extraToolsAreTheRootAgents();
   await concurrencyCapIsPerSession();
   await subagentModelOrder();
 } finally {

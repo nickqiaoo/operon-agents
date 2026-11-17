@@ -103,6 +103,12 @@ export interface RunnerConfig<TContext = unknown> {
    * `Agent` tool is untouched — only `Workflow` is withheld.
    */
   readonly workflowTool?: boolean;
+  /**
+   * Tools no run offers, by name, wherever they come from (the agent's own, a capability's, an MCP
+   * server's, `Agent`/`Workflow`). Left out of the request and of what a program can call, so a
+   * call to one fails as an unknown tool. Subagents inherit it.
+   */
+  readonly disabledTools?: readonly string[];
 }
 
 export type AgentInput = string | Message[];
@@ -201,6 +207,8 @@ export interface RunOptions<TContext = unknown> {
   readonly maxConcurrentSubagents?: number;
   /** Replaces `RunnerConfig.workflowTool` for this run. */
   readonly workflowTool?: boolean;
+  /** Replaces `RunnerConfig.disabledTools` for this run. */
+  readonly disabledTools?: readonly string[];
 }
 
 /**
@@ -232,6 +240,8 @@ export interface RunState<TContext> {
   readonly maxConcurrentSubagents?: number;
   /** False when the host withholds the builtin `Workflow` tool (see RunnerConfig). */
   readonly workflowTool?: boolean;
+  /** Tools this run never offers (see RunnerConfig). */
+  readonly disabledTools?: readonly string[];
   readonly permission: PermissionManager;
   readonly capabilities: AssembledCapabilities;
   readonly steer: SteerBus;
@@ -857,6 +867,7 @@ export class Runner<TContext = unknown> {
       subagentProvider: opts?.subagentProvider === null ? undefined : opts?.subagentProvider ?? this.config.subagentProvider,
       ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
       workflowTool: opts?.workflowTool ?? this.config.workflowTool,
+      disabledTools: opts?.disabledTools ?? this.config.disabledTools,
       permission,
       capabilities,
       steer: session.steer,

@@ -41,7 +41,9 @@ export async function buildRunTools<TContext>(
   // Capability (MCP) tools are the deferred-loading candidates. When the agent
   // opts in, they stay executable but are omitted from the model-facing schema
   // projection until a SearchTool result adds their names to the transcript.
-  const rawCapTools = await state.capabilities.listTools();
+  // A disabled tool is not even a deferred-loading candidate: SearchTool must not turn it up.
+  const disabled = new Set(state.disabledTools ?? []);
+  const rawCapTools = (await state.capabilities.listTools()).filter((tool) => !disabled.has(tool.schema.name));
   // A tagged (dynamically contributed) tool loses a name clash and says so; untagged tools are
   // trusted contributors and keep theirs. Between two tagged claimants the first one survives,
   // so a clash never makes the name vanish entirely. See `tagToolSource`.
@@ -90,22 +92,26 @@ export async function buildRunTools<TContext>(
 }
 
 /**
- * Last stop before the turn: let capabilities narrow the complete registry (the extension
- * runtime's `setActiveTools` rides this). Filtering happens AFTER assembly so a filter sees
- * handoff and subagent tools too, and the deferred-name set is pruned to whatever survived.
+ * Last stop before the turn: drop the run's disabled tools, then let capabilities narrow the
+ * complete registry (the extension runtime's `setActiveTools` rides this). Filtering happens AFTER
+ * assembly so it sees handoff and subagent tools too, and the deferred-name set is pruned to
+ * whatever survived. What is dropped here is gone for the turn: not in the request, not in what a
+ * program can call, not executable.
  */
 function finish<TContext>(
   state: RunState<TContext>,
-  tools: readonly Tool[],
+  assembled: readonly Tool[],
   deferredToolNames: ReadonlySet<string>,
   deferEnabled: boolean,
 ): RunToolset {
+  const disabled = state.disabledTools?.length ? new Set(state.disabledTools) : undefined;
+  const tools = disabled ? assembled.filter((tool) => !disabled.has(tool.schema.name)) : assembled;
   const filtered = state.capabilities.applyToolFilters(tools, {
     address: state.address,
     isRootAgent: state.address === DEFAULT_ADDRESS,
   });
   const enabled = deferEnabled && filtered.some((tool) => tool.schema.name === "SearchTool");
-  if (filtered === tools) return { tools, deferredToolNames, deferEnabled: enabled };
+  if (filtered === assembled) return { tools, deferredToolNames, deferEnabled: enabled };
   const surviving = new Set(filtered.map((tool) => tool.schema.name));
   return {
     tools: filtered,

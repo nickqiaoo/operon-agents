@@ -187,6 +187,8 @@ export interface BuildAgentOptions {
    * Only invoked when a `tools` registry was provided. Default: silent (unchanged behavior).
    */
   readonly onUnknownTool?: (toolName: string) => void;
+  /** Tools the agent gets on top of the ones the profile picks. A name the profile already uses throws. */
+  readonly extraTools?: readonly Tool[];
   /** Force the built agent's model, overriding the profile's `model`. Omit to keep the profile's ref
    *  (or inherit the session model when the profile declares none). */
   readonly model?: string | ChatModel;
@@ -215,6 +217,12 @@ export async function buildAgentFromProfile<TContext = unknown>(
     // Unresolved names are capability tools joining at runtime — or typos. Not distinguishable
     // here, so never throw; surface them through the optional diagnostic callback instead.
     else if (options.tools !== undefined) options.onUnknownTool?.(name);
+  }
+  for (const tool of options.extraTools ?? []) {
+    if (toolset.some((own) => own.schema.name === tool.schema.name)) {
+      throw new Error(`extra tool "${tool.schema.name}" has the name of a tool the "${profile.name}" profile already uses`);
+    }
+    toolset.push(tool);
   }
   const model =
     options.model ??

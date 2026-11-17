@@ -148,12 +148,35 @@ the whole provider or on one `resolve()` for a single model.
 
 Most options on `createHarness` are defaults a session can replace: pass the same field to
 `createSession` or `resumeSession` and it replaces the harness's value whole, with nothing merged.
-That covers `model`, `modelSettings`, `agent`, `tools`, `appendSystemPrompt`, `permission`, the
+That covers `model`, `modelSettings`, `agent`, `tools`, `disabledTools`, `appendSystemPrompt`, `permission`, the
 subagent settings and the turn limits. A model named in the session, or by a Workflow's
 `agent(prompt, { model })`, reaches subagents in this order: `agent(prompt, { model })`, the model a
 subagent declares, the session's model, then the harness's. `modelSettings`, `tools`,
 `appendSystemPrompt` and `maxStepsPerTurn` only shape the default agent, so passing one beside a
 complete `agent` is an error.
+
+`tools` picks from the registered palette; `disabledTools` takes tools away by name, wherever they
+come from — a built-in (`Bash`), a capability's (`Skill`, `Monitor`), an MCP server's
+(`mcp__github__create_issue`), `Agent` or `Workflow`. A disabled tool is left out of every request,
+of what SearchTool finds and of what a Code Mode program can call, so a call to it fails as an
+unknown tool whatever the permission mode. Subagents inherit the list. It is a collection like the
+others: a session's replaces the harness's whole, and `[]` brings everything back.
+
+```ts
+// A session that talks and delegates, but never runs a shell or spawns subagents itself.
+await harness.createSession({ config: { disabledTools: ["Bash", "Agent", "Workflow"] } });
+```
+
+A host's own actions go in as `bindings.extraTools`: tools the session's default agent gets on top
+of the ones its profile picks, run in process. They are the root agent's own — offered directly,
+never deferred behind SearchTool or put in a Code Mode catalog, and not handed to subagents. Like
+any binding they are live objects, so a restore must hand them in again; a name the profile already
+uses is an error.
+
+```ts
+const startTask = defineTool({ name: "start_task", description: "…", parameters, execute: (args) => app.startTask(args) });
+await harness.createSession({ bindings: { extraTools: [startTask] }, config: { disabledTools: ["Bash"] } });
+```
 
 ### What a session runs on
 

@@ -28,6 +28,7 @@ function mergeOne(base: AgentFrameworkConfig, layer: PartialConfig): AgentFramew
       model: layer.model ?? base.model,
       agent: layer.agent ?? base.agent,
       tools: layer.tools ?? base.tools,
+      disabledTools: layer.disabledTools ?? base.disabledTools,
       appendSystemPrompt: layer.appendSystemPrompt ?? base.appendSystemPrompt,
       extensions: layer.extensions !== undefined || base.extensions !== undefined ? { ...base.extensions, ...layer.extensions } : undefined,
       skills: layer.skills ?? base.skills,

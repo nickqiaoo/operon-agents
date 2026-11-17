@@ -151,6 +151,13 @@ export interface SessionBindings<TContext = unknown> {
   readonly model?: ChatModel;
   /** Concrete tools for this session's default agent, instead of names from the registry. */
   readonly tools?: readonly Tool[];
+  /**
+   * Tools the session's default agent gets on top of the ones its profile picks — the host's own
+   * actions, run in process. They are the root agent's own tools: offered directly (never deferred
+   * behind SearchTool or hidden in a Code Mode catalog), and not handed to its subagents. A name
+   * the profile already uses is an error. `disabledTools` still applies to them.
+   */
+  readonly extraTools?: readonly Tool[];
   readonly subagentProvider?: SubagentProvider<TContext>;
   readonly extraSubagentProfiles?: Record<string, ResolvedAgentProfile>;
   /**
@@ -162,8 +169,8 @@ export interface SessionBindings<TContext = unknown> {
 }
 
 /** The kinds of live object a session can depend on being provided again. */
-export type SessionBindingKey = "environment" | "mcpCredentials" | "agent" | "model" | "tools" | "subagentProvider";
-const SESSION_BINDING_KEYS: readonly SessionBindingKey[] = ["environment", "mcpCredentials", "agent", "model", "tools", "subagentProvider"];
+export type SessionBindingKey = "environment" | "mcpCredentials" | "agent" | "model" | "tools" | "extraTools" | "subagentProvider";
+const SESSION_BINDING_KEYS: readonly SessionBindingKey[] = ["environment", "mcpCredentials", "agent", "model", "tools", "extraTools", "subagentProvider"];
 
 export type SessionOperation = "create" | "restore" | "fork";
 
@@ -274,7 +281,7 @@ function withoutModel(config: SessionConfig): SessionConfig {
   return { ...rest, ...(Object.keys(permissionConfig).length > 0 ? { permission: permissionConfig } : {}) };
 }
 
-const DEFAULT_AGENT_ONLY_OPTIONS = ["modelSettings", "tools", "appendSystemPrompt", "maxStepsPerTurn"] as const;
+const DEFAULT_AGENT_ONLY_OPTIONS = ["modelSettings", "tools", "extraTools", "appendSystemPrompt", "maxStepsPerTurn"] as const;
 
 /** These options shape the default agent. Given alongside a complete `agent`, they could only be ignored. */
 function assertNoDefaultAgentOptions(options: { readonly [K in (typeof DEFAULT_AGENT_ONLY_OPTIONS)[number]]?: unknown }, agentGivenAt: string): void {
@@ -666,7 +673,7 @@ export interface HarnessInfrastructure {
 }
 
 /** The settings every run on one session carries. */
-type SessionRunOverrides<TContext> = Pick<RunOptions<TContext>, "maxTurns" | "subagentProvider" | "workflowTool" | "maxConcurrentSubagents">;
+type SessionRunOverrides<TContext> = Pick<RunOptions<TContext>, "maxTurns" | "subagentProvider" | "workflowTool" | "maxConcurrentSubagents" | "disabledTools">;
 
 function toolPaletteOf(tools: readonly Tool[]): Readonly<Record<string, Tool>> {
   return Object.fromEntries(tools.map((tool) => [tool.schema.name, tool]));
@@ -1894,10 +1901,11 @@ export class Harness<TContext = unknown, TOutput = unknown> {
    * resolves the current frame's environment + cwd through the Session cache, so root/subagent/worktree
    * prompts stay isolated without coupling Agent lifetime to environment lifetime.
    */
-  private buildDefaultAgent(config: SessionConfig, sessionTools: readonly Tool[] | undefined): Promise<Agent<TContext>> {
+  private buildDefaultAgent(config: SessionConfig, sessionTools: readonly Tool[] | undefined, extraTools: readonly Tool[] | undefined): Promise<Agent<TContext>> {
     const steps = config.limits?.maxStepsPerTurn;
     return buildAgentFromProfile<TContext>(DEFAULT_AGENT_PROFILES[DEFAULT_AGENT_PROFILE_NAME]!, {
       tools: sessionTools === undefined ? this.toolPalette : toolPaletteOf(sessionTools),
+      ...(extraTools !== undefined && extraTools.length > 0 ? { extraTools } : {}),
       // The profile declares no model: the harness default. A model the session names is applied
       // on the session itself, like `setModel`.
       ...(this.defaultConfig.model !== undefined ? { model: this.defaultConfig.model } : {}),
@@ -1933,6 +1941,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(subagents?.workflowTool !== undefined ? { workflowTool: subagents.workflowTool } : {}),
       ...(subagents?.maxConcurrent !== undefined ? { maxConcurrentSubagents: subagents.maxConcurrent } : {}),
+      ...(config.disabledTools !== undefined ? { disabledTools: config.disabledTools } : {}),
     };
   }
 
@@ -2745,7 +2754,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
       const givenAgent = bindings.agent ?? namedAgent;
       if (givenAgent !== undefined) {
         assertNoDefaultAgentOptions(
-          { modelSettings: effective.modelSettings, tools: bindings.tools ?? effective.tools, appendSystemPrompt: effective.appendSystemPrompt, maxStepsPerTurn: effective.limits?.maxStepsPerTurn },
+          { modelSettings: effective.modelSettings, tools: bindings.tools ?? effective.tools, extraTools: bindings.extraTools, appendSystemPrompt: effective.appendSystemPrompt, maxStepsPerTurn: effective.limits?.maxStepsPerTurn },
           bindings.agent !== undefined || effective.agent !== undefined ? "this session" : "the harness",
         );
       }
@@ -2849,7 +2858,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
       if (givenAgent === undefined && this.defaultConfig.model === undefined && explicit.model === undefined && bindings.model === undefined && core.modelSetting === undefined) {
         throw new HarnessConfigError(`session "${id}" has no model: name one in the harness configuration (\`config.defaults.model\`, or \`model\`), in the session's own, or run a complete agent`);
       }
-      const agent = givenAgent ?? (await this.buildDefaultAgent(effective, sessionTools));
+      const agent = givenAgent ?? (await this.buildDefaultAgent(effective, sessionTools, bindings.extraTools));
       // A model the session names is set like `setModel`, so it is remembered with the session;
       // the harness default is not, and keeps reaching the session through its agent.
       if (bindings.model !== undefined) core.setModel(bindings.model);

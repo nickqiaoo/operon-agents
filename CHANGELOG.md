@@ -7,6 +7,27 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `SessionConfig.disabledTools` (and `disabledTools` in `config.toml` / harness defaults): tools a
+  session never offers, by name, wherever they come from — built-in, a capability's, an MCP
+  server's, `Agent`, `Workflow`. They are dropped from the turn's toolset, so they are absent from
+  the request, from SearchTool's catalog and from what a Code Mode program can call, and a call to
+  one fails as an unknown tool in any permission mode. Subagents inherit the list; a session's
+  replaces the harness's whole. `RunOptions.disabledTools` / `RunnerConfig.disabledTools` carry it
+  for a run. Before this, only the built-in palette could be narrowed (`tools`, an allow-list), and
+  a capability's or an MCP tool could only be denied at call time while still being offered.
+- `SessionBindings.extraTools`: tools a session's default agent gets on top of the ones its profile
+  picks — a host's own actions, run in process instead of through an MCP server. They are the root
+  agent's own tools: offered directly (never deferred, never in a Code Mode catalog) and not handed
+  to subagents. `bindings.tools` only replaced the palette the profile picks from by name, so a
+  tool the profile does not name could not be added. A restore must hand them in again
+  (`SessionDependencyMissingError` otherwise); a name the profile already uses is an error; with a
+  complete `agent` they are refused like the other default-agent options.
+  `BuildAgentOptions.extraTools` does the same for `buildAgentFromProfile`.
+
 ## [0.1.0-alpha.34] — 2026-11-14
 
 ### Fixed
