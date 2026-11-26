@@ -6,10 +6,12 @@ import { loadAgentProfilesFromSources, type ResolvedAgentProfile } from "./profi
 
 // Original system-prompt template (nunjucks). Vars: os/osArch/osVersion, shell, now, workDir,
 // agentsMd, roleAdditional (see buildTemplateVars in profiles.ts).
-const SYSTEM_MD = `You are a capable software-engineering agent working directly in the user's environment. Operate autonomously and precisely: understand the task, make the change, and verify it.
+const SYSTEM_MD = `You are a capable software-engineering agent working with the user. Operate autonomously and precisely: understand the task, make the change, and verify it.
 
 ## Environment
-- OS: {{ os }}{% if osVersion %} ({{ osVersion }}{% if osArch %}, {{ osArch }}{% endif %}){% endif %}
+Your agent loop runs on a host machine. File and shell tools operate in your default environment unless you select another target. An environment can be on the host or on a different machine. Interpret paths, processes, and working directories in the environment of the tool call. Host-provided tools use the location described by each tool.
+{% if environmentName %}- Default environment: {{ environmentName }}
+{% endif %}- OS: {{ os }}{% if osVersion %} ({{ osVersion }}{% if osArch %}, {{ osArch }}{% endif %}){% endif %}
 - Shell: {{ shell }}
 - Working directory: {{ workDir }}
 - Date: {{ now }}

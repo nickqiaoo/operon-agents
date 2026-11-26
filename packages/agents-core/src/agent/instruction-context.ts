@@ -6,6 +6,7 @@ const AGENTS_MD_MAX_CHARS = 32 * 1024;
 
 /** Runtime-only values used to render a profile system prompt. */
 export interface SystemPromptContext {
+  readonly environmentName?: string;
   readonly osKind: string;
   readonly osArch?: string;
   readonly osVersion?: string;
@@ -32,6 +33,7 @@ export async function prepareSystemPromptContext(
   cwd = environment.normpath(environment.getcwd()),
 ): Promise<SystemPromptContext> {
   return {
+    environmentName: environment.name,
     osKind: environment.osInfo.osKind,
     osArch: environment.osInfo.osArch,
     osVersion: environment.osInfo.osVersion,

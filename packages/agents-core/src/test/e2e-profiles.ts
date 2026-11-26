@@ -127,6 +127,7 @@ async function main(): Promise<void> {
       const text = (await agent.resolveInstructions(runtimeContext)) ?? "";
       const readsAfterFirst = environment.readCount;
       const second = (await agent.resolveInstructions(runtimeContext)) ?? "";
+      check("build: prompt distinguishes the loop host from the active environment", text.includes("Your agent loop runs on a host machine.") && text.includes("- Default environment: local"));
       check("build: rendered prompt includes the live cwd", text.includes(dir));
       check("build: rendered prompt includes AGENTS.md", text.includes("initial project instruction"));
       check("build: rendered prompt includes the subagent role", text.includes("subagent"));

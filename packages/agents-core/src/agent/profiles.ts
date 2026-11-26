@@ -61,6 +61,7 @@ function buildTemplateVars(context: SystemPromptContext, promptVars: Record<stri
   const now = context.now instanceof Date ? formatSystemPromptDate(context.now) : (context.now ?? "");
   return {
     ...promptVars,
+    environmentName: context.environmentName ?? "",
     os: context.osKind,
     osArch: context.osArch ?? "",
     osVersion: context.osVersion ?? "",

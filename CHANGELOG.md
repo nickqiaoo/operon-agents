@@ -7,6 +7,12 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.37] — 2026-11-26
+
+### Changed
+
+- The built-in agent profiles explain where the agent loop runs and identify the default environment for file and shell tools. The same guidance applies to single-environment sessions and subagents.
+
 ## [0.1.0-alpha.36] — 2026-11-26
 
 ### Added
