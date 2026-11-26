@@ -7,6 +7,14 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.38] — 2026-11-26
+
+### Fixed
+
+- Explicit tool targets are validated against the current session environments, including after an environment is removed.
+- Workflow steps fail if their requested worktree cannot be created.
+- Environment updates reach each active agent frame once, including frames already running when the session environments change.
+
 ## [0.1.0-alpha.37] — 2026-11-26
 
 ### Changed

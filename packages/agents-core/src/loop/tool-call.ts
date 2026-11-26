@@ -39,8 +39,8 @@ export interface ToolCallStepContext {
   readonly model: ChatModel;
   readonly environment: Environment;
   /**
-   * The environments this frame can address. Present only when there is more than one; an
-   * environment-scoped call then names one with `target` (default: `home`).
+   * The environments this frame can address. An explicit target must be reachable even
+   * when the frame has only its home.
    */
   readonly environments?: FrameEnvironments;
   readonly tools: ReadonlyMap<string, Tool>;
@@ -302,8 +302,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
 
 /**
  * Settle where an environment-scoped call runs: its `target`, else the frame's home. The
- * argument is taken out either way, so the tool never sees it. A call that is not
- * environment-scoped, or a frame with one environment, passes through untouched.
+ * argument is taken out either way, so the tool never sees it.
  */
 function selectCallEnvironment(
   step: ToolCallStepContext,
@@ -338,6 +337,8 @@ function selectCallEnvironment(
     // Declared but not connected in this open: refuse rather than fall back to another machine.
     return { error: `Environment "${name}" is not connected right now, so ${toolName} cannot run there. Nothing was run. Use another environment or ask the user to reconnect "${name}".` };
   }
+  // Single-environment calls keep the existing event, approval and scheduling semantics.
+  if (frame.declared.length === 1) return { args: rest };
   return {
     args: rest,
     callEnv: { name, environment: entry.environment, identity: entry.identity, root: name === frame.root },

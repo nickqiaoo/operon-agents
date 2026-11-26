@@ -1,4 +1,5 @@
 import { testRunner, openTestSession } from "./faux.ts";
+import { rejects } from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -66,11 +67,14 @@ async function testWorktree(): Promise<void> {
       check("clean worktree removed on cleanup", !existsSync(wt2.cwd));
     }
 
-    // Non-repo dir → null (graceful: caller degrades to shared workspace).
+    // Optional setup returns null; explicitly requested isolation reports the Git error.
     const nonRepo = mkdtempSync(join(tmpdir(), "wf-norepo-"));
     try {
       const ns = new LocalEnvironment(nonRepo);
       check("createWorktree returns null outside a git repo", (await createWorktree(ns)) === null);
+      await rejects(createWorktree(ns, { required: true }), /Cannot create an isolated worktree.*not a git repository/is);
+      git(nonRepo, "init", "-q");
+      await rejects(createWorktree(ns, { required: true }), /Cannot create an isolated worktree.*HEAD/is);
     } finally {
       rmSync(nonRepo, { recursive: true, force: true });
     }

@@ -158,9 +158,7 @@ export function deriveChild<TContext>(
 }
 
 /**
- * The environments `state`'s frame can address, as the tool-call layer and the prompt need
- * them — `undefined` for a frame that reaches one environment (every single-environment
- * session), which keeps that path exactly as it was.
+ * The environments this frame can address, including the home of a single-environment session.
  */
 export function frameEnvironmentsFor<TContext>(state: RunState<TContext>): FrameEnvironments | undefined {
   const table = state.environments;
@@ -201,20 +199,8 @@ export function injectAtTurnBoundary<TContext>(state: RunState<TContext>, contex
       context.appendMessage(message, origin);
     },
   );
-  // Environment status (a declared machine not connected this open, a changed working directory,
-  // an `updateEnvironments`): a reminder at the boundary, never a system-prompt change, so the
-  // cached prefix holds. Once per frame per notice.
-  const notice = state.session.takeEnvironmentNotice?.(state.address);
-  if (notice !== undefined) {
-    const text = systemReminder(notice);
-    const message: Message = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
-    injectionTokens.set(ENVIRONMENT_INJECTOR_ID, estimateTokens(text));
-    context.appendMessage(message, { kind: "injection" as const, injectorId: ENVIRONMENT_INJECTOR_ID, variant: "status" });
-  }
   return injectionTokens;
 }
-
-const ENVIRONMENT_INJECTOR_ID = "environments";
 
 // ── Pure message helpers ─────────────────────────────────────────────────────────────────
 

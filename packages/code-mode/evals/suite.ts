@@ -55,10 +55,13 @@ export async function measureRun(
       writeFileSync(join(work, path), content);
     }
     const harness = createHarness({
-    extensions: variant === "code" ? [codeMode({ hide: "none" })] : [],
-    config: { workDir: work, defaults: { model: model, permission: { mode: "yolo" }, limits: { maxStepsPerTurn: options.maxStepsPerTurn ?? 12 } } }
-  });
-    const session = await harness.createSession();
+      extensions: variant === "code" ? [codeMode({ hide: "none" })] : [],
+      config: {
+        workDir: work,
+        defaults: { permission: { mode: "yolo" }, limits: { maxStepsPerTurn: options.maxStepsPerTurn ?? 12 } },
+      },
+    });
+    const session = await harness.createSession({ bindings: { model } });
     let steps = 0;
     let tokens = 0;
     let toolCalls = 0;

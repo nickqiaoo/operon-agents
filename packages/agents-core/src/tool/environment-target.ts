@@ -38,6 +38,8 @@ export function withTargetParameter(tool: Tool, frame: FrameEnvironments): Targe
     outcome = { kind: "conflict", tool: notScoped(tool) };
   } else if (properties !== undefined && Object.hasOwn(properties, TARGET_PARAMETER)) {
     outcome = { kind: "conflict", tool: notScoped(tool) };
+  } else if (names.length <= 1) {
+    outcome = { kind: "unchanged", tool };
   } else {
     const target = {
       type: "string",

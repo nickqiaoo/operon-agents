@@ -19,7 +19,9 @@
  *  K. updateEnvironments — the one way the declaration changes; the root cannot be removed
  *  L. a `home-only` environment — a subagent sent there reaches nothing else
  *  M. auto mode — the judge is told which machine the action and each earlier call run on
+ *  N. each frame receives the latest pending environment notice once, at a fresh turn
  */
+import { z } from "zod";
 import { strict as assert } from "node:assert";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,8 +29,10 @@ import { join } from "node:path";
 import {
   bashTool,
   defineAgent,
+  defineTool,
   EnvironmentTable,
   LocalEnvironment,
+  InjectionManager,
   ListenerSink,
   Runner,
   Session,
@@ -495,6 +499,33 @@ function messageText(request: LlmRequest | undefined): string {
   await session.close();
   const reopened = await Session.open({ store, sessionId: "menv-k", environment: new LocalEnvironment(local) });
   check("K: the update is what a reopen declares", reopened.environments.names.join(",") === "main,test");
+  await reopened.updateEnvironments({ remove: ["test"] });
+  const lookup = defineTool({
+    name: "lookup",
+    description: "Look up a target by name",
+    environmentScoped: true,
+    parameters: z.object({ target: z.string() }),
+    execute: ({ target }) => `lookup: ${target}`,
+  });
+  const single = defineAgent({ name: "single", instructions: "x", model, tools: [writeTool, lookup] });
+  let output: string[] = [];
+  faux.setResponses([
+    () => fauxAssistantMessage([
+      fauxToolCall("Write", { target: "test", path: "stale.txt", content: "wrong host" }),
+      fauxToolCall("Write", { target: "main", path: "home.txt", content: "home" }),
+      fauxToolCall("lookup", { target: "record" }),
+    ], { stopReason: "toolUse" }),
+    (context) => {
+      output = toolResultTexts(context);
+      return fauxAssistantMessage("done", { stopReason: "stop" });
+    },
+  ]);
+  reopened.setPermissionMode("yolo");
+  await new Runner().run(single, "use explicit targets after removing test", { session: reopened });
+  check("K: a removed last target is rejected", output.some((text) => text.includes('Unknown environment "test"')));
+  check("K: the stale call wrote to neither host", !existsSync(join(local, "stale.txt")) && !existsSync(join(test, "stale.txt")));
+  check("K: the named home still works", readFileSync(join(local, "home.txt"), "utf8") === "home");
+  check("K: a tool keeps its own target parameter", output.includes("lookup: record"));
   await reopened.close();
 }
 
@@ -563,6 +594,45 @@ function messageText(request: LlmRequest | undefined): string {
   check("M: an untargeted action is marked as the home environment", (judged[1] ?? "").includes(String.raw`{\"meta\":{\"environment\":{\"name\":\"main\",\"home\":true}}}`));
   check("M: earlier calls in the transcript keep their environment", (judged[1] ?? "").includes(String.raw`\"name\":\"scratch\"`));
   check("M: both commands ran where they were sent", existsSync(join(scratch, "one")) && existsSync(join(local, "two")));
+}
+
+// ── N. environment reminders across runs and frames ──────────────────────────────────
+{
+  const cap = capture();
+  const session = await Session.open({
+    environment: new LocalEnvironment(tempDir("menv-n-")), events: cap.sink,
+    permissionOptions: { mode: "yolo" },
+  });
+  const worker = defineAgent({ name: "worker", instructions: "x", model });
+  const lead = defineAgent({ name: "lead", instructions: "x", model, subagents: [worker] });
+  const runner = new Runner();
+  const env = new LocalEnvironment(tempDir("menv-n-build-"));
+  await session.updateEnvironments({ add: [{ name: "old", environment: env }] });
+  await session.updateEnvironments({ remove: ["old"], add: [{ name: "build", environment: env }] });
+
+  const manager = new InjectionManager();
+  session.registerSessionInjectors(manager);
+  manager.runAtTurnBoundary({ trigger: "compaction", sessionId: session.id, address: "main",
+    history: [], originOf: () => undefined }, () => assert.fail("compaction consumed a pending environment notice"));
+
+  faux.setResponses([
+    () => fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "worker", description: "check", prompt: "check" }), { stopReason: "toolUse" }),
+    () => fauxAssistantMessage("child done", { stopReason: "stop" }),
+    () => fauxAssistantMessage("done", { stopReason: "stop" }),
+  ]);
+  await runner.run(lead, "ask the worker", { session });
+  faux.setResponses([() => fauxAssistantMessage("done", { stopReason: "stop" })]);
+  await runner.run(lead, "another turn", { session });
+
+  const notices = cap.events.filter((e) => e.type === "message.appended" && e.origin?.kind === "injection"
+    && e.origin.injectorId === "environments" && e.origin.variant === "status");
+  check("N: main and child each receive the notice once across turns", notices.length === 2
+    && notices.some((e) => e.address === "main") && new Set(notices.map((e) => e.address)).size === 2);
+  check("N: only the latest pending change was delivered", notices.length > 0 && notices.every((e) => {
+    const text = JSON.stringify(e);
+    return text.includes("added `build`") && text.includes("removed `old`") && !text.includes("added `old`");
+  }));
+  await session.close();
 }
 
 for (const dir of roots) rmSync(dir, { recursive: true, force: true });

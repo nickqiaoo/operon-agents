@@ -1,4 +1,6 @@
 import { SandboxKeepalive } from './sandbox-keepalive.ts';
+import { EnvironmentNoticeInjector } from "./environment-notice-injector.ts";
+import type { InjectionManager } from "../capabilities/injection.ts";
 import { recoverOrphanedTurns } from "./lifecycle-recovery.ts";
 import { readSessionTails } from "../events/projection.ts";
 import type { Environment } from "../tool/environment.ts";
@@ -344,8 +346,7 @@ export class Session implements SessionPort {
   /** The root environment — where tools run unless a call names another `target`. */
   readonly environment: Environment;
   private environmentTable: EnvironmentTable;
-  private environmentNotice: string | undefined;
-  private readonly environmentNoticeDelivered = new Set<string>();
+  private readonly environmentNotice = new EnvironmentNoticeInjector();
   private readonly sandboxTtlMs: number;
   readonly store?: SessionStore;
   readonly events: EventSink;
@@ -588,10 +589,14 @@ export class Session implements SessionPort {
     return this.environmentTable;
   }
 
+  /** @internal Add the session-owned injectors to each run's manager. */
+  registerSessionInjectors(manager: InjectionManager): void {
+    manager.register(this.environmentNotice);
+  }
+
   /** Queue a status note for every frame's next turn boundary (replaces any undelivered one). */
   setEnvironmentNotice(text: string): void {
-    this.environmentNotice = text;
-    this.environmentNoticeDelivered.clear();
+    this.environmentNotice.publish(text);
   }
 
   /**
@@ -600,9 +605,7 @@ export class Session implements SessionPort {
    * changing the system prompt, so the cached prefix holds.
    */
   takeEnvironmentNotice(address: string): string | undefined {
-    if (this.environmentNotice === undefined || this.environmentNoticeDelivered.has(address)) return undefined;
-    this.environmentNoticeDelivered.add(address);
-    return this.environmentNotice;
+    return this.environmentNotice.take(address);
   }
 
   /**

@@ -110,7 +110,7 @@ function buildAuthorizer<TContext>(
     getTools: typeof tools === "function" ? tools : () => tools,
     getEnvironments: () => {
       const frame = frameEnvironmentsFor(state);
-      if (frame === undefined) return undefined;
+      if (frame === undefined || frame.declared.length <= 1) return undefined;
       return {
         home: frame.home,
         entries: [...frame.reachable.values()].map((entry) => ({ name: entry.name, ...(entry.description !== undefined ? { description: entry.description } : {}) })),

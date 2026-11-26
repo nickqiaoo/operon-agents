@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { errorMessage } from "../loop/errors.ts";
 import type { Environment } from "../tool/environment.ts";
 
 /**
@@ -30,15 +31,23 @@ export const WORKTREES_DIR = ".operon/worktrees";
  * capabilities — git runs through `environment.exec`, and the scoped environment comes from
  * `environment.withCwd`. It is therefore backend-agnostic: any environment whose target host
  * has git (local, ssh, sandbox) can isolate. Whether isolation happens is decided at
- * runtime by git itself — a host without git, or a cwd that isn't a repo, makes the
- * git command fail and we return `null`, and the caller degrades to the shared
- * workspace (surfacing that isolation was unavailable rather than failing silently).
+ * runtime by git itself. By default an unavailable worktree returns `null`. Callers
+ * requesting isolation use `required: true` to receive the underlying failure.
  * Cleanup removes the worktree only if the agent left it clean; a dirty worktree is
  * kept for inspection.
  */
-export async function createWorktree(environment: Environment, options?: { label?: string }): Promise<WorktreeHandle | null> {
-  const root = (await runGit(environment, ["-C", environment.getcwd(), "rev-parse", "--show-toplevel"])).ok?.trim();
-  if (!root) return null; // no git, or cwd isn't a repo → no isolation available
+export function createWorktree(environment: Environment, options: { label?: string; required: true }): Promise<WorktreeHandle>;
+export function createWorktree(environment: Environment, options?: { label?: string; required?: boolean }): Promise<WorktreeHandle | null>;
+export async function createWorktree(environment: Environment, options?: { label?: string; required?: boolean }): Promise<WorktreeHandle | null> {
+  const cwd = environment.getcwd();
+  function unavailable(reason: string): null {
+    if (options?.required) throw new Error(`Cannot create an isolated worktree in "${cwd}": ${reason}`);
+    return null;
+  }
+  const repo = await runGit(environment, ["-C", cwd, "rev-parse", "--show-toplevel"]);
+  if ("error" in repo) return unavailable(repo.error);
+  const root = repo.ok.trim();
+  if (!root) return unavailable("Git returned an empty repository root.");
 
   const id = randomBytes(4).toString("hex");
   const safeLabel = (options?.label ?? "wt").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "wt";
@@ -50,11 +59,11 @@ export async function createWorktree(environment: Environment, options?: { label
   const wtPath = environment.normpath(`${root}/${WORKTREES_DIR}/${safeLabel}-${id}`);
 
   const added = await runGit(environment, ["-C", root, "worktree", "add", "--quiet", "-b", branch, wtPath, "HEAD"]);
-  if (added.ok === undefined) return null; // creation failed → caller degrades to shared workspace
+  if ("error" in added) return unavailable(added.error);
 
   const cleanup = async (): Promise<void> => {
     const status = await runGit(environment, ["-C", wtPath, "status", "--porcelain"]);
-    if (status.ok !== undefined && status.ok.trim() === "") {
+    if ("ok" in status && status.ok.trim() === "") {
       await runGit(environment, ["-C", root, "worktree", "remove", "--force", wtPath]);
       await runGit(environment, ["-C", root, "branch", "-D", branch]);
     }
@@ -64,9 +73,12 @@ export async function createWorktree(environment: Environment, options?: { label
   return { environment: environment.withCwd(wtPath), cwd: wtPath, cleanup };
 }
 
-/** Run `git <args>` on the environment's host; `ok` is stdout on exit 0, undefined otherwise. */
-async function runGit(environment: Environment, args: string[]): Promise<{ ok?: string }> {
-  // `.catch` covers git-not-found / the backend refusing to spawn at all.
-  const result = await environment.commands.run(["git", ...args]).catch(() => undefined);
-  return result?.exitCode === 0 ? { ok: result.stdout } : {};
+async function runGit(environment: Environment, args: string[]): Promise<{ ok: string } | { error: string }> {
+  try {
+    const result = await environment.commands.run(["git", ...args]);
+    if (result.exitCode === 0) return { ok: result.stdout };
+    return { error: result.stderr.trim() || `Git exited with status ${result.exitCode ?? "unknown"}.` };
+  } catch (error) {
+    return { error: errorMessage(error) };
+  }
 }

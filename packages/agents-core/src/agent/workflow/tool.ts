@@ -87,18 +87,13 @@ export function buildWorkflowTool<TContext>(
         // event can be joined to this child's Session AgentEvents and interruption is resumable.
         onStart({ agentId, address });
 
-        // Optional worktree isolation — degrade (with a log, never silently) if unsupported.
         let runEnvironment = parent.environment;
         let cleanupWorktree: (() => Promise<void>) | undefined;
         if (isolation === "worktree") {
-          const wt = await createWorktree(parent.environment, { label: agentId });
-          if (wt) {
-            runEnvironment = wt.environment;
-            cleanupWorktree = wt.cleanup;
-            emitProgress({ type: "log", message: `🌳 ${agentId}: isolated worktree at ${wt.cwd}` });
-          } else {
-            emitProgress({ type: "log", message: `isolation:'worktree' unavailable on environment '${parent.environment.name}' — running in the shared workspace` });
-          }
+          const wt = await createWorktree(parent.environment, { label: agentId, required: true });
+          runEnvironment = wt.environment;
+          cleanupWorktree = wt.cleanup;
+          emitProgress({ type: "log", message: `🌳 ${agentId}: isolated worktree at ${wt.cwd}` });
         }
 
         // Per-agent abort: workflow signal OR an absolute stall timeout.

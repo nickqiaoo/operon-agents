@@ -2,6 +2,8 @@ import type { Message } from "../protocol/index.ts";
 import type { PromptOrigin } from "../store/origin.ts";
 
 export interface InjectionContext {
+  /** Defaults to a fresh turn. Compaction also runs injectors to restore context. */
+  readonly trigger?: "turn" | "compaction";
   readonly history: readonly Message[];
   readonly sessionId: string;
   readonly address: string;

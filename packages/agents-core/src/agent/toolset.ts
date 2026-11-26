@@ -131,14 +131,13 @@ const targetConflictWarned = new WeakMap<object, Set<string>>();
  */
 function withEnvironmentTargets<TContext>(state: RunState<TContext>, tools: readonly Tool[]): readonly Tool[] {
   const frame = frameEnvironmentsFor(state);
-  // One reachable environment: nothing to choose, so no parameter (a stray `target` is refused).
-  if (frame === undefined || frame.reachable.size <= 1) return tools;
+  if (frame === undefined) return tools;
   let changed = false;
   const out = tools.map((tool) => {
     const outcome = withTargetParameter(tool, frame);
     if (outcome.kind === "unchanged") return tool;
     changed = true;
-    if (outcome.kind === "conflict") {
+    if (outcome.kind === "conflict" && frame.reachable.size > 1) {
       const warned = targetConflictWarned.get(state) ?? new Set<string>();
       targetConflictWarned.set(state, warned);
       if (!warned.has(tool.schema.name)) {

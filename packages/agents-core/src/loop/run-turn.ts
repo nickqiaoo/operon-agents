@@ -37,7 +37,7 @@ export interface RunTurnInput {
   readonly signal: AbortSignal;
   readonly model: ChatModel;
   readonly environment: Environment;
-  /** The frame's environments, when it can reach more than one (see `ToolCallStepContext`). */
+  /** The frame's routing table (see `ToolCallStepContext`). */
   readonly environments?: FrameEnvironments;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */

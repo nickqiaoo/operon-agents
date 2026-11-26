@@ -858,6 +858,7 @@ export class Runner<TContext = unknown> {
     let capabilities: Awaited<typeof assembling>;
     try {
       capabilities = await assembling;
+      session.registerSessionInjectors(capabilities.injection);
     } catch (error) {
       await session.exitRun();
       throw error;

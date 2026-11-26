@@ -284,7 +284,7 @@ export function snapshotDrift(declared: EnvironmentSnapshot, live: EnvironmentSn
  * The environments ONE frame (root agent or subagent) can address, as the tool-call layer needs
  * them. `home` is where a call without `target` runs; its entry carries the frame's ACTUAL
  * environment (a workflow worktree, say), which may differ from the table's entry of that name.
- * Present on a step only when the frame can reach more than one environment.
+ * Also used to validate explicit targets in single-environment sessions.
  */
 export interface FrameEnvironments {
   readonly home: string;
@@ -298,10 +298,8 @@ export interface FrameEnvironments {
 
 /**
  * Build a frame's view of the table. `homeEnvironment` is the frame's own instance; `reachable`
- * limits the names (undefined = the whole table). Returns `undefined` for a single-environment
- * session — the path that must stay byte-for-byte what it was. A frame of a multi-environment
- * session that reaches only its home still gets a view: it is offered no `target` and no list,
- * but a call that names another environment is refused instead of silently running at home.
+ * limits the names (undefined = the whole table). A single reachable environment is enough
+ * to validate a call even though the model is offered no target parameter or environment list.
  */
 export function frameEnvironmentsOf(
   table: EnvironmentTable | undefined,
@@ -309,7 +307,7 @@ export function frameEnvironmentsOf(
   homeEnvironment: Environment,
   reachable?: readonly string[],
 ): FrameEnvironments | undefined {
-  if (table === undefined || table.size <= 1) return undefined;
+  if (table === undefined) return undefined;
   const allowed = reachable === undefined ? undefined : new Set(reachable);
   const map = new Map<string, EnvironmentTableEntry>();
   for (const entry of table.entries) {

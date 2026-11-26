@@ -65,6 +65,7 @@ export async function runFullCompaction(deps: FullCompactionDeps): Promise<numbe
   if (deps.injection) {
     deps.injection.runAtTurnBoundary(
       {
+        trigger: "compaction",
         history: messages,
         sessionId: deps.sessionId,
         address: deps.address,
