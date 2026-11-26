@@ -126,6 +126,7 @@ const GREP_DESCRIPTION = [
 
 export const grepTool = defineTool({
   name: "Grep",
+  environmentScoped: true,
   description: GREP_DESCRIPTION,
   parameters: GrepInput,
   async resolve(args, ctx) {

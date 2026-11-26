@@ -13,12 +13,17 @@ function preToolCallHookPolicy(engine: HookEngine): PermissionPolicy {
     name: "pre-tool-call-hook",
     async evaluate(ctx) {
       if (!engine.has("PreToolUse")) return undefined;
+      const environment = ctx.environment;
       const result = await engine.triggerBlock("PreToolUse", {
         matcherValue: ctx.toolCall.name,
+        ...(environment !== undefined ? { environment: environment.name } : {}),
         inputData: {
           tool_name: ctx.toolCall.name,
           tool_input: ctx.args,
           approval_rule: ctx.plan.approvalRule,
+          // Multi-environment sessions: which machine the call is for, and its working dir —
+          // a hook must not read a remote path as a local one.
+          ...(environment !== undefined ? { environment: environment.name, environment_cwd: safeCwd(environment.environment) } : {}),
         },
         signal: ctx.signal,
       });
@@ -91,6 +96,14 @@ export function userHooksCapability(hooks: readonly HookDef[]): Capability {
   };
 }
 
+function safeCwd(environment: import("../../tool/environment.ts").Environment): string {
+  try {
+    return environment.normpath(environment.getcwd());
+  } catch {
+    return "";
+  }
+}
+
 function observeShellHookEvent(engine: HookEngine, event: import("../../events/index.ts").AgentEvent): void {
   switch (event.type) {
     case "agent.started":
@@ -108,7 +121,8 @@ function observeShellHookEvent(engine: HookEngine, event: import("../../events/i
       if (engine.has(hookEvent)) {
         engine.fireAndForgetTrigger(hookEvent, {
           matcherValue: event.toolName,
-          inputData: { tool_name: event.toolName, is_error: event.isError },
+          ...(event.environment !== undefined ? { environment: event.environment } : {}),
+          inputData: { tool_name: event.toolName, is_error: event.isError, ...(event.environment !== undefined ? { environment: event.environment } : {}) },
         });
       }
       break;

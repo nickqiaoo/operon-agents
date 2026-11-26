@@ -18,6 +18,8 @@ interface ToolDefBase<S extends ZodType> {
   readonly parameters: S;
   /** Security-relevant projection for the `auto`-mode judge. See `Tool.toAutoApprovalInput`. */
   readonly toAutoApprovalInput?: (args: z.infer<S>) => unknown;
+  /** The tool works on `ctx.environment`; see `Tool.environmentScoped`. */
+  readonly environmentScoped?: boolean;
 }
 
 /**
@@ -58,6 +60,7 @@ export function defineTool<S extends ZodType, TContext = unknown>(def: FunctionT
   const parse = (rawArgs: unknown): z.infer<S> => def.parameters.parse(rawArgs) as z.infer<S>;
   return {
     schema: { name: def.name, description: def.description, parameters },
+    ...(def.environmentScoped === true ? { environmentScoped: true } : {}),
     // Project from the raw (history) args. The judge passes unvalidated tool_use input from
     // the transcript, so parse defensively and let the judge's try/catch handle throws.
     ...(def.toAutoApprovalInput

@@ -20,6 +20,7 @@ export type {
   Responder,
   AutoApprover,
   AutoApprovalInput,
+  AutoApprovalEnvironments,
   AutoApprovalVerdict,
 } from "./types.ts";
 export { PermissionManager, AUTO_MODE_DENIAL_LIMITS } from "./manager.ts";

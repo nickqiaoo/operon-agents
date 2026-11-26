@@ -238,6 +238,8 @@ export const SESSION_PERMISSION_KEY: StateKey = "session:permission";
 export const SESSION_THINKING_KEY: StateKey = "session:thinking";
 export const SESSION_MODEL_KEY: StateKey = "session:model";
 export const SESSION_USAGE_KEY: StateKey = "session:usage";
+/** The session's environment declaration (multi-environment sessions only): see `EnvironmentDeclaration`. */
+export const SESSION_ENVIRONMENTS_KEY: StateKey = "session:environments";
 
 /** KV key under which a store indexes a shard's newest checkpoint. An index, not state:
  *  stale or missing, the reader falls back to the shard's head. */

@@ -93,7 +93,7 @@ export function parseHooksDocument(raw: unknown): ParsedPluginHooks {
 
 /** Project config.hooks entries into HookDefs, dropping unknown events. */
 export function hookDefsFromConfig(
-  entries: ReadonlyArray<{ event: string; matcher?: string; command: string; timeout?: number }>,
+  entries: ReadonlyArray<{ event: string; matcher?: string; command: string; timeout?: number; environments?: readonly string[] }>,
 ): HookDef[] {
   const out: HookDef[] = [];
   for (const entry of entries) {
@@ -104,6 +104,7 @@ export function hookDefsFromConfig(
       ...(entry.matcher !== undefined ? { matcher: entry.matcher } : {}),
       command: entry.command,
       ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {}),
+      ...(entry.environments !== undefined ? { environments: [...entry.environments] } : {}),
     });
   }
   return out;

@@ -23,6 +23,8 @@ export type {
   ResumeSessionOptions,
   SessionBindingKey,
   SessionBindings,
+  SessionEnvironmentBinding,
+  HarnessEnvironmentChange,
   SessionIdentity,
   SessionOpenInfo,
   SessionOpenedListener,

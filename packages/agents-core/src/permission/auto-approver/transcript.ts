@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../../protocol/index.ts";
 import type { Tool } from "../../tool/types.ts";
+import type { AutoApprovalEnvironments } from "../types.ts";
 import { permissionDenialOf } from "../denial.ts";
 
 export type ToolLookup = ReadonlyMap<string, Tool>;
@@ -58,6 +59,23 @@ export function serializeToolCall(name: string, args: unknown, tool: Tool | unde
 
 export function serializeProjectedCall(name: string, projected: unknown, id?: string): string {
   return line({ [transcriptKey(name)]: projected, ...(id !== undefined ? { id: shortCallId(id) } : {}) });
+}
+
+/**
+ * The harness `meta` line naming the machine the next call runs on (multi-environment sessions).
+ * The judge treats meta lines as ground truth about the environment of the call below them.
+ */
+export function environmentMetaLine(name: string, environments: AutoApprovalEnvironments): string {
+  const entry = environments.entries.find((e) => e.name === name);
+  return line({
+    meta: {
+      environment: {
+        name,
+        ...(entry?.description !== undefined ? { description: entry.description } : {}),
+        ...(name === environments.home ? { home: true } : {}),
+      },
+    },
+  });
 }
 
 function userText(message: Message): string {
@@ -132,6 +150,7 @@ export function buildTranscriptText(
   messages: readonly Message[],
   lookup: ToolLookup,
   excludeToolCallId?: string,
+  environments?: AutoApprovalEnvironments,
 ): string {
   let out = "";
   let pendingAssistant: string | undefined;
@@ -150,6 +169,10 @@ export function buildTranscriptText(
         if (call.id === excludeToolCallId) continue;
         const serialized = serializeToolCall(call.name, call.arguments, undefined, lookup, call.id);
         if (serialized === "") continue;
+        if (environments !== undefined && lookup.get(call.name)?.environmentScoped === true) {
+          const target = (call.arguments as Record<string, unknown> | undefined)?.["target"];
+          out += environmentMetaLine(typeof target === "string" ? target : environments.home, environments);
+        }
         out += serialized;
         emitted.add(call.id);
       }

@@ -6,6 +6,7 @@ import { isAbortError } from "../loop/errors.ts";
 import { ConversationContext, readShardTail } from "../loop/context.ts";
 import type { BatchResume, PendingApprovalInterrupt } from "../loop/types.ts";
 import type { Environment } from "../tool/environment.ts";
+import type { EnvironmentTable } from "../tool/environment-table.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import { PermissionManager } from "../permission/manager.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
@@ -50,6 +51,7 @@ import { prepareToolCatalog } from "../tool/search/catalog.ts";
 import {
   emitRunEvent,
   finalText,
+  frameEnvironmentsFor,
   historyChangeEmitter,
   injectAtTurnBoundary,
   lastAssistant,
@@ -57,6 +59,7 @@ import {
   resolveModelParams,
   runCtxFor,
   tryParseOutput,
+  withEnvironmentSection,
 } from "./run-support.ts";
 
 /**
@@ -231,7 +234,14 @@ export interface RunState<TContext> {
   readonly maxTurns: number;
   address: string;
   readonly events: EventSink;
+  /** This frame's home environment instance: where a call without `target` runs. */
   readonly environment: Environment;
+  /** The session's named environments. A table of one = the single-environment session. */
+  readonly environments?: EnvironmentTable;
+  /** Name of this frame's home environment in `environments` (default: the table's root). */
+  readonly homeEnvironment?: string;
+  /** Names this frame may target (its home always included). Undefined = the whole table. */
+  readonly reachableEnvironments?: readonly string[];
   readonly store?: SessionStore;
   readonly responder?: Responder;
   readonly background?: BackgroundSpawner;
@@ -268,6 +278,13 @@ export interface DeriveOptions {
   readonly signal?: AbortSignal;
   /** Isolated environment (e.g. a workflow worktree); defaults to the parent's. */
   readonly environment?: Environment;
+  /**
+   * The child's home environment by name, when it is sent to another environment of the table
+   * (the Agent tool's `target`). Set together with `environment` (that entry's instance).
+   */
+  readonly homeEnvironment?: string;
+  /** Names the child may target; defaults to what the parent could reach. */
+  readonly reachableEnvironments?: readonly string[];
   /** Own SteerBus (parallel workflow agents can't share the parent's single-turn bus). */
   readonly steer?: SteerBus;
   /** Stable instance identity for a fresh child. Defaults to the address tail. */
@@ -861,6 +878,8 @@ export class Runner<TContext = unknown> {
       address: runAddress,
       events: session.events,
       environment: session.environment,
+      environments: session.environments,
+      homeEnvironment: session.environments.rootName,
       store: session.store,
       responder: session.responder,
       background: session.background,
@@ -979,7 +998,8 @@ class Engine<TContext> {
       const injectionTokens = resumingInterruptedTurn ? new Map<string, number>() : injectAtTurnBoundary(state, context);
 
       const model = await this.resolveModelFor(current, state);
-      const system = await current.resolveInstructions(runCtxFor(state));
+      const frameEnvironments = frameEnvironmentsFor(state);
+      const system = withEnvironmentSection(await current.resolveInstructions(runCtxFor(state)), frameEnvironments);
       // The engine's run loop rides into the toolset as a plain callback: the spawner the
       // subagent/Agent/Workflow tools share calls it to run child agents.
       const toolset = await buildRunTools(
@@ -1028,6 +1048,7 @@ class Engine<TContext> {
           signal: state.signal,
           model,
           environment: state.environment,
+          ...(frameEnvironments !== undefined ? { environments: frameEnvironments } : {}),
           background: state.background,
           responder: state.responder,
           hostContext: state.context,
@@ -1125,6 +1146,7 @@ class Engine<TContext> {
                 toolName: p.toolName,
                 approvalRule: p.approvalRule,
                 display: p.display,
+                ...(p.environment !== undefined ? { environment: p.environment } : {}),
               },
               { signal: state.signal },
             );

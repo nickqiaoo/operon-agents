@@ -28,6 +28,7 @@ export {
   SESSION_MODEL_KEY,
   SESSION_THINKING_KEY,
   SESSION_USAGE_KEY,
+  SESSION_ENVIRONMENTS_KEY,
 } from "./store.ts";
 export { CheckpointingSessionStore } from "./checkpointing-store.ts";
 export { MemorySessionLock, SessionBusyError } from "./lock.ts";

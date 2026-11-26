@@ -38,6 +38,7 @@ const WRITE_DESCRIPTION = [
 
 export const writeTool = defineTool({
   name: "Write",
+  environmentScoped: true,
   description: WRITE_DESCRIPTION,
   parameters: WriteInput,
   // Expose path + content so the judge can see what is being written (e.g. a curl|bash

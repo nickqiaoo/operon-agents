@@ -69,6 +69,9 @@ export function backgroundCapability(manager: BackgroundManager = new Background
           // spawns start recording. Without a durable store the manager stays purely in memory.
         manager.attach({
           environment: ctx.environment,
+          ...(ctx.environments !== undefined && ctx.environments.size > 1
+            ? { environments: ctx.environments.entries.map((entry) => entry.environment) }
+            : {}),
           steer,
           events,
           sessionId: ctx.sessionId,

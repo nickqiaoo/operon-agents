@@ -25,12 +25,21 @@ export interface HookDef {
   readonly matcher?: string;
   readonly command: string;
   readonly timeout?: number;
+  /**
+   * In a session with several environments: run only for tool calls in these environments.
+   * Absent = every environment. The hook's command itself always runs on the session's root
+   * environment (that is where hook scripts live); the call's environment is in its input as
+   * `environment`.
+   */
+  readonly environments?: readonly string[];
 }
 
 export type HookInputData = Readonly<Record<string, unknown>>;
 
 export interface HookTriggerArgs {
   readonly matcherValue?: string;
+  /** The environment of the tool call that triggered this, in a multi-environment session. */
+  readonly environment?: string;
   readonly inputData?: HookInputData;
   readonly signal?: AbortSignal;
 }

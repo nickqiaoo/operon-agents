@@ -211,6 +211,12 @@ export interface BackgroundManagerOptions {
 
 export interface BackgroundManagerRuntime {
   readonly environment?: Environment;
+  /**
+   * Every environment of the session (root included). A process task recorded on one of them
+   * — matched by sandbox id — is reconciled and stopped THERE after a restart. Absent = the
+   * root environment only.
+   */
+  readonly environments?: readonly Environment[];
   readonly steer?: SteerBus;
   readonly events?: EventSink;
   readonly sessionId?: string;
@@ -279,9 +285,11 @@ export class BackgroundManager implements BackgroundSpawner {
   }
 
   private environment?: Environment;
+  private environments: readonly Environment[] = [];
 
   attach(runtime: BackgroundManagerRuntime): void {
     this.environment = runtime.environment;
+    this.environments = runtime.environments ?? [];
     this.steer = runtime.steer;
     this.events = runtime.events;
     this.sessionId = runtime.sessionId ?? "";
@@ -834,9 +842,38 @@ export class BackgroundManager implements BackgroundSpawner {
     return lost;
   }
 
+  /** Replace the session's environment list (after `Session.updateEnvironments`). */
+  setEnvironments(environments: readonly Environment[]): void {
+    this.environments = environments;
+  }
+
+  /** Whether a live (non-terminal) process task runs on `environment`. */
+  hasLiveProcessOn(environment: Environment): boolean {
+    for (const entry of this.tasks.values()) {
+      if (TERMINAL_STATUSES.has(entry.status)) continue;
+      const location = entry.task.outputLocation;
+      if (entry.task.kind === "process" && location?.kind === "file" && location.environment === environment) return true;
+    }
+    return false;
+  }
+
+  /** The session environment a recorded process ran on, by its sandbox id. */
+  private environmentOfSandbox(sandboxId: string): Environment | undefined {
+    for (const environment of [this.environment, ...this.environments]) {
+      if (environment === undefined) continue;
+      try {
+        if (environment.sandbox.id === sandboxId) return environment;
+      } catch {
+        // an environment that cannot name its sandbox cannot own a recorded process
+      }
+    }
+    return undefined;
+  }
+
   private async restoreCommand(record: PersistedTask): Promise<boolean> {
-    const environment = this.environment;
-    if (record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file' || !environment || environment.sandbox.id !== record.process.sandboxId) return false;
+    if (record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file') return false;
+    const environment = this.environmentOfSandbox(record.process.sandboxId);
+    if (!environment) return false;
     const { pid } = record.process;
     const path = record.outputRef.path;
     const processes = await environment.commands.list().catch(() => []);
@@ -1030,8 +1067,9 @@ export class BackgroundManager implements BackgroundSpawner {
     const entry = this.tasks.get(taskId);
     if (!entry) {
       const record = this.ghosts.get(taskId);
-      const environment = this.environment;
-      if (!record || record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file' || !environment || record.process.sandboxId !== environment.sandbox.id) return undefined;
+      if (!record || record.kind !== 'process' || !record.process || record.outputRef?.kind !== 'file') return undefined;
+      const environment = this.environmentOfSandbox(record.process.sandboxId);
+      if (!environment) return undefined;
       if (isPersistedTaskTerminal(record.status) && record.status !== 'lost') return publicTaskInfo(record);
       const processes = await environment.commands.list();
       const pid = record.process.pid;

@@ -95,12 +95,20 @@ export class DecisionAutoApprover implements AutoApprover {
       return { decision: "allow", reason: "Tool declares no security-relevant input" };
     }
 
-    const transcript = buildTranscriptText(input.transcript, lookup, input.ctx.toolCall.id);
+    const transcript = buildTranscriptText(input.transcript, lookup, input.ctx.toolCall.id, input.environments);
+    const where = input.environments !== undefined && input.ctx.environment !== undefined
+      ? input.environments.entries.find((e) => e.name === input.ctx.environment!.name)
+      : undefined;
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const result = await model.classify(
       {
         state: {
           action: redact(JSON.stringify({ [toolName]: action })),
+          // Multi-environment sessions: the machine the action runs on (earlier calls in
+          // `conversation` carry theirs as `meta` lines). Harness ground truth, not agent text.
+          ...(where !== undefined
+            ? { environment: { name: where.name, ...(where.description !== undefined ? { description: where.description } : {}), home: where.name === input.environments!.home } }
+            : {}),
           conversation: redact(transcript.slice(-MAX_TRANSCRIPT_CHARS)),
           policy: {
             allow: [...(rules?.allow ?? [])],

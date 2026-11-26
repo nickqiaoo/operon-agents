@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { closeDeadlines } from "./harness-test-hooks.ts";
 import { readTranscriptPage, type TranscriptPage, type TranscriptPageOptions } from "operon-agents-core";
-import { type AgentEvent, type AgentRecord,type EventPublicationMode, type TelemetryService, type AgentEventListener, type AgentInput, readSessionTails, SessionProjection, type SessionSnapshot, type SnapshotOptions, type DirectoryEntry, type ProjectionObservation, type ProjectionListener, type ApprovalRequest, type ApprovalResponse, type Capability, type InterruptAnswer, type ChatModel, type ModelSettings, type RunOptions, ListenerSink, type AutoApprover, type PermissionMode, type PermissionRule, type PendingRunInterrupt, type QuestionRequest, type QuestionResult, type Responder, type RunHandle, type RunResult, type SessionStore, type SessionHandle, type SessionSummary, type ListSessionsFilter, type CreateSessionInput, type OpenSessionOptions, type DeleteSessionOptions, type ThinkingLevel, type Tool, type PromptOrigin, type SteerMessage, type SteerOptions, type SteerOrigin, type SteerReceipt, Agent, buildAgentFromProfile, INTERRUPTION_STATE_KEY, flattenPendingInterrupts, parseInterruptionState, Runner, Session, emptyUsage, isGuardrailTripwireError, type GuardrailTripwireError, askUserQuestionTool, createAutoApprover, createModelManager, backgroundCapability, compactionCapability, filesystemTools, goalCapability, LocalEnvironment, McpOAuthService, MemorySessionRepository, SessionRepositoryNotFoundError, SessionBusyError, SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError, isAbortError, planCapability, skillsCapability, SkillRegistry, mcpServersCapability, pluginsCapability, userHooksCapability, type HookDef, type McpServerConfig, type McpTransportKind, type McpCredentialProvider, type PluginManager, type ApprovalRequestOptions, type Environment, type EnvironmentFactory, type ActivateSkillRequest, type SessionRepository, type ResolvedAgentProfile, taskCapability, workflowCapability, DEFAULT_AGENT_PROFILES, DEFAULT_AGENT_PROFILE_NAME, DEFAULT_SUBAGENT_NAMES, profileSubagentProvider, type SubagentProvider, DEFAULT_ADDRESS, envLogger, noopLogger, parseSessionConfig, resolveSessionConfig, inlineMcpSecretPaths, sessionPolicyViolation, hookDefsFromConfig, SessionPolicySchema, SESSION_MODEL_KEY, SESSION_PERMISSION_KEY, SESSION_THINKING_KEY, type SessionConfig, type HarnessConfig, type SessionPolicy, type SessionMcpConfig, type SkillsConfig } from "operon-agents-core";
+import { type AgentEvent, type AgentRecord,type EventPublicationMode, type TelemetryService, type AgentEventListener, type AgentInput, readSessionTails, SessionProjection, type SessionSnapshot, type SnapshotOptions, type DirectoryEntry, type ProjectionObservation, type ProjectionListener, type ApprovalRequest, type ApprovalResponse, type Capability, type InterruptAnswer, type ChatModel, type ModelSettings, type RunOptions, ListenerSink, type AutoApprover, type PermissionMode, type PermissionRule, type PendingRunInterrupt, type QuestionRequest, type QuestionResult, type Responder, type RunHandle, type RunResult, type SessionStore, type SessionHandle, type SessionSummary, type ListSessionsFilter, type CreateSessionInput, type OpenSessionOptions, type DeleteSessionOptions, type ThinkingLevel, type Tool, type PromptOrigin, type SteerMessage, type SteerOptions, type SteerOrigin, type SteerReceipt, Agent, buildAgentFromProfile, INTERRUPTION_STATE_KEY, flattenPendingInterrupts, parseInterruptionState, Runner, Session, emptyUsage, isGuardrailTripwireError, type GuardrailTripwireError, askUserQuestionTool, createAutoApprover, createModelManager, backgroundCapability, compactionCapability, filesystemTools, goalCapability, LocalEnvironment, McpOAuthService, MemorySessionRepository, SessionRepositoryNotFoundError, SessionBusyError, SessionClosedError, SessionInterruptedError, SessionNotInterruptedError, SteerTargetNotFoundError, isAbortError, planCapability, skillsCapability, SkillRegistry, mcpServersCapability, pluginsCapability, userHooksCapability, type HookDef, type McpServerConfig, type McpTransportKind, type McpCredentialProvider, type PluginManager, type ApprovalRequestOptions, type Environment, type EnvironmentFactory, type ActivateSkillRequest, type SessionRepository, type ResolvedAgentProfile, taskCapability, workflowCapability, DEFAULT_AGENT_PROFILES, DEFAULT_AGENT_PROFILE_NAME, DEFAULT_SUBAGENT_NAMES, profileSubagentProvider, type SubagentProvider, DEFAULT_ADDRESS, envLogger, noopLogger, parseSessionConfig, resolveSessionConfig, inlineMcpSecretPaths, sessionPolicyViolation, hookDefsFromConfig, SessionPolicySchema, SESSION_MODEL_KEY, SESSION_PERMISSION_KEY, SESSION_THINKING_KEY, type SessionConfig, type HarnessConfig, type SessionPolicy, type SessionMcpConfig, type SkillsConfig, EnvironmentTableError, invalidEnvironmentName, type SessionEnvironmentInput, type SubagentEnvironmentAccess } from "operon-agents-core";
 import { recoverOrphanedTurns } from "operon-agents-core/internal";
 import type {
   TodoStore,
@@ -143,6 +143,31 @@ export interface SessionBindings<TContext = unknown> {
   readonly context?: TContext;
   /** Where this session's tools execute. The session only operates it; see `release`. */
   readonly environment?: Environment | EnvironmentFactory;
+  /**
+   * Name of `environment` among the session's environments. Defaults to `"main"`; only matters
+   * with `additionalEnvironments`.
+   */
+  readonly environmentName?: string;
+  /**
+   * More places this session's tools can run, by name — other SSH machines, other sandboxes.
+   * With one or more, file and shell tools (and `Agent`) take an optional `target` naming where
+   * a call runs; without it a call runs on `environment`, as always. The system prompt lists
+   * each environment with its OS, shell, working directory and `description`.
+   *
+   * The first open that brings them DECLARES them, and the session keeps that declaration: later
+   * opens only hand in the live instances, by name. One left out this time (or whose factory
+   * fails) is just not connected — its calls are refused, the model is told, and the prompt and
+   * tool schemas stay as they were, so the cached prefix holds. A name the session never declared
+   * is refused; change the declaration with `HarnessSession.updateEnvironments`. Like
+   * `environment`, the session only operates them; `release` gives them back.
+   */
+  readonly additionalEnvironments?: Readonly<Record<string, Environment | EnvironmentFactory | SessionEnvironmentBinding>>;
+  /**
+   * What a subagent sent to another environment may reach, unless that environment says
+   * otherwise: `inherit` (default) or `home-only`. Part of the declaration — read on the first
+   * open that declares environments.
+   */
+  readonly subagentEnvironmentAccess?: SubagentEnvironmentAccess;
   /** Where this session's http MCP servers get their credentials, asked on every connect. */
   readonly mcpCredentials?: McpCredentialProvider;
   /** A complete agent, instead of one named in the configuration or the default. */
@@ -168,9 +193,62 @@ export interface SessionBindings<TContext = unknown> {
   release?(): void | Promise<void>;
 }
 
-/** The kinds of live object a session can depend on being provided again. */
+/** One additional environment of a session, with what the model is told it is for. */
+export interface SessionEnvironmentBinding {
+  readonly environment: Environment | EnvironmentFactory;
+  /** What it is for — shown to the model next to its OS, shell and working directory. */
+  readonly description?: string;
+  /** Workspace identity: give two names the same one when they reach the same workspace. */
+  readonly identity?: string;
+  /** `home-only`: a subagent sent here reaches only this environment. */
+  readonly subagentAccess?: SubagentEnvironmentAccess;
+}
+
+/** The kinds of live object a session can depend on being provided again. Additional
+ *  environments are not among them: the session keeps their declaration, and one not handed in
+ *  is just not connected for that open. */
 export type SessionBindingKey = "environment" | "mcpCredentials" | "agent" | "model" | "tools" | "extraTools" | "subagentProvider";
 const SESSION_BINDING_KEYS: readonly SessionBindingKey[] = ["environment", "mcpCredentials", "agent", "model", "tools", "extraTools", "subagentProvider"];
+
+/** The bindings' additional environments as `Session.open` takes them, names checked. */
+function additionalEnvironmentsOf(sessionId: string, bindings: SessionBindings<unknown>): SessionEnvironmentInput[] | undefined {
+  if (bindings.environmentName !== undefined) {
+    const rootInvalid = invalidEnvironmentName(bindings.environmentName);
+    if (rootInvalid !== undefined) throw new HarnessConfigError(`session "${sessionId}": bindings.environmentName: ${rootInvalid}`);
+  }
+  const given = bindings.additionalEnvironments;
+  if (given === undefined) return undefined;
+  const out: SessionEnvironmentInput[] = [];
+  for (const [name, value] of Object.entries(given)) {
+    const invalid = invalidEnvironmentName(name);
+    if (invalid !== undefined) throw new HarnessConfigError(`session "${sessionId}": bindings.additionalEnvironments: ${invalid}`);
+    out.push(environmentInputOf(name, value));
+  }
+  return out;
+}
+
+function environmentInputOf(name: string, value: Environment | EnvironmentFactory | SessionEnvironmentBinding): SessionEnvironmentInput {
+  if (typeof value === "function" || !("environment" in value)) return { name, environment: value as Environment | EnvironmentFactory };
+  return {
+    name,
+    environment: value.environment,
+    ...(value.description !== undefined ? { description: value.description } : {}),
+    ...(value.identity !== undefined ? { identity: value.identity } : {}),
+    ...(value.subagentAccess !== undefined ? { subagentAccess: value.subagentAccess } : {}),
+  };
+}
+
+/**
+ * A change to a session's declared environments (`HarnessSession.updateEnvironments`): `add` in
+ * the bindings' own shape, `remove` by name, `update` a description or subagent access (`null`
+ * clears it), and the session-wide subagent default.
+ */
+export interface HarnessEnvironmentChange {
+  readonly add?: Readonly<Record<string, Environment | EnvironmentFactory | SessionEnvironmentBinding>>;
+  readonly remove?: readonly string[];
+  readonly update?: Readonly<Record<string, { readonly description?: string | null; readonly subagentAccess?: SubagentEnvironmentAccess | null }>>;
+  readonly subagentAccess?: SubagentEnvironmentAccess | null;
+}
 
 export type SessionOperation = "create" | "restore" | "fork";
 
@@ -1543,6 +1621,28 @@ export class HarnessSession<TContext = unknown, TOutput = unknown> {
   get environment(): Environment {
     return this.core.environment;
   }
+  /**
+   * Change what environments this session has — the one way its declaration changes (a reopen
+   * that hands in different instances never does). Between runs only; the next request starts
+   * a new cached prefix, and every agent is told what changed.
+   */
+  async updateEnvironments(change: HarnessEnvironmentChange): Promise<void> {
+    for (const name of Object.keys(change.add ?? {})) {
+      const invalid = invalidEnvironmentName(name);
+      if (invalid !== undefined) throw new HarnessConfigError(`session "${this.id}": ${invalid}`);
+    }
+    try {
+      await this.core.updateEnvironments({
+        ...(change.add !== undefined ? { add: Object.entries(change.add).map(([name, value]) => environmentInputOf(name, value)) } : {}),
+        ...(change.remove !== undefined ? { remove: change.remove } : {}),
+        ...(change.update !== undefined ? { update: Object.entries(change.update).map(([name, fields]) => ({ name, ...fields })) } : {}),
+        ...("subagentAccess" in change ? { subagentAccess: change.subagentAccess ?? null } : {}),
+      });
+    } catch (error) {
+      if (error instanceof EnvironmentTableError) throw new HarnessConfigError(`session "${this.id}": ${error.message}`);
+      throw error;
+    }
+  }
   /** The current todo list (the `TodoList` tool's latest state); empty without the todo capability. */
   getTodos(): readonly TodoItem[] {
     return this.core.service<TodoStore>("todo")?.get() ?? [];
@@ -2784,6 +2884,7 @@ export class Harness<TContext = unknown, TOutput = unknown> {
       // Environment: this open's → the harness's default → a LocalEnvironment at the session's own
       // workDir. The session only OPERATES a caller-supplied environment.
       const environment = bindings.environment ?? this.infrastructure.environment ?? new LocalEnvironment(workDir);
+      const additionalEnvironments = additionalEnvironmentsOf(id, bindings as SessionBindings<unknown>);
       // ONE open-time log read, shared: every shard from its newest checkpoint on (each
       // checkpoint carries the history and lifecycle before it). The projection seeds from it,
       // and Session.open receives it as `preloadedLog` so its capability restore + context
@@ -2835,6 +2936,9 @@ export class Harness<TContext = unknown, TOutput = unknown> {
         events,
         responder,
         environment,
+        ...(additionalEnvironments !== undefined && additionalEnvironments.length > 0 ? { additionalEnvironments } : {}),
+        ...(bindings.environmentName !== undefined ? { environmentName: bindings.environmentName } : {}),
+        ...(bindings.subagentEnvironmentAccess !== undefined ? { subagentEnvironmentAccess: bindings.subagentEnvironmentAccess } : {}),
         permissionOptions: {
           mode: effective.permission?.mode ?? DEFAULT_PERMISSION_MODE,
           rules: [...(effective.permission?.rules ?? []), ...(this.sessionPolicy.permission?.rules ?? [])],
@@ -2844,6 +2948,11 @@ export class Harness<TContext = unknown, TOutput = unknown> {
         ...(this.infrastructure.tracing !== undefined ? { tracing: this.infrastructure.tracing } : {}),
         ...(this.options.telemetry !== undefined ? { telemetry: this.options.telemetry } : {}),
         ...(publication !== undefined ? { eventPublication: publication } : {}),
+      }).catch((error: unknown) => {
+        // A table the bindings describe wrongly (a bad name, one the session never declared) is
+        // the host's configuration, like every other refusal here.
+        if (error instanceof EnvironmentTableError) throw new HarnessConfigError(`session "${id}": ${error.message}`);
+        throw error;
       });
       // A custom capability factory may not honour policy; what it connected is still visible.
       const allowedTransports = strictIsolation && strictPolicy

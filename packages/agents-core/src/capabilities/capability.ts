@@ -9,6 +9,7 @@ import type { ThinkingLevel } from "../llm/model.ts";
 import type { ContextBreakdown } from "../agent/context-report.ts";
 import type { CompactRequestOptions, PendingCompaction } from "./compaction/index.ts";
 import type { Environment } from "../tool/environment.ts";
+import type { EnvironmentTable } from "../tool/environment-table.ts";
 import type { EventSink } from "../events/index.ts";
 import type { AgentRecord, SessionStore } from "../store/index.ts";
 import type { SteerBus } from "../loop/steer.ts";
@@ -48,7 +49,10 @@ export interface SessionControls {
  */
 export interface SessionContext {
   readonly sessionId: string;
+  /** The root environment. */
   readonly environment: Environment;
+  /** Every named environment of the session (root first); one entry in the usual case. */
+  readonly environments?: EnvironmentTable;
   readonly store?: SessionStore;
   readonly events: EventSink;
   /** Aborts when the SESSION is cancelled. */

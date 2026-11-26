@@ -25,7 +25,7 @@ export class HookEngine {
   }
 
   async triggerBlock(event: HookEventType, args: HookTriggerArgs = {}): Promise<HookBlockResult> {
-    for (const hook of this.matching(event, args.matcherValue)) {
+    for (const hook of this.matching(event, args.matcherValue, args.environment)) {
       const result = await this.runHook(hook, args).catch(() => undefined);
       if (result?.block) return { block: true, reason: result.reason };
     }
@@ -34,7 +34,7 @@ export class HookEngine {
 
   async trigger(event: HookEventType, args: HookTriggerArgs = {}): Promise<string> {
     const out: string[] = [];
-    for (const hook of this.matching(event, args.matcherValue)) {
+    for (const hook of this.matching(event, args.matcherValue, args.environment)) {
       const result = await this.runHook(hook, args).catch(() => undefined);
       if (result?.stdout) out.push(result.stdout);
     }
@@ -42,17 +42,19 @@ export class HookEngine {
   }
 
   fireAndForgetTrigger(event: HookEventType, args: HookTriggerArgs = {}): void {
-    for (const hook of this.matching(event, args.matcherValue)) {
+    for (const hook of this.matching(event, args.matcherValue, args.environment)) {
       void this.runHook(hook, args).catch(() => undefined);
     }
   }
 
-  private matching(event: HookEventType, matcherValue: string | undefined): HookDef[] {
+  private matching(event: HookEventType, matcherValue: string | undefined, environment: string | undefined): HookDef[] {
     const seen = new Set<string>();
     const out: HookDef[] = [];
     for (const hook of this.hooks) {
       if (hook.event !== event) continue;
       if (hook.matcher !== undefined && !this.matches(hook.matcher, matcherValue)) continue;
+      // An environment filter applies to calls that name one (multi-environment sessions only).
+      if (hook.environments !== undefined && environment !== undefined && !hook.environments.includes(environment)) continue;
       if (seen.has(hook.command)) continue;
       seen.add(hook.command);
       out.push(hook);

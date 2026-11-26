@@ -56,6 +56,7 @@ function replaceOnceLiteral(content: string, oldString: string, newString: strin
 
 export const editTool = defineTool({
   name: "Edit",
+  environmentScoped: true,
   description: EDIT_DESCRIPTION,
   parameters: EditInput,
   // The replacement text is what lands in the file — that's the security-relevant part.

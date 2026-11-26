@@ -73,6 +73,11 @@ export interface SubagentMeta {
   readonly background: boolean;
   readonly parentAddress?: string;
   readonly parentToolCallId?: string;
+  /**
+   * The environment the subagent was sent to (the Agent tool's `target`), by name. Absent = it
+   * runs where its parent does. A resume goes back to the same one.
+   */
+  readonly environment?: string;
 }
 
 export async function readSubagentMeta(store: SessionStore, address: string): Promise<SubagentMeta | undefined> {
@@ -102,5 +107,6 @@ function subagentMetaOf(record: AgentRecord): SubagentMeta | undefined {
     background: data.background === true,
     parentAddress: data.parentAddress,
     parentToolCallId: data.parentToolCallId,
+    ...(typeof data.environment === "string" ? { environment: data.environment } : {}),
   };
 }

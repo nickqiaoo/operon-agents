@@ -17,6 +17,7 @@ import { estimateTokens } from "../capabilities/compaction/tokens.ts";
 import type { Agent, AgentRunContext } from "./agent.ts";
 import type { DeriveOptions, RunState, RunStatus } from "./runner.ts";
 import type { TurnStopReason } from "../loop/types.ts";
+import { frameEnvironmentsOf, renderEnvironmentSection, type FrameEnvironments } from "../tool/environment-table.ts";
 
 /**
  * This frame's flat directory id — what peers address it by.
@@ -150,8 +151,28 @@ export function deriveChild<TContext>(
     parentToolCallId: opts.parentToolCallId,
     ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.environment ? { environment: opts.environment } : {}),
+    ...(opts.homeEnvironment !== undefined ? { homeEnvironment: opts.homeEnvironment } : {}),
+    ...(opts.reachableEnvironments !== undefined ? { reachableEnvironments: opts.reachableEnvironments } : {}),
     ...(opts.steer ? { steer: opts.steer } : {}),
   };
+}
+
+/**
+ * The environments `state`'s frame can address, as the tool-call layer and the prompt need
+ * them — `undefined` for a frame that reaches one environment (every single-environment
+ * session), which keeps that path exactly as it was.
+ */
+export function frameEnvironmentsFor<TContext>(state: RunState<TContext>): FrameEnvironments | undefined {
+  const table = state.environments;
+  if (table === undefined) return undefined;
+  return frameEnvironmentsOf(table, state.homeEnvironment ?? table.rootName, state.environment, state.reachableEnvironments);
+}
+
+/** Append the frame's environment list to its system prompt (multi-environment frames only). */
+export function withEnvironmentSection(system: string | undefined, frame: FrameEnvironments | undefined): string | undefined {
+  if (frame === undefined || frame.reachable.size <= 1) return system;
+  const section = renderEnvironmentSection(frame);
+  return system === undefined || system.length === 0 ? section : `${system}\n\n${section}`;
 }
 
 /** Runs the turn-boundary injectors, appending their reminders to `context`, and returns each
@@ -180,8 +201,20 @@ export function injectAtTurnBoundary<TContext>(state: RunState<TContext>, contex
       context.appendMessage(message, origin);
     },
   );
+  // Environment status (a declared machine not connected this open, a changed working directory,
+  // an `updateEnvironments`): a reminder at the boundary, never a system-prompt change, so the
+  // cached prefix holds. Once per frame per notice.
+  const notice = state.session.takeEnvironmentNotice?.(state.address);
+  if (notice !== undefined) {
+    const text = systemReminder(notice);
+    const message: Message = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+    injectionTokens.set(ENVIRONMENT_INJECTOR_ID, estimateTokens(text));
+    context.appendMessage(message, { kind: "injection" as const, injectorId: ENVIRONMENT_INJECTOR_ID, variant: "status" });
+  }
   return injectionTokens;
 }
+
+const ENVIRONMENT_INJECTOR_ID = "environments";
 
 // ── Pure message helpers ─────────────────────────────────────────────────────────────────
 

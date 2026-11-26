@@ -29,6 +29,12 @@ export interface PermissionRule {
   readonly scope: PermissionRuleScope;
   readonly pattern: string;
   readonly reason?: string;
+  /**
+   * The environment the rule is for, in a session with several. Absent = the session's ROOT
+   * environment only: a rule written for the local workspace does not silently extend to a
+   * remote machine the session also reaches.
+   */
+  readonly environment?: string;
 }
 
 export interface ApprovalRequest {
@@ -36,6 +42,8 @@ export interface ApprovalRequest {
   readonly toolName: string;
   readonly approvalRule: string;
   readonly display?: unknown;
+  /** The environment the call would run in — present only in a multi-environment session. */
+  readonly environment?: string;
 }
 
 export interface ApprovalResponse {
@@ -104,6 +112,18 @@ export interface AutoApprovalInput {
   readonly approvalRule: string;
   /** Tool registry, so the judge can project prior tool calls in the transcript faithfully. */
   readonly tools?: readonly Tool[];
+  /**
+   * The calling frame's environments, in a multi-environment session: which machine each call
+   * runs on matters to the judge (`rm -rf build` on a throwaway sandbox is not the same action as
+   * on a workstation). The action's own environment is `ctx.environment`.
+   */
+  readonly environments?: AutoApprovalEnvironments;
+}
+
+export interface AutoApprovalEnvironments {
+  /** Where a call without a `target` runs: the calling frame's home environment. */
+  readonly home: string;
+  readonly entries: readonly { readonly name: string; readonly description?: string }[];
 }
 
 export interface AutoApprovalVerdict {

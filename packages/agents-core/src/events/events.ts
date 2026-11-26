@@ -200,14 +200,16 @@ export type AgentEventBody =
   // `ToolRunContext.dispatch` (a Code Mode program calling `tools.Read(...)`). It has no
   // `tool_use` block of its own in any message, so it never replays from history; the parent
   // call's result is where a durable summary belongs.
-  | { readonly type: "tool.call.started"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly parentToolCallId?: string }
+  // `environment` names where the call runs — present only in a session with several
+  // environments (absent = the single environment, as it always was).
+  | { readonly type: "tool.call.started"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly parentToolCallId?: string; readonly environment?: string }
   | { readonly type: "tool.call.delta"; readonly turnId: string; readonly toolCallId: string; readonly toolName?: string; readonly argumentsPart: string }
   | { readonly type: "tool.progress"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown; readonly update: ToolUpdate; readonly parentToolCallId?: string }
   // A running tool call has entered its detachable window: the UI may offer "move to background",
   // which fires `session.service("background").detach(toolCallId)`. Emitted once when the call becomes detachable;
   // its later `tool.result` (carrying `details.movedToBackground` + `taskId` if detached) ends it.
   | { readonly type: "tool.detachable"; readonly toolCallId: string; readonly toolName: string }
-  | { readonly type: "tool.result"; readonly toolCallId: string; readonly toolName: string; readonly result: ToolResult; readonly isError: boolean; readonly parentToolCallId?: string }
+  | { readonly type: "tool.result"; readonly toolCallId: string; readonly toolName: string; readonly result: ToolResult; readonly isError: boolean; readonly parentToolCallId?: string; readonly environment?: string }
   // A running tool call suspended instead of producing a result: it asked for caller input
   // (`request` present) or a foreground sub-agent under it paused. Pairs with the earlier
   // `tool.call.started`; the call re-runs (and eventually emits `tool.result`) after resume.

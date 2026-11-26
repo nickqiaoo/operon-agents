@@ -45,6 +45,8 @@ export interface ProjectedToolCall {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly args: unknown;
+  /** Where the call runs, in a session with several environments. */
+  readonly environment?: string;
   /** Latest `tool.progress` update, if any. */
   readonly progress?: ToolUpdate;
   /** The call entered its detachable window (UI may offer "move to background"). */
@@ -180,6 +182,7 @@ interface ToolCallState {
   toolCallId: string;
   toolName: string;
   args: unknown;
+  environment?: string;
   progress?: ToolUpdate;
   detachable: boolean;
   suspended?: ToolInputRequest | null;
@@ -636,6 +639,7 @@ export class SessionProjection {
           toolCallId: event.toolCallId,
           toolName: event.toolName,
           args: event.args,
+          ...(event.environment !== undefined ? { environment: event.environment } : {}),
           detachable: false,
         });
         break;

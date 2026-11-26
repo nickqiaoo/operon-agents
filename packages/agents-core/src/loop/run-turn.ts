@@ -5,6 +5,7 @@ import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/ind
 import type { PromptOrigin } from "../store/origin.ts";
 import type { Tool } from "../tool/types.ts";
 import type { Environment } from "../tool/environment.ts";
+import type { FrameEnvironments } from "../tool/environment-table.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import type { Logger } from "../logging/index.ts";
@@ -36,6 +37,8 @@ export interface RunTurnInput {
   readonly signal: AbortSignal;
   readonly model: ChatModel;
   readonly environment: Environment;
+  /** The frame's environments, when it can reach more than one (see `ToolCallStepContext`). */
+  readonly environments?: FrameEnvironments;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
@@ -119,7 +122,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         (p): p is ToolCall => p.type === "toolCall" && !completed.has(p.id),
       );
       const batch = await runCalls(
-        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, background: input.background, responder: input.responder, hostContext: input.hostContext, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
+        { turnId: input.turnId, stepNumber: 0, address: input.address, signal: input.signal, model: input.model, environment: input.environment, ...(input.environments !== undefined ? { environments: input.environments } : {}), background: input.background, responder: input.responder, hostContext: input.hostContext, tools: resumeToolMap, describeUnknownTool: (name) => describeUnknownTool(resumePrepared, name), hooks: input.hooks, dispatchEvent: input.dispatchEvent, logger: input.logger, answers: input.answers, resume: input.resume },
         calls,
       );
       // No hand-written `message.appended` here (or at the two drains below): appending
@@ -164,6 +167,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
           signal: input.signal,
           model: input.model,
           environment: input.environment,
+          ...(input.environments !== undefined ? { environments: input.environments } : {}),
           background: input.background,
           responder: input.responder,
           hostContext: input.hostContext,

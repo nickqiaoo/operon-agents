@@ -7,7 +7,10 @@ import type { Logger } from "../logging/index.ts";
 import { createPolicies, type PermissionState } from "./policies.ts";
 import { permissionPatternError } from "./matches-rule.ts";
 import { permissionDenialDetails } from "./denial.ts";
+import { sessionGrantKey } from "./environment-scope.ts";
+import type { ToolCallEnvironment } from "../loop/types.ts";
 import type {
+  AutoApprovalEnvironments,
   AutoApprovalVerdict,
   AutoApprover,
   PermissionMode,
@@ -26,6 +29,10 @@ import type {
  */
 export const AUTO_MODE_DENIAL_LIMITS = { maxConsecutive: 3, maxTotal: 20 } as const;
 
+function withEnvironments(environments: AutoApprovalEnvironments | undefined): { environments?: AutoApprovalEnvironments } {
+  return environments === undefined ? {} : { environments };
+}
+
 /** What the model reads when the judge blocks a call: the reason, and what to do instead. */
 function autoModeBlockMessage(reason: string): string {
   return [
@@ -41,6 +48,11 @@ export interface PermissionManagerOptions {
   readonly cwd?: string;
   readonly pathClass?: PathClass;
   readonly environment?: GitWorkTreeEnvironment;
+  /**
+   * Name of the session's root environment. `cwd` / `pathClass` / `environment` above describe
+   * it; a call on another environment of a multi-environment session is judged against its own.
+   */
+  readonly rootEnvironmentName?: string;
   readonly policyOverrides?: ReadonlyMap<string, PermissionPolicy>;
   /** The `auto`-mode judge. Consulted for would-prompt actions when `mode === "auto"`. */
   readonly autoApprover?: AutoApprover;
@@ -65,6 +77,8 @@ export interface PermissionManagerOptions {
 export interface AuthorizeProviders {
   readonly getTranscript?: () => readonly Message[];
   readonly getTools?: () => readonly Tool[];
+  /** The frame's environments, for the judge (multi-environment sessions only). */
+  readonly getEnvironments?: () => AutoApprovalEnvironments | undefined;
 }
 
 export class PermissionManager {
@@ -75,6 +89,7 @@ export class PermissionManager {
   private readonly cwd: string;
   private readonly pathClass: PathClass;
   private readonly environment: GitWorkTreeEnvironment | undefined;
+  private readonly rootEnvironmentName: string | undefined;
   private readonly policies: PermissionPolicy[];
   private readonly autoApprover: AutoApprover | undefined;
   private readonly getTranscript: (() => readonly Message[]) | undefined;
@@ -90,6 +105,7 @@ export class PermissionManager {
     this.cwd = options.cwd ?? "";
     this.pathClass = options.pathClass ?? "posix";
     this.environment = options.environment;
+    this.rootEnvironmentName = options.rootEnvironmentName;
     this.autoApprover = options.autoApprover;
     this.getTranscript = options.getTranscript;
     this.getTools = options.getTools;
@@ -103,6 +119,7 @@ export class PermissionManager {
       cwd: () => this.cwd,
       pathClass: () => this.pathClass,
       environment: () => this.environment,
+      rootEnvironmentName: () => this.rootEnvironmentName,
     };
     this.policies = createPolicies(state, options.policyOverrides);
   }
@@ -181,6 +198,7 @@ export class PermissionManager {
           transcript: (providers?.getTranscript ?? this.getTranscript)?.() ?? [],
           approvalRule: ctx.plan.approvalRule,
           tools: (providers?.getTools ?? this.getTools)?.(),
+          ...withEnvironments(providers?.getEnvironments?.()),
         });
         // Without this trail, a mis-tuned or dead judge is indistinguishable from "auto
         // mode just always asks" — every escalation looks like a normal approval prompt.
@@ -238,6 +256,7 @@ export class PermissionManager {
           approvalRule: ctx.plan.approvalRule,
           policyName,
           display: ctx.plan.display,
+          ...(ctx.environment !== undefined ? { environment: ctx.environment.name } : {}),
         },
       };
     }
@@ -247,6 +266,7 @@ export class PermissionManager {
         toolName: ctx.toolCall.name,
         approvalRule: ctx.plan.approvalRule,
         display: ctx.plan.display,
+        ...(ctx.environment !== undefined ? { environment: ctx.environment.name } : {}),
       },
       { signal: ctx.signal },
     );
@@ -255,7 +275,7 @@ export class PermissionManager {
       return { block: true, reason: resolved.message ?? "Denied.", blockDetails: permissionDenialDetails("blocked-by-permissions") };
     }
     if (response.decision === "approved") {
-      if (response.scope === "session") this.sessionPatterns.add(ctx.plan.approvalRule);
+      if (response.scope === "session") this.sessionPatterns.add(sessionGrantKey(ctx.plan.approvalRule, ctx.environment));
       return this.proceed();
     }
     return {
@@ -271,9 +291,25 @@ export class PermissionManager {
     return undefined;
   }
 
-  applyApproval(approvalRule: string, response: { decision: "approved" | "rejected" | "cancelled"; scope?: "session" }): boolean {
+  /**
+   * The key a session grant for `approvalRule` is stored under: the rule itself on the root
+   * environment, environment-qualified elsewhere (see `sessionGrantKey`).
+   */
+  grantKey(approvalRule: string, environment?: ToolCallEnvironment): string {
+    return sessionGrantKey(approvalRule, environment);
+  }
+
+  /**
+   * Record the user's answer. A session grant is scoped to `environment` (the call's) — or,
+   * without one, stored as given: a restored grant arrives already keyed.
+   */
+  applyApproval(
+    approvalRule: string,
+    response: { decision: "approved" | "rejected" | "cancelled"; scope?: "session" },
+    environment?: ToolCallEnvironment,
+  ): boolean {
     if (response.decision === "approved") {
-      if (response.scope === "session") this.sessionPatterns.add(approvalRule);
+      if (response.scope === "session") this.sessionPatterns.add(sessionGrantKey(approvalRule, environment));
       return true;
     }
     return false;

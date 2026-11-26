@@ -99,6 +99,7 @@ function normalizeTimeoutMs(timeout: number | undefined): number {
 
 export const bashTool = defineTool({
   name: "Bash",
+  environmentScoped: true,
   description: BASH_DESCRIPTION,
   parameters: BashInput,
   // The command is the only security-relevant field; cwd/timeout/background don't change

@@ -4,6 +4,7 @@ import { ToolAccesses } from "../tool/access.ts";
 import type { NestedCallResult, NestedToolDispatcher, Tool, ToolInputRequest, ToolPlan, ToolResult, ToolResumeContext } from "../tool/types.ts";
 import type { ApprovalResponse, Responder } from "../permission/types.ts";
 import type { Environment } from "../tool/environment.ts";
+import type { FrameEnvironments } from "../tool/environment-table.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import type { ChatModel } from "../llm/define-model.ts";
@@ -17,6 +18,7 @@ import type {
   PendingApprovalInterrupt,
   PendingInputInterrupt,
   PendingInterrupt,
+  ToolCallEnvironment,
 } from "./types.ts";
 import {
   ToolSuspendSignal,
@@ -36,6 +38,11 @@ export interface ToolCallStepContext {
   readonly signal: AbortSignal;
   readonly model: ChatModel;
   readonly environment: Environment;
+  /**
+   * The environments this frame can address. Present only when there is more than one; an
+   * environment-scoped call then names one with `target` (default: `home`).
+   */
+  readonly environments?: FrameEnvironments;
   readonly tools: ReadonlyMap<string, Tool>;
   /** Explains a call to a name absent from `tools` (e.g. an unloaded deferred tool). */
   readonly describeUnknownTool?: (name: string) => string | undefined;
@@ -81,6 +88,9 @@ type PreparedCall =
       readonly args: unknown;
       /** Continuation of a suspended call being re-run with its answer. */
       readonly resumed?: ToolResumeContext;
+      /** Where the call runs, when the frame has several environments. Fixed at prepare time:
+       *  resolve and run see the same instance. */
+      readonly callEnv?: ToolCallEnvironment;
     };
 
 type CallOutcome =
@@ -113,7 +123,8 @@ export async function runCalls(step: ToolCallStepContext, calls: readonly ToolCa
   for (const p of prepared) {
     if (p.kind === "repark") continue;
     const startArgs = p.kind === "run" ? p.args : p.call.arguments;
-    step.dispatchEvent?.({ type: "tool.call.started", toolCallId: p.call.id, toolName: p.call.name, args: startArgs });
+    const environment = p.kind === "run" ? p.callEnv?.name : undefined;
+    step.dispatchEvent?.({ type: "tool.call.started", toolCallId: p.call.id, toolName: p.call.name, args: startArgs, ...(environment !== undefined ? { environment } : {}) });
   }
 
   // Phase B — run the runnable ones, scheduled by resource conflict.
@@ -155,6 +166,7 @@ export async function runCalls(step: ToolCallStepContext, calls: readonly ToolCa
   // Tool tasks may finish out of order; results are dispatched in provider order so each
   // tool call gets a paired result event (drives incremental tool.result).
   const resultMessages: ToolResultMessage[] = [];
+  const resultEnvironments = new Map<string, string>();
   const suspensions: ToolCallSuspension[] = [];
   const inputPending: PendingInputInterrupt[] = [];
   for (let i = 0; i < outcomes.length; i++) {
@@ -170,15 +182,19 @@ export async function runCalls(step: ToolCallStepContext, calls: readonly ToolCa
       }
     } else {
       resultMessages.push(toResultMessage(calls[i]!, outcome.result));
+      const p = prepared[i]!;
+      if (p.kind === "run" && p.callEnv !== undefined) resultEnvironments.set(p.call.id, p.callEnv.name);
     }
   }
   for (const result of resultMessages) {
+    const environment = resultEnvironments.get(result.toolCallId);
     step.dispatchEvent?.({
       type: "tool.result",
       toolCallId: result.toolCallId,
       toolName: result.toolName,
       result: { content: result.content, isError: result.isError, details: result.details },
       isError: result.isError ?? false,
+      ...(environment !== undefined ? { environment } : {}),
     });
   }
   return {
@@ -205,6 +221,14 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
     }
   }
 
+  // ⓪½ Target — an environment-scoped call in a multi-environment frame names where it runs.
+  //   Settled before any hook sees the call, and never changed after: approval, resume and
+  //   execution all go to this one environment.
+  const selected = selectCallEnvironment(step, tool, call.name, args);
+  if ("error" in selected) return { kind: "result", call, result: errorResult(selected.error) };
+  args = selected.args;
+  const callEnv = selected.callEnv;
+
   // ① prepareToolExecution — input guardrail / arg rewrite / early block.
   if (step.hooks?.prepareToolExecution) {
     const prep = await step.hooks.prepareToolExecution({
@@ -216,12 +240,16 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       toolCall: call,
       tool,
       args,
+      ...(callEnv !== undefined ? { environment: callEnv } : {}),
     });
     if (prep?.syntheticResult) return { kind: "result", call, result: prep.syntheticResult };
     if (prep?.block === true) {
       return { kind: "result", call, result: errorResult(prep.reason ?? "blocked", prep.terminate === true, prep.blockDetails) };
     }
-    if (prep && "updatedArgs" in prep && prep.updatedArgs !== undefined) args = prep.updatedArgs;
+    if (prep && "updatedArgs" in prep && prep.updatedArgs !== undefined) {
+      // A hook may rewrite the arguments but not move the call: the target was settled above.
+      args = callEnv !== undefined ? withoutTarget(prep.updatedArgs) : prep.updatedArgs;
+    }
   }
 
   if (!tool) {
@@ -236,7 +264,8 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       turnId: step.turnId,
       toolCallId: call.id,
       signal: step.signal,
-      environment: step.environment,
+      environment: callEnv?.environment ?? step.environment,
+      ...(callEnv !== undefined ? { environmentName: callEnv.name } : {}),
       ...(step.hostContext !== undefined ? { context: step.hostContext } : {}),
     });
   } catch (error) {
@@ -248,6 +277,7 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
     }
     return { kind: "result", call, result: errorResult(messageOf(error)) };
   }
+  if (callEnv !== undefined) plan = withEnvironmentAccesses(plan, callEnv.identity);
 
   if (step.hooks?.authorizeToolExecution) {
     const decision = await step.hooks.authorizeToolExecution({
@@ -260,20 +290,85 @@ async function prepareCall(step: ToolCallStepContext, call: ToolCall): Promise<P
       tool,
       args,
       plan,
+      ...(callEnv !== undefined ? { environment: callEnv } : {}),
     });
     if (decision?.interrupt) return { kind: "interrupt", call, pending: decision.interrupt };
     if (decision?.syntheticResult) return { kind: "result", call, result: decision.syntheticResult };
     if (decision?.block === true) return { kind: "result", call, result: errorResult(decision.reason ?? "denied", false, decision.blockDetails) };
   }
 
-  return { kind: "run", call, tool, plan, args, resumed };
+  return { kind: "run", call, tool, plan, args, resumed, ...(callEnv !== undefined ? { callEnv } : {}) };
+}
+
+/**
+ * Settle where an environment-scoped call runs: its `target`, else the frame's home. The
+ * argument is taken out either way, so the tool never sees it. A call that is not
+ * environment-scoped, or a frame with one environment, passes through untouched.
+ */
+function selectCallEnvironment(
+  step: ToolCallStepContext,
+  tool: Tool | undefined,
+  toolName: string,
+  args: unknown,
+): { readonly args: unknown; readonly callEnv?: ToolCallEnvironment } | { readonly error: string } {
+  const frame = step.environments;
+  if (frame === undefined || tool?.environmentScoped !== true) return { args };
+  let name = frame.home;
+  let rest = args;
+  if (isPlainObject(args) && Object.hasOwn(args, "target")) {
+    const target = args["target"];
+    rest = withoutTarget(args);
+    if (target !== undefined && target !== null) {
+      if (typeof target !== "string") return { error: `Invalid arguments for ${toolName}: target: expected an environment name (string)` };
+      name = target;
+    }
+  }
+  const entry = frame.reachable.get(name);
+  if (entry === undefined && frame.declared.includes(name)) {
+    return {
+      error: `Environment "${name}" is not reachable from this agent, so ${toolName} cannot run there. Nothing was run. This agent can run on: ${[...frame.reachable.keys()].join(", ")}.`,
+    };
+  }
+  if (entry === undefined) {
+    return {
+      error: `Unknown environment "${name}" for ${toolName}. Available environments: ${[...frame.reachable.keys()].join(", ")}. Omit target to run on "${frame.home}".`,
+    };
+  }
+  if (!entry.available) {
+    // Declared but not connected in this open: refuse rather than fall back to another machine.
+    return { error: `Environment "${name}" is not connected right now, so ${toolName} cannot run there. Nothing was run. Use another environment or ask the user to reconnect "${name}".` };
+  }
+  return {
+    args: rest,
+    callEnv: { name, environment: entry.environment, identity: entry.identity, root: name === frame.root },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function withoutTarget(args: unknown): unknown {
+  if (!isPlainObject(args) || !Object.hasOwn(args, "target")) return args;
+  const { target: _target, ...rest } = args;
+  return rest;
+}
+
+/**
+ * Stamp the call's environment identity on what its plan touches, so the scheduler lets calls
+ * in different environments run side by side. An undeclared plan (`all`) becomes "all of THIS
+ * environment" — the tool works on `ctx.environment` and nothing else.
+ */
+function withEnvironmentAccesses(plan: ToolPlan, identity: string): ToolPlan {
+  const accesses = (plan.accesses ?? ToolAccesses.all()).map((access) => ({ ...access, environment: identity }));
+  return { ...plan, accesses };
 }
 
 async function runAndFinalize(
   step: ToolCallStepContext,
   run: Extract<PreparedCall, { kind: "run" }>,
 ): Promise<CallOutcome> {
-  const { call, tool, plan, args, resumed } = run;
+  const { call, tool, plan, args, resumed, callEnv } = run;
   const logger = step.logger ?? noopLogger;
   logger.log("debug", "tool invoke", logDataPolicy.dontLogToolData
     ? { tool: call.name, toolCallId: call.id }
@@ -290,7 +385,8 @@ async function runAndFinalize(
         turnId: step.turnId,
         toolCallId: call.id,
         signal: step.signal,
-        environment: step.environment,
+        environment: callEnv?.environment ?? step.environment,
+        ...(callEnv !== undefined ? { environmentName: callEnv.name } : {}),
         ...(step.address !== undefined ? { address: step.address } : {}),
         background: step.background,
         dispatch: createNestedDispatcher(step, call),
@@ -340,6 +436,7 @@ async function runAndFinalize(
       tool,
       args,
       result,
+      ...(callEnv !== undefined ? { environment: callEnv } : {}),
     });
     if (finalized) result = finalized;
   }
@@ -396,7 +493,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
         // Ask now, as the runner does for a live top-level batch, then authorize again with the
         // answer filed — the same audited path a resumed batch's answers take.
         const pending = prepared.pending;
-        await step.dispatchEvent?.({ type: "tool.call.started", toolCallId: call.id, toolName: name, args: call.arguments, parentToolCallId: parent.id });
+        await step.dispatchEvent?.({ type: "tool.call.started", toolCallId: call.id, toolName: name, args: call.arguments, parentToolCallId: parent.id, ...(pending.environment !== undefined ? { environment: pending.environment } : {}) });
         announced = true;
         step.answers[call.id] = await approver.requestApproval(
           {
@@ -404,6 +501,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
             toolName: name,
             approvalRule: pending.approvalRule,
             ...(pending.display !== undefined ? { display: pending.display } : {}),
+            ...(pending.environment !== undefined ? { environment: pending.environment } : {}),
           },
           { signal: step.signal },
         );
@@ -440,6 +538,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
           toolName: name,
           args: prepared.kind === "run" ? prepared.args : call.arguments,
           parentToolCallId: parent.id,
+          ...(prepared.kind === "run" && prepared.callEnv !== undefined ? { environment: prepared.callEnv.name } : {}),
         });
       }
       let result: ToolResult;
@@ -463,6 +562,7 @@ function createNestedDispatcher(step: ToolCallStepContext, parent: ToolCall): Ne
         result: { content: result.content, isError: result.isError, details: result.details },
         isError: result.isError ?? false,
         parentToolCallId: parent.id,
+        ...(prepared.kind === "run" && prepared.callEnv !== undefined ? { environment: prepared.callEnv.name } : {}),
       });
       return result;
     },

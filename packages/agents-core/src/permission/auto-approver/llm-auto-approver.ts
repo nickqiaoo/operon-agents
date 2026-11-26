@@ -4,7 +4,7 @@ import { completeWithRetry } from "../../llm/retry.ts";
 import type { AssistantMessage, TextContent } from "../../protocol/index.ts";
 import type { AutoApprovalInput, AutoApprovalVerdict, AutoApprover } from "../types.ts";
 import { buildClassifierSystemPrompt, type ClassifierRules } from "./prompts.ts";
-import { buildToolLookup, buildTranscriptText, projectToolCall, serializeProjectedCall } from "./transcript.ts";
+import { buildToolLookup, buildTranscriptText, environmentMetaLine, projectToolCall, serializeProjectedCall } from "./transcript.ts";
 import { parseXmlBlock, parseXmlCategory, parseXmlReason } from "./xml.ts";
 
 export type TwoStageMode = "both" | "fast" | "thinking";
@@ -147,8 +147,11 @@ export class LlmAutoApprover implements AutoApprover {
       return escalate("error", "Auto-approval judge repeatedly unavailable — asking for confirmation.");
     }
 
-    const actionLine = serializeProjectedCall(toolName, action, input.ctx.toolCall.id);
-    const transcript = buildTranscriptText(input.transcript, lookup, input.ctx.toolCall.id);
+    const environmentLine = input.environments !== undefined && input.ctx.environment !== undefined
+      ? environmentMetaLine(input.ctx.environment.name, input.environments)
+      : "";
+    const actionLine = environmentLine + serializeProjectedCall(toolName, action, input.ctx.toolCall.id);
+    const transcript = buildTranscriptText(input.transcript, lookup, input.ctx.toolCall.id, input.environments);
     const content = `<transcript>\n${transcript}${actionLine}</transcript>\n`;
     const model = this.options.model ?? input.ctx.model;
     const signal = input.ctx.signal;

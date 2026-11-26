@@ -103,6 +103,7 @@ const MonitorInput = z.object({
 export function monitorTool(): Tool {
   return defineTool({
     name: "Monitor",
+    environmentScoped: true,
     description: MONITOR_DESCRIPTION,
     parameters: MonitorInput,
     toAutoApprovalInput: (args) => args.command,

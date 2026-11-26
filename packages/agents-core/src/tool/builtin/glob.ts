@@ -46,6 +46,7 @@ const GLOB_DESCRIPTION = [
 
 export const globTool = defineTool({
   name: "Glob",
+  environmentScoped: true,
   description: GLOB_DESCRIPTION,
   parameters: GlobInput,
   async resolve(args, ctx) {

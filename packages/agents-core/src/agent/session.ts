@@ -9,6 +9,19 @@ import { PermissionManager } from "../permission/manager.ts";
 import { STAGED_POLICY_SLOTS } from "../permission/policies.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import { NullEnvironment } from "../tool/environment-null.ts";
+import {
+  DEFAULT_ROOT_ENVIRONMENT_NAME,
+  EnvironmentTable,
+  EnvironmentTableError,
+  declarationOf,
+  parseEnvironmentDeclaration,
+  snapshotDrift,
+  snapshotOf,
+  unavailableEnvironment,
+  type EnvironmentDeclaration,
+  type EnvironmentTableEntryInput,
+  type SubagentEnvironmentAccess,
+} from "../tool/environment-table.ts";
 import type {
   BackgroundTaskInfo,
   BackgroundTaskOutputDelta,
@@ -38,6 +51,7 @@ import {
   SESSION_PERMISSION_KEY,
   SESSION_MODEL_KEY,
   SESSION_THINKING_KEY,
+  SESSION_ENVIRONMENTS_KEY,
   SESSION_USAGE_KEY,
   type SessionStore,
 } from "../store/index.ts";
@@ -148,6 +162,31 @@ export interface SessionOpenOptions {
    * outlives any one session, so closing a session must not pull it out from under the others.
    */
   readonly environment?: Environment | EnvironmentFactory;
+  /**
+   * Name of the root environment (`environment` above) in the session's environment table.
+   * Defaults to `"main"`. Only matters when `additionalEnvironments` is given.
+   */
+  readonly environmentName?: string;
+  /**
+   * The live instances of this session's other environments, by name. With at least one,
+   * environment-scoped tools take an optional `target` naming where a call runs, and the system
+   * prompt lists every environment.
+   *
+   * The first open that brings them DECLARES them: names, descriptions, subagent access and what
+   * each machine looked like (OS, shell, cwd) are kept with the session (store-backed sessions).
+   * Every later open hands in instances for the declared names only — the declaration does not
+   * change with what is handed in, so the prompt and tool schemas (the cached request prefix) stay
+   * the same. A declared name this open does not get, or whose factory fails, is UNAVAILABLE:
+   * calls to it are refused and the model is told. A name that was never declared fails the open;
+   * change the declaration with `Session.updateEnvironments`.
+   */
+  readonly additionalEnvironments?: readonly SessionEnvironmentInput[];
+  /**
+   * What a subagent sent to another environment (the Agent tool's `target`) may reach, unless
+   * that environment says otherwise. Default `inherit`. Part of the declaration: read only when
+   * the declaration is first made.
+   */
+  readonly subagentEnvironmentAccess?: SubagentEnvironmentAccess;
   readonly sandboxTtlMs?: number;
   readonly events?: EventSink;
   readonly steer?: SteerBus;
@@ -161,6 +200,32 @@ export interface SessionOpenOptions {
   readonly eventPublication?: EventPublicationMode;
   /** Spawns background work when no background capability is open. */
   readonly spawner?: BackgroundSpawner;
+}
+
+/** One additional environment handed to `Session.open`. */
+export interface SessionEnvironmentInput {
+  readonly name: string;
+  readonly environment: Environment | EnvironmentFactory;
+  /** What it is for, shown to the model with its OS / shell / cwd. */
+  readonly description?: string;
+  /** Workspace identity; give two names the same one when they reach the same workspace. */
+  readonly identity?: string;
+  /** What a subagent sent here may reach (overrides `subagentEnvironmentAccess`). */
+  readonly subagentAccess?: SubagentEnvironmentAccess;
+}
+
+/** A change to a session's declared environments (`Session.updateEnvironments`). */
+export interface EnvironmentChange {
+  readonly add?: readonly SessionEnvironmentInput[];
+  readonly remove?: readonly string[];
+  /** `null` clears a field. */
+  readonly update?: readonly {
+    readonly name: string;
+    readonly description?: string | null;
+    readonly subagentAccess?: SubagentEnvironmentAccess | null;
+  }[];
+  /** The session-wide default; `null` resets it to `inherit`. */
+  readonly subagentAccess?: SubagentEnvironmentAccess | null;
 }
 
 /** The current owner and root conversation shard for the next user prompt. */
@@ -225,6 +290,8 @@ export interface SessionPort {
    *  tool needs; the manager itself stays behind `session.workflow`. */
   newWorkflowJournal(runId: string, parentToolCallId?: string): WorkflowJournal;
   resolveSystemPromptContext(environment: Environment): Promise<SystemPromptContext>;
+  /** The environment status note `address` has not seen yet (multi-environment sessions). */
+  takeEnvironmentNotice?(address: string): string | undefined;
   recordContextBreakdown(breakdown: ContextBreakdown): void;
   flushEvents(): Promise<void>;
   setLiveContext(address: string, ctx: ConversationContext): void;
@@ -274,7 +341,12 @@ export class Session implements SessionPort {
   private readonly injectedSpawner: BackgroundSpawner | undefined;
   /** Open capabilities in registration order — closed in reverse. */
   private openedForClose: readonly Capability[] = [];
+  /** The root environment — where tools run unless a call names another `target`. */
   readonly environment: Environment;
+  private environmentTable: EnvironmentTable;
+  private environmentNotice: string | undefined;
+  private readonly environmentNoticeDelivered = new Set<string>();
+  private readonly sandboxTtlMs: number;
   readonly store?: SessionStore;
   readonly events: EventSink;
   private readonly eventPublisher: SessionEventPublisher;
@@ -348,20 +420,16 @@ export class Session implements SessionPort {
     ownController: AbortController,
     publisher: SessionEventPublisher,
     checkpointing: CheckpointingSessionStore | undefined,
-    environment: Environment,
+    environments: EnvironmentTable,
     opts: SessionOpenOptions,
   ) {
     this.id = id;
     this.signal = signal;
     this.ownController = ownController;
-    this.environment = environment;
-    this.sandboxKeepalive = new SandboxKeepalive(environment.sandbox, opts.sandboxTtlMs ?? 600_000,
-      () => this.turnActive || (this.background?.list().some(task => task.kind === 'process') ?? false),
-      error => {
-        const message = `sandbox renewal failed: ${messageOf(error)}`;
-        this.pendingDiagnostics.push({ capability: 'sandbox', phase: 'start', level: 'warn', message });
-        this.logger.log('warn', message);
-      });
+    this.environmentTable = environments;
+    this.environment = environments.root.environment;
+    this.sandboxTtlMs = opts.sandboxTtlMs ?? 600_000;
+    this.sandboxKeepalives = this.keepalivesFor(environments);
     this.eventPublisher = publisher;
     // The publishing wrapper around the host's store: record-backed events surface on `events` when
     // the append commits, so everything in the session writes through THIS store. Beneath it, the
@@ -461,19 +529,157 @@ export class Session implements SessionPort {
     const ownController = new AbortController();
     const signal = opts.signal === undefined ? ownController.signal : AbortSignal.any([opts.signal, ownController.signal]);
     // Resolved here rather than in the constructor because a factory is async and needs the id.
-    const environment =
-      opts.environment === undefined
-        ? new NullEnvironment()
-        : typeof opts.environment === "function"
-          ? await opts.environment({ sessionId: id, signal })
-          : opts.environment;
+    const resolveEnvironment = async (binding: Environment | EnvironmentFactory): Promise<Environment> =>
+      typeof binding === "function" ? await binding({ sessionId: id, signal }) : binding;
+    const environment = opts.environment === undefined ? new NullEnvironment() : await resolveEnvironment(opts.environment);
+    const resolved = await resolveEnvironmentTable(opts, environment, resolveEnvironment);
+    const environments = resolved.table;
     // The publisher is the session's OWN object — one producer, one consumer, both inside this
     // class — so it is built here and held as a field.
     const checkpointing = opts.store === undefined ? undefined : new CheckpointingSessionStore(opts.store, id);
     const publisher = new SessionEventPublisher(id, opts.events ?? new ListenerSink(), checkpointing, opts.eventPublication ?? "immediate");
-    const session = new Session(id, signal, ownController, publisher, checkpointing, environment, opts);
+    const session = new Session(id, signal, ownController, publisher, checkpointing, environments, opts);
+    if (resolved.notice !== undefined) session.setEnvironmentNotice(resolved.notice);
+    for (const warning of resolved.warnings) {
+      session.pendingDiagnostics.push({ capability: "environments", phase: "start", level: "warn", message: warning });
+    }
     await session.openCapabilities();
+    // Written only once the open has succeeded, so a session that never opened leaves nothing.
+    if (resolved.declare !== undefined && opts.store !== undefined) {
+      await opts.store.putState(SESSION_ENVIRONMENTS_KEY, resolved.declare);
+    }
     return session;
+  }
+
+  /**
+   * One renewer per backing sandbox of `table`: two names on one machine share it, and an
+   * environment that is not connected has nothing to renew. The root keeps the message it always
+   * had; another environment's failure names that environment.
+   */
+  private keepalivesFor(table: EnvironmentTable): SandboxKeepalive[] {
+    const seenSandboxes = new Set<string>();
+    const out: SandboxKeepalive[] = [];
+    for (const entry of table.entries) {
+      if (!entry.available) continue;
+      let sandboxId: string;
+      try {
+        sandboxId = entry.environment.sandbox.id;
+      } catch {
+        sandboxId = `environment:${entry.name}`;
+      }
+      if (seenSandboxes.has(sandboxId)) continue;
+      seenSandboxes.add(sandboxId);
+      const isRoot = entry.name === table.rootName;
+      out.push(new SandboxKeepalive(entry.environment.sandbox, this.sandboxTtlMs,
+        () => this.turnActive || (this.background?.list().some(task => task.kind === 'process') ?? false),
+        error => {
+          const message = isRoot ? `sandbox renewal failed: ${messageOf(error)}` : `sandbox renewal failed for environment "${entry.name}": ${messageOf(error)}`;
+          this.pendingDiagnostics.push({ capability: 'sandbox', phase: 'start', level: 'warn', message });
+          this.logger.log('warn', message);
+        }));
+    }
+    return out;
+  }
+
+  // ── Environments ──────────────────────────────────────────────────────────────────────
+
+  /** Every named environment of this session, root first. A table of one in the usual case. */
+  get environments(): EnvironmentTable {
+    return this.environmentTable;
+  }
+
+  /** Queue a status note for every frame's next turn boundary (replaces any undelivered one). */
+  setEnvironmentNotice(text: string): void {
+    this.environmentNotice = text;
+    this.environmentNoticeDelivered.clear();
+  }
+
+  /**
+   * The environment status note `address` has not seen yet, marking it seen — or undefined.
+   * Read at each turn boundary: availability and drift reach the model this way, never by
+   * changing the system prompt, so the cached prefix holds.
+   */
+  takeEnvironmentNotice(address: string): string | undefined {
+    if (this.environmentNotice === undefined || this.environmentNoticeDelivered.has(address)) return undefined;
+    this.environmentNoticeDelivered.add(address);
+    return this.environmentNotice;
+  }
+
+  /**
+   * Change what environments this session HAS — the one deliberate way to: reopening with a
+   * different set of instances never changes the declaration. Call it between runs: during a
+   * run it is refused (a tool awaiting it would otherwise wait on its own run). The tool `target` options and the prompt's
+   * environment list change with it, so the next request starts a new cached prefix; every frame
+   * is told what changed at its next turn boundary.
+   *
+   * Refused (nothing changes) for: the root environment, an unknown name, a name already taken,
+   * or removing an environment a background process is still running on.
+   */
+  async updateEnvironments(change: EnvironmentChange): Promise<void> {
+    if (this.turnActive) throw new EnvironmentTableError("cannot change environments while a run is in progress; change them between runs");
+    await this.withRunLock(async () => {
+      const current = this.environmentTable;
+      const remove = new Set(change.remove ?? []);
+      for (const name of remove) {
+        if (name === current.rootName) throw new EnvironmentTableError(`cannot remove the root environment "${name}"`);
+        if (!current.has(name)) throw new EnvironmentTableError(`cannot remove "${name}": the session has no such environment`);
+        const entry = current.get(name)!;
+        if (entry.available && this.background?.hasLiveProcessOn?.(entry.environment) === true) {
+          throw new EnvironmentTableError(`cannot remove "${name}": a background process is still running there; stop it first`);
+        }
+      }
+      const updates = new Map((change.update ?? []).map((u) => [u.name, u]));
+      for (const name of updates.keys()) {
+        if (!current.has(name) || remove.has(name)) throw new EnvironmentTableError(`cannot update "${name}": the session has no such environment`);
+      }
+      const added: EnvironmentTableEntryInput[] = [];
+      for (const input of change.add ?? []) {
+        if (current.has(input.name) && !remove.has(input.name)) throw new EnvironmentTableError(`environment name "${input.name}" is already declared; update or remove it instead`);
+        const environment = typeof input.environment === "function" ? await input.environment({ sessionId: this.id, signal: this.signal }) : input.environment;
+        added.push({
+          name: input.name,
+          environment,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.identity !== undefined ? { identity: input.identity } : {}),
+          ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
+        });
+      }
+      const kept: EnvironmentTableEntryInput[] = [];
+      for (const entry of current.entries) {
+        if (remove.has(entry.name)) continue;
+        const update = updates.get(entry.name);
+        const description = update && "description" in update ? update.description ?? undefined : entry.description;
+        const subagentAccess = update && "subagentAccess" in update ? update.subagentAccess ?? undefined : entry.subagentAccess;
+        kept.push({
+          name: entry.name,
+          environment: entry.environment,
+          available: entry.available,
+          identity: entry.identity,
+          snapshot: entry.snapshot,
+          ...(description !== undefined ? { description } : {}),
+          ...(subagentAccess !== undefined ? { subagentAccess } : {}),
+        });
+      }
+      const [root, ...rest] = kept;
+      const table = new EnvironmentTable(root!, [...rest, ...added], {
+        subagentAccess: "subagentAccess" in change ? change.subagentAccess ?? "inherit" : current.subagentAccess,
+      });
+
+      for (const keepalive of this.sandboxKeepalives) keepalive.close();
+      this.environmentTable = table;
+      this.sandboxKeepalives = this.keepalivesFor(table);
+      this.background?.setEnvironments?.(table.entries.filter((e) => e.available).map((e) => e.environment));
+      if (this.store !== undefined) await this.store.putState(SESSION_ENVIRONMENTS_KEY, declarationOf(table));
+
+      const lines: string[] = [];
+      for (const input of added) lines.push(`- added \`${input.name}\`${input.description !== undefined ? `: ${input.description}` : ""}`);
+      for (const name of remove) lines.push(`- removed \`${name}\`: calls to it will fail`);
+      for (const name of updates.keys()) lines.push(`- updated \`${name}\``);
+      if ("subagentAccess" in change) lines.push(`- subagents sent to another environment now ${table.subagentAccess === "home-only" ? "reach only that environment" : "reach what their parent can"}`);
+      if (lines.length > 0) {
+        this.setEnvironmentNotice(["The session's environments changed. The Environments section and every `target` option now reflect this:", ...lines].join("\n"));
+      }
+    });
   }
 
   /**
@@ -510,6 +716,7 @@ export class Session implements SessionPort {
     const shared = {
       sessionId: this.id,
       environment: this.environment,
+      environments: this.environments,
       events: this.events,
       signal: this.signal,
       steer: this.steer,
@@ -848,6 +1055,7 @@ export class Session implements SessionPort {
       cwd: options?.cwd ?? safeCwd(this.environment),
       pathClass: options?.pathClass ?? this.environment.pathClass(),
       environment: options?.environment ?? this.environment,
+      rootEnvironmentName: options?.rootEnvironmentName ?? this.environments.rootName,
       policyOverrides: overrides,
       logger: this.logger,
     });
@@ -1146,7 +1354,7 @@ export class Session implements SessionPort {
     return this.pendingDiagnostics.splice(0, this.pendingDiagnostics.length);
   }
 
-  private readonly sandboxKeepalive: SandboxKeepalive;
+  private sandboxKeepalives: SandboxKeepalive[];
   private turnActive = false;
 
   async withRunLock<T>(body: () => Promise<T>): Promise<T> {
@@ -1156,7 +1364,7 @@ export class Session implements SessionPort {
     await prev;
     this.turnActive = true;
     try {
-      await this.sandboxKeepalive.renew();
+      await Promise.all(this.sandboxKeepalives.map((keepalive) => keepalive.renew()));
       return await body();
     } finally {
       this.turnActive = false;
@@ -1181,7 +1389,7 @@ export class Session implements SessionPort {
   }
 
   private async runClose(): Promise<void> {
-    this.sandboxKeepalive.close();
+    for (const keepalive of this.sandboxKeepalives) keepalive.close();
     this.isOpen = false;
     // Nothing queued will be applied now; one already being applied finishes first, so the
     // capability it opens is on the list the teardown below walks.
@@ -1400,4 +1608,104 @@ function workflowStatusFromTask(status: BackgroundTaskStatus, runStatus?: string
     default:
       return "failed"; // failed / timed_out
   }
+}
+
+// ── Environment declaration ─────────────────────────────────────────────────────────────
+
+interface ResolvedEnvironments {
+  readonly table: EnvironmentTable;
+  /** A declaration to store once the open succeeds (the first open of a multi-environment session). */
+  readonly declare?: EnvironmentDeclaration;
+  /** What to tell every frame at its next turn boundary (unavailable / changed environments). */
+  readonly notice?: string;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * Build this open's environment table. With a stored declaration, the DECLARATION decides what
+ * the session has and what the model is told; the open only supplies instances. Without one, the
+ * instances handed in become the declaration (stored after the open when there is more than one).
+ */
+async function resolveEnvironmentTable(
+  opts: SessionOpenOptions,
+  root: Environment,
+  resolve: (binding: Environment | EnvironmentFactory) => Promise<Environment>,
+): Promise<ResolvedEnvironments> {
+  const given = opts.additionalEnvironments ?? [];
+  const stored = opts.store === undefined ? undefined : parseEnvironmentDeclaration(await opts.store.getState(SESSION_ENVIRONMENTS_KEY));
+
+  if (stored === undefined) {
+    // First declaration: every instance must resolve now — there is nothing to fall back to.
+    const additional: EnvironmentTableEntryInput[] = [];
+    for (const input of given) {
+      additional.push({
+        name: input.name,
+        environment: await resolve(input.environment),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.identity !== undefined ? { identity: input.identity } : {}),
+        ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
+      });
+    }
+    const table = new EnvironmentTable(
+      { name: opts.environmentName ?? DEFAULT_ROOT_ENVIRONMENT_NAME, environment: root },
+      additional,
+      opts.subagentEnvironmentAccess !== undefined ? { subagentAccess: opts.subagentEnvironmentAccess } : {},
+    );
+    return { table, ...(table.size > 1 ? { declare: declarationOf(table) } : {}), warnings: [] };
+  }
+
+  if (opts.environmentName !== undefined && opts.environmentName !== stored.root) {
+    throw new EnvironmentTableError(`this session's root environment is "${stored.root}", not "${opts.environmentName}"`);
+  }
+  const declared = new Set(stored.environments.map((entry) => entry.name));
+  const undeclared = given.filter((input) => !declared.has(input.name) || input.name === stored.root).map((input) => input.name);
+  if (undeclared.length > 0) {
+    throw new EnvironmentTableError(
+      `environment ${undeclared.map((name) => `"${name}"`).join(", ")} is not declared by this session (it has ${stored.environments.map((e) => `"${e.name}"`).join(", ")}); add it with updateEnvironments`,
+    );
+  }
+  const byName = new Map(given.map((input) => [input.name, input]));
+  const warnings: string[] = [];
+  const unavailable: string[] = [];
+  const drifted: string[] = [];
+  const entries: EnvironmentTableEntryInput[] = [];
+  for (const entry of stored.environments) {
+    const base = {
+      name: entry.name,
+      snapshot: entry.snapshot,
+      ...(entry.description !== undefined ? { description: entry.description } : {}),
+      ...(entry.subagentAccess !== undefined ? { subagentAccess: entry.subagentAccess } : {}),
+    };
+    let environment: Environment | undefined;
+    let identity: string | undefined;
+    if (entry.name === stored.root) {
+      environment = root;
+    } else {
+      const input = byName.get(entry.name);
+      if (input !== undefined) {
+        identity = input.identity;
+        try {
+          environment = await resolve(input.environment);
+        } catch (error) {
+          warnings.push(`environment "${entry.name}" could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    if (environment === undefined) {
+      unavailable.push(entry.name);
+      entries.push({ ...base, environment: unavailableEnvironment(entry.name), available: false });
+      continue;
+    }
+    const drift = snapshotDrift(entry.snapshot, snapshotOf(environment));
+    if (drift.length > 0) drifted.push(`- \`${entry.name}\`: ${drift.join("; ")}`);
+    entries.push({ ...base, environment, ...(identity !== undefined ? { identity } : {}) });
+  }
+  const [rootEntry, ...rest] = entries;
+  const table = new EnvironmentTable(rootEntry!, rest, stored.subagentAccess !== undefined ? { subagentAccess: stored.subagentAccess } : {});
+  const lines: string[] = [];
+  if (unavailable.length > 0) {
+    lines.push(`Not connected right now: ${unavailable.map((name) => `\`${name}\``).join(", ")}. Calls with that target will fail until it is reconnected; work on the others, or tell the user.`);
+  }
+  if (drifted.length > 0) lines.push("Changed since the Environments section was written:", ...drifted);
+  return { table, ...(lines.length > 0 ? { notice: lines.join("\n") } : {}), warnings };
 }

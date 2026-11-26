@@ -9,6 +9,7 @@ import {
 } from "../tool/support/git-worktree.ts";
 import type { ToolFileAccess } from "../tool/access.ts";
 import { matchPermissionRule, type PermissionRuleMatch } from "./matches-rule.ts";
+import { parseSessionGrantKey, callScopeName, ruleAppliesTo } from "./environment-scope.ts";
 import type {
   PermissionMode,
   PermissionPolicy,
@@ -26,6 +27,34 @@ export interface PermissionState {
   cwd(): string;
   pathClass(): PathClass;
   environment?(): GitWorkTreeEnvironment | undefined;
+  /** Name of the session's root environment (what an explicitly scoped root rule names). */
+  rootEnvironmentName?(): string | undefined;
+}
+
+/**
+ * The workspace a call is judged against. A call on a non-root environment is judged against
+ * THAT environment's cwd / path flavour / git work tree — the session's root values would
+ * measure a remote path against the local checkout.
+ */
+interface CallScope {
+  readonly key: string;
+  readonly cwd: string;
+  readonly pathClass: PathClass;
+  readonly environment: GitWorkTreeEnvironment | undefined;
+}
+
+function scopeOf(state: PermissionState, ctx: PermissionPolicyContext): CallScope {
+  const env = ctx.environment;
+  if (env === undefined || env.root) {
+    return { key: "", cwd: state.cwd(), pathClass: state.pathClass(), environment: state.environment?.() };
+  }
+  let cwd = "";
+  try {
+    cwd = env.environment.normpath(env.environment.getcwd());
+  } catch {
+    cwd = "";
+  }
+  return { key: env.identity, cwd, pathClass: env.environment.pathClass(), environment: env.environment };
 }
 
 const USER_CONFIGURED_SCOPES = new Set<PermissionRuleScope>(["turn-override", "project", "user"]);
@@ -53,8 +82,9 @@ function firstMatchingRule(
   return undefined;
 }
 
-function userRules(state: PermissionState): PermissionRule[] {
-  return state.rules().filter((rule) => USER_CONFIGURED_SCOPES.has(rule.scope));
+function userRules(state: PermissionState, ctx: PermissionPolicyContext): PermissionRule[] {
+  const rootName = state.rootEnvironmentName?.();
+  return state.rules().filter((rule) => USER_CONFIGURED_SCOPES.has(rule.scope) && ruleAppliesTo(rule, ctx.environment, rootName));
 }
 
 function userRuleReason(decision: PermissionRuleDecision, match: PermissionRuleMatch) {
@@ -88,15 +118,20 @@ export function createPolicies(
 ): PermissionPolicy[] {
   const slot = (name: string): PermissionPolicy => overrides?.get(name) ?? staged(name);
 
-  // Shared, memoized git-work-tree marker lookup (one walk per manager; cwd is fixed). Used by
-  // both git-control-path-access-ask and git-cwd-write-approve so they probe at most once.
-  let markerProbe: Promise<GitWorkTreeMarker | null> | undefined;
-  const gitMarker = (): Promise<GitWorkTreeMarker | null> => {
-    const environment = state.environment?.();
-    const cwd = state.cwd();
+  // Shared, memoized git-work-tree marker lookup (one walk per manager and environment; each
+  // cwd is fixed). Used by both git-control-path-access-ask and git-cwd-write-approve so they
+  // probe at most once per environment.
+  const markerProbes = new Map<string, Promise<GitWorkTreeMarker | null>>();
+  const gitMarker = (scope: CallScope): Promise<GitWorkTreeMarker | null> => {
+    const environment = scope.environment;
+    const cwd = scope.cwd;
     if (environment === undefined || cwd.length === 0) return Promise.resolve(null);
-    markerProbe ??= findGitWorkTreeMarker(environment, cwd).catch(() => null);
-    return markerProbe;
+    let probe = markerProbes.get(scope.key);
+    if (probe === undefined) {
+      probe = findGitWorkTreeMarker(environment, cwd).catch(() => null);
+      markerProbes.set(scope.key, probe);
+    }
+    return probe;
   };
   return [
     // PreToolUse hook returned a block → deny. [STAGED slot: user HookEngine]
@@ -117,7 +152,7 @@ export function createPolicies(
     {
       name: "user-configured-deny",
       evaluate(ctx) {
-        const match = firstMatchingRule(ctx, userRules(state), "deny");
+        const match = firstMatchingRule(ctx, userRules(state, ctx), "deny");
         if (match === undefined) return undefined;
         const suffix = match.rule.reason ? ` Reason: ${match.rule.reason}` : "";
         return {
@@ -145,7 +180,10 @@ export function createPolicies(
     {
       name: "session-approval-history",
       evaluate(ctx) {
-        for (const pattern of state.sessionApprovalRulePatterns()) {
+        const scope = callScopeName(ctx.environment);
+        for (const key of state.sessionApprovalRulePatterns()) {
+          const { environment, pattern } = parseSessionGrantKey(key);
+          if (environment !== scope) continue;
           const match = matchPermissionRule({
             rule: { decision: "allow", scope: "session-runtime", pattern, reason: "approve for session" },
             toolName: ctx.toolCall.name,
@@ -164,7 +202,7 @@ export function createPolicies(
     {
       name: "user-configured-ask",
       evaluate(ctx) {
-        const match = firstMatchingRule(ctx, userRules(state), "ask");
+        const match = firstMatchingRule(ctx, userRules(state, ctx), "ask");
         return match ? { kind: "ask", reason: userRuleReason("ask", match), classifierApprovable: false } : undefined;
       },
     },
@@ -173,7 +211,7 @@ export function createPolicies(
     {
       name: "user-configured-allow",
       evaluate(ctx) {
-        const match = firstMatchingRule(ctx, userRules(state), "allow");
+        const match = firstMatchingRule(ctx, userRules(state, ctx), "allow");
         return match ? { kind: "approve", reason: userRuleReason("allow", match) } : undefined;
       },
     },
@@ -196,9 +234,10 @@ export function createPolicies(
     {
       name: "git-control-path-access-ask",
       async evaluate(ctx) {
-        const cwd = state.cwd();
+        const scope = scopeOf(state, ctx);
+        const cwd = scope.cwd;
         if (cwd.length === 0) return undefined;
-        const pathClass = state.pathClass();
+        const pathClass = scope.pathClass;
         const accesses = fileAccesses(ctx);
         if (accesses.length === 0) return undefined;
 
@@ -207,7 +246,7 @@ export function createPolicies(
         );
         if (direct !== undefined) return { kind: "ask", reason: fileAccessReason(direct, { git_control_path: true }) };
 
-        const marker = await gitMarker();
+        const marker = await gitMarker(scope);
         if (marker === null) return undefined;
         const inside = accesses.find((a) => isGitControlPath(a.path, marker, pathClass));
         return inside ? { kind: "ask", reason: fileAccessReason(inside, { git_control_path: true }) } : undefined;
@@ -218,9 +257,10 @@ export function createPolicies(
     {
       name: "cwd-outside-file-write-ask",
       evaluate(ctx) {
-        const cwd = state.cwd();
+        const scope = scopeOf(state, ctx);
+        const cwd = scope.cwd;
         if (cwd.length === 0) return undefined;
-        const pathClass = state.pathClass();
+        const pathClass = scope.pathClass;
         const access = writeFileAccesses(ctx).find((a) => !isWithinDirectory(a.path, cwd, pathClass));
         return access ? { kind: "ask", reason: fileAccessReason(access, { cwd_outside: true }) } : undefined;
       },
@@ -259,13 +299,14 @@ export function createPolicies(
       name: "git-cwd-write-approve",
       async evaluate(ctx) {
         if (ctx.toolCall.name !== "Write" && ctx.toolCall.name !== "Edit") return undefined;
-        if (state.pathClass() !== "posix") return undefined;
-        const cwd = state.cwd();
+        const scope = scopeOf(state, ctx);
+        if (scope.pathClass !== "posix") return undefined;
+        const cwd = scope.cwd;
         if (cwd.length === 0) return undefined;
         const writes = writeFileAccesses(ctx);
         if (writes.length === 0) return undefined;
-        if (!writes.every((a) => isWithinDirectory(a.path, cwd, state.pathClass()))) return undefined;
-        if ((await gitMarker()) === null) return undefined;
+        if (!writes.every((a) => isWithinDirectory(a.path, cwd, scope.pathClass))) return undefined;
+        if ((await gitMarker(scope)) === null) return undefined;
         return { kind: "approve", reason: { git_cwd_write: true } };
       },
     },

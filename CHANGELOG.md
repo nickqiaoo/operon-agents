@@ -7,6 +7,18 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.36] — 2026-11-26
+
+### Added
+
+- A session can bind multiple named environments with `SessionBindings.additionalEnvironments`.
+  File and shell tools and the `Agent` tool accept an optional `target` to select where they run.
+  Calls without a target use the session's primary environment.
+- Environment declarations persist across restores. Hosts reconnect live environments by name and
+  can change the declaration between runs with `HarnessSession.updateEnvironments`.
+- Permission rules, session approvals and tool hooks can be scoped to an environment. Hosts can
+  restrict a subagent to its assigned environment with `home-only` access.
+
 ## [0.1.0-alpha.35] — 2026-11-17
 
 ### Added

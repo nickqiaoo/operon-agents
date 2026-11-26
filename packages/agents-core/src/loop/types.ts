@@ -3,6 +3,7 @@ import type { LlmRequest } from "../llm/model.ts";
 import type { AssistantMessage, Message, ToolCall, Usage } from "../protocol/index.ts";
 import type { ConversationContext } from "./context.ts";
 import type { Tool, ToolInputRequest, ToolPlan, ToolResult } from "../tool/types.ts";
+import type { Environment } from "../tool/environment.ts";
 import type { ToolCallSuspension } from "./interruption.ts";
 
 export type StepStopReason =
@@ -54,6 +55,9 @@ export interface PendingApprovalInterrupt {
   readonly approvalRule: string;
   readonly policyName?: string;
   readonly display?: unknown;
+  /** The environment the call would run in — set only in a session with several environments,
+   *  so an approval prompt can say which machine it is for. */
+  readonly environment?: string;
 }
 
 /** A tool call that suspended itself mid-execution via `ctx.suspend` (sibling calls
@@ -120,7 +124,24 @@ export interface ContextStepHookContext extends StepHookContext {
 export interface ToolExecutionHookContext extends StepHookContext {
   readonly toolCall: ToolCall;
   readonly tool?: Tool;
+  /** The call's arguments. For an environment-scoped tool `target` is already taken out. */
   readonly args: unknown;
+  /**
+   * The environment the call runs in — present only in a session with several environments and
+   * only for an environment-scoped tool. Read-only: a prepare hook cannot move a call to another
+   * environment (a `target` in `updatedArgs` is ignored).
+   */
+  readonly environment?: ToolCallEnvironment;
+}
+
+/** Where one tool call runs, as hooks and permission policies see it. */
+export interface ToolCallEnvironment {
+  readonly name: string;
+  readonly environment: Environment;
+  /** Workspace identity (see `EnvironmentTableEntry.identity`). */
+  readonly identity: string;
+  /** The session's root environment — the one unscoped permission rules apply to. */
+  readonly root: boolean;
 }
 
 export interface ResolvedToolExecutionHookContext extends ToolExecutionHookContext {

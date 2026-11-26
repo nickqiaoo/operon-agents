@@ -138,6 +138,8 @@ export const HookDefConfigSchema = z.object({
   matcher: z.string().optional(),
   command: z.string(),
   timeout: z.number().int().positive().optional(),
+  /** Multi-environment sessions: fire only for tool calls in these environments. */
+  environments: z.array(z.string()).optional(),
 });
 
 export const PluginRefSchema = z.object({

@@ -5,10 +5,18 @@ export interface ToolFileAccess {
   readonly operation: ToolFileAccessOperation;
   readonly path: string;
   readonly recursive?: boolean;
+  /**
+   * Identity of the environment the access is in. Stamped by the tool-call layer (tools never
+   * set it) only in a multi-environment session. Two accesses stamped with DIFFERENT identities
+   * never conflict; an unstamped access is environment-agnostic and conflicts as before.
+   */
+  readonly environment?: string;
 }
 
 export interface ToolResourceAccessAll {
   readonly kind: "all";
+  /** As on {@link ToolFileAccess}: `all` of one environment, not of every environment. */
+  readonly environment?: string;
 }
 
 export type ToolResourceAccess = ToolFileAccess | ToolResourceAccessAll;
@@ -66,6 +74,8 @@ export const ToolAccesses = {
 };
 
 function resourceAccessesConflict(left: ToolResourceAccess, right: ToolResourceAccess): boolean {
+  // Two different environments share no resources; an unstamped access may touch any of them.
+  if (left.environment !== undefined && right.environment !== undefined && left.environment !== right.environment) return false;
   if (left.kind === "all" || right.kind === "all") return true;
   if (!fileOperationsConflict(left.operation, right.operation)) return false;
   return fileAccessesOverlap(left, right);

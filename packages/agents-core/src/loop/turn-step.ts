@@ -5,6 +5,7 @@ import type { AssistantMessage, AssistantMessageEvent, Usage } from "../protocol
 import type { ConversationContext } from "./context.ts";
 import type { Tool } from "../tool/types.ts";
 import type { Environment } from "../tool/environment.ts";
+import type { FrameEnvironments } from "../tool/environment-table.ts";
 import type { BackgroundSpawner } from "../tool/background.ts";
 import type { QuestionResponder } from "../tool/questions.ts";
 import type { Logger } from "../logging/index.ts";
@@ -32,6 +33,8 @@ export interface ExecuteStepDeps {
   readonly signal: AbortSignal;
   readonly model: ChatModel;
   readonly environment: Environment;
+  /** The frame's environments, when it can reach more than one (see `ToolCallStepContext`). */
+  readonly environments?: FrameEnvironments;
   readonly background?: BackgroundSpawner;
   /** Client interactive-question channel; forwarded to tool contexts (AskUserQuestion). */
   readonly responder?: QuestionResponder;
@@ -269,7 +272,7 @@ export async function executeStep(deps: ExecuteStepDeps): Promise<StepResult> {
 
   if (effectiveStopReason === "tool_use") {
     const batch = await runToolCallBatch(
-      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, background: deps.background, responder: deps.responder, hostContext: deps.hostContext, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
+      { turnId, stepNumber: currentStep, address: deps.address, signal, model, environment: deps.environment, ...(deps.environments !== undefined ? { environments: deps.environments } : {}), background: deps.background, responder: deps.responder, hostContext: deps.hostContext, tools: toolMap, describeUnknownTool: (name) => describeUnknownTool(prepared, name), hooks, dispatchEvent: deps.dispatchEvent, logger: deps.logger, answers: deps.answers },
       message,
     );
 

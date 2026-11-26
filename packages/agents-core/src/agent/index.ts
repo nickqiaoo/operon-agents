@@ -50,6 +50,8 @@ export type {
   GoalStatusInput,
   PlanModeOptions,
   SessionOpenOptions,
+  SessionEnvironmentInput,
+  EnvironmentChange,
   SessionPort,
 } from "./session.ts";
 

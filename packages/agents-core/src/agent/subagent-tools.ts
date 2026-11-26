@@ -22,7 +22,8 @@ import {
 } from "../loop/interruption.ts";
 import { defineTool } from "../tool/define.ts";
 import { ToolAccesses } from "../tool/access.ts";
-import type { Tool, ToolResult } from "../tool/types.ts";
+import type { Tool, ToolResult, ToolRunContext } from "../tool/types.ts";
+import type { Environment } from "../tool/environment.ts";
 import { joinAddress } from "../events/index.ts";
 import { AgentBackgroundTask } from "../capabilities/background/agent-task.ts";
 import { asTaskRegistrar } from "../capabilities/background/registrar.ts";
@@ -184,6 +185,9 @@ export function buildAgentTool<TContext>(
 
   return defineTool({
     name: "Agent",
+    // In a multi-environment session `target` sends the subagent to another environment: it
+    // runs there as its home (prompt, cwd, AGENTS.md, and every call without a target).
+    environmentScoped: true,
     description,
     parameters: input,
     resolve: (args) => {
@@ -210,10 +214,12 @@ export function buildAgentTool<TContext>(
             if (!meta) return errResult(`Cannot resume interrupted agent "${continuation.agentInstanceId}": subagent metadata is missing.`);
             const root = await spawner.resolve(meta.type);
             if (!root) return errResult(`Cannot resume interrupted agent: type "${meta.type}" is not available here.`);
+            const home = recordedChildEnvironment(parent, meta);
+            if ("error" in home) return errResult(home.error);
             const deadline = createDeadline(parent.signal, AGENT_TIMEOUT_MS);
             let result: RunResult;
             try {
-              result = await resumeInterruptedChild(root, continuation, spawner, parent, ctx.toolCallId, deadline.signal);
+              result = await resumeInterruptedChild(root, continuation, spawner, parent, ctx.toolCallId, deadline.signal, home.placement);
             } finally {
               deadline.clear();
             }
@@ -247,8 +253,16 @@ export function buildAgentTool<TContext>(
             if (sub === undefined) {
               return errResult(`Cannot resume "${resumeId}": its agent type "${meta.type}" is not available here.`);
             }
+            // A resumed subagent goes back to the environment it was sent to; it cannot move.
+            const home = recordedChildEnvironment(parent, meta);
+            if ("error" in home) return errResult(home.error);
+            const asked = requestedChildEnvironment(parent, ctx);
+            const recorded = home.placement?.homeEnvironment ?? parentHomeOf(parent);
+            if (asked !== undefined && asked.homeEnvironment !== recorded) {
+              return errResult(`Cannot resume "${resumeId}" on environment "${asked.homeEnvironment}": it runs on "${recorded}". Omit target when resuming.`);
+            }
             const deadline = createDeadline(parent.signal, AGENT_TIMEOUT_MS);
-            const childState = spawner.derive({ address, signal: deadline.signal, parentToolCallId: ctx.toolCallId, steer: new SteerBus() });
+            const childState = spawner.derive({ address, signal: deadline.signal, parentToolCallId: ctx.toolCallId, steer: new SteerBus(), ...home.placement });
             // Rebuild the subagent's context, validate the new prompt, then append it only
             // after acceptance. A rejected prompt is audit-only in the child shard.
             const childContext = await parent.session.openFrameContext(address);
@@ -291,6 +305,7 @@ export function buildAgentTool<TContext>(
           }
           const agentId = chosenName !== undefined && chosenName.length > 0 ? chosenName : newAgentId(sub.name);
           const address = joinAddress(parent.address, agentId);
+          const placement = requestedChildEnvironment(parent, ctx);
           const background = args.run_in_background === true;
           if (background && parent.store === undefined) {
             return errResult("Background Agent execution requires a durable session store because the result lives in the subagent's conversation shard.");
@@ -313,6 +328,7 @@ export function buildAgentTool<TContext>(
                 background,
                 parentAddress: parent.address,
                 parentToolCallId: ctx.toolCallId,
+                ...(placement !== undefined ? { environment: placement.homeEnvironment } : {}),
               } satisfies SubagentMeta,
             });
           }
@@ -325,6 +341,7 @@ export function buildAgentTool<TContext>(
               parentToolCallId: ctx.toolCallId,
               signal,
               description: args.description,
+              ...(placement !== undefined ? { placement } : {}),
             });
 
           if (background) {
@@ -522,6 +539,8 @@ async function runFreshChildInner<TContext>(
     readonly parentToolCallId: string;
     readonly signal?: AbortSignal;
     readonly description?: string;
+    /** Send the child to another environment of the session's table. */
+    readonly placement?: ChildPlacement;
   },
 ): Promise<RunResult> {
   // Its OWN SteerBus. Without this the child inherits the parent's (`deriveChild` spreads
@@ -535,6 +554,7 @@ async function runFreshChildInner<TContext>(
     agentInstanceId: opts.agentInstanceId,
     steer: new SteerBus(),
     ...(opts.signal ? { signal: opts.signal } : {}),
+    ...opts.placement,
   });
   const childMessages: Message[] = [
     { role: "user", content: [{ type: "text", text: opts.prompt }], timestamp: Date.now() },
@@ -593,6 +613,7 @@ async function resumeInterruptedChild<TContext>(
   parent: RunState<TContext>,
   parentToolCallId: string,
   signal: AbortSignal,
+  placement?: ChildPlacement,
 ): Promise<RunResult> {
   if (!parent.store) throw new Error("Cannot resume an interrupted sub-agent without a durable session store.");
   const active = spawner.resolveInGraph(root, frame.agent.key);
@@ -603,6 +624,7 @@ async function resumeInterruptedChild<TContext>(
     signal,
     resumeFrame: frame,
     steer: new SteerBus(),
+    ...placement,
   });
   const childContext = await parent.session.openFrameContext(frame.address);
   childState.session.setLiveContext(frame.address, childContext);
@@ -615,6 +637,54 @@ async function resumeInterruptedChild<TContext>(
     unregisterBus();
     await childContext.flush();
   }
+}
+
+// ── Environment placement ───────────────────────────────────────────────────────────────
+
+/** Where a child runs when it is sent away from its parent's home environment. */
+interface ChildPlacement {
+  readonly homeEnvironment: string;
+  readonly environment: Environment;
+  /** Set when the environment is `home-only` for subagents: the child reaches nothing else. */
+  readonly reachableEnvironments?: readonly string[];
+}
+
+/** The placement on `name`, with that environment's subagent access applied. */
+function placementOn<TContext>(parent: RunState<TContext>, name: string, environment: Environment): ChildPlacement {
+  const homeOnly = parent.environments?.subagentAccessFor(name) === "home-only";
+  return { homeEnvironment: name, environment, ...(homeOnly ? { reachableEnvironments: [name] } : {}) };
+}
+
+function parentHomeOf<TContext>(parent: RunState<TContext>): string | undefined {
+  return parent.homeEnvironment ?? parent.environments?.rootName;
+}
+
+/**
+ * The placement an Agent call asked for with `target`, or `undefined` when the child simply runs
+ * where its parent does (no target, a single-environment session, or the parent's own home —
+ * which keeps the parent's actual instance, a workflow worktree for instance).
+ */
+function requestedChildEnvironment<TContext>(parent: RunState<TContext>, ctx: ToolRunContext): ChildPlacement | undefined {
+  const name = ctx.environmentName;
+  if (name === undefined || name === parentHomeOf(parent)) return undefined;
+  return placementOn(parent, name, ctx.environment);
+}
+
+/** The placement a subagent's meta recorded, resolved against this session's table. */
+function recordedChildEnvironment<TContext>(
+  parent: RunState<TContext>,
+  meta: SubagentMeta,
+): { readonly placement?: ChildPlacement } | { readonly error: string } {
+  const name = meta.environment;
+  if (name === undefined || name === parentHomeOf(parent)) return {};
+  const entry = parent.environments?.get(name);
+  if (entry === undefined) {
+    return { error: `Cannot resume agent "${meta.agentId}": it ran on environment "${name}", which this session does not have.` };
+  }
+  if (!entry.available) {
+    return { error: `Cannot resume agent "${meta.agentId}": it runs on environment "${name}", which is not connected right now.` };
+  }
+  return { placement: placementOn(parent, name, entry.environment) };
 }
 
 function bubbleInterruption(result: RunResult): void {

@@ -13,7 +13,8 @@ import { buildWorkflowTool } from "./workflow/tool.ts";
 import { buildSubagentTool, buildAgentTool } from "./subagent-tools.ts";
 import { buildSearchTool } from "../tool/search/search-tool.ts";
 import { findAgentByName } from "./graph.ts";
-import { deriveChild, emitRunEvent, runCtxFor } from "./run-support.ts";
+import { deriveChild, emitRunEvent, frameEnvironmentsFor, runCtxFor } from "./run-support.ts";
+import { withTargetParameter } from "../tool/environment-target.ts";
 import type { RunState, SubagentSpawner } from "./runner.ts";
 import { toolSource } from "../capabilities/tool-provider.ts";
 import { DEFAULT_ADDRESS } from "../store/index.ts";
@@ -106,10 +107,11 @@ function finish<TContext>(
 ): RunToolset {
   const disabled = state.disabledTools?.length ? new Set(state.disabledTools) : undefined;
   const tools = disabled ? assembled.filter((tool) => !disabled.has(tool.schema.name)) : assembled;
-  const filtered = state.capabilities.applyToolFilters(tools, {
+  const narrowed = state.capabilities.applyToolFilters(tools, {
     address: state.address,
     isRootAgent: state.address === DEFAULT_ADDRESS,
   });
+  const filtered = withEnvironmentTargets(state, narrowed);
   const enabled = deferEnabled && filtered.some((tool) => tool.schema.name === "SearchTool");
   if (filtered === assembled) return { tools, deferredToolNames, deferEnabled: enabled };
   const surviving = new Set(filtered.map((tool) => tool.schema.name));
@@ -118,6 +120,38 @@ function finish<TContext>(
     deferredToolNames: new Set(enabled ? [...deferredToolNames].filter((name) => surviving.has(name)) : []),
     deferEnabled: enabled,
   };
+}
+
+/** Run frames already warned about a tool that cannot take `target` (once per frame and tool). */
+const targetConflictWarned = new WeakMap<object, Set<string>>();
+
+/**
+ * In a frame that reaches several environments, every environment-scoped tool takes `target`.
+ * Returns `tools` itself (same array) when nothing changes — the single-environment case.
+ */
+function withEnvironmentTargets<TContext>(state: RunState<TContext>, tools: readonly Tool[]): readonly Tool[] {
+  const frame = frameEnvironmentsFor(state);
+  // One reachable environment: nothing to choose, so no parameter (a stray `target` is refused).
+  if (frame === undefined || frame.reachable.size <= 1) return tools;
+  let changed = false;
+  const out = tools.map((tool) => {
+    const outcome = withTargetParameter(tool, frame);
+    if (outcome.kind === "unchanged") return tool;
+    changed = true;
+    if (outcome.kind === "conflict") {
+      const warned = targetConflictWarned.get(state) ?? new Set<string>();
+      targetConflictWarned.set(state, warned);
+      if (!warned.has(tool.schema.name)) {
+        warned.add(tool.schema.name);
+        emitRunEvent(state, {
+          type: "warning",
+          message: `Tool "${tool.schema.name}" is environment-scoped but its parameters cannot take "target" (it already has one, or is not an object schema); it runs on "${frame.home}" only.`,
+        });
+      }
+    }
+    return outcome.tool;
+  });
+  return changed ? out : tools;
 }
 
 /**

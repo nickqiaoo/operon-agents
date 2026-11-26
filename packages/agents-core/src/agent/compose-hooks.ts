@@ -13,7 +13,7 @@ import type { CapabilityProviderHooks, ProviderHeaders, ProviderHookContext } fr
 import type { ConversationContext } from "../loop/context.ts";
 import type { Agent } from "./agent.ts";
 import { toolInputGuardrailHook, toolOutputGuardrailHook } from "./guardrail.ts";
-import { runCtxFor } from "./run-support.ts";
+import { frameEnvironmentsFor, runCtxFor } from "./run-support.ts";
 import type { RunState } from "./runner.ts";
 import { withToolCallRecoveryContext } from "./recovery.ts";
 import { permissionDenialDetails } from "../permission/denial.ts";
@@ -105,7 +105,18 @@ function buildAuthorizer<TContext>(
   // The `auto`-mode judge needs THIS frame's live transcript + tool registry (the authorize
   // ctx carries neither). Bind them per turn as closure state — the manager is a session
   // singleton shared by concurrent frames, so they must never be stored on it.
-  const base = state.permission.authorizerFor({ getTranscript: () => context.messages, getTools: typeof tools === "function" ? tools : () => tools });
+  const base = state.permission.authorizerFor({
+    getTranscript: () => context.messages,
+    getTools: typeof tools === "function" ? tools : () => tools,
+    getEnvironments: () => {
+      const frame = frameEnvironmentsFor(state);
+      if (frame === undefined) return undefined;
+      return {
+        home: frame.home,
+        entries: [...frame.reachable.values()].map((entry) => ({ name: entry.name, ...(entry.description !== undefined ? { description: entry.description } : {}) })),
+      };
+    },
+  });
   return async (ctx) => {
     // Read at call time, not captured: a nested call (`ToolRunContext.dispatch`) may add an
     // answer while the batch runs.
@@ -115,9 +126,12 @@ function buildAuthorizer<TContext>(
       // flow through (the responder/resume answer is applied here).
       context.audit({ type: "permission.record_approval", toolCallId: ctx.toolCall.id, toolName: ctx.toolCall.name, decision: answer.decision, feedback: answer.feedback, approvalRule: ctx.plan.approvalRule, scope: answer.scope });
       // That record is this frame's audit trail. A session grant is the SESSION's state, so the
-      // session persists it — what a reopen restores from — whichever frame earned it.
-      const grants = answer.decision === "approved" && answer.scope === "session" && !state.permission.sessionGrants.includes(ctx.plan.approvalRule);
-      const ok = state.permission.applyApproval(ctx.plan.approvalRule, answer);
+      // session persists it — what a reopen restores from — whichever frame earned it. It is
+      // scoped to the environment the call runs in: approving `make` on one machine is not
+      // approving it on another.
+      const key = state.permission.grantKey(ctx.plan.approvalRule, ctx.environment);
+      const grants = answer.decision === "approved" && answer.scope === "session" && !state.permission.sessionGrants.includes(key);
+      const ok = state.permission.applyApproval(ctx.plan.approvalRule, answer, ctx.environment);
       if (grants) state.session.persistPermissionState();
       if (ok) return undefined;
       return {

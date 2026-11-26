@@ -223,6 +223,7 @@ function err(output: string): ToolResult {
 
 export const readTool = defineTool({
   name: "Read",
+  environmentScoped: true,
   description: READ_DESCRIPTION,
   parameters: ReadInput,
   async resolve(args, ctx) {

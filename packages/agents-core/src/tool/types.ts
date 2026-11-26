@@ -67,6 +67,12 @@ export interface ToolContextBase<TContext = unknown> {
   readonly signal: AbortSignal;
   readonly environment: Environment;
   /**
+   * Name of the environment this call runs in. Set only in a session with more than one
+   * environment, and only for an {@link Tool.environmentScoped} tool — `environment` is then the
+   * instance the call's `target` named (or the frame's home one).
+   */
+  readonly environmentName?: string;
+  /**
    * The host's application context for this run — `RunOptions.context` (or the Harness
    * session's), the same value `instructions` and guardrails receive. Runtime-only: never
    * journaled. Typed by the tool author's declaration, not checked: a tool written for one
@@ -170,6 +176,14 @@ export interface ToolResolveContext<TContext = unknown> extends ToolContextBase<
 
 export interface Tool {
   readonly schema: ToolSchema;
+  /**
+   * The tool works on `ctx.environment` (files, commands), so in a session with several
+   * environments it can be pointed at any of them. The framework then adds an optional `target`
+   * parameter to its schema, resolves it before the tool sees the arguments (the tool never
+   * receives `target`), and hands `resolve` and `run` that environment. Ignored — no parameter
+   * added, nothing changes — when the session has one environment.
+   */
+  readonly environmentScoped?: boolean;
   resolve(args: unknown, ctx: ToolResolveContext): ToolPlan | Promise<ToolPlan>;
   /**
    * Compact, security-relevant projection of this tool call for the `auto`-mode judge

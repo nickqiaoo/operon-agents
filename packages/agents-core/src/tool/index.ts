@@ -1,5 +1,23 @@
 export type * from "./types.ts";
 export { ToolAccesses } from "./access.ts";
+export {
+  DEFAULT_ROOT_ENVIRONMENT_NAME,
+  ENVIRONMENT_NAME_PATTERN,
+  EnvironmentTable,
+  EnvironmentTableError,
+  defaultEnvironmentIdentity,
+  invalidEnvironmentName,
+  unavailableEnvironment,
+} from "./environment-table.ts";
+export type {
+  EnvironmentDeclaration,
+  EnvironmentDeclarationEntry,
+  EnvironmentSnapshot,
+  EnvironmentTableEntry,
+  EnvironmentTableEntryInput,
+  FrameEnvironments,
+  SubagentEnvironmentAccess,
+} from "./environment-table.ts";
 export type {
   Environment,
   EnvironmentFactory,
