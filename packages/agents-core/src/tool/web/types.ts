@@ -6,13 +6,38 @@ export interface WebSearchResult {
   readonly content?: string;
 }
 
+export type WebSearchRecency = "day" | "week" | "month" | "year";
+
 export interface WebSearchOptions {
   readonly limit?: number;
   readonly includeContent?: boolean;
+  /**
+   * Only results from these hosts; a host also matches its subdomains. Passed only to a provider
+   * whose `supports.domains` is true — for any other, WebSearch filters the results itself.
+   */
+  readonly domains?: readonly string[];
+  /**
+   * Only results published within this window. Passed only to a provider whose `supports.recency`
+   * is true — for any other, WebSearch filters the results by their `date` itself.
+   */
+  readonly recency?: WebSearchRecency;
   readonly signal?: AbortSignal;
 }
 
+/** Filters a search provider applies on its own side, so WebSearch need not emulate them. */
+export interface WebSearchSupports {
+  readonly domains?: boolean;
+  readonly recency?: boolean;
+}
+
+/**
+ * A search backend. WebSearch's parameters are the same whichever provider runs it: a filter the
+ * provider cannot apply is still honoured, by WebSearch filtering what comes back and telling the
+ * model it did. Provider-specific knobs (depth, topic, region…) belong in the provider's own
+ * constructor options — the host's choice, not the model's.
+ */
 export interface WebSearchProvider {
+  readonly supports?: WebSearchSupports;
   search(query: string, options?: WebSearchOptions): Promise<readonly WebSearchResult[]>;
 }
 

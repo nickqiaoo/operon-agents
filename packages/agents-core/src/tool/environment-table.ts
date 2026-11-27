@@ -44,11 +44,20 @@ export interface EnvironmentTableEntry {
   readonly description?: string;
   /** Overrides the table's default for subagents sent here. */
   readonly subagentAccess?: SubagentEnvironmentAccess;
+  /** The host's own notes on this environment, kept with the declaration (see {@link EnvironmentMetadata}). */
+  readonly metadata?: EnvironmentMetadata;
   /** What the prompt says about it (see {@link EnvironmentSnapshot}). */
   readonly snapshot: EnvironmentSnapshot;
   /** Process-local: never persisted (a sandbox id can change across a snapshot restore). */
   readonly identity: string;
 }
+
+/**
+ * What a host records about an environment for itself — which saved machine a name stands for,
+ * say — so it can hand the right instance back on a later open without keeping its own copy of
+ * the table. Stored with the declaration, never shown to the model.
+ */
+export type EnvironmentMetadata = Readonly<Record<string, string>>;
 
 /** Host input for one entry — identity and snapshot are derived when not given. */
 export interface EnvironmentTableEntryInput {
@@ -57,6 +66,7 @@ export interface EnvironmentTableEntryInput {
   readonly description?: string;
   readonly identity?: string;
   readonly subagentAccess?: SubagentEnvironmentAccess;
+  readonly metadata?: EnvironmentMetadata;
   /** Default true. An unavailable entry keeps its declared place but runs nothing. */
   readonly available?: boolean;
   /** Default: read from `environment` now. */
@@ -154,6 +164,7 @@ export class EnvironmentTable {
         available,
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         snapshot: input.snapshot ?? snapshotOf(input.environment),
         identity: input.identity ?? (available ? defaultEnvironmentIdentity(input.environment) : `unavailable:${input.name}`),
       });
@@ -220,6 +231,7 @@ export interface EnvironmentDeclarationEntry {
   readonly name: string;
   readonly description?: string;
   readonly subagentAccess?: SubagentEnvironmentAccess;
+  readonly metadata?: EnvironmentMetadata;
   readonly snapshot: EnvironmentSnapshot;
 }
 
@@ -232,6 +244,7 @@ export function declarationOf(table: EnvironmentTable): EnvironmentDeclaration {
       name: entry.name,
       ...(entry.description !== undefined ? { description: entry.description } : {}),
       ...(entry.subagentAccess !== undefined ? { subagentAccess: entry.subagentAccess } : {}),
+      ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
       snapshot: entry.snapshot,
     })),
   };
@@ -251,6 +264,7 @@ export function parseEnvironmentDeclaration(value: unknown): EnvironmentDeclarat
       name: e.name,
       ...(typeof e.description === "string" ? { description: e.description } : {}),
       ...(isAccess(e.subagentAccess) ? { subagentAccess: e.subagentAccess } : {}),
+      ...(isMetadata(e.metadata) ? { metadata: e.metadata } : {}),
       snapshot: e.snapshot as EnvironmentSnapshot,
     });
   }
@@ -261,6 +275,11 @@ export function parseEnvironmentDeclaration(value: unknown): EnvironmentDeclarat
     ...(isAccess(v.subagentAccess) ? { subagentAccess: v.subagentAccess } : {}),
     environments,
   };
+}
+
+function isMetadata(value: unknown): value is EnvironmentMetadata {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.values(value).every((field) => typeof field === "string");
 }
 
 function isAccess(value: unknown): value is SubagentEnvironmentAccess {

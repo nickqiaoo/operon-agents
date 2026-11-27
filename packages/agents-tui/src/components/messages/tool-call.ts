@@ -462,6 +462,7 @@ export function extractKeyArgumentDetail(
     Edit: ['path', 'file_path'],
     Grep: ['pattern'],
     Glob: ['pattern'],
+    WebFetch: ['url'],
     FetchURL: ['url'],
     WebSearch: ['query'],
     // Prefer the short `description` so the header preview never spills a
@@ -857,6 +858,7 @@ export class ToolCallComponent extends Container {
           nonEmptyLines(result.output).length > OUTCOME_MAX_LINES
         );
       case 'Read':
+      case 'WebFetch':
       case 'FetchURL':
       case 'WebSearch':
       case 'Think':

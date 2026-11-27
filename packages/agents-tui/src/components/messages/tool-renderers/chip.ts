@@ -156,6 +156,7 @@ const REGISTRY: Record<string, ChipProvider> = {
   ReadMediaFile: readMediaChip,
   Grep: grepChip,
   Glob: globChip,
+  WebFetch: fetchChip,
   FetchURL: fetchChip,
   WebSearch: webSearchChip,
   CreateGoal: goalStatusOutputChip,

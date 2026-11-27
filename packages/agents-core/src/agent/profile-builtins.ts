@@ -45,7 +45,7 @@ tools:
   - TodoList
   - Skill
   - WebSearch
-  - FetchURL
+  - WebFetch
   - Agent
   - AskUserQuestion
   - EnterPlanMode
@@ -87,7 +87,7 @@ tools:
   - Glob
   - Bash
   - WebSearch
-  - FetchURL
+  - WebFetch
   - mcp__*
 `;
 
@@ -104,7 +104,7 @@ tools:
   - Glob
   - Bash
   - WebSearch
-  - FetchURL
+  - WebFetch
 `;
 
 const PLAN_YAML = `extends: agent
@@ -119,7 +119,7 @@ tools:
   - Grep
   - Glob
   - WebSearch
-  - FetchURL
+  - WebFetch
 `;
 
 const PROFILE_SOURCES: Record<string, string> = {

@@ -20,7 +20,7 @@ const PLAN_REJECT_CHOICES: ApprovalPanelChoice[] = [
  * The engine's `ApprovalRequest.display` is the tool's own `ToolDisplay`: a `title`, an optional
  * `detail`, and whatever tool-specific fields the tool attached (Bash: `command` + `warning`;
  * Edit: `path` + `before`/`after`; Write: `path` + `content`; Read/Glob/Grep: `path`/`pattern`;
- * FetchURL: `url`; WebSearch: `query`; ExitPlanMode: `kind: "plan_review"` + `plan`; a goal
+ * WebFetch: `url`; WebSearch: `query`; ExitPlanMode: `kind: "plan_review"` + `plan`; a goal
  * start: `kind: "goal_start"`). This adapter reads those fields structurally.
  */
 export function adaptApprovalRequest(request: ApprovalRequest): ApprovalPanelData {

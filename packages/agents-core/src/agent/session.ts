@@ -21,6 +21,7 @@ import {
   snapshotOf,
   unavailableEnvironment,
   type EnvironmentDeclaration,
+  type EnvironmentMetadata,
   type EnvironmentTableEntryInput,
   type SubagentEnvironmentAccess,
 } from "../tool/environment-table.ts";
@@ -214,6 +215,14 @@ export interface SessionEnvironmentInput {
   readonly identity?: string;
   /** What a subagent sent here may reach (overrides `subagentEnvironmentAccess`). */
   readonly subagentAccess?: SubagentEnvironmentAccess;
+  /** The host's notes on this environment, kept with the declaration and never shown to the model. */
+  readonly metadata?: EnvironmentMetadata;
+  /**
+   * Give back what `environment` acquired (close a connection, return a sandbox to a pool).
+   * Called once for each instance this session resolved: when `updateEnvironments` removes it,
+   * when the session closes, or when the open or update that resolved it fails.
+   */
+  readonly release?: (environment: Environment) => void | Promise<void>;
 }
 
 /** A change to a session's declared environments (`Session.updateEnvironments`). */
@@ -534,12 +543,28 @@ export class Session implements SessionPort {
       typeof binding === "function" ? await binding({ sessionId: id, signal }) : binding;
     const environment = opts.environment === undefined ? new NullEnvironment() : await resolveEnvironment(opts.environment);
     const resolved = await resolveEnvironmentTable(opts, environment, resolveEnvironment);
+    try {
+      return await Session.openResolved(id, signal, ownController, opts, resolved);
+    } catch (error) {
+      await releaseAll(resolved.releases);
+      throw error;
+    }
+  }
+
+  private static async openResolved(
+    id: string,
+    signal: AbortSignal,
+    ownController: AbortController,
+    opts: SessionOpenOptions,
+    resolved: ResolvedEnvironments,
+  ): Promise<Session> {
     const environments = resolved.table;
     // The publisher is the session's OWN object — one producer, one consumer, both inside this
     // class — so it is built here and held as a field.
     const checkpointing = opts.store === undefined ? undefined : new CheckpointingSessionStore(opts.store, id);
     const publisher = new SessionEventPublisher(id, opts.events ?? new ListenerSink(), checkpointing, opts.eventPublication ?? "immediate");
     const session = new Session(id, signal, ownController, publisher, checkpointing, environments, opts);
+    for (const [name, release] of resolved.releases) session.environmentReleases.set(name, release);
     if (resolved.notice !== undefined) session.setEnvironmentNotice(resolved.notice);
     for (const warning of resolved.warnings) {
       session.pendingDiagnostics.push({ capability: "environments", phase: "start", level: "warn", message: warning });
@@ -635,54 +660,92 @@ export class Session implements SessionPort {
       for (const name of updates.keys()) {
         if (!current.has(name) || remove.has(name)) throw new EnvironmentTableError(`cannot update "${name}": the session has no such environment`);
       }
-      const added: EnvironmentTableEntryInput[] = [];
       for (const input of change.add ?? []) {
         if (current.has(input.name) && !remove.has(input.name)) throw new EnvironmentTableError(`environment name "${input.name}" is already declared; update or remove it instead`);
-        const environment = typeof input.environment === "function" ? await input.environment({ sessionId: this.id, signal: this.signal }) : input.environment;
-        added.push({
-          name: input.name,
-          environment,
-          ...(input.description !== undefined ? { description: input.description } : {}),
-          ...(input.identity !== undefined ? { identity: input.identity } : {}),
-          ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
-        });
       }
-      const kept: EnvironmentTableEntryInput[] = [];
-      for (const entry of current.entries) {
-        if (remove.has(entry.name)) continue;
-        const update = updates.get(entry.name);
-        const description = update && "description" in update ? update.description ?? undefined : entry.description;
-        const subagentAccess = update && "subagentAccess" in update ? update.subagentAccess ?? undefined : entry.subagentAccess;
-        kept.push({
-          name: entry.name,
-          environment: entry.environment,
-          available: entry.available,
-          identity: entry.identity,
-          snapshot: entry.snapshot,
-          ...(description !== undefined ? { description } : {}),
-          ...(subagentAccess !== undefined ? { subagentAccess } : {}),
-        });
+      const added: EnvironmentTableEntryInput[] = [];
+      const addedReleases = new Map<string, EnvironmentRelease>();
+      try {
+        for (const input of change.add ?? []) {
+          const environment = typeof input.environment === "function" ? await input.environment({ sessionId: this.id, signal: this.signal }) : input.environment;
+          if (input.release !== undefined) addedReleases.set(input.name, releaseOnce(input.release, environment));
+          added.push(tableInputOf(input, environment));
+        }
+        await this.swapEnvironments(current, change, remove, updates, added);
+      } catch (error) {
+        await releaseAll(addedReleases);
+        throw error;
       }
-      const [root, ...rest] = kept;
-      const table = new EnvironmentTable(root!, [...rest, ...added], {
-        subagentAccess: "subagentAccess" in change ? change.subagentAccess ?? "inherit" : current.subagentAccess,
-      });
-
-      for (const keepalive of this.sandboxKeepalives) keepalive.close();
-      this.environmentTable = table;
-      this.sandboxKeepalives = this.keepalivesFor(table);
-      this.background?.setEnvironments?.(table.entries.filter((e) => e.available).map((e) => e.environment));
-      if (this.store !== undefined) await this.store.putState(SESSION_ENVIRONMENTS_KEY, declarationOf(table));
-
-      const lines: string[] = [];
-      for (const input of added) lines.push(`- added \`${input.name}\`${input.description !== undefined ? `: ${input.description}` : ""}`);
-      for (const name of remove) lines.push(`- removed \`${name}\`: calls to it will fail`);
-      for (const name of updates.keys()) lines.push(`- updated \`${name}\``);
-      if ("subagentAccess" in change) lines.push(`- subagents sent to another environment now ${table.subagentAccess === "home-only" ? "reach only that environment" : "reach what their parent can"}`);
-      if (lines.length > 0) {
-        this.setEnvironmentNotice(["The session's environments changed. The Environments section and every `target` option now reflect this:", ...lines].join("\n"));
+      const removed = new Map<string, EnvironmentRelease>();
+      for (const name of remove) {
+        const release = this.environmentReleases.get(name);
+        if (release === undefined) continue;
+        removed.set(name, release);
+        this.environmentReleases.delete(name);
       }
+      for (const [name, release] of addedReleases) this.environmentReleases.set(name, release);
+      await this.releaseEnvironments(removed);
     });
+  }
+
+  /** Build and install the table `change` describes, persist its declaration and tell the frames. */
+  private async swapEnvironments(
+    current: EnvironmentTable,
+    change: EnvironmentChange,
+    remove: ReadonlySet<string>,
+    updates: ReadonlyMap<string, NonNullable<EnvironmentChange["update"]>[number]>,
+    added: readonly EnvironmentTableEntryInput[],
+  ): Promise<void> {
+    const kept: EnvironmentTableEntryInput[] = [];
+    for (const entry of current.entries) {
+      if (remove.has(entry.name)) continue;
+      const update = updates.get(entry.name);
+      const description = update && "description" in update ? update.description ?? undefined : entry.description;
+      const subagentAccess = update && "subagentAccess" in update ? update.subagentAccess ?? undefined : entry.subagentAccess;
+      kept.push({
+        name: entry.name,
+        environment: entry.environment,
+        available: entry.available,
+        identity: entry.identity,
+        snapshot: entry.snapshot,
+        ...(description !== undefined ? { description } : {}),
+        ...(subagentAccess !== undefined ? { subagentAccess } : {}),
+        ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
+      });
+    }
+    const [root, ...rest] = kept;
+    const table = new EnvironmentTable(root!, [...rest, ...added], {
+      subagentAccess: "subagentAccess" in change ? change.subagentAccess ?? "inherit" : current.subagentAccess,
+    });
+    // Persisted before it is installed: a store that refuses the write leaves the session as it was.
+    if (this.store !== undefined) await this.store.putState(SESSION_ENVIRONMENTS_KEY, declarationOf(table));
+
+    for (const keepalive of this.sandboxKeepalives) keepalive.close();
+    this.environmentTable = table;
+    this.sandboxKeepalives = this.keepalivesFor(table);
+    this.background?.setEnvironments?.(table.entries.filter((e) => e.available).map((e) => e.environment));
+
+    const lines: string[] = [];
+    for (const input of added) lines.push(`- added \`${input.name}\`${input.description !== undefined ? `: ${input.description}` : ""}`);
+    for (const name of remove) lines.push(`- removed \`${name}\`: calls to it will fail`);
+    for (const name of updates.keys()) lines.push(`- updated \`${name}\``);
+    if ("subagentAccess" in change) lines.push(`- subagents sent to another environment now ${table.subagentAccess === "home-only" ? "reach only that environment" : "reach what their parent can"}`);
+    if (lines.length > 0) {
+      this.setEnvironmentNotice(["The session's environments changed. The Environments section and every `target` option now reflect this:", ...lines].join("\n"));
+    }
+  }
+
+  /** Give back the environments in `releases`; a failure is a diagnostic, never a throw. */
+  private async releaseEnvironments(releases: ReadonlyMap<string, EnvironmentRelease>): Promise<void> {
+    for (const [name, release] of releases) {
+      try {
+        await release();
+      } catch (error) {
+        const message = `environment "${name}" could not be released: ${messageOf(error)}`;
+        this.pendingDiagnostics.push({ capability: "environments", phase: "stop", level: "warn", message });
+        this.logger.log("warn", message);
+      }
+    }
   }
 
   /**
@@ -1358,6 +1421,8 @@ export class Session implements SessionPort {
   }
 
   private sandboxKeepalives: SandboxKeepalive[];
+  /** How to give back each live additional environment this session resolved, by name. */
+  private readonly environmentReleases = new Map<string, EnvironmentRelease>();
   private turnActive = false;
 
   async withRunLock<T>(body: () => Promise<T>): Promise<T> {
@@ -1393,6 +1458,9 @@ export class Session implements SessionPort {
 
   private async runClose(): Promise<void> {
     for (const keepalive of this.sandboxKeepalives) keepalive.close();
+    const releases = new Map(this.environmentReleases);
+    this.environmentReleases.clear();
+    await this.releaseEnvironments(releases);
     this.isOpen = false;
     // Nothing queued will be applied now; one already being applied finishes first, so the
     // capability it opens is on the list the teardown below walks.
@@ -1622,6 +1690,32 @@ interface ResolvedEnvironments {
   /** What to tell every frame at its next turn boundary (unavailable / changed environments). */
   readonly notice?: string;
   readonly warnings: readonly string[];
+  /** How to give back each instance this open resolved, by name. */
+  readonly releases: ReadonlyMap<string, EnvironmentRelease>;
+}
+
+/** Gives back one resolved environment instance; safe to call more than once. */
+type EnvironmentRelease = () => Promise<void>;
+
+function releaseOnce(release: (environment: Environment) => void | Promise<void>, environment: Environment): EnvironmentRelease {
+  let done: Promise<void> | undefined;
+  return () => (done ??= Promise.resolve().then(() => release(environment)));
+}
+
+/** Release every entry, ignoring failures: used only to undo an open or update that failed. */
+async function releaseAll(releases: ReadonlyMap<string, EnvironmentRelease>): Promise<void> {
+  await Promise.allSettled([...releases.values()].map((release) => release()));
+}
+
+function tableInputOf(input: SessionEnvironmentInput, environment: Environment): EnvironmentTableEntryInput {
+  return {
+    name: input.name,
+    environment,
+    ...(input.description !== undefined ? { description: input.description } : {}),
+    ...(input.identity !== undefined ? { identity: input.identity } : {}),
+    ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+  };
 }
 
 /**
@@ -1637,24 +1731,26 @@ async function resolveEnvironmentTable(
   const given = opts.additionalEnvironments ?? [];
   const stored = opts.store === undefined ? undefined : parseEnvironmentDeclaration(await opts.store.getState(SESSION_ENVIRONMENTS_KEY));
 
+  const releases = new Map<string, EnvironmentRelease>();
   if (stored === undefined) {
     // First declaration: every instance must resolve now — there is nothing to fall back to.
     const additional: EnvironmentTableEntryInput[] = [];
-    for (const input of given) {
-      additional.push({
-        name: input.name,
-        environment: await resolve(input.environment),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(input.identity !== undefined ? { identity: input.identity } : {}),
-        ...(input.subagentAccess !== undefined ? { subagentAccess: input.subagentAccess } : {}),
-      });
+    try {
+      for (const input of given) {
+        const environment = await resolve(input.environment);
+        if (input.release !== undefined) releases.set(input.name, releaseOnce(input.release, environment));
+        additional.push(tableInputOf(input, environment));
+      }
+      const table = new EnvironmentTable(
+        { name: opts.environmentName ?? DEFAULT_ROOT_ENVIRONMENT_NAME, environment: root },
+        additional,
+        opts.subagentEnvironmentAccess !== undefined ? { subagentAccess: opts.subagentEnvironmentAccess } : {},
+      );
+      return { table, ...(table.size > 1 ? { declare: declarationOf(table) } : {}), warnings: [], releases };
+    } catch (error) {
+      await releaseAll(releases);
+      throw error;
     }
-    const table = new EnvironmentTable(
-      { name: opts.environmentName ?? DEFAULT_ROOT_ENVIRONMENT_NAME, environment: root },
-      additional,
-      opts.subagentEnvironmentAccess !== undefined ? { subagentAccess: opts.subagentEnvironmentAccess } : {},
-    );
-    return { table, ...(table.size > 1 ? { declare: declarationOf(table) } : {}), warnings: [] };
   }
 
   if (opts.environmentName !== undefined && opts.environmentName !== stored.root) {
@@ -1678,6 +1774,7 @@ async function resolveEnvironmentTable(
       snapshot: entry.snapshot,
       ...(entry.description !== undefined ? { description: entry.description } : {}),
       ...(entry.subagentAccess !== undefined ? { subagentAccess: entry.subagentAccess } : {}),
+      ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
     };
     let environment: Environment | undefined;
     let identity: string | undefined;
@@ -1689,6 +1786,7 @@ async function resolveEnvironmentTable(
         identity = input.identity;
         try {
           environment = await resolve(input.environment);
+          if (input.release !== undefined) releases.set(entry.name, releaseOnce(input.release, environment));
         } catch (error) {
           warnings.push(`environment "${entry.name}" could not be opened: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -1704,11 +1802,17 @@ async function resolveEnvironmentTable(
     entries.push({ ...base, environment, ...(identity !== undefined ? { identity } : {}) });
   }
   const [rootEntry, ...rest] = entries;
-  const table = new EnvironmentTable(rootEntry!, rest, stored.subagentAccess !== undefined ? { subagentAccess: stored.subagentAccess } : {});
+  let table: EnvironmentTable;
+  try {
+    table = new EnvironmentTable(rootEntry!, rest, stored.subagentAccess !== undefined ? { subagentAccess: stored.subagentAccess } : {});
+  } catch (error) {
+    await releaseAll(releases);
+    throw error;
+  }
   const lines: string[] = [];
   if (unavailable.length > 0) {
     lines.push(`Not connected right now: ${unavailable.map((name) => `\`${name}\``).join(", ")}. Calls with that target will fail until it is reconnected; work on the others, or tell the user.`);
   }
   if (drifted.length > 0) lines.push("Changed since the Environments section was written:", ...drifted);
-  return { table, ...(lines.length > 0 ? { notice: lines.join("\n") } : {}), warnings };
+  return { table, ...(lines.length > 0 ? { notice: lines.join("\n") } : {}), warnings, releases };
 }

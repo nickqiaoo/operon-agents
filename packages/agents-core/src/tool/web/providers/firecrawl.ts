@@ -5,14 +5,21 @@ import {
   type UrlFetchResult,
   type WebSearchOptions,
   type WebSearchProvider,
+  type WebSearchRecency,
   type WebSearchResult,
+  type WebSearchSupports,
 } from "../types.ts";
 
 export interface FirecrawlProviderOptions {
   readonly apiKey: string;
   readonly baseUrl?: string;
   readonly fetchImpl?: typeof fetch;
+  /** Firecrawl's search `location`: where the search is run from (e.g. "Germany"). */
+  readonly location?: string;
 }
+
+/** Firecrawl's `tbs` time filter for each recency window. */
+const TBS: Record<WebSearchRecency, string> = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" };
 
 interface FirecrawlSearchItem {
   readonly title?: string;
@@ -29,17 +36,25 @@ export class FirecrawlProvider implements WebSearchProvider, UrlFetchProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly location: string | undefined;
+  readonly supports: WebSearchSupports = { domains: true, recency: true };
 
   constructor(options: FirecrawlProviderOptions) {
     if (!options.apiKey) throw new WebToolError("Firecrawl provider requires an apiKey.");
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? "https://api.firecrawl.dev").replace(/\/+$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.location = options.location;
   }
 
   async search(query: string, options?: WebSearchOptions): Promise<readonly WebSearchResult[]> {
-    const body: Record<string, unknown> = { query };
+    // Firecrawl has no domain parameter; its search takes `site:` operators in the query.
+    const sites = options?.domains?.map((d) => `site:${d}`) ?? [];
+    const scoped = sites.length === 0 ? query : `${query} ${sites.length === 1 ? sites[0] : `(${sites.join(" OR ")})`}`;
+    const body: Record<string, unknown> = { query: scoped };
     if (options?.limit !== undefined) body.limit = options.limit;
+    if (options?.recency !== undefined) body.tbs = TBS[options.recency];
+    if (this.location !== undefined) body.location = this.location;
     if (options?.includeContent === true) body.scrapeOptions = { formats: ["markdown"] };
     const json = await this.post<{ data?: FirecrawlSearchItem[] }>("/v1/search", body, options?.signal);
     return (json.data ?? []).map((item) => ({

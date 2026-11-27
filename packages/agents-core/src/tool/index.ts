@@ -5,13 +5,16 @@ export {
   ENVIRONMENT_NAME_PATTERN,
   EnvironmentTable,
   EnvironmentTableError,
+  declarationOf,
   defaultEnvironmentIdentity,
   invalidEnvironmentName,
+  parseEnvironmentDeclaration,
   unavailableEnvironment,
 } from "./environment-table.ts";
 export type {
   EnvironmentDeclaration,
   EnvironmentDeclarationEntry,
+  EnvironmentMetadata,
   EnvironmentSnapshot,
   EnvironmentTableEntry,
   EnvironmentTableEntryInput,

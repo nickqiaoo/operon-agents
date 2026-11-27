@@ -92,8 +92,42 @@ async function main(): Promise<void> {
     check("the update is what the next open declares", later.core.environments.names.join(",") === "local,build,test");
     await later.close();
 
+    // The session gives back every instance it resolved, so a host keeps no table of its own.
+    const released: string[] = [];
+    const owned = (label: string) => ({
+      environment: async () => new LocalEnvironment(build),
+      metadata: { machine: label },
+      release: () => { released.push(label); },
+    });
+    const failing = { environment: async (): Promise<LocalEnvironment> => { throw new Error("machine is down"); } };
+    const tracked = await harness.createSession({
+      workDir: local,
+      bindings: { environment: localEnv, environmentName: "local", additionalEnvironments: { build: owned("build") } },
+    });
+    check("metadata is part of the declaration", (await harness.readEnvironmentDeclaration(tracked.id))?.environments.find((e) => e.name === "build")?.metadata?.machine === "build");
+    await tracked.updateEnvironments({ add: { test: owned("test") } });
+    await tracked.updateEnvironments({ remove: ["build"] });
+    check("removing an environment releases its instance", released.join(",") === "build");
+    await tracked.close();
+    check("closing releases what is still live", released.join(",") === "build,test");
+    const declared = await harness.readEnvironmentDeclaration(tracked.id);
+    check("the declaration is readable without opening the session", declared?.environments.map((e) => e.name).join(",") === "local,test");
+    check("an added environment keeps its metadata", declared?.environments.find((e) => e.name === "test")?.metadata?.machine === "test");
+    const reopened = await harness.resumeSession(tracked.id, { bindings: { environment: localEnv, additionalEnvironments: { test: owned("test-2") } } });
+    check("a failed update is refused", await rejectsWith(reopened.updateEnvironments({ add: { a: owned("a"), b: failing } }), Error));
+    check("a failed update gives back what it opened and changes nothing", released.includes("a") && reopened.core.environments.names.join(",") === "local,test");
+    await reopened.close();
+    check("a reopened instance is released on close", released.includes("test-2"));
+    check("each instance is released once", released.filter((label) => label === "test").length === 1);
+    check(
+      "a failed first open gives back what it opened",
+      await rejectsWith(harness.createSession({ workDir: local, bindings: { environment: localEnv, additionalEnvironments: { x: owned("x"), y: failing } } }), Error)
+        && released.includes("x"),
+    );
+
     const plain = await harness.createSession({ workDir: local, bindings: { environment: localEnv } });
     check("a plain session has one environment", plain.core.environments.size === 1);
+    check("a plain session has no declaration to read", (await harness.readEnvironmentDeclaration(plain.id)) === undefined);
     check("a plain session does not require additional environments", !plain.requires.includes("additionalEnvironments"));
     await plain.close();
 

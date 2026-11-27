@@ -98,7 +98,7 @@ same.
 
 ## Tool permissions
 
-The analyst's tools (`WebSearch`, `FetchURL`) are always allowed by policy, and the harness
+The analyst's tools (`WebSearch`, `WebFetch`) are always allowed by policy, and the harness
 runs in `workspace` permission mode. If you add a tool that asks (a shell, an editor), the
 chat has no approval surface: the session parks on the question (`requires_action`), holds
 further input until it is answered, and the bridge tells the user to start a new chat. Answer

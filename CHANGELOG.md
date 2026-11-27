@@ -7,6 +7,21 @@ version and are released together, so this file covers all of them.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.39] — 2026-11-27
+
+### Added
+
+- An additional environment can carry `release`: the session gives its instance back when `updateEnvironments` removes it, when the session closes, or when the open or update that resolved it fails. Hosts no longer track which connections a session opened.
+- An additional environment can carry `metadata`, the host's own notes kept with the declaration and never shown to the model.
+- `Harness.readEnvironmentDeclaration(id)` reads what a session declares without opening it.
+- `WebSearch` takes `domains` and `recency`; providers that cannot filter have the results filtered for them. `WebFetch` pages long content with `offset` and reuses a fetched page for 15 minutes.
+- `DeepSeekWebProvider`; `TavilyProvider` also reads pages.
+
+### Changed
+
+- **Breaking:** `FetchURL` is now `WebFetch`, with no alias: rules, disabled-tool lists and stored transcripts that name `FetchURL` no longer match. `fetchUrlTool` is `webFetchTool` and `TavilySearchProvider` is `TavilyProvider`.
+- `updateEnvironments` persists the new declaration before installing it, so a store that refuses the write leaves the session unchanged.
+
 ## [0.1.0-alpha.38] — 2026-11-26
 
 ### Fixed

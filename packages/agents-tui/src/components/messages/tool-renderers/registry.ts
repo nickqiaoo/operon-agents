@@ -47,6 +47,7 @@ export function pickResultRenderer(toolName: string): ResultRenderer {
       return grepSummary;
     case 'Glob':
       return globSummary;
+    case 'WebFetch':
     case 'FetchURL':
       return fetchSummary;
     case 'WebSearch':

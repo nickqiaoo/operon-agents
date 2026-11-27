@@ -62,7 +62,7 @@ const USER_CONFIGURED_SCOPES = new Set<PermissionRuleScope>(["turn-override", "p
 const DEFAULT_APPROVE_TOOLS = new Set([
   "Read", "Grep", "Glob", "SetTodoList", "TodoList", "BackgroundList",
   "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-  "CronList", "WebSearch", "FetchURL", "Agent", "AskUserQuestion", "Skill",
+  "CronList", "WebSearch", "WebFetch", "Agent", "AskUserQuestion", "Skill",
   "GetGoal", "SetGoalBudget", "UpdateGoal",
   // Workflow orchestrates subagents (like Agent); StructuredOutput is the schema
   // tool the Workflow runtime injects into a subagent — neither needs approval.

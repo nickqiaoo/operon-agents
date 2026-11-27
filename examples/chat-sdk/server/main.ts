@@ -11,7 +11,7 @@
 import { mkdirSync } from "node:fs";
 import { compactionCapability, ConsoleSink, DiskSessionRepository, sinkLogger } from "operon-agents/advanced";
 import { createHarness, defineAgent, LocalEnvironment, type Tool } from "operon-agents";
-import { DirectFetchProvider, fetchUrlTool, FirecrawlProvider, TavilySearchProvider, webSearchTool } from "operon-agents/tools";
+import { DirectFetchProvider, webFetchTool, FirecrawlProvider, TavilyProvider, webSearchTool } from "operon-agents/tools";
 import {
   allowAllRequests,
   createManagedHttpServer,
@@ -33,12 +33,11 @@ const HOME = new URL("../.agent-home/", import.meta.url).pathname;
 const WORK = new URL("../workspace/", import.meta.url).pathname;
 mkdirSync(WORK, { recursive: true });
 
-// The analyst's tools: search when a provider key is present, fetch always. Firecrawl covers
-// both; Tavily is search-only and pairs with plain HTTP fetching.
+// Use the configured provider for both tools, falling back to direct HTTP without a key.
 const firecrawl = process.env.FIRECRAWL_API_KEY ? new FirecrawlProvider({ apiKey: process.env.FIRECRAWL_API_KEY }) : undefined;
-const tavily = process.env.TAVILY_API_KEY ? new TavilySearchProvider({ apiKey: process.env.TAVILY_API_KEY }) : undefined;
+const tavily = process.env.TAVILY_API_KEY ? new TavilyProvider({ apiKey: process.env.TAVILY_API_KEY }) : undefined;
 const search = firecrawl ?? tavily;
-const tools: Tool[] = [...(search ? [webSearchTool(search)] : []), fetchUrlTool(firecrawl ?? new DirectFetchProvider())];
+const tools: Tool[] = [...(search ? [webSearchTool(search)] : []), webFetchTool(search ?? new DirectFetchProvider())];
 
 const repository = new DiskSessionRepository(HOME);
 const harness = createHarness({
@@ -98,7 +97,7 @@ console.error(`analyst server listening on http://${HOST}:${PORT}/v1`);
 console.error(`agent=${AGENT_ID} environment=${ENVIRONMENT_ID} model=${MODEL}`);
 console.error(
   search
-    ? `web search: ${firecrawl ? "firecrawl" : "tavily"}; fetch: ${firecrawl ? "firecrawl" : "direct"}`
+    ? `web search: ${firecrawl ? "firecrawl" : "tavily"}; fetch: ${firecrawl ? "firecrawl" : "tavily"}`
     : "warning: no FIRECRAWL_API_KEY or TAVILY_API_KEY -- WebSearch is off, the analyst can only fetch URLs it is given",
 );
 if (API_KEY === undefined) console.error("MANAGED_API_KEY is unset: loopback only, no authentication");
